@@ -3403,11 +3403,17 @@ app.post("/api/v1/integration", async (req, res) => {
 
     const uniquePayloadMap = new Map();
     for (const p of productsBatch) {
-       const rawEan = getValFromProduct(p, ['barcode', 'ean', 'ean13', 'codigo_barra', 'codigo_barras', 'cod_barra', 'cod_barras', 'codigo_de_barras', 'barras', 'codigo_barra_produto', 'cod barras', 'cod. barras']);
+       const rawEan = getValFromProduct(p, [
+         'barcode', 'ean', 'ean13', 'codigo_barra', 'codigo_barras', 'cod_barra', 'cod_barras', 'codigo_de_barras', 'barras', 'codigo_barra_produto', 'cod barras', 'cod. barras', 
+         'cd barras', 'cd. barras', 'cd_barras', 'cd.barras', 'codbarras', 'cdbarras'
+       ]);
        const ean = rawEan !== undefined && rawEan !== null ? String(rawEan).trim() : "";
        if (!ean) continue;
 
-       const rawInternalCode = getValFromProduct(p, ['internal_code', 'internalCode', 'CodigoInterno', 'codigo_interno', 'codigo', 'cod_interno', 'cod_prod', 'codigo_produto', 'cod_produto', 'referencia', 'ref', 'id']);
+       const rawInternalCode = getValFromProduct(p, [
+         'internal_code', 'internalCode', 'CodigoInterno', 'codigo_interno', 'codigo', 'cod_interno', 'cod_prod', 'codigo_produto', 'cod_produto', 'referencia', 'ref', 'id',
+         'cdigo', 'cdg', 'cd'
+       ]);
        const internalCode = rawInternalCode !== undefined && rawInternalCode !== null ? String(rawInternalCode).trim() : "";
        
        let stock = Number(getValFromProduct(p, ['stock', 'estoque', 'estoque_atual', 'estoque_disponivel', 'saldo', 'saldo_estoque', 'qtd_estoque', 'quantidade', 'qtd', 'quantidade_estoque', 'quant']));
@@ -3419,7 +3425,10 @@ app.post("/api/v1/integration", async (req, res) => {
        let originalPrice = Number(getValFromProduct(p, ['original_price', 'originalPrice', 'preco_original', 'preco_de', 'preco_tabela', 'preco_cadastro', 'preco_antigo', 'valor_original']));
        if (isNaN(originalPrice) || originalPrice < 0) originalPrice = 0;
 
-       const rawName = getValFromProduct(p, ['name', 'nome', 'descricao', 'descricao_produto', 'nome_produto', 'produto']);
+       const rawName = getValFromProduct(p, [
+         'name', 'nome', 'descricao', 'descricao_produto', 'nome_produto', 'produto',
+         'descrio', 'descr'
+       ]);
        const name = rawName !== undefined && rawName !== null ? String(rawName).trim() : `Produto ${ean}`;
 
        uniquePayloadMap.set(ean, {
@@ -3440,7 +3449,8 @@ app.post("/api/v1/integration", async (req, res) => {
         message: "Nenhum produto válido encontrado no lote.", 
         productsBatchSize: productsBatch.length,
         processedCount: 0,
-        isSuccess: true 
+        isSuccess: true,
+        rawBatchSample: productsBatch.slice(0, 5)
       }, "SUCCESS");
       return res.status(200).json({ success: true, processed: 0, message: "Nenhum produto válido encontrado no lote." });
     }
