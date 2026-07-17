@@ -3389,7 +3389,7 @@ app.post("/api/v1/integration", async (req, res) => {
              .replace(/Ã¡/g, 'a').replace(/Ã©/g, 'e')
              .replace(/Ãµ/g, 'o').replace(/Ãº/g, 'u').replace(/Ã¢/g, 'a')
              .replace(/Ãª/g, 'e').replace(/Ã´/g, 'o');
-        return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+        return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9_]/g, "");
       };
       const normalizedKeys = keys.map(k => normalize(k));
       
