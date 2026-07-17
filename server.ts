@@ -3405,7 +3405,7 @@ app.post("/api/v1/integration", async (req, res) => {
     for (const p of productsBatch) {
        const rawEan = getValFromProduct(p, [
          'barcode', 'ean', 'ean13', 'codigo_barra', 'codigo_barras', 'cod_barra', 'cod_barras', 'codigo_de_barras', 'barras', 'codigo_barra_produto', 'cod barras', 'cod. barras', 
-         'cd barras', 'cd. barras', 'cd_barras', 'cd.barras', 'codbarras', 'cdbarras'
+         'cd barras', 'cd. barras', 'cd_barras', 'cd.barras', 'codbarras', 'cdbarras', 'ean_produto'
        ]);
        const ean = rawEan !== undefined && rawEan !== null ? String(rawEan).trim() : "";
        if (!ean) continue;
