@@ -58,8 +58,10 @@ export const isControlledProduct = (product: Product): boolean => {
     name.includes("tarja preta") ||
     name.includes("tarja vermelha") ||
     desc.includes("receita retida") ||
-    desc.includes("controlado") ||
-    ind.includes("controlado")
+    desc.includes("medicamento controlado") ||
+    desc.includes("controle especial") ||
+    ind.includes("medicamento controlado") ||
+    ind.includes("controle especial")
   );
 };
 
