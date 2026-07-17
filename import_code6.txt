@@ -1,0 +1,61 @@
+            } catch (e) {
+                console.warn("Aviso ao mapear departamento/subcategoria da linha. Pulando...", e);
+            }
+        }
+
+        // Passo 2: Subcategorias e Produtos
+        for (let i = 0; i < total; i++) {
+            const row = json[i];
+            setImportProgress(Math.round(((i + 1) / total) * 100));
+            
+            // Yield to event loop every 50 items to prevent UI freezing
+            if (i % 50 === 0) {
+                await new Promise(resolve => setTimeout(resolve, 0));
+            }
+
+            const getVal = (keys: string[]) => getValFromRow(row, keys);
+
+            const name = getVal(['Nome', 'Produto', 'Descricao', 'NOME_PRODUTO', 'Nome produto']);
+            if (!name) continue;
+
+            const rawCode = getVal(['Codigo', 'CodigoInterno', 'Ref', 'CODIGO_INTERNO', 'codigo interno']);
+            const rawEan = getVal(['ean', 'ean_barras', 'barcode', 'codigo_de_barras', 'codigo barras', 'cod barras', 'EAN', 'Barras', 'CodigoBarras', 'EAN_BARRAS']);
+            
+            const code = rawCode !== undefined && rawCode !== null ? String(rawCode).trim() : undefined;
+            let ean = rawEan !== undefined && rawEan !== null ? String(rawEan).trim() : '';
+            if (ean.toLowerCase().includes('e')) {
+                const parsed = Number(ean);
+                if (!isNaN(parsed)) {
+                    ean = parsed.toLocaleString('fullwide', { useGrouping: false });
+                }
+            }
+            if (ean.includes('.')) {
+                ean = ean.split('.')[0];
+            }
+            console.log("[FarmaFlow Debug] EAN Processado da Planilha:", ean);
+
+            // Rejeita/pula se o EAN (Código de barras) estiver ausente ou vazio
+            if (!ean || ean.trim() === '') {
+                audit.push({ 
+                    name: String(name), 
+                    code: code || '', 
+                    status: 'no-change', 
+                    details: "Pulado: Código de barras (EAN) ausente" 
+                });
+                continue;
+            }
+            
+            let existingProduct: Product | undefined = undefined;
+            let isNewProductUpdate = false;
+            
+            if (ean) {
+                existingProduct = productsByEan.get(String(ean));
+                if (!existingProduct) {
+                    existingProduct = newProductsByEan.get(String(ean));
+                    if (existingProduct) isNewProductUpdate = true;
+                }
+            }
+
+            const rowPrice = parseNumberSafe(getVal(['valor', 'preco', 'preco_venda', 'preco venda', 'valor_venda', 'novo_preco', 'Preco', 'Valor', 'Preço', 'Venda', 'PRECO_VENDA']));
+            const rowStock = parseNumberSafe(getVal(['Estoque', 'Qtd', 'Quantidade', 'ESTOQUE_ATUAL', 'estoque']));
+            let rowImage = getVal(['Imagem', 'Image', 'Foto', 'UrlImagem', 'ImagemURL', 'IMAGEM_PRINCIPAL']);

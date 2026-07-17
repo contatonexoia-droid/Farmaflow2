@@ -1,0 +1,146 @@
+--- server.ts
++++ server.ts
+@@ -2131,6 +2131,105 @@
+   }
+ });
+ 
++app.post("/api/integrations/erp/send-order", async (req, res) => {
++  try {
++    const { order_id, tenant_id } = req.body;
++    if (!order_id || !tenant_id) {
++      return res.status(400).json({ error: 'Missing order_id or tenant_id' });
++    }
++
++    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
++    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '';
++    const { createClient } = require('@supabase/supabase-js');
++    const supabase = createClient(supabaseUrl, supabaseKey);
++
++    const { data: order, error: fetchError } = await supabase
++      .from('orders')
++      .select(`
++        *,
++        order_items (
++          quantity,
++          unit_price,
++          products (
++            barcode,
++            ean
++          )
++        ),
++        customers (
++          name,
++          phone,
++          cpf,
++          address,
++          address_number,
++          neighborhood,
++          city
++        )
++      `)
++      .eq('id', order_id)
++      .eq('tenant_id', tenant_id)
++      .single();
++
++    let targetOrder = order;
++
++    if (fetchError || !order) {
++      const { data: orderJson, error: fetchJsonError } = await supabase
++        .from('orders')
++        .select('*')
++        .eq('id', order_id)
++        .eq('tenant_id', tenant_id)
++        .single();
++        
++      if (fetchJsonError || !orderJson) {
++         return res.status(404).json({ error: 'Pedido não encontrado ou acesso negado ao tenant.' });
++      }
++      targetOrder = orderJson;
++    }
++    
++    const customer = targetOrder.customers || targetOrder.customer || {};
++    const items = targetOrder.order_items || targetOrder.items || [];
++
++    const dados_cliente = {
++      nome: customer.name || customer.nome || 'Cliente Não Identificado',
++      telefone: customer.phone || customer.telefone || '',
++      cpf: customer.cpf || '',
++      endereco: {
++        rua: customer.address || customer.street || customer.rua || '',
++        numero: customer.address_number || customer.addressNumber || customer.number || customer.numero || '',
++        bairro: customer.neighborhood || customer.bairro || '',
++        cidade: customer.city || customer.cidade || ''
++      }
++    };
++
++    const payload_itens = items.map((item: any) => {
++      const barcode = item.products?.barcode || item.products?.ean || item.barcode || item.product?.barcode || item.ean || '';
++      const ean = barcode.replace(/[^0-9]/g, '');
++      return {
++        ean: ean,
++        quantidade: item.quantity || item.quantidade || 1,
++        preco_unitario: item.unit_price || item.price || item.preco_unitario || 0
++      };
++    });
++
++    const payload = {
++      order_id: targetOrder.id,
++      tenant_id: targetOrder.tenant_id,
++      dados_cliente,
++      itens: payload_itens,
++      pagamento: {
++        forma_pagamento: targetOrder.paymentMethod || targetOrder.payment_method || targetOrder.forma_pagamento || '',
++        taxa_entrega: targetOrder.deliveryFee || targetOrder.delivery_fee || targetOrder.taxa_entrega || 0,
++        valor_total: targetOrder.total || targetOrder.total_amount || targetOrder.valor_total || 0
++      }
++    };
++
++    const { data: tenantSettings } = await supabase
++      .from('tenants')
++      .select('erp_webhook_url, erp_webhook_secret')
++      .eq('id', targetOrder.tenant_id)
++      .maybeSingle();
++
++    if (tenantSettings?.erp_webhook_url) {
++      try {
++        const webhookResponse = await fetch(tenantSettings.erp_webhook_url, {
++          method: 'POST',
++          headers: {
++            'Content-Type': 'application/json',
++            ...(tenantSettings.erp_webhook_secret ? { 'Authorization': `Bearer ${tenantSettings.erp_webhook_secret}` } : {})
++          },
++          body: JSON.stringify(payload)
++        });
++        if (!webhookResponse.ok) {
++          console.error(`Erro ao enviar payload ao Webhook. Status: ${webhookResponse.status}`);
++        }
++      } catch (err) {
++        console.error('Falha na requisição para o Webhook do ERP', err);
++      }
++    }
++
++    const { error: updateError } = await supabase
++      .from('orders')
++      .update({ status: 'enviado_ao_pdv' })
++      .eq('id', targetOrder.id)
++      .eq('tenant_id', targetOrder.tenant_id);
++
++    if (updateError) {
++      console.error('Erro ao atualizar status do pedido no Supabase:', updateError);
++      return res.status(500).json({ error: 'Falha ao atualizar status do pedido para enviado_ao_pdv' });
++    }
++
++    return res.json({
++      success: true,
++      message: 'Pedido enviado à fila de integração do ERP (PDV) com sucesso',
++      payload_enviado: payload
++    });
++  } catch (error: any) {
++    console.error('Erro ao processar integração ERP:', error);
++    return res.status(500).json({ error: 'Erro interno no servidor', details: error.message });
++  }
++});
++
+ app.post("/api/v1/integration/logs/internal", async (req, res) => {
+   try {
+     const { tenant_id, endpoint, payload, status, error_message } = req.body;

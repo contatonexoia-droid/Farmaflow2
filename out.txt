@@ -1,0 +1,81 @@
+43:  tenant: PharmacyConfig;
+193:  tenant,
+227:          const stored = localStorage.getItem(`image_snapshot_${tenant.id}`);
+271:    if ((!tenant.departments || tenant.departments.length === 0) && Object.keys(DEPARTMENT_MAPPING).length > 0) {
+289:        onTenantUpdate({ ...tenant, departments: defaultDepartments });
+291:  }, [tenant.id]);
+372:      if (tenant.departments && tenant.departments.length > 0) {
+373:          return tenant.departments.map(d => d.name).sort();
+376:  }, [tenant.departments]);
+381:          return categoryOptions.filter(c => getDepartmentForCategory(c, tenant.departments) === 'Outros');
+383:      return categoryOptions.filter(c => getDepartmentForCategory(c, tenant.departments) === filterDepartment);
+384:  }, [filterDepartment, categoryOptions, tenant.departments]);
+387:     const explicit = tenant.customManufacturers || [];
+388:     const withLogos = Object.keys(tenant.manufacturerLogos || {});
+390:  }, [tenant]);
+412:        const mfgKey = p.manufacturer ? Object.keys(tenant.manufacturerLogos || {}).find(k => k.trim().toLowerCase() === p.manufacturer?.trim().toLowerCase()) : null;
+413:        if (mfgKey && tenant.manufacturerLogos?.[mfgKey]) {
+414:            return fixImageUrl(tenant.manufacturerLogos[mfgKey]);
+467:          const prodDept = getDepartmentForCategory(p.category, tenant.departments);
+497:  }, [products, debouncedSearchTerm, filterDepartment, filterCategory, filterManufacturer, filterPromotion, filterPrescription, filterZeroStock, filterFeatured, filterNoImage, fuse, tenant.departments]);
+531:      setSelectedDeptForEdit(getDepartmentForCategory(product.category, tenant.departments));
+559:    await onTenantUpdate({ ...tenant, departments: newDepartments });
+570:        tenantId: tenant.id,
+651:        const currentDeptName = getDepartmentForCategory(productToSave.category, tenant.departments);
+653:            const depts = [...(tenant.departments || [])];
+676:            await onTenantUpdate({...tenant, departments: depts});
+747:      const backgroundColor = tenant.accentColor || '#10b981';
+748:      const primaryColor = tenant.primaryColor || '#059669';
+753:            <title>Encarte Digital - ${tenant.name}</title>
+911:                        ${tenant.logo ? `<img src="${tenant.logo}" referrerPolicy="no-referrer" />` : `<span class="logo-text">${tenant.name.charAt(0)}</span>`}
+915:                        <div class="pharmacy-name">${tenant.bannerTitle || tenant.name}</div>
+916:                        <div class="slogan">${tenant.bannerSubtitle || 'Aqui você encontra saúde e bem estar!'}</div>
+956:                            <p>${tenant.whatsapp}</p>
+960:                            <p>${tenant.fullAddress || 'Endereço não informado'}</p>
+1050:          link.download = `Encarte-${tenant.name}-${new Date().getTime()}.jpg`;
+1082:      XLSX.writeFile(workbook, `Lista_de_Faltas_${tenant.name.replace(/\s+/g, '_')}_${new Date().toISOString().split('T')[0]}.xlsx`);
+1088:    const currentLogos = { ...(tenant.manufacturerLogos || {}) };
+1089:    const currentCustom = new Set(tenant.customManufacturers || []);
+1114:        ...tenant,
+1124:    const currentLogos = { ...(tenant.manufacturerLogos || {}) };
+1127:    const currentCustom = (tenant.customManufacturers || []).filter(m => m !== name);
+1130:        ...tenant,
+1150:      const currentSynonyms = tenant.manufacturerSynonyms || {};
+1153:          ...tenant,
+1178:        const newLogos = { ...(tenant.manufacturerLogos || {}) };
+1179:        const newCustom = new Set(tenant.customManufacturers || []);
+1200:                ...tenant,
+1289:        localStorage.setItem(`image_snapshot_${tenant.id}`, JSON.stringify(snapshot));
+1321:        let trackedDepartments = tenant.departments ? JSON.parse(JSON.stringify(tenant.departments)) : [];
+1583:                            tenant.manufacturerSynonyms || {}
+1641:                    tenantId: tenant.id,
+1651:                        tenant.manufacturerSynonyms || {}
+1747:                tenantId: tenant.id,
+1767:                    tenantId: tenant.id,
+1778:            await onTenantUpdate({ ...tenant, departments: trackedDepartments });
+1871:                    <p className="text-gray-400 font-bold text-xs uppercase tracking-widest mt-1">{tenant.name || 'Portal Master'}</p>
+1951:                                        const currentDepts = tenant.departments || [];
+1960:                                            onTenantUpdate({ ...tenant, departments: newDepts });
+2190:                    tenantSlug: tenant.slug,
+2191:                    themeColor: tenant.primaryColor || '#1e40af',
+2192:                    themeSecondaryColor: tenant.accentColor || '#1e3a8a',
+2193:                    bannerTitle: tenant.bannerTitle || 'OFERTAS ESPECIAIS',
+2194:                    subTitle: tenant.bannerSubtitle || 'Aqui você encontra saúde e bem estar!',
+2220:                        whatsapp: tenant.whatsapp,
+2224:                    logo: tenant.logo,
+2225:                    tenantName: tenant.name || 'Drogaria'
+2300:                                            {(tenant.departments && tenant.departments.length > 0) ? (
+2301:                                                tenant.departments.map(d => <option key={d.id} value={d.name}>{d.name}</option>)
+2309:                                <div className="space-y-1 relative"><InputLabel label="Categoria (Subcategoria)" />{customCategoryMode ? ( <div className="flex gap-2"><input autoFocus className="flex-1 bg-white p-4 rounded-2xl font-bold border-2 border-brand outline-none text-gray-900 transition-all" value={editingProduct.category} onChange={e => setEditingProduct({...editingProduct, category: e.target.value})} placeholder="Digite a nova subcategoria..." /><button onClick={() => setCustomCategoryMode(false)} className="px-4 bg-gray-100 rounded-2xl text-gray-500 hover:bg-gray-200 font-bold"><X size={20}/></button></div> ) : ( <div className="relative"><select className="w-full bg-gray-50 p-4 rounded-2xl font-bold border-2 border-transparent focus:bg-white focus:border-brand outline-none text-gray-900 appearance-none transition-all cursor-pointer" value={editingProduct.category} onChange={(e) => { if (e.target.value === 'NEW_ENTRY') { setCustomCategoryMode(true); setEditingProduct({...editingProduct, category: ''}); } else { setEditingProduct({...editingProduct, category: e.target.value}); } }} ><option value="" disabled>Selecione...</option>{categoryOptions.filter(c => getDepartmentForCategory(c, tenant.departments) === selectedDeptForEdit).map(c => <option key={c} value={c}>{c}</option>)}<option value="NEW_ENTRY" className="font-black text-brand">➕ Cadastrar Nova...</option></select><ChevronDown size={20} className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none"/></div> )}</div>
+2452:                            {tenant.manufacturerSynonyms && Object.keys(tenant.manufacturerSynonyms).length > 0 && (
+2456:                                        {Object.entries(tenant.manufacturerSynonyms).map(([synonym, target]) => (
+2462:                                                        const newSynonyms = { ...tenant.manufacturerSynonyms };
+2464:                                                        await onTenantUpdate({ ...tenant, manufacturerSynonyms: newSynonyms });
+2479:                                <div key={m} className="bg-gray-50 p-4 rounded-2xl border flex flex-col items-center gap-3 group relative cursor-pointer hover:border-black transition-colors" onClick={() => setNewLabLogo({ name: m, logo: tenant.manufacturerLogos?.[m] || '', originalName: m })}>
+2481:                                    <div className="h-12 w-full flex items-center justify-center">{tenant.manufacturerLogos?.[m] ? <img src={fixImageUrl(tenant.manufacturerLogos[m])!} className="h-full object-contain" referrerPolicy="no-referrer" /> : <Factory className="text-gray-200" size={24}/>}</div>
+2573:                    <AdminDepartmentManager tenant={tenant} onTenantUpdate={onTenantUpdate} products={products} onProductsUpdate={onProductsUpdate} />
+2759:                                                const currentDepts = tenant.departments || [];
+2768:                                                    onTenantUpdate({ ...tenant, departments: newDepts });
+2794:                                        ...categoryOptions.filter(c => getDepartmentForCategory(c, tenant.departments) === bulkSelectedDepartment).map(c => ({ value: c, label: c }))
+2803:                                                const currentDepts = tenant.departments || [];
+2815:                                                    onTenantUpdate({ ...tenant, departments: [...otherDepts, deptToUpdate] });

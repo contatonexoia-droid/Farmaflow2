@@ -1,0 +1,3 @@
+ALTER TABLE coupons ADD COLUMN IF NOT EXISTS coupon_scope TEXT DEFAULT 'SPECIFIC_PRODUCT';
+ALTER TABLE coupons ADD COLUMN IF NOT EXISTS min_purchase_value NUMERIC(10,2);
+NOTIFY pgrst, 'reload schema';

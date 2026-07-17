@@ -1,0 +1,8 @@
+{
+  "name": "NexoIA_FarmaFlow",
+  "description": "Ferramenta de investigação técnica e otimização para integração com a API EAN Pictures, incluindo fila de processamento, throttling e cache.",
+  "requestFramePermissions": [
+    "camera",
+    "geolocation"
+  ]
+}
