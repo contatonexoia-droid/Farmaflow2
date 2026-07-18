@@ -731,11 +731,11 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
 
       <div className="flex flex-wrap bg-white p-2 rounded-3xl border border-gray-100 shadow-sm gap-2 w-full max-w-full">
         {(
-          ["all", "pending", "confirmed", "enviado_ao_pdv", "impresso_no_pdv", "concluido_no_pdv", "erro_integracao_pdv", "dispatched", "cancelled"] as const
+          ["all", "pending", "confirmed", "dispatched", "cancelled"] as const
         ).map((status) => (
           <button
             key={status}
-            onClick={() => setStatusFilter(status)}
+            onClick={() => setStatusFilter(status as any)}
             className={`flex-1 sm:flex-none px-4 md:px-5 py-2.5 rounded-2xl text-[10px] font-black uppercase tracking-wider transition-all whitespace-nowrap border-2 text-center flex justify-center ${statusFilter === status ? "bg-emerald-600 border-emerald-600 text-white shadow-lg" : "bg-transparent border-transparent text-gray-400 hover:text-gray-600 hover:bg-gray-50"}`}
           >
             {status === "all"
@@ -744,17 +744,9 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                 ? "Pendentes"
                 : status === "confirmed"
                   ? "Confirmados"
-                  : status === "enviado_ao_pdv"
-                    ? "Enviados ao PDV"
-                    : status === "impresso_no_pdv"
-                      ? "Impressos no PDV"
-                      : status === "concluido_no_pdv"
-                        ? "Concluídos (PDV)"
-                        : status === "erro_integracao_pdv"
-                          ? "Erro PDV"
-                          : status === "dispatched"
-                            ? "Enviados"
-                            : "Cancelados"}
+                  : status === "dispatched"
+                    ? "Enviados"
+                    : "Cancelados"}
           </button>
         ))}
       </div>
@@ -925,10 +917,18 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                           >
                             <option value="pending">Marcar: Pendente</option>
                             <option value="confirmed">Confirmar Pedido</option>
-                            <option value="enviado_ao_pdv">Enviado ao PDV</option>
-                            <option value="impresso_no_pdv">Impresso no PDV</option>
-                            <option value="concluido_no_pdv">Concluído no PDV</option>
-                            <option value="erro_integracao_pdv">Erro Integração PDV</option>
+                            {order.status === "enviado_ao_pdv" && (
+                              <option value="enviado_ao_pdv">Enviado ao PDV</option>
+                            )}
+                            {order.status === "impresso_no_pdv" && (
+                              <option value="impresso_no_pdv">Impresso no PDV</option>
+                            )}
+                            {order.status === "concluido_no_pdv" && (
+                              <option value="concluido_no_pdv">Concluído no PDV</option>
+                            )}
+                            {order.status === "erro_integracao_pdv" && (
+                              <option value="erro_integracao_pdv">Erro Integração PDV</option>
+                            )}
                             <option value="dispatched">
                               Em Rota (Enviado)
                             </option>
