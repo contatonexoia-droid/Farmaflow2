@@ -5,6 +5,30 @@ import { CalendarDays, TrendingUp, DollarSign, X, ExternalLink, Copy, CheckCircl
 import { getEmptySearches, isSupabaseConfigured, getTenants, getOrdersByTenant } from '../services/storage';
 import { supabase } from '../services/supabase';
 
+const isConfirmedOrder = (status: string): boolean => {
+  const s = (status || "").toLowerCase();
+  return ["confirmed", "dispatched", "enviado_ao_pdv", "impresso_no_pdv", "concluido_no_pdv", "concluido", "pago"].includes(s);
+};
+
+const getLocalDateString = (dateStr: string): string => {
+  try {
+    const dateObj = new Date(dateStr);
+    const formatter = new Intl.DateTimeFormat('pt-BR', {
+      timeZone: 'America/Sao_Paulo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    });
+    const parts = formatter.formatToParts(dateObj);
+    const day = parts.find(p => p.type === 'day')?.value;
+    const month = parts.find(p => p.type === 'month')?.value;
+    const year = parts.find(p => p.type === 'year')?.value;
+    return `${year}-${month}-${day}`;
+  } catch (e) {
+    return (dateStr || "").split('T')[0];
+  }
+};
+
 interface AdminDashboardProps {
   orders: Order[];
   tenantId: string;
@@ -197,7 +221,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
     return baseOrders.filter(o => {
       if (!o.date) return false;
-      const orderDate = o.date.split('T')[0];
+      const orderDate = getLocalDateString(o.date);
       if (startDate && orderDate < startDate) return false;
       if (endDate && orderDate > endDate) return false;
       return true;
@@ -205,7 +229,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   }, [allOrders, startDate, endDate, selectedBranchId]);
 
   const stats = useMemo(() => {
-    const confirmedOrders = filteredOrders.filter(o => o.status === 'confirmed' || o.status === 'dispatched');
+    const confirmedOrders = filteredOrders.filter(o => isConfirmedOrder(o.status));
     const totalRevenue = confirmedOrders.reduce((acc, curr) => acc + curr.total, 0);
     const totalItems = confirmedOrders.reduce((acc, curr) => acc + curr.items.reduce((a, c) => a + c.quantity, 0), 0);
     const pendingOrders = filteredOrders.filter(o => o.status.toLowerCase() === 'pending' || o.status.toLowerCase() === 'pendente');
@@ -215,7 +239,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     
     const previousOrders = allOrders.filter(o => {
       if (!startDate) return false;
-      const orderDate = o.date.split('T')[0];
+      const orderDate = getLocalDateString(o.date);
       return orderDate < startDate;
     });
     const previousPhones = new Set(previousOrders.map(o => o.customer?.phone).filter(Boolean));
@@ -243,14 +267,28 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const chartData = useMemo(() => {
     const map = new Map();
-    const confirmed = filteredOrders.filter(o => o.status === 'confirmed');
+    const confirmed = filteredOrders.filter(o => isConfirmedOrder(o.status));
     const sorted = [...confirmed].sort((a,b) => new Date(a.date).getTime() - new Date(b.date).getTime());
     
     sorted.forEach(o => {
-        const dateObj = new Date(o.date);
-        const day = dateObj.getDate().toString().padStart(2, '0');
-        const month = (dateObj.getMonth() + 1).toString().padStart(2, '0');
-        const label = `${day}/${month}`;
+        let label = '';
+        try {
+          const dateObj = new Date(o.date);
+          const formatter = new Intl.DateTimeFormat('pt-BR', {
+            timeZone: 'America/Sao_Paulo',
+            month: '2-digit',
+            day: '2-digit'
+          });
+          const parts = formatter.formatToParts(dateObj);
+          const day = parts.find(p => p.type === 'day')?.value || '01';
+          const month = parts.find(p => p.type === 'month')?.value || '01';
+          label = `${day}/${month}`;
+        } catch (e) {
+          const dateObj = new Date(o.date);
+          const day = dateObj.getDate().toString().padStart(2, '0');
+          const month = (dateObj.getMonth() + 1).toString().padStart(2, '0');
+          label = `${day}/${month}`;
+        }
         const current = map.get(label) || { revenue: 0, orders: 0, items: 0 };
         const itemsCount = o.items.reduce((acc, item) => acc + item.quantity, 0);
 
