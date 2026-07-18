@@ -394,26 +394,63 @@ export const isPromotionActive = (
   return true;
 };
 
+export const checkProductMatchesRule = (
+  rule: PromotionRule | CouponRule,
+  p: Product,
+  matrizProducts: Product[] = [],
+  tenantId?: string,
+): boolean => {
+  // Se a regra for de rede ou pertencer a um tenant diferente do produto, é escopo rede
+  const isNetworkScope = rule.scope === "NETWORK" || (tenantId && rule.tenantId !== tenantId);
+
+  if (rule.targetType === "PRODUCT") {
+    if (rule.targetValue === p.id) return true;
+    // Se for escopo de rede, targetValue é o ID do produto na matriz. Comparamos pelo código de barras (EAN)
+    if (isNetworkScope && p.barcode) {
+      const matrizProd = matrizProducts.find((mp) => mp.id === rule.targetValue);
+      if (matrizProd && matrizProd.barcode === p.barcode) return true;
+    }
+    return false;
+  }
+
+  if (rule.targetType === "CATEGORY") {
+    const norm = (s: string) => (s || "").toLowerCase().trim();
+    return norm(rule.targetValue) === norm(p.category);
+  }
+
+  if (rule.targetType === "MANUFACTURER") {
+    const norm = (s: string) => (s || "").toLowerCase().trim();
+    return norm(rule.targetValue) === norm(p.manufacturer || "");
+  }
+
+  if (rule.targetType === "SPECIFIC_SELECTION") {
+    if (rule.specificProductIds?.includes(p.id)) return true;
+    if (isNetworkScope && p.barcode) {
+      const targetEans = matrizProducts
+        .filter((mp) => rule.specificProductIds?.includes(mp.id) && mp.barcode)
+        .map((mp) => mp.barcode);
+      if (p.barcode && targetEans.includes(p.barcode)) return true;
+    }
+    return false;
+  }
+
+  if (rule.targetType === "ALL") {
+    return true;
+  }
+
+  return false;
+};
+
 export const calculateItemPromotionDetails = (
   item: CartItem,
   activePromotions: PromotionRule[] = [],
+  matrizProducts: Product[] = [],
+  tenantId?: string,
 ): PromotionDetail => {
   const now = new Date();
   const applicablePromos = activePromotions.filter((p) => {
     if (!isPromotionActive(p, now)) return false;
-
-    if (p.targetType === "PRODUCT" && p.targetValue === item.id) return true;
-    if (p.targetType === "CATEGORY" && p.targetValue === item.category)
-      return true;
-    if (p.targetType === "MANUFACTURER" && p.targetValue === item.manufacturer)
-      return true;
-    if (
-      p.targetType === "SPECIFIC_SELECTION" &&
-      p.specificProductIds?.includes(item.id)
-    )
-      return true;
-
-    return false;
+    return checkProductMatchesRule(p, item, matrizProducts, tenantId);
   });
 
   const baseTotal = item.price * item.quantity;
@@ -522,9 +559,6 @@ export const calculateItemPromotionDetails = (
     };
   }
 
-  // Falta a validação pendente de BUY_X_PAY_Y se não bateu a regra? Ah, no legacy não tem pending acima, ele calcula tudo matematicamente se sets=0.
-  // Mas no return final a gente pode colocar:
-
   return {
     discount: Math.max(0, baseTotal - legacyDiscountedTotal),
   };
@@ -533,7 +567,9 @@ export const calculateItemPromotionDetails = (
 export const calculateItemTotal = (
   item: CartItem,
   activePromotions: PromotionRule[] = [],
+  matrizProducts: Product[] = [],
+  tenantId?: string,
 ): number => {
-  const details = calculateItemPromotionDetails(item, activePromotions);
+  const details = calculateItemPromotionDetails(item, activePromotions, matrizProducts, tenantId);
   return item.price * item.quantity - details.discount;
 };

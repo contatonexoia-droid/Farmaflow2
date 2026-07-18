@@ -9,6 +9,7 @@ import {
   PromotionRule,
   CouponRule,
   isPromotionActive,
+  checkProductMatchesRule,
 } from "../types";
 import {
   Trash2,
@@ -41,6 +42,7 @@ interface CartProps {
   tenant?: PharmacyConfig;
   promotions?: PromotionRule[];
   coupons?: CouponRule[];
+  matrizProducts?: any[];
   updateQuantity: (id: string, delta: number) => void;
   onRemove: (id: string) => void;
   onComplete: (
@@ -58,6 +60,7 @@ export const Cart: React.FC<CartProps> = ({
   tenant,
   promotions = [],
   coupons = [],
+  matrizProducts = [],
   updateQuantity,
   onRemove,
   onComplete,
@@ -312,7 +315,7 @@ export const Cart: React.FC<CartProps> = ({
   };
 
   const subtotal = items.reduce(
-    (acc, curr) => acc + calculateItemTotal(curr, promotions),
+    (acc, curr) => acc + calculateItemTotal(curr, promotions, matrizProducts, tenant?.id),
     0,
   );
 
@@ -341,32 +344,10 @@ export const Cart: React.FC<CartProps> = ({
     // 1. Calcula produto se existir cupom de produto válido
     if (activeProductCoupon && activeProductCoupon?.isActive) {
       let applicableTotal = items.reduce((acc, item) => {
-        let isApplicable = false;
-        if (
-          activeProductCoupon?.targetType === "PRODUCT" &&
-          activeProductCoupon?.targetValue === item.id
-        )
-          isApplicable = true;
-        if (
-          activeProductCoupon?.targetType === "CATEGORY" &&
-          activeProductCoupon?.targetValue === item.category
-        )
-          isApplicable = true;
-        if (
-          activeProductCoupon?.targetType === "MANUFACTURER" &&
-          activeProductCoupon?.targetValue === item.manufacturer
-        )
-          isApplicable = true;
-        if (
-          activeProductCoupon?.targetType === "SPECIFIC_SELECTION" &&
-          activeProductCoupon?.specificProductIds?.includes(item.id)
-        )
-          isApplicable = true;
-
-        if (activeProductCoupon?.targetType === "ALL") isApplicable = true;
+        let isApplicable = checkProductMatchesRule(activeProductCoupon, item, matrizProducts, tenant?.id);
 
         if (isApplicable) {
-          return acc + calculateItemTotal(item, promotions);
+          return acc + calculateItemTotal(item, promotions, matrizProducts, tenant?.id);
         }
         return acc;
       }, 0);
@@ -958,35 +939,19 @@ export const Cart: React.FC<CartProps> = ({
         <div className="space-y-4">
           {items.map((item) => {
             const isMaxStock = item.quantity >= item.stock;
-            const itemTotal = calculateItemTotal(item, promotions);
+            const itemTotal = calculateItemTotal(item, promotions, matrizProducts, tenant?.id);
             const promoDetails = calculateItemPromotionDetails(
               item,
               promotions,
+              matrizProducts,
+              tenant?.id,
             );
             let activePromo =
               promotions.find((p) => p.id === promoDetails.promotionId) ||
               promotions.find((p) => {
                 const now = new Date();
                 if (!isPromotionActive(p, now)) return false;
-
-                if (p.targetType === "PRODUCT" && p.targetValue === item.id)
-                  return true;
-                if (
-                  p.targetType === "CATEGORY" &&
-                  p.targetValue === item.category
-                )
-                  return true;
-                if (
-                  p.targetType === "MANUFACTURER" &&
-                  p.targetValue === item.manufacturer
-                )
-                  return true;
-                if (
-                  p.targetType === "SPECIFIC_SELECTION" &&
-                  p.specificProductIds?.includes(item.id)
-                )
-                  return true;
-                return false;
+                return checkProductMatchesRule(p, item, matrizProducts, tenant?.id);
               });
 
             if (

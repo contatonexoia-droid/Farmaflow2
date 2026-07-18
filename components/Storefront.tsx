@@ -15,6 +15,7 @@ import {
   PromotionRule,
   CouponRule,
   isPromotionActive,
+  checkProductMatchesRule,
 } from "../types";
 import {
   Search,
@@ -1676,19 +1677,8 @@ export const Storefront: React.FC<StorefrontProps> = ({
   }, [activePromotions, activeCouponFilter, matrizProducts, tenant.id]);
 
   const isProductInRule = useCallback((rule: PromotionRule | CouponRule, p: Product) => {
-    if (rule.targetType === "PRODUCT" && rule.targetValue === p.id) return true;
-    if (rule.targetType === "CATEGORY" && rule.targetValue === p.category) return true;
-    if (rule.targetType === "MANUFACTURER" && rule.targetValue === p.manufacturer) return true;
-    if (rule.targetType === "SPECIFIC_SELECTION") {
-      if (rule.scope === "NETWORK" && tenant.id !== rule.tenantId) {
-        const eans = promoTargetEans.get(rule.id) || [];
-        return eans.includes(p.barcode || "");
-      } else {
-        return rule.specificProductIds?.includes(p.id) ?? false;
-      }
-    }
-    return false;
-  }, [promoTargetEans, tenant.id]);
+    return checkProductMatchesRule(rule, p, matrizProducts, tenant.id);
+  }, [matrizProducts, tenant.id]);
 
   const filteredProducts = useMemo<Product[]>(() => {
     console.log(

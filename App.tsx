@@ -21,6 +21,7 @@ import {
   PromotionRule,
   CouponRule,
   isPromotionActive,
+  checkProductMatchesRule,
 } from "./types";
 import { Navbar } from "./components/Navbar";
 import { Storefront } from "./components/Storefront";
@@ -502,6 +503,7 @@ const App: React.FC = () => {
   );
 
   const [products, setProducts] = useState<Product[]>([]);
+  const [matrizProducts, setMatrizProducts] = useState<Product[]>([]);
   const [promotions, setPromotions] = useState<PromotionRule[]>([]);
   const [coupons, setCoupons] = useState<CouponRule[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
@@ -747,6 +749,14 @@ const App: React.FC = () => {
       getCouponsByTenant(currentTenant.id, currentTenant.networkId).then(setCoupons);
     }
   }, [currentTenant?.id, isLoading]);
+
+  useEffect(() => {
+    if (currentTenant?.networkId && currentTenant.networkId !== currentTenant.id) {
+      getProductsByTenant(currentTenant.networkId).then(setMatrizProducts).catch(console.error);
+    } else {
+      setMatrizProducts([]);
+    }
+  }, [currentTenant?.id, currentTenant?.networkId]);
 
   // Realtime subscription for orders
   useEffect(() => {
@@ -1048,27 +1058,9 @@ const App: React.FC = () => {
 
     return promotions.find((p) => {
       if (!idSet.has(p.id)) return false;
-
-      if (p.targetType === "PRODUCT" && p.targetValue === selectedProduct.id)
-        return true;
-      if (
-        p.targetType === "CATEGORY" &&
-        p.targetValue === selectedProduct.category
-      )
-        return true;
-      if (
-        p.targetType === "MANUFACTURER" &&
-        p.targetValue === selectedProduct.manufacturer
-      )
-        return true;
-      if (
-        p.targetType === "SPECIFIC_SELECTION" &&
-        p.specificProductIds?.includes(selectedProduct.id)
-      )
-        return true;
-      return false;
+      return checkProductMatchesRule(p, selectedProduct, matrizProducts, currentTenant?.id);
     });
-  }, [selectedProduct, promotions, activePromoIds]);
+  }, [selectedProduct, promotions, activePromoIds, matrizProducts, currentTenant?.id]);
 
   // moved isMedicine logic to root level of component or file
   const normalize = (s: string) =>
@@ -3244,6 +3236,7 @@ const App: React.FC = () => {
               tenant={currentTenant || undefined}
               promotions={promotions}
               coupons={coupons}
+              matrizProducts={matrizProducts}
               updateQuantity={updateCartQuantity}
               onRemove={(id) => setCart(cart.filter((i) => i.id !== id))}
               onComplete={finalizeOrder}
