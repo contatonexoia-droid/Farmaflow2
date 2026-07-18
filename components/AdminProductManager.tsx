@@ -3096,7 +3096,7 @@ const [selectedDeptForEdit, setSelectedDeptForEdit] = useState<string>('Outros')
                         };
                     }),
                     footerInfo: {
-                        whatsapp: tenant.whatsapp,
+                        whatsapp: tenant.whatsapp || '',
                         deliveryLink: 'Levamos até você!',
                         rules: 'Ofertas válidas enquanto durarem os estoques.'
                     },

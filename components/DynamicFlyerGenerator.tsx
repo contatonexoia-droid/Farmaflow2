@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { X, Printer, ImageIcon, Loader2, Sparkles, Phone, Truck, Info, Star, ChevronDown, AlertTriangle } from 'lucide-react';
-import * as htmlToImage from 'html-to-image';
+import { domToJpeg } from 'modern-screenshot';
 
 interface FlyerProduct {
     id: string;
@@ -100,7 +100,8 @@ export const DynamicFlyerGenerator: React.FC<DynamicFlyerGeneratorProps> = ({ in
     };
 
     const generateFlyerTextSupport = () => {
-        const storeSlug = config.tenantSlug || config.tenantName.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9\s-]/g, "").trim().replace(/\s+/g, "-");
+        const rawSlug = config.tenantSlug || config.tenantName || 'loja';
+        const storeSlug = rawSlug.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9\s-]/g, "").trim().replace(/\s+/g, "-");
         
         let text = `💪🛡️ ${config.bannerTitle.toUpperCase()} NA ${config.tenantName.toUpperCase()}! 🛡️💪\n\n`;
         text += `💊 Saúde e bem-estar com descontos imperdíveis diretamente no nosso site.\n\n`;
@@ -137,7 +138,7 @@ export const DynamicFlyerGenerator: React.FC<DynamicFlyerGeneratorProps> = ({ in
         await new Promise(resolve => setTimeout(resolve, 500));
 
         const dataUrl = await Promise.race([
-            htmlToImage.toJpeg(flyerRef.current, {
+            domToJpeg(flyerRef.current, {
                 quality: 0.95,
                 pixelRatio: 2,
                 backgroundColor: '#ffffff'
@@ -178,8 +179,8 @@ export const DynamicFlyerGenerator: React.FC<DynamicFlyerGeneratorProps> = ({ in
             
             URL.revokeObjectURL(objectUrl);
         } catch (e: any) {
-            console.error("Erro ao gerar encarte:", e);
-            alert("Erro ao gerar encarte. Tente novamente.");
+            console.error("Erro ao gerar encarte detalhado:", JSON.stringify(e, Object.getOwnPropertyNames(e)));
+            alert("Erro ao gerar encarte: " + (e?.message || e || "Erro desconhecido"));
         } finally {
             setIsGeneratingJPG(false);
         }
@@ -213,13 +214,13 @@ export const DynamicFlyerGenerator: React.FC<DynamicFlyerGeneratorProps> = ({ in
                 link.href = dataUrl;
                 link.click();
                 
-                const cleanPhone = config.footerInfo.whatsapp.replace(/\D/g, '');
+                const cleanPhone = (config.footerInfo?.whatsapp || '').replace(/\D/g, '');
                 const waUrl = `https://api.whatsapp.com/send?phone=${cleanPhone}&text=${encodeURIComponent(shareText)}`;
                 window.open(waUrl, '_blank');
             }
         } catch (e: any) {
-            console.error("Erro ao gerar encarte:", e);
-            alert("Erro ao gerar encarte. Tente novamente.");
+            console.error("Erro ao gerar encarte detalhado:", JSON.stringify(e, Object.getOwnPropertyNames(e)));
+            alert("Erro ao gerar encarte: " + (e?.message || e || "Erro desconhecido"));
         } finally {
             setIsGeneratingJPG(false);
         }
@@ -412,17 +413,17 @@ export const DynamicFlyerGenerator: React.FC<DynamicFlyerGeneratorProps> = ({ in
                             }}
                         >
                             {/* Cabeçalho Agressivo */}
-                            <div className="pt-10 pb-6 px-8 flex flex-col items-center text-center relative z-10">
+                            <div className="pt-10 pb-6 px-12 flex flex-col items-center text-center relative z-10">
                                 {/* Decorators / Sparkles */}
-                                <Sparkles className="absolute top-8 left-12 text-yellow-300 opacity-80" size={32} />
-                                <Sparkles className="absolute top-20 right-16 text-yellow-400 opacity-60" size={48} />
+                                <Sparkles className="absolute top-8 left-8 text-yellow-300 opacity-80" size={32} />
+                                <Sparkles className="absolute top-12 right-8 text-yellow-400 opacity-60" size={40} />
                                 
-                                <div className="bg-green-500 text-white px-4 py-1.5 rounded-full text-[12px] font-black uppercase inline-flex items-center gap-2 mb-4 shadow-lg border-2 border-white/20 transform -rotate-1">
+                                <div className="bg-green-500 text-white px-4 py-1.5 rounded-full text-[12px] font-black uppercase inline-flex items-center gap-2 mb-4 shadow-lg border-2 border-white/20 transform -rotate-1 relative z-20">
                                     <Info size={14} /> Ofertas Especiais
                                 </div>
                                 
                                 <h1 
-                                    className="text-[3.5rem] leading-[0.9] font-black uppercase text-white tracking-tighter"
+                                     className="text-[3.5rem] leading-[0.9] font-black uppercase text-white tracking-tighter relative z-20 px-10"
                                     style={{
                                         textShadow: '0 8px 16px rgba(0,0,0,0.4), 0 2px 4px rgba(0,0,0,0.8), -2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000'
                                     }}
@@ -441,7 +442,7 @@ export const DynamicFlyerGenerator: React.FC<DynamicFlyerGeneratorProps> = ({ in
                                 {highlightedProducts.length > 0 && (
                                     <div className="grid grid-cols-2 gap-4">
                                         {highlightedProducts.map(p => {
-                                            const hasDiscount = p.originalPrice && p.originalPrice > p.price;
+                                            const hasDiscount = Boolean(p.originalPrice && p.originalPrice > p.price);
                                             const isKit = p.promotionType === 'BUY_X_PAY_Y';
                                             const img = getProductDisplayImage(p);
                                             return (
@@ -462,11 +463,11 @@ export const DynamicFlyerGenerator: React.FC<DynamicFlyerGeneratorProps> = ({ in
                                                         <div className="font-black text-gray-900 text-lg mb-2 leading-tight line-clamp-2">{p.name}</div>
                                                         
                                                         <div className="bg-green-50 rounded-2xl p-3 border-2 border-green-200">
-                                                            {hasDiscount && p.originalPrice && (
+                                                            {hasDiscount ? (
                                                                 <p className="text-xs text-gray-500 font-bold line-through mb-[-4px]">
-                                                                    De R$ {p.originalPrice.toFixed(2).replace('.', ',')}
+                                                                    De R$ {p.originalPrice?.toFixed(2).replace('.', ',')}
                                                                 </p>
-                                                            )}
+                                                            ) : null}
                                                             <div className="text-4xl font-black text-green-600 tracking-tighter">
                                                                 R$ {p.price.toFixed(2).replace('.', ',')}
                                                             </div>
@@ -482,7 +483,7 @@ export const DynamicFlyerGenerator: React.FC<DynamicFlyerGeneratorProps> = ({ in
                                 {normalProducts.length > 0 && (
                                     <div className={`grid ${normalProducts.length <= 3 ? 'grid-cols-3' : 'grid-cols-3'} gap-4 mt-2`}>
                                         {normalProducts.map(p => {
-                                            const hasDiscount = p.originalPrice && p.originalPrice > p.price;
+                                            const hasDiscount = Boolean(p.originalPrice && p.originalPrice > p.price);
                                             const isKit = p.promotionType === 'BUY_X_PAY_Y';
                                             const img = getProductDisplayImage(p);
                                             return (
@@ -503,11 +504,11 @@ export const DynamicFlyerGenerator: React.FC<DynamicFlyerGeneratorProps> = ({ in
                                                         <div className="font-black text-gray-800 text-sm mb-2 leading-tight line-clamp-2 h-10 flex items-center justify-center">{p.name}</div>
                                                         
                                                         <div className="bg-gray-50 rounded-xl p-2 border border-gray-100">
-                                                            {hasDiscount && p.originalPrice && (
+                                                            {hasDiscount ? (
                                                                 <p className="text-[10px] text-gray-500 font-bold line-through mb-[-2px]">
-                                                                    De R$ {p.originalPrice.toFixed(2).replace('.', ',')}
+                                                                    De R$ {p.originalPrice?.toFixed(2).replace('.', ',')}
                                                                 </p>
-                                                            )}
+                                                            ) : null}
                                                             <div className={`text-2xl font-black tracking-tighter ${hasDiscount ? 'text-red-600' : 'text-gray-900'}`}>
                                                                 R$ {p.price.toFixed(2).replace('.', ',')}
                                                             </div>
