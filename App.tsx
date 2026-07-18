@@ -752,7 +752,7 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (currentTenant?.networkId && currentTenant.networkId !== currentTenant.id) {
-      getProductsByTenant(currentTenant.networkId).then(setMatrizProducts).catch(console.error);
+      getProductsByTenant(currentTenant.networkId, setMatrizProducts).catch(console.error);
     } else {
       setMatrizProducts([]);
     }
@@ -2392,9 +2392,9 @@ const App: React.FC = () => {
       let validatedTotal = 0;
       const cleanItems = cart.map((item) => {
         const { image, ...rest } = item;
-        const itemTotal = calculateItemTotal(item, promotions);
+        const itemTotal = calculateItemTotal(item, promotions, matrizProducts, currentTenant?.id);
         validatedTotal += itemTotal;
-        const promoDetails = calculateItemPromotionDetails(item, promotions);
+        const promoDetails = calculateItemPromotionDetails(item, promotions, matrizProducts, currentTenant?.id);
         return {
           ...rest,
           appliedPromotionId: promoDetails.promotionId,
@@ -2462,7 +2462,7 @@ const App: React.FC = () => {
       msg += `*🛒 PRODUTOS*\n\n`;
 
       cart.forEach((item) => {
-        const itemTotal = calculateItemTotal(item, promotions).toFixed(2);
+        const itemTotal = calculateItemTotal(item, promotions, matrizProducts, currentTenant?.id).toFixed(2);
         msg += `*${item.quantity}x ${item.name}*\n`;
         if (item.internalCode) msg += `   🏷️ Ref: ${item.internalCode}\n`;
         msg += `   💲 R$ ${itemTotal}\n\n`;
@@ -3153,6 +3153,7 @@ const App: React.FC = () => {
                     onProductsStateUpdate={handleProductsStateUpdate}
                     promotions={promotions}
                     coupons={coupons}
+                    matrizProducts={matrizProducts}
                     isDelivererMode={isDeliverer}
                   />
                 )}

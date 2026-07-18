@@ -1059,7 +1059,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
 
   useEffect(() => {
     if (tenant?.networkId && tenant.networkId !== tenant.id) {
-      getProductsByTenant(tenant.networkId).then(setMatrizProducts).catch(console.error);
+      getProductsByTenant(tenant.networkId, setMatrizProducts).catch(console.error);
     }
   }, [tenant?.networkId, tenant?.id]);
   useEffect(() => {

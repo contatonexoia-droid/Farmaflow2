@@ -7,6 +7,7 @@ import {
   Product,
   PromotionRule,
   CouponRule,
+  checkProductMatchesRule,
 } from "../types";
 import {
   Search,
@@ -51,6 +52,7 @@ interface AdminOrderManagerProps {
   onProductsStateUpdate?: (products: Product[]) => void;
   promotions?: PromotionRule[];
   coupons?: CouponRule[];
+  matrizProducts?: Product[];
   isDelivererMode?: boolean;
 }
 
@@ -65,6 +67,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
   onProductsStateUpdate,
   promotions = [],
   coupons = [],
+  matrizProducts = [],
   isDelivererMode = false,
 }) => {
   const [searchTerm, setSearchTerm] = useState("");
@@ -275,7 +278,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
 
   const recalculateOrderTotals = (items: any[], appliedCouponCode?: string) => {
     const subtotal = items.reduce(
-      (acc, curr) => acc + calculateItemTotal(curr, promotions),
+      (acc, curr) => acc + calculateItemTotal(curr, promotions, matrizProducts, tenant?.id),
       0,
     );
 
@@ -299,30 +302,10 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
             applicableTotal = subtotal;
           } else {
             applicableTotal = items.reduce((acc, item) => {
-              let isApplicable = false;
-              if (
-                appliedCoupon?.targetType === "PRODUCT" &&
-                appliedCoupon?.targetValue === item.id
-              )
-                isApplicable = true;
-              if (
-                appliedCoupon?.targetType === "CATEGORY" &&
-                appliedCoupon?.targetValue === item.category
-              )
-                isApplicable = true;
-              if (
-                appliedCoupon?.targetType === "MANUFACTURER" &&
-                appliedCoupon?.targetValue === item.manufacturer
-              )
-                isApplicable = true;
-              if (
-                appliedCoupon?.targetType === "SPECIFIC_SELECTION" &&
-                appliedCoupon?.specificProductIds?.includes(item.id)
-              )
-                isApplicable = true;
+              let isApplicable = checkProductMatchesRule(appliedCoupon, item, matrizProducts, tenant?.id);
 
               if (isApplicable) {
-                return acc + calculateItemTotal(item, promotions);
+                return acc + calculateItemTotal(item, promotions, matrizProducts, tenant?.id);
               }
               return acc;
             }, 0);
@@ -469,7 +452,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
         <tr>
             <td style="padding: 8px; border-bottom: 1px solid #eee;">${item.quantity}x</td>
             <td style="padding: 8px; border-bottom: 1px solid #eee;">${item.name}</td>
-            <td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">R$ ${calculateItemTotal(item, promotions).toFixed(2)}</td>
+            <td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">R$ ${calculateItemTotal(item, promotions, matrizProducts, tenant?.id).toFixed(2)}</td>
         </tr>
       `,
       )
@@ -1206,7 +1189,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                       </div>
                       <div className="text-right">
                         <p className="font-black text-gray-900 text-sm">
-                          R$ {calculateItemTotal(item, promotions).toFixed(2)}
+                          R$ {calculateItemTotal(item, promotions, matrizProducts, tenant?.id).toFixed(2)}
                         </p>
                       </div>
                     </div>
@@ -1466,7 +1449,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                             </p>
                             <p className="font-black text-emerald-600 text-lg tracking-tight">
                               R${" "}
-                              {calculateItemTotal(item, promotions).toFixed(2)}
+                              {calculateItemTotal(item, promotions, matrizProducts, tenant?.id).toFixed(2)}
                             </p>
                           </div>
                         </div>
