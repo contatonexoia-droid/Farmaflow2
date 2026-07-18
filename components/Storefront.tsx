@@ -1101,7 +1101,6 @@ export const Storefront: React.FC<StorefrontProps> = ({
       const isCurrentTenant = p.tenantId === tenant.id;
       const isNetworkShared =
         tenant.networkId &&
-        p.scope === "NETWORK" &&
         (p.tenantId === tenant.networkId || p.tenantId === tenant.id);
       
       if (isNetworkShared && p.filtersMetadata) {
@@ -1121,9 +1120,9 @@ export const Storefront: React.FC<StorefrontProps> = ({
       if (!c.isActive) return false;
 
       // 2. Regra de herança:
-      // O cupom é da própria loja OU pertence à rede e é do tipo 'NETWORK'
+      // O cupom é da própria loja OU pertence à rede/matriz
       const ehDaLoja = c.tenantId === tenant.id;
-      const ehDaRede = c.networkId === tenant.networkId && c.scope === 'NETWORK';
+      const ehDaRede = (c.networkId === tenant.networkId || c.tenantId === tenant.networkId);
 
       // 3. Se houver filiais específicas no alvo, a filial atual deve estar inclusa
       const targetBranches = c.targetBranchIds || c.filtersMetadata?.branchIds || [];

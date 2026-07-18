@@ -1147,10 +1147,9 @@ export const getPromotionsByTenant = async (
   if (!isSupabaseConfigured()) return [];
   try {
     return await retryRequest(async () => {
-      const support = await checkSchemaSupport();
       let query = supabase.from("promotions").select("*");
-      if (networkId && support.hasNetworkPromotions) {
-        query = query.or(`tenant_id.eq.${tenantId},and(scope.eq.NETWORK,tenant_id.eq.${networkId})`);
+      if (networkId) {
+        query = query.or(`tenant_id.eq.${tenantId},tenant_id.eq.${networkId}`);
       } else {
         query = query.eq("tenant_id", tenantId);
       }
@@ -1244,10 +1243,9 @@ export const getCouponsByTenant = async (
   if (!isSupabaseConfigured()) return [];
   try {
     return await retryRequest(async () => {
-      const support = await checkSchemaSupport();
       let query = supabase.from("coupons").select("*");
-      if (networkId && support.hasNetworkCoupons) {
-        query = query.or(`tenant_id.eq.${tenantId},and(scope.eq.NETWORK,tenant_id.eq.${networkId})`);
+      if (networkId) {
+        query = query.or(`tenant_id.eq.${tenantId},tenant_id.eq.${networkId}`);
       } else {
         query = query.eq("tenant_id", tenantId);
       }

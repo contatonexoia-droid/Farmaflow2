@@ -116,11 +116,30 @@ app.get("/api/v1/store/:tenantId/init", async (req, res) => {
   try {
     const tenantId = req.params.tenantId;
 
-    // Parallel fetch of all critical configuration and first subset of products
-    const [tenantRes, promoRes, couponsRes, productsRes, gatewaysRes] = await Promise.all([
-      supabase.from("tenants").select("*").eq("id", tenantId).single(),
-      supabase.from("promotions").select("*").eq("tenant_id", tenantId),
-      supabase.from("coupons").select("*").eq("tenant_id", tenantId),
+    const tenantRes = await supabase.from("tenants").select("*").eq("id", tenantId).single();
+    if (tenantRes.error) throw tenantRes.error;
+
+    const tenant = tenantRes.data;
+    const networkId = tenant?.network_id;
+
+    let promoQuery = supabase.from("promotions").select("*");
+    if (networkId) {
+      promoQuery = promoQuery.or(`tenant_id.eq.${tenantId},tenant_id.eq.${networkId}`);
+    } else {
+      promoQuery = promoQuery.eq("tenant_id", tenantId);
+    }
+
+    let couponsQuery = supabase.from("coupons").select("*");
+    if (networkId) {
+      couponsQuery = couponsQuery.or(`tenant_id.eq.${tenantId},tenant_id.eq.${networkId}`);
+    } else {
+      couponsQuery = couponsQuery.eq("tenant_id", tenantId);
+    }
+
+    // Parallel fetch of remaining critical configuration and first subset of products
+    const [promoRes, couponsRes, productsRes, gatewaysRes] = await Promise.all([
+      promoQuery,
+      couponsQuery,
       supabase
         .from("products")
         .select("*")
@@ -3046,12 +3065,25 @@ app.post("/api/coupons/validate", async (req, res) => {
 
     const cleanCode = code.trim().toUpperCase();
 
-    // Query both tenant-specific and global coupons
+    // Query tenant to check for network/matrix ID
+    const { data: tenant } = await supabase
+      .from("tenants")
+      .select("network_id")
+      .eq("id", tenant_id)
+      .single();
+    const networkId = tenant?.network_id;
+
+    let tenantOrClause = `tenant_id.eq.${tenant_id},tenant_id.is.null`;
+    if (networkId) {
+      tenantOrClause += `,tenant_id.eq.${networkId}`;
+    }
+
+    // Query both tenant-specific, matrix-specific and global coupons
     const { data: coupons, error } = await supabase
       .from("coupons")
       .select("*")
       .ilike("code", cleanCode)
-      .or(`tenant_id.eq.${tenant_id},tenant_id.is.null`);
+      .or(tenantOrClause);
 
     if (error) {
       return res.status(500).json({ error: "DATABASE_ERROR", message: error.message });
