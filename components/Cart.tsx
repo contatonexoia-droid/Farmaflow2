@@ -492,6 +492,14 @@ export const Cart: React.FC<CartProps> = ({
 
   const total = Math.max(0, subtotal - discount + (deliveryFee === -1 ? 0 : deliveryFee));
 
+  const isAddressIncomplete = !getFinalSubmitValue("address") || !getFinalSubmitValue("neighborhood") || !getFinalSubmitValue("city");
+  const isDeliveryPending = Boolean(
+    tenant?.deliverySettings?.enabled &&
+    tenant?.deliverySettings?.type === "dynamic" &&
+    isAddressIncomplete &&
+    !(tenant?.deliverySettings?.minOrderForFreeDelivery > 0 && subtotal >= tenant.deliverySettings.minOrderForFreeDelivery)
+  );
+
   const [isApplyingCoupon, setIsApplyingCoupon] = useState(false);
 
   const handleApplyCoupon = async () => {
@@ -1615,9 +1623,11 @@ export const Cart: React.FC<CartProps> = ({
                        <Loader2 size={14} className="animate-spin" /> Calculando...
                      </span>
                   ) : (
-                    <span className={deliveryFee === 0 && !deliveryError ? "text-emerald-600 font-extrabold uppercase text-xs" : "text-black"}>
+                    <span className={!isDeliveryPending && deliveryFee === 0 && !deliveryError ? "text-emerald-600 font-extrabold uppercase text-xs" : "text-black"}>
                       {deliveryError ? (
                         <span className="text-red-500 text-xs">-</span>
+                      ) : isDeliveryPending ? (
+                        <span className="text-amber-600 font-bold text-xs uppercase">A calcular</span>
                       ) : deliveryFee === -1 ? (
                         <span className="text-amber-600 font-bold text-xs uppercase">A combinar</span>
                       ) : deliveryFee === 0 ? "Grátis" : `R$ ${deliveryFee.toFixed(2)}`}
