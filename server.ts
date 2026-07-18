@@ -1272,6 +1272,8 @@ app.get("/api/image-proxy", async (req, res) => {
     const contentType = response.headers.get("content-type");
     if (contentType) res.setHeader("Content-Type", contentType);
     res.setHeader("Cache-Control", "public, max-age=31536000");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
 
     const buffer = await response.arrayBuffer();
     res.send(Buffer.from(buffer));

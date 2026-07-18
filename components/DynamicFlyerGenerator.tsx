@@ -94,9 +94,16 @@ export const DynamicFlyerGenerator: React.FC<DynamicFlyerGeneratorProps> = ({ in
         }));
     }, [config]);
 
+    const getProxiedImageUrl = (url?: string) => {
+        if (!url) return 'https://via.placeholder.com/300x300.png?text=Sem+Imagem';
+        if (url.startsWith('http') && !url.includes('supabase.co')) {
+            return `/api/image-proxy?url=${encodeURIComponent(url)}`;
+        }
+        return url;
+    };
+
     const getProductDisplayImage = (product: FlyerProduct) => {
-        if (product.image) return product.image;
-        return 'https://via.placeholder.com/300x300.png?text=Sem+Imagem';
+        return getProxiedImageUrl(product.image);
     };
 
     const generateFlyerTextSupport = () => {
@@ -117,7 +124,14 @@ export const DynamicFlyerGenerator: React.FC<DynamicFlyerGeneratorProps> = ({ in
         const images = flyerRef.current.querySelectorAll('img');
         const imagePromises = Array.from(images).map(async (img) => {
             if (img.src.startsWith('data:')) return;
-            const originalSrc = img.src;
+            let originalSrc = img.src;
+            // Avoid double proxying
+            if (originalSrc.includes('/api/image-proxy?url=')) {
+                const urlParam = new URL(originalSrc).searchParams.get('url');
+                if (urlParam) {
+                    originalSrc = urlParam;
+                }
+            }
             try {
                 const proxyUrl = `/api/image-proxy?url=${encodeURIComponent(originalSrc)}`;
                 const response = await fetch(proxyUrl);
@@ -141,8 +155,12 @@ export const DynamicFlyerGenerator: React.FC<DynamicFlyerGeneratorProps> = ({ in
             domToJpeg(flyerRef.current, {
                 quality: 0.95,
                 pixelRatio: 2,
-                backgroundColor: '#ffffff'
-            }),
+                backgroundColor: '#ffffff',
+                fetch: {
+                    bypassingCache: true,
+                    requestInit: { mode: 'cors' }
+                }
+            } as any),
             new Promise<string>((_, reject) => setTimeout(() => reject(new Error("Timeout ao gerar imagem")), 15000))
         ]);
 
@@ -365,7 +383,7 @@ export const DynamicFlyerGenerator: React.FC<DynamicFlyerGeneratorProps> = ({ in
                                     <div key={p.id} className="bg-white border rounded-lg p-3 flex flex-col gap-2">
                                         <div className="flex items-center gap-3">
                                             <div className="w-10 h-10 shrink-0 bg-gray-50 rounded p-1">
-                                                <img src={getProductDisplayImage(p)} className="w-full h-full object-contain" />
+                                                <img src={getProductDisplayImage(p)} className="w-full h-full object-contain" crossOrigin="anonymous" />
                                             </div>
                                             <div className="flex-1 min-w-0">
                                                 <p className="text-[10px] font-bold truncate text-gray-900">{p.name}</p>
@@ -435,90 +453,45 @@ export const DynamicFlyerGenerator: React.FC<DynamicFlyerGeneratorProps> = ({ in
                                     {config.subTitle || "Aqui você encontra saúde e bem estar!"}
                                 </div>
                             </div>
-                            
-                            {/* Grade de Produtos */}
+                                      {/* Grade de Produtos */}
                             <div className="px-6 py-4 flex-1 flex flex-col gap-4 relative z-10">
-                                {/* Destaques */}
-                                {highlightedProducts.length > 0 && (
-                                    <div className="grid grid-cols-2 gap-4">
-                                        {highlightedProducts.map(p => {
-                                            const hasDiscount = Boolean(p.originalPrice && p.originalPrice > p.price);
-                                            const isKit = p.promotionType === 'BUY_X_PAY_Y';
-                                            const img = getProductDisplayImage(p);
-                                            return (
-                                                <div key={p.id} className="bg-white rounded-3xl p-4 text-center relative shadow-[0_8px_30px_rgb(0,0,0,0.2)] border-4 border-yellow-400 flex flex-col items-center justify-between overflow-hidden">
-                                                    
-                                                    {p.badgeText && (
-                                                        <div className={`absolute top-0 inset-x-0 text-white text-xs font-black uppercase py-1.5 text-center shadow-md ${isKit ? 'bg-purple-600' : 'bg-blue-600'}`}>
-                                                            {p.badgeText}
-                                                        </div>
-                                                    )}
-                                                    
-                                                    <div className="w-full h-40 flex items-center justify-center mt-6 mb-4">
-                                                        <img src={img} className="max-w-full max-h-full object-contain drop-shadow-md" referrerPolicy="no-referrer" crossOrigin="anonymous" />
+                                <div className="grid grid-cols-3 gap-4 mt-2">
+                                    {config.productsArray.map(p => {
+                                        const hasDiscount = Boolean(p.originalPrice && p.originalPrice > p.price);
+                                        const isKit = p.promotionType === 'BUY_X_PAY_Y';
+                                        const img = getProductDisplayImage(p);
+                                        return (
+                                            <div key={p.id} className={`bg-white rounded-2xl p-3 text-center relative shadow-lg flex flex-col items-center justify-between pt-6 ${p.isHighlight ? 'border-4 border-yellow-400 shadow-[0_8px_30px_rgb(0,0,0,0.2)]' : 'border-b-4 border-gray-200'}`}>
+                                                
+                                                {p.badgeText && (
+                                                    <div className={`absolute top-0 right-0 left-0 text-white text-[10px] font-black uppercase px-2 py-1 shadow-sm z-10 ${p.isHighlight ? 'rounded-t-xl' : 'rounded-t-xl'} ${isKit ? 'bg-purple-600' : (p.isHighlight ? 'bg-blue-600' : 'bg-red-600')}`}>
+                                                        {p.badgeText}
                                                     </div>
+                                                )}
+                                                
+                                                <div className="w-full h-24 flex items-center justify-center mb-3 mt-2">
+                                                    <img src={img} className={`max-w-full max-h-full object-contain ${p.isHighlight ? 'drop-shadow-md' : ''}`} referrerPolicy="no-referrer" crossOrigin="anonymous" />
+                                                </div>
+                                                
+                                                <div className="w-full">
+                                                    <span className="text-[8px] font-black uppercase text-gray-400 block mb-0.5 tracking-widest">{p.category}</span>
+                                                    <div className="font-black text-gray-800 text-sm mb-2 leading-tight line-clamp-2 h-10 flex items-center justify-center">{p.name}</div>
                                                     
-                                                    <div className="w-full">
-                                                        <span className="text-[10px] font-black uppercase text-gray-400 block mb-1 tracking-widest">{p.category}</span>
-                                                        <div className="font-black text-gray-900 text-lg mb-2 leading-tight line-clamp-2">{p.name}</div>
-                                                        
-                                                        <div className="bg-green-50 rounded-2xl p-3 border-2 border-green-200">
-                                                            {hasDiscount ? (
-                                                                <p className="text-xs text-gray-500 font-bold line-through mb-[-4px]">
-                                                                    De R$ {p.originalPrice?.toFixed(2).replace('.', ',')}
-                                                                </p>
-                                                            ) : null}
-                                                            <div className="text-4xl font-black text-green-600 tracking-tighter">
-                                                                R$ {p.price.toFixed(2).replace('.', ',')}
-                                                            </div>
+                                                    <div className={`rounded-xl p-2 border ${p.isHighlight ? 'bg-green-50 border-green-200' : 'bg-gray-50 border-gray-100'}`}>
+                                                        {hasDiscount ? (
+                                                            <p className="text-[10px] text-gray-500 font-bold line-through mb-[-2px]">
+                                                                De R$ {p.originalPrice?.toFixed(2).replace('.', ',')}
+                                                            </p>
+                                                        ) : null}
+                                                        <div className={`text-2xl font-black tracking-tighter ${p.isHighlight ? 'text-green-600' : (hasDiscount ? 'text-red-600' : 'text-gray-900')}`}>
+                                                            R$ {p.price.toFixed(2).replace('.', ',')}
                                                         </div>
                                                     </div>
                                                 </div>
-                                            )
-                                        })}
-                                    </div>
-                                )}
-
-                                {/* Grade Normal */}
-                                {normalProducts.length > 0 && (
-                                    <div className={`grid ${normalProducts.length <= 3 ? 'grid-cols-3' : 'grid-cols-3'} gap-4 mt-2`}>
-                                        {normalProducts.map(p => {
-                                            const hasDiscount = Boolean(p.originalPrice && p.originalPrice > p.price);
-                                            const isKit = p.promotionType === 'BUY_X_PAY_Y';
-                                            const img = getProductDisplayImage(p);
-                                            return (
-                                                <div key={p.id} className="bg-white rounded-2xl p-3 text-center relative shadow-lg flex flex-col items-center justify-between border-b-4 border-gray-200 pt-6">
-                                                    
-                                                    {p.badgeText && (
-                                                        <div className={`absolute top-0 right-0 left-0 text-white text-[10px] font-black uppercase px-2 py-1 rounded-t-xl shadow-sm z-10 ${isKit ? 'bg-purple-600' : 'bg-red-600'}`}>
-                                                            {p.badgeText}
-                                                        </div>
-                                                    )}
-                                                    
-                                                    <div className="w-full h-24 flex items-center justify-center mb-3 mt-2">
-                                                        <img src={img} className="max-w-full max-h-full object-contain" referrerPolicy="no-referrer" crossOrigin="anonymous" />
-                                                    </div>
-                                                    
-                                                    <div className="w-full">
-                                                        <span className="text-[8px] font-black uppercase text-gray-400 block mb-0.5 tracking-widest">{p.category}</span>
-                                                        <div className="font-black text-gray-800 text-sm mb-2 leading-tight line-clamp-2 h-10 flex items-center justify-center">{p.name}</div>
-                                                        
-                                                        <div className="bg-gray-50 rounded-xl p-2 border border-gray-100">
-                                                            {hasDiscount ? (
-                                                                <p className="text-[10px] text-gray-500 font-bold line-through mb-[-2px]">
-                                                                    De R$ {p.originalPrice?.toFixed(2).replace('.', ',')}
-                                                                </p>
-                                                            ) : null}
-                                                            <div className={`text-2xl font-black tracking-tighter ${hasDiscount ? 'text-red-600' : 'text-gray-900'}`}>
-                                                                R$ {p.price.toFixed(2).replace('.', ',')}
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            )
-                                        })}
-                                    </div>
-                                )}
+                                            </div>
+                                        )
+                                    })}
+                                </div>
                             </div>
                             
                             {/* Rodapé Agressivo */}
@@ -527,7 +500,7 @@ export const DynamicFlyerGenerator: React.FC<DynamicFlyerGeneratorProps> = ({ in
                                     {/* Logo */}
                                     <div className="flex items-center gap-4">
                                         <div className="w-16 h-16 bg-white rounded-xl flex items-center justify-center shadow border p-2">
-                                            {config.logo ? <img src={config.logo} className="max-w-full max-h-full object-contain" /> : <span className="text-xl font-black text-blue-800">{config.tenantName.charAt(0)}</span>}
+                                            {config.logo ? <img src={getProxiedImageUrl(config.logo)} className="max-w-full max-h-full object-contain" referrerPolicy="no-referrer" crossOrigin="anonymous" /> : <span className="text-xl font-black text-blue-800">{config.tenantName.charAt(0)}</span>}
                                         </div>
                                         <div>
                                             <h2 className="text-2xl font-black text-gray-900 tracking-tighter uppercase leading-none">{config.tenantName}</h2>
@@ -566,7 +539,7 @@ export const DynamicFlyerGenerator: React.FC<DynamicFlyerGeneratorProps> = ({ in
                             </div>
                             
                             {/* Graphic Overlay Backgrounds */}
-                            <div className="absolute inset-0 z-0 opacity-10 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] mix-blend-overlay"></div>
+                            <div className="absolute inset-0 z-0 opacity-10 mix-blend-overlay" style={{ backgroundImage: `url('/api/image-proxy?url=${encodeURIComponent('https://www.transparenttextures.com/patterns/cubes.png')}')` }}></div>
                         </div>
                     </div>
                     
