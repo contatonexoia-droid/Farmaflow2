@@ -736,6 +736,103 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
   }
 });
 
+app.post("/api/v1/matrix/bulk-featured-products", async (req, res) => {
+  try {
+    const { productIds, targetTenantIds } = req.body;
+
+    if (!productIds || !Array.isArray(productIds) || productIds.length === 0) {
+      return res.status(400).json({ error: "Parâmetro productIds é obrigatório e deve ser uma lista não vazia." });
+    }
+    if (!targetTenantIds || !Array.isArray(targetTenantIds) || targetTenantIds.length === 0) {
+      return res.status(400).json({ error: "Parâmetro targetTenantIds é obrigatório e deve ser uma lista não vazia." });
+    }
+
+    // 1. Fetch matrix products to get their barcodes and internal codes
+    const { data: matrixProducts, error: matrixError } = await supabase
+      .from("products")
+      .select("barcode, internal_code")
+      .in("id", productIds);
+
+    if (matrixError) throw matrixError;
+    if (!matrixProducts || matrixProducts.length === 0) {
+      return res.status(404).json({ error: "Nenhum produto correspondente encontrado na Matriz." });
+    }
+
+    // Gather all barcodes and internal_codes to match on
+    const barcodes = matrixProducts.map(p => p.barcode ? String(p.barcode).trim() : null).filter(Boolean) as string[];
+    const internalCodes = matrixProducts.map(p => p.internal_code ? String(p.internal_code).trim() : null).filter(Boolean) as string[];
+
+    if (barcodes.length === 0 && internalCodes.length === 0) {
+      return res.status(400).json({ error: "Os produtos selecionados na Matriz não possuem código de barras (EAN) ou código interno para correspondência." });
+    }
+
+    // 2. Query target products
+    const orClauses: string[] = [];
+    barcodes.forEach(b => {
+      orClauses.push(`barcode.eq.${b}`);
+    });
+    internalCodes.forEach(ic => {
+      orClauses.push(`internal_code.eq.${ic}`);
+    });
+
+    let query = supabase
+      .from("products")
+      .select("id, tenant_id, barcode, internal_code")
+      .in("tenant_id", targetTenantIds);
+
+    if (orClauses.length > 0) {
+      query = query.or(orClauses.join(","));
+    }
+
+    const { data: targetProducts, error: targetError } = await query;
+    if (targetError) throw targetError;
+
+    if (!targetProducts || targetProducts.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: "Nenhum produto correspondente foi encontrado nas filiais selecionadas para destacar.",
+        updatedCount: 0
+      });
+    }
+
+    const targetProductIdsToUpdate = targetProducts.map(p => p.id);
+
+    // Update is_featured to true inside a single atomic operation
+    const { error: updateError } = await supabase
+      .from("products")
+      .update({ is_featured: true })
+      .in("id", targetProductIdsToUpdate);
+
+    if (updateError) throw updateError;
+
+    // Save logs to integration_logs for audit
+    try {
+      await supabase.from("integration_logs").insert({
+        tenant_id: targetTenantIds[0], // associate with first target tenant
+        endpoint: "bulk_featured_products",
+        payload: {
+          productIds,
+          targetTenantIds,
+          updatedProductIds: targetProductIdsToUpdate,
+          timestamp: new Date().toISOString()
+        },
+        status: "SUCCESS"
+      });
+    } catch (logErr) {
+      console.error("Erro ao gravar logs de auditoria em lote:", logErr);
+    }
+
+    res.json({
+      success: true,
+      message: `${targetProductIdsToUpdate.length} produtos foram definidos como destaque nas filiais selecionadas.`,
+      updatedCount: targetProductIdsToUpdate.length
+    });
+  } catch (err: any) {
+    console.error("Error in POST /api/v1/matrix/bulk-featured-products:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Cacheable Products Endpoint for Vercel Edge Cache (ISR Pattern)
 app.get("/api/v1/tenants/:tenantId/products", async (req, res) => {
   try {

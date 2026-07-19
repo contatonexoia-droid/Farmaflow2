@@ -431,6 +431,13 @@ const [selectedDeptForEdit, setSelectedDeptForEdit] = useState<string>('Outros')
   const [centralPriceProgress, setCentralPriceProgress] = useState(0);
   const [centralPriceLogs, setCentralPriceLogs] = useState<AuditItem[]>([]);
   const centralPriceInputRef = useRef<HTMLInputElement>(null);
+  
+  const [isBulkFeaturedModalOpen, setIsBulkFeaturedModalOpen] = useState(false);
+  const [bulkFeaturedBranches, setBulkFeaturedBranches] = useState<PharmacyConfig[]>([]);
+  const [selectedBulkFeaturedBranches, setSelectedBulkFeaturedBranches] = useState<Set<string>>(new Set());
+  const [isProcessingBulkFeatured, setIsProcessingBulkFeatured] = useState(false);
+  const [bulkFeaturedProgress, setBulkFeaturedProgress] = useState(0);
+
   const [isDepartmentManagerOpen, setIsDepartmentManagerOpen] = useState(false);
   const [importType, setImportType] = useState<'simple' | 'ai'>('simple');
   const [importStockMode, setImportStockMode] = useState<'ADD' | 'SET' | 'SUBTRACT'>('SET'); 
@@ -521,6 +528,54 @@ const [selectedDeptForEdit, setSelectedDeptForEdit] = useState<string>('Outros')
 
   const handleBulkCategoryClick = () => {
       setIsBulkCategoryModalOpen(true);
+  };
+
+  const handleApplyBulkFeatured = async () => {
+    if (selectedProducts.size === 0) {
+      alert("Selecione pelo menos um produto na Matriz.");
+      return;
+    }
+    if (selectedBulkFeaturedBranches.size === 0) {
+      alert("Selecione pelo menos uma filial.");
+      return;
+    }
+
+    setIsProcessingBulkFeatured(true);
+    setBulkFeaturedProgress(20);
+
+    try {
+      const response = await fetch("/api/v1/matrix/bulk-featured-products", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          productIds: Array.from(selectedProducts),
+          targetTenantIds: Array.from(selectedBulkFeaturedBranches),
+        }),
+      });
+
+      setBulkFeaturedProgress(60);
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Erro ao definir destaques nas filiais.");
+      }
+
+      setBulkFeaturedProgress(100);
+      alert(data.message || "Destaques aplicados com sucesso nas filiais selecionadas!");
+      
+      // Reset selected products/branches
+      setSelectedProducts(new Set());
+      setSelectedBulkFeaturedBranches(new Set());
+      setIsBulkFeaturedModalOpen(false);
+    } catch (error: any) {
+      console.error("Erro ao aplicar destaques em lote:", error);
+      alert(error.message || "Ocorreu um erro ao aplicar destaques em lote.");
+    } finally {
+      setIsProcessingBulkFeatured(false);
+      setBulkFeaturedProgress(0);
+    }
   };
 
   const confirmBulkCategory = async () => {
@@ -1529,6 +1584,12 @@ const [selectedDeptForEdit, setSelectedDeptForEdit] = useState<string>('Outros')
         getTenants().then(t => setCentralPriceBranches(t.filter(br => br.networkId === tenant.id && br.id !== tenant.id)));
     }
   }, [isCentralPriceModalOpen, tenant]);
+
+  useEffect(() => {
+    if (isBulkFeaturedModalOpen && tenant?.isNetworkMaster) {
+        getTenants().then(t => setBulkFeaturedBranches(t.filter(br => br.networkId === tenant.id && br.id !== tenant.id)));
+    }
+  }, [isBulkFeaturedModalOpen, tenant]);
 
   const executeCentralPriceImport = async (rawData: any[]) => {
         const priceMap = new Map<string, number>();
@@ -2909,6 +2970,21 @@ const [selectedDeptForEdit, setSelectedDeptForEdit] = useState<string>('Outros')
                         <ListChecks size={18} /> {selectedProducts.size > 0 ? 'Desmarcar' : 'Selecionar'}
                     </button>
                     
+                    {tenant?.isNetworkMaster && (
+                        <button 
+                            onClick={() => {
+                                if (selectedProducts.size === 0) {
+                                    alert("Selecione pelo menos um produto na Matriz para definir como destaque.");
+                                    return;
+                                }
+                                setIsBulkFeaturedModalOpen(true);
+                            }} 
+                            className="flex-1 md:flex-none px-5 py-4 rounded-xl font-bold text-xs uppercase tracking-wide flex items-center justify-center gap-2 bg-purple-600 text-white shadow-md hover:bg-purple-700 transition-all text-center whitespace-nowrap"
+                        >
+                            <Star size={18} /> Definir como Destaque em Lojas
+                        </button>
+                    )}
+                    
                     {selectedProducts.size > 0 && (
                         <>
                             <button onClick={handleBulkPrescriptionClick} className="flex-1 md:flex-none px-5 py-4 rounded-xl font-bold text-xs uppercase tracking-wide flex items-center justify-center gap-2 bg-amber-500 text-white shadow-md hover:bg-amber-600 transition-all text-center whitespace-nowrap">
@@ -3931,6 +4007,115 @@ const [selectedDeptForEdit, setSelectedDeptForEdit] = useState<string>('Outros')
                     <FileImage size={18} />
                     {selectedProducts.size > MAX_FLYER_ITEMS ? `Gerar Encarte (Max 12)` : `Gerar Encarte (${selectedProducts.size}/${MAX_FLYER_ITEMS})`}
                 </button>
+            </div>
+        )}
+        {/* Bulk Featured Products Modal */}
+        {isBulkFeaturedModalOpen && (
+            <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+                <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => !isProcessingBulkFeatured && setIsBulkFeaturedModalOpen(false)}></div>
+                <div className="relative bg-white w-full max-w-2xl rounded-[2rem] shadow-2xl flex flex-col max-h-[90vh] overflow-hidden">
+                    <div className="p-6 md:p-8 flex items-center justify-between border-b border-gray-100 bg-gray-50/50">
+                        <div className="flex items-center gap-4">
+                            <div className="w-12 h-12 bg-purple-100 text-purple-600 rounded-2xl flex items-center justify-center shadow-inner">
+                                <Star size={24} fill="currentColor" />
+                            </div>
+                            <div>
+                                <h2 className="text-xl md:text-2xl font-black text-gray-900 tracking-tight">Distribuição de Destaques em Massa</h2>
+                                <p className="text-xs md:text-sm font-bold text-gray-500">Defina os {selectedProducts.size} produtos selecionados como Destaque em várias filiais de uma só vez.</p>
+                            </div>
+                        </div>
+                        <button onClick={() => !isProcessingBulkFeatured && setIsBulkFeaturedModalOpen(false)} className="p-3 bg-white rounded-full text-gray-400 hover:text-red-500 hover:bg-red-50 transition-all border border-gray-100 shadow-sm">
+                            <X size={20} />
+                        </button>
+                    </div>
+
+                    <div className="p-6 md:p-8 overflow-y-auto flex-1">
+                        {isProcessingBulkFeatured ? (
+                            <div className="bg-gray-50 rounded-3xl p-8 flex flex-col items-center justify-center text-center my-4">
+                                <Loader2 size={40} className="animate-spin text-purple-600 mb-4" />
+                                <h4 className="font-black text-xl text-gray-900">Aplicando Destaques...</h4>
+                                <p className="text-gray-500 font-bold text-sm mt-2">{bulkFeaturedProgress}% concluído</p>
+                                <div className="w-full bg-gray-200 rounded-full h-2 mt-4 overflow-hidden max-w-md">
+                                    <div className="bg-purple-500 h-full transition-all duration-300" style={{ width: `${bulkFeaturedProgress}%` }}></div>
+                                </div>
+                                <p className="text-[10px] text-gray-400 mt-4 uppercase font-black">Por favor, não feche esta janela.</p>
+                            </div>
+                        ) : (
+                            <div className="space-y-6">
+                                <div className="bg-purple-50 border border-purple-100 p-4 rounded-2xl flex items-center gap-3">
+                                    <AlertCircle size={20} className="text-purple-600 shrink-0" />
+                                    <p className="text-xs md:text-sm font-bold text-purple-900">
+                                        Os produtos selecionados na Matriz serão pareados nas filiais escolhidas usando o código de barras (EAN) ou código interno e definidos como <span className="font-black underline">Destaques</span> na vitrine online.
+                                    </p>
+                                </div>
+
+                                <div className="space-y-4">
+                                    <div className="flex justify-between items-center">
+                                        <h3 className="text-xs font-black uppercase text-gray-400 tracking-widest">Filiais Alvo</h3>
+                                        <div className="flex gap-2">
+                                            <button 
+                                                onClick={() => setSelectedBulkFeaturedBranches(new Set(bulkFeaturedBranches.map(b => b.id)))}
+                                                className="text-[10px] font-black uppercase tracking-wider text-purple-600 hover:text-purple-800 transition-colors"
+                                            >
+                                                Marcar Todas
+                                            </button>
+                                            <span className="text-gray-300 text-[10px]">|</span>
+                                            <button 
+                                                onClick={() => setSelectedBulkFeaturedBranches(new Set())}
+                                                className="text-[10px] font-black uppercase tracking-wider text-gray-500 hover:text-gray-700 transition-colors"
+                                            >
+                                                Desmarcar Todas
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    <div className="bg-gray-50 p-4 rounded-2xl max-h-64 overflow-y-auto grid grid-cols-1 md:grid-cols-2 gap-2 border border-gray-100">
+                                        {bulkFeaturedBranches.map(branch => (
+                                            <label key={branch.id} className="flex items-center gap-3 p-3 bg-white border border-gray-100 rounded-xl cursor-pointer hover:border-purple-200 transition-all">
+                                                <input 
+                                                    type="checkbox" 
+                                                    className="w-5 h-5 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
+                                                    checked={selectedBulkFeaturedBranches.has(branch.id)}
+                                                    onChange={(e) => {
+                                                        const newSet = new Set(selectedBulkFeaturedBranches);
+                                                        if (e.target.checked) newSet.add(branch.id);
+                                                        else newSet.delete(branch.id);
+                                                        setSelectedBulkFeaturedBranches(newSet);
+                                                    }}
+                                                />
+                                                <div className="flex flex-col">
+                                                    <span className="text-sm font-bold text-gray-700 leading-tight">{branch.name}</span>
+                                                    <span className="text-[10px] text-gray-400 font-medium">ID: {branch.id.slice(0, 8)}...</span>
+                                                </div>
+                                            </label>
+                                        ))}
+                                        {bulkFeaturedBranches.length === 0 && (
+                                            <p className="text-sm text-gray-500 p-2 col-span-2 text-center">Nenhuma filial conectada encontrada.</p>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
+                    {!isProcessingBulkFeatured && (
+                        <div className="p-6 md:p-8 bg-gray-50 border-t border-gray-100 flex items-center justify-end gap-4 rounded-b-[2rem]">
+                            <button 
+                                onClick={() => setIsBulkFeaturedModalOpen(false)} 
+                                className="px-6 py-3 rounded-xl text-gray-500 hover:bg-gray-100 hover:text-gray-700 font-bold text-sm transition-all"
+                            >
+                                Cancelar
+                            </button>
+                            <button 
+                                onClick={handleApplyBulkFeatured}
+                                disabled={selectedBulkFeaturedBranches.size === 0}
+                                className="px-8 py-3 bg-purple-600 hover:bg-purple-700 text-white font-black text-sm rounded-xl transition-all shadow-lg shadow-purple-600/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                Aplicar Destaques
+                            </button>
+                        </div>
+                    )}
+                </div>
             </div>
         )}
         {/* Central Price Upload Modal */}
