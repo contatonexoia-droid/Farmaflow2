@@ -1104,6 +1104,10 @@ export const Storefront: React.FC<StorefrontProps> = ({
         tenant.networkId &&
         (p.tenantId === tenant.networkId || p.tenantId === tenant.id);
       
+      if (isCurrentTenant) {
+        return true;
+      }
+      
       if (isNetworkShared && p.filtersMetadata) {
         const branchIds = p.filtersMetadata.branchIds;
         if (Array.isArray(branchIds) && branchIds.length > 0) {
@@ -1127,7 +1131,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
 
       // 3. Se houver filiais específicas no alvo, a filial atual deve estar inclusa
       const targetBranches = c.targetBranchIds || c.filtersMetadata?.branchIds || [];
-      const inclusaNoTarget = targetBranches.length === 0 || targetBranches.includes(tenant.id);
+      const inclusaNoTarget = ehDaLoja || targetBranches.length === 0 || targetBranches.includes(tenant.id);
 
       return ehDaLoja || (ehDaRede && inclusaNoTarget);
     });
