@@ -754,7 +754,8 @@ app.post("/api/v1/matrix/bulk-featured-products", async (req, res) => {
       const { error: resetError } = await supabase
         .from("products")
         .update({ is_featured: false })
-        .in("tenant_id", targetTenantIds);
+        .in("tenant_id", targetTenantIds)
+        .eq("is_featured", true);
 
       if (resetError) throw resetError;
     }
