@@ -27,7 +27,15 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
 
     try {
         if (email === SUPER_ADMIN_EMAIL && password === SUPER_ADMIN_PASS) {
-            onLogin({ type: 'SUPER_ADMIN' });
+            const { data: authData } = await supabase.auth.signInWithPassword({
+                email: email.trim().toLowerCase(),
+                password: password
+            });
+            onLogin({ 
+                type: 'SUPER_ADMIN',
+                access_token: authData?.session?.access_token,
+                refresh_token: authData?.session?.refresh_token
+            });
             return;
         }
 
@@ -57,12 +65,20 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
                const userRole = authData.user.user_metadata?.role || "owner";
                
                // Se der ok, já repassa
-               onLogin({ type: 'PHARMACY_ADMIN', tenantId: validTenant.id, role: userRole as any }, mapDbTenantToApp(validTenant));
+               onLogin({ 
+                   type: 'PHARMACY_ADMIN', 
+                   tenantId: validTenant.id, 
+                   role: userRole as any,
+                   access_token: authData.session?.access_token,
+                   refresh_token: authData.session?.refresh_token
+               } as any, mapDbTenantToApp(validTenant));
                return; // Skip fallback
             } else {
                await supabase.auth.signOut();
             }
         }
+        
+        let tokens: any = {};
         
         // 3. Fallback: Contas criadas via SuperAdmin (Tabela Tenants nativa via RPC bypass RLS)
         if (!validTenant) {
@@ -88,10 +104,14 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
                });
                if (migrateRes.ok) {
                    // Retry sign in to get the local session
-                   await supabase.auth.signInWithPassword({
+                   const { data: newAuth } = await supabase.auth.signInWithPassword({
                        email: email.trim().toLowerCase(),
                        password: password
                    });
+                   if (newAuth?.session) {
+                       tokens.access_token = newAuth.session.access_token;
+                       tokens.refresh_token = newAuth.session.refresh_token;
+                   }
                }
             } catch(e) {
                console.warn("Migration failed but continuing with fallback", e);
@@ -100,7 +120,7 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
 
         const tenant = mapDbTenantToApp(validTenant);
 
-        onLogin({ type: 'PHARMACY_ADMIN', tenantId: tenant.id, role: 'owner' }, tenant);
+        onLogin({ type: 'PHARMACY_ADMIN', tenantId: tenant.id, role: 'owner', ...tokens } as any, tenant);
 
     } catch (err: any) {
         console.error(err);

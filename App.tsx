@@ -462,7 +462,20 @@ const SuggestionCard = ({
 const App: React.FC = () => {
   const [session, setSession] = useState<AuthSession>(() => {
     const saved = localStorage.getItem("ff_session");
-    return saved ? JSON.parse(saved) : { type: "GUEST" };
+    let parsed = saved ? JSON.parse(saved) : { type: "GUEST" };
+    if ((parsed.type === "SUPER_ADMIN" || parsed.type === "PHARMACY_ADMIN") && (!parsed.access_token || !parsed.refresh_token)) {
+        parsed = { type: "GUEST" };
+        localStorage.removeItem("ff_session");
+    } else if (parsed.access_token && parsed.refresh_token) {
+        supabase.auth.setSession({ access_token: parsed.access_token, refresh_token: parsed.refresh_token }).then(({ error }) => {
+            if (error) {
+                console.error("Session restore failed, logging out", error);
+                localStorage.removeItem("ff_session");
+                window.location.reload();
+            }
+        }).catch(e => console.error("Failed to restore session", e));
+    }
+    return parsed;
   });
 
   const [view, setView] = useState<ViewMode>(() => {
@@ -680,9 +693,16 @@ const App: React.FC = () => {
   useEffect(() => {
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((event) => {
+    } = supabase.auth.onAuthStateChange((event, s) => {
       if (event === "SIGNED_OUT") {
         setSession({ type: "GUEST" });
+      } else if ((event === "TOKEN_REFRESHED" || event === "SIGNED_IN") && s) {
+        setSession(prev => {
+           if (prev.type === "GUEST") return prev;
+           const updated = { ...prev, access_token: s.access_token, refresh_token: s.refresh_token };
+           localStorage.setItem("ff_session", JSON.stringify(updated));
+           return updated;
+        });
       }
     });
 

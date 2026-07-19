@@ -200,6 +200,8 @@ export interface AuthSession {
   tenantId?: string;
   role?: "owner" | "admin" | "gerente" | "operador" | "entregador";
   user?: any;
+  access_token?: string;
+  refresh_token?: string;
 }
 
 export enum ViewMode {
