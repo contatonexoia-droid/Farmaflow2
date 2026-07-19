@@ -738,13 +738,25 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
 
 app.post("/api/v1/matrix/bulk-featured-products", async (req, res) => {
   try {
-    const { productIds, targetTenantIds } = req.body;
+    const { productIds, targetTenantIds, mode } = req.body;
 
     if (!productIds || !Array.isArray(productIds) || productIds.length === 0) {
       return res.status(400).json({ error: "Parâmetro productIds é obrigatório e deve ser uma lista não vazia." });
     }
     if (!targetTenantIds || !Array.isArray(targetTenantIds) || targetTenantIds.length === 0) {
       return res.status(400).json({ error: "Parâmetro targetTenantIds é obrigatório e deve ser uma lista não vazia." });
+    }
+
+    const isReplaceMode = mode === 'replace';
+
+    // If replace mode, we first reset is_featured to false for all products in the selected target tenants
+    if (isReplaceMode) {
+      const { error: resetError } = await supabase
+        .from("products")
+        .update({ is_featured: false })
+        .in("tenant_id", targetTenantIds);
+
+      if (resetError) throw resetError;
     }
 
     // 1. Fetch matrix products to get their barcodes and internal codes
@@ -788,9 +800,29 @@ app.post("/api/v1/matrix/bulk-featured-products", async (req, res) => {
     if (targetError) throw targetError;
 
     if (!targetProducts || targetProducts.length === 0) {
+      // Save logs even when no matched products to record that the showcase was reset (if in replace mode)
+      try {
+        await supabase.from("integration_logs").insert({
+          tenant_id: targetTenantIds[0],
+          endpoint: "bulk_featured_products",
+          payload: {
+            productIds,
+            targetTenantIds,
+            mode: mode || "append",
+            updatedProductIds: [],
+            timestamp: new Date().toISOString()
+          },
+          status: "SUCCESS"
+        });
+      } catch (logErr) {
+        console.error("Erro ao gravar logs de auditoria em lote:", logErr);
+      }
+
       return res.status(200).json({
         success: true,
-        message: "Nenhum produto correspondente foi encontrado nas filiais selecionadas para destacar.",
+        message: isReplaceMode
+          ? "Os destaques anteriores foram removidos com sucesso, mas nenhum produto correspondente foi encontrado nas filiais selecionadas para destacar."
+          : "Nenhum produto correspondente foi encontrado nas filiais selecionadas para destacar.",
         updatedCount: 0
       });
     }
@@ -813,6 +845,7 @@ app.post("/api/v1/matrix/bulk-featured-products", async (req, res) => {
         payload: {
           productIds,
           targetTenantIds,
+          mode: mode || "append",
           updatedProductIds: targetProductIdsToUpdate,
           timestamp: new Date().toISOString()
         },
@@ -824,7 +857,9 @@ app.post("/api/v1/matrix/bulk-featured-products", async (req, res) => {
 
     res.json({
       success: true,
-      message: `${targetProductIdsToUpdate.length} produtos foram definidos como destaque nas filiais selecionadas.`,
+      message: isReplaceMode
+        ? `Vitrine substituída com sucesso! ${targetProductIdsToUpdate.length} novos produtos foram definidos como destaque nas filiais selecionadas.`
+        : `${targetProductIdsToUpdate.length} produtos foram adicionados como destaque nas filiais selecionadas com sucesso.`,
       updatedCount: targetProductIdsToUpdate.length
     });
   } catch (err: any) {

@@ -437,6 +437,7 @@ const [selectedDeptForEdit, setSelectedDeptForEdit] = useState<string>('Outros')
   const [selectedBulkFeaturedBranches, setSelectedBulkFeaturedBranches] = useState<Set<string>>(new Set());
   const [isProcessingBulkFeatured, setIsProcessingBulkFeatured] = useState(false);
   const [bulkFeaturedProgress, setBulkFeaturedProgress] = useState(0);
+  const [bulkFeaturedMode, setBulkFeaturedMode] = useState<'append' | 'replace'>('append');
 
   const [isDepartmentManagerOpen, setIsDepartmentManagerOpen] = useState(false);
   const [importType, setImportType] = useState<'simple' | 'ai'>('simple');
@@ -552,6 +553,7 @@ const [selectedDeptForEdit, setSelectedDeptForEdit] = useState<string>('Outros')
         body: JSON.stringify({
           productIds: Array.from(selectedProducts),
           targetTenantIds: Array.from(selectedBulkFeaturedBranches),
+          mode: bulkFeaturedMode,
         }),
       });
 
@@ -4047,6 +4049,40 @@ const [selectedDeptForEdit, setSelectedDeptForEdit] = useState<string>('Outros')
                                     <p className="text-xs md:text-sm font-bold text-purple-900">
                                         Os produtos selecionados na Matriz serão pareados nas filiais escolhidas usando o código de barras (EAN) ou código interno e definidos como <span className="font-black underline">Destaques</span> na vitrine online.
                                     </p>
+                                </div>
+
+                                <div className="space-y-3 bg-gray-50 border border-gray-100 p-5 rounded-2xl">
+                                    <h3 className="text-xs font-black uppercase text-gray-400 tracking-widest">Modo de Distribuição</h3>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                        <label className={`flex items-start gap-3 p-4 bg-white border rounded-xl cursor-pointer transition-all ${bulkFeaturedMode === 'append' ? 'border-purple-600 ring-1 ring-purple-100 shadow-sm' : 'border-gray-200 hover:border-gray-300'}`}>
+                                            <input 
+                                                type="radio" 
+                                                name="bulkFeaturedMode"
+                                                value="append"
+                                                checked={bulkFeaturedMode === 'append'}
+                                                onChange={() => setBulkFeaturedMode('append')}
+                                                className="mt-0.5 w-4 h-4 text-purple-600 border-gray-300 focus:ring-purple-500"
+                                            />
+                                            <div className="flex flex-col">
+                                                <span className="text-xs font-black text-gray-800 uppercase tracking-tight">Adicionar aos destaques atuais (Modo Incremental)</span>
+                                                <span className="text-[11px] font-bold text-gray-500 mt-0.5">Mantém os destaques atuais das filiais e apenas adiciona os novos produtos.</span>
+                                            </div>
+                                        </label>
+                                        <label className={`flex items-start gap-3 p-4 bg-white border rounded-xl cursor-pointer transition-all ${bulkFeaturedMode === 'replace' ? 'border-purple-600 ring-1 ring-purple-100 shadow-sm' : 'border-gray-200 hover:border-gray-300'}`}>
+                                            <input 
+                                                type="radio" 
+                                                name="bulkFeaturedMode"
+                                                value="replace"
+                                                checked={bulkFeaturedMode === 'replace'}
+                                                onChange={() => setBulkFeaturedMode('replace')}
+                                                className="mt-0.5 w-4 h-4 text-purple-600 border-gray-300 focus:ring-purple-500"
+                                            />
+                                            <div className="flex flex-col">
+                                                <span className="text-xs font-black text-gray-800 uppercase tracking-tight">Substituir destaques atuais (Modo Sobrescrever)</span>
+                                                <span className="text-[11px] font-bold text-gray-500 mt-0.5">Remove TODOS os destaques atuais das filiais e define apenas os novos produtos selecionados.</span>
+                                            </div>
+                                        </label>
+                                    </div>
                                 </div>
 
                                 <div className="space-y-4">
