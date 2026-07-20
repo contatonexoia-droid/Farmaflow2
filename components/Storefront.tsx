@@ -1249,6 +1249,38 @@ export const Storefront: React.FC<StorefrontProps> = ({
     setTimeout(() => setIsTransitioning(false), 300);
   };
 
+  const selectDepartmentAndCategory = (dept: string, cat: string) => {
+    setIsTransitioning(true);
+    searchCache.current = {};
+    window.scrollTo({ top: 0, behavior: "instant" });
+    setIsDrawerOpen(false);
+    setFilters({
+      departamento: dept,
+      categoria: cat,
+      promocao_id: null,
+      cupom_id: null,
+      termo_busca: "",
+    });
+    setDebouncedSearchTerm("");
+
+    // URL management
+    const url = new URL(window.location.href);
+    url.searchParams.delete("promo_id");
+    url.searchParams.delete("cupom_id");
+    if (dept === "Todos") {
+      url.searchParams.delete("dept_id");
+    } else {
+      url.searchParams.set("dept_id", dept);
+    }
+    if (cat === "Todos") {
+      url.searchParams.delete("category_id");
+    } else {
+      url.searchParams.set("category_id", cat);
+    }
+    window.history.replaceState({}, "", url.toString());
+    setTimeout(() => setIsTransitioning(false), 300);
+  };
+
   const selectCategory = (cat: string) => {
     setIsTransitioning(true);
     searchCache.current = {};
@@ -1685,12 +1717,21 @@ export const Storefront: React.FC<StorefrontProps> = ({
   }, [matrizProducts, tenant.id]);
 
   const filteredProducts = useMemo<Product[]>(() => {
-    console.log(
-      "filteredProducts re-running for promotion:",
-      selectedPromotion?.id,
-      "category:",
-      selectedCategory,
-    );
+    // 2. Otimização Rígida no useMemo:
+    // Se não há busca por texto, nem filtro de promoção específica, nem cupom,
+    // e a categoria e o departamento são "Todos" (ou nulos/vazios), retorne diretamente os produtos válidos em estoque.
+    const hasSearch = debouncedSearchTerm.trim().length > 0;
+    const hasPromo = !!selectedPromotion;
+    const hasCoupon = !!activeCouponFilter;
+    const isCatAll = selectedCategory === "Todos" || !selectedCategory;
+    const isDeptAll = selectedDepartment === "Todos" || !selectedDepartment;
+
+    if (!hasSearch && !hasPromo && !hasCoupon && isCatAll && isDeptAll) {
+      return products.filter(
+        (p) => typeof p.price === "number" && p.price > 0 && p.stock > 0,
+      );
+    }
+
     const term = normalizeStr(debouncedSearchTerm);
     const activePromoIds = activePromotions.map((p) => p.id).join(",");
     const cacheKey = `${term}_${selectedDepartment}_${selectedCategory}_${selectedPromotion?.id || "none"}_${activeCouponFilter?.id || "none"}_${activePromoIds}`;
@@ -2059,7 +2100,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
     selectedPromotion,
     activePromotions,
     activeCouponFilter,
-    // activePromotions
+    isProductInRule,
   ]);
 
   const rowVirtualizer = useWindowVirtualizer({
@@ -3210,9 +3251,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
                         <div className="px-3 pb-4 space-y-1.5 animate-in slide-in-from-top-2 fade-in duration-200">
                           <button
                             onClick={() => {
-                              selectDepartment(dept);
-                              selectCategory("Todos");
-                              setIsDrawerOpen(false);
+                              selectDepartmentAndCategory(dept, "Todos");
                             }}
                             className="w-full text-left py-2.5 px-3 rounded-xl text-xs font-black text-white hover:opacity-90 transition-all flex items-center gap-2 mb-2 shadow-sm"
                             style={{ backgroundColor: tenant.primaryColor }}
@@ -3227,9 +3266,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
                             <button
                               key={cat}
                               onClick={() => {
-                                selectDepartment(dept);
-                                selectCategory(cat);
-                                setIsDrawerOpen(false);
+                                selectDepartmentAndCategory(dept, cat);
                               }}
                               className="w-full text-left py-2.5 px-3 rounded-xl text-[13px] font-bold text-gray-600 hover:bg-gray-50 hover:text-gray-900 transition-all border border-transparent hover:border-gray-100"
                             >
