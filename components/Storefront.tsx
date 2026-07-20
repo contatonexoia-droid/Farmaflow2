@@ -1211,7 +1211,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
   const activePromoIdsStr = activePromotions.map((p) => p.id).join(",");
   useEffect(() => {
     searchCache.current = {};
-  }, [activePromoIdsStr]);
+  }, [activePromoIdsStr, products]);
 
   useEffect(() => {
     const handleToggleDrawer = () => setIsDrawerOpen((prev) => !prev);
@@ -1717,21 +1717,6 @@ export const Storefront: React.FC<StorefrontProps> = ({
   }, [matrizProducts, tenant.id]);
 
   const filteredProducts = useMemo<Product[]>(() => {
-    // 2. Otimização Rígida no useMemo:
-    // Se não há busca por texto, nem filtro de promoção específica, nem cupom,
-    // e a categoria e o departamento são "Todos" (ou nulos/vazios), retorne diretamente os produtos válidos em estoque.
-    const hasSearch = debouncedSearchTerm.trim().length > 0;
-    const hasPromo = !!selectedPromotion;
-    const hasCoupon = !!activeCouponFilter;
-    const isCatAll = selectedCategory === "Todos" || !selectedCategory;
-    const isDeptAll = selectedDepartment === "Todos" || !selectedDepartment;
-
-    if (!hasSearch && !hasPromo && !hasCoupon && isCatAll && isDeptAll) {
-      return products.filter(
-        (p) => typeof p.price === "number" && p.price > 0 && p.stock > 0,
-      );
-    }
-
     const term = normalizeStr(debouncedSearchTerm);
     const activePromoIds = activePromotions.map((p) => p.id).join(",");
     const cacheKey = `${term}_${selectedDepartment}_${selectedCategory}_${selectedPromotion?.id || "none"}_${activeCouponFilter?.id || "none"}_${activePromoIds}`;
