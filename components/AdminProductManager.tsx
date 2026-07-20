@@ -102,6 +102,9 @@ const fixImageUrl = (url?: string, width: number = 200): string | null => {
         }
 
         if (!url.startsWith('http://') && !url.startsWith('https://')) {
+            if (url.startsWith('/') || url.startsWith('.')) {
+                return url;
+            }
             return GENERIC_PLACEHOLDER;
         }
 

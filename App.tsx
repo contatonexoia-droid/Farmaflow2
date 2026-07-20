@@ -164,6 +164,12 @@ const fixImageUrl = (url?: string, width: number = 400): string | null => {
   if (!url || url === "IGNORE" || url === "PENDENTE_CURADORIA") return null;
   if (url.startsWith("data:")) return url;
   if (url.includes("cdn-cosmos.bluesoft.com.br")) return url;
+
+  // Se for uma URL de imagem relativa ou local, não passamos pelo proxy wsrv.nl para evitar falhas/timeouts
+  if (!url.startsWith("http://") && !url.startsWith("https://")) {
+    return url;
+  }
+
   return `https://wsrv.nl/?url=${encodeURIComponent(url)}&output=webp&q=80&w=${width}&we&default=${encodeURIComponent(GENERIC_PLACEHOLDER)}`;
 };
 

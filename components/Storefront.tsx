@@ -82,6 +82,11 @@ const fixImageUrl = (url?: string, width: number = 400): string | null => {
     return url;
   }
 
+  // Se for uma URL de imagem relativa ou local, não passamos pelo proxy wsrv.nl para evitar falhas/timeouts
+  if (!url.startsWith("http://") && !url.startsWith("https://")) {
+    return url;
+  }
+
   // Otimização de Imagem: Utilizamos o proxy Weserv.nl para:
   // 1. Garantir HTTPS (evitar Mixed Content)
   // 2. Converter para WebP (muito mais leve)
@@ -1738,14 +1743,86 @@ export const Storefront: React.FC<StorefrontProps> = ({
     // Strict rule: Never show products with zero, negative or missing prices
     sourceList = sourceList.filter(p => typeof p.price === 'number' && p.price > 0);
 
+    // Cache department mappings for O(1) lookups during the filtering loop
+    const deptCache: Record<string, string> = {};
+    const getDeptCached = (cat: string) => {
+      if (!cat) return "Outros";
+      if (deptCache[cat] !== undefined) return deptCache[cat];
+      const dept = getDepartmentForCategory(cat, tenant.departments);
+      deptCache[cat] = dept;
+      return dept;
+    };
+
+    const getPromoPriority = (p: Product) => {
+      if (p.promotionType && p.promotionType !== "NONE") {
+        return p.promotionType === "BUY_X_PAY_Y" ? 3 : 2;
+      }
+      if (!activePromotions) return 0;
+
+      // If a promotion is selected, only consider it for priority
+      if (selectedPromotion && selectedPromotion.isActive) {
+        if (isProductInRule(selectedPromotion, p)) {
+          return selectedPromotion.type === "BUY_X_PAY_Y" ||
+            selectedPromotion.type === "FIXED_COMBO"
+            ? 3
+            : 2;
+        }
+      }
+
+      // Fallback for all other active promotions
+      for (let promo of activePromotions) {
+        // If we already have a focused promotion, we don't care about others
+        if (selectedPromotion && promo.id === selectedPromotion.id) continue;
+
+        if (isProductInRule(promo, p)) {
+          return promo.type === "BUY_X_PAY_Y" || promo.type === "FIXED_COMBO"
+            ? 3
+            : 2;
+        }
+      }
+      return 0; // NONE
+    };
+
+    // Identifica o nível hierárquico do produto
+    const getPriority = (p: Product) => {
+      // Se há uma promoção ativa, o destaque só vale se o produto fizer parte dela
+      let isPartOfActivePromo = false;
+
+      if (activeCouponFilter) {
+        isPartOfActivePromo = isProductInRule(activeCouponFilter, p);
+      } else if (selectedPromotion) {
+        isPartOfActivePromo = isProductInRule(selectedPromotion, p);
+      }
+
+      // Prioridade 1: Destaques Manuais (agora condicional se promo ativa)
+      if (
+        p.isFeatured &&
+        ((!selectedPromotion && !activeCouponFilter) || isPartOfActivePromo)
+      )
+        return 4;
+
+      const promoScore = getPromoPriority(p);
+      // Prioridade 2: Promoções Estruturadas (Leve X Pague Y / Combos) => Score 3
+      // Prioridade 3: Ofertas de Preço (Descontos) => Score 2
+      if (promoScore > 0) return promoScore;
+
+      // Prioridade 4: Catálogo Geral
+      return 1;
+    };
+
     // 1. Camada de Substituição Ética (Mesma Fórmula/Similares)
-    // Identifica se há correspondência exata para buscar o princípio ativo
-    const strongMatches = sourceList.filter(
-      (p) => p.id && normalizeStr(p.name).includes(processedTerm),
-    );
-    const activePrinciplesToInclude = new Set(
-      strongMatches.map((p) => normalizeStr(p.activePrinciple)).filter(Boolean),
-    );
+    // Identifica se há correspondência exata para buscar o princípio ativo (only if search is active)
+    const activePrinciplesToInclude = new Set<string>();
+    if (processedTerm.trim().length > 0) {
+      const strongMatches = sourceList.filter(
+        (p) => p.id && normalizeStr(p.name).includes(processedTerm),
+      );
+      strongMatches.forEach((p) => {
+        if (p.activePrinciple) {
+          activePrinciplesToInclude.add(normalizeStr(p.activePrinciple));
+        }
+      });
+    }
 
     const SYNONYM_MAP: Record<string, string[]> = {
       absorvente: [
@@ -1840,6 +1917,13 @@ export const Storefront: React.FC<StorefrontProps> = ({
       .map((p) => {
         if (!p.id) return null; // Filter out ghost products
 
+        // 1. Regra de Omissão / Stock Check - Discard immediately to avoid further checks
+        const isOutOfStock = p.stock <= 0;
+        if (isOutOfStock && !debouncedSearchTerm.trim()) {
+          return null;
+        }
+
+        // 2. Active coupon and promotion rules (fail fast)
         if (activeCouponFilter && !isProductInRule(activeCouponFilter, p)) {
           return null;
         }
@@ -1848,16 +1932,27 @@ export const Storefront: React.FC<StorefrontProps> = ({
           return null;
         }
 
-        const pName = normalizeStr(p.name);
-        const pActive = normalizeStr(p.activePrinciple || "");
-        const pType = normalizeStr(p.drugType || "");
-        const pManuf = normalizeStr(p.manufacturer || "");
-        const pCat = normalizeStr(p.category || "");
-        const pInd = normalizeStr(p.indications || "");
+        // 3. Department and Category filter checks (fail fast using Cached O(1) lookup)
+        const matchesDepartment =
+          selectedDepartment === "Todos" ||
+          getDeptCached(p.category) === selectedDepartment;
+        if (!matchesDepartment) return null;
+
+        const matchesCategory =
+          selectedCategory === "Todos" || p.category === selectedCategory;
+        if (!matchesCategory) return null;
 
         let matchScore = 0;
 
+        // 4. NLP / Search logic: Only executed if there is a search term query active
         if (searchTokens.length > 0) {
+          const pName = normalizeStr(p.name);
+          const pActive = normalizeStr(p.activePrinciple || "");
+          const pType = normalizeStr(p.drugType || "");
+          const pManuf = normalizeStr(p.manufacturer || "");
+          const pCat = normalizeStr(p.category || "");
+          const pInd = normalizeStr(p.indications || "");
+
           let hasExactTokenMatch = false;
           let hasExpandedMatch = false;
           let manufacturerMatched = false;
@@ -1931,25 +2026,12 @@ export const Storefront: React.FC<StorefrontProps> = ({
           }
         }
 
-        const matchesDepartment =
-          selectedDepartment === "Todos" ||
-          getDepartmentForCategory(p.category, tenant.departments) ===
-            selectedDepartment;
-        const matchesCategory =
-          selectedCategory === "Todos" || p.category === selectedCategory;
+        // Precompute product priority score once (O(N)) to avoid O(N log N) recalculations during sorting
+        const priorityScore = getPriority(p);
 
-        // Regra de Omissão: Produtos com estoque = 0 devem ser automaticamente ocultados da página inicial e categorias.
-        // Exceção: Se houver um termo de busca, mostramos mesmo se estiver sem estoque (Busca Direta).
-        const isOutOfStock = p.stock <= 0;
-        if (isOutOfStock && !debouncedSearchTerm.trim()) {
-          return null;
-        }
-
-        if (!matchesDepartment || !matchesCategory) return null;
-
-        return { ...p, _searchScore: matchScore };
+        return { ...p, _searchScore: matchScore, _priority: priorityScore };
       })
-      .filter(Boolean) as (Product & { _searchScore: number })[];
+      .filter(Boolean) as (Product & { _searchScore: number; _priority: number })[];
 
     let finalBaseList = baseList;
 
@@ -1973,11 +2055,11 @@ export const Storefront: React.FC<StorefrontProps> = ({
             pName.substring(0, processedTerm.length),
           );
           if (dist <= 2) {
-            return { ...p, _searchScore: 10 - dist };
+            return { ...p, _searchScore: 10 - dist, _priority: getPriority(p) };
           }
           return null;
         })
-        .filter(Boolean) as (Product & { _searchScore: number })[];
+        .filter(Boolean) as (Product & { _searchScore: number; _priority: number })[];
     }
 
     // 3. Algoritmo de Priorização (Ranking de Exibição)
@@ -1987,64 +2069,6 @@ export const Storefront: React.FC<StorefrontProps> = ({
         return (b._searchScore || 0) - (a._searchScore || 0);
       }
 
-      // Helper para verificar tipo de promoção e retornar seu peso
-      const getPromoPriority = (p: Product) => {
-        if (p.promotionType && p.promotionType !== "NONE") {
-          return p.promotionType === "BUY_X_PAY_Y" ? 3 : 2;
-        }
-        if (!activePromotions) return 0;
-
-        // If a promotion is selected, only consider it for priority
-        if (selectedPromotion && selectedPromotion.isActive) {
-          if (isProductInRule(selectedPromotion, p)) {
-            return selectedPromotion.type === "BUY_X_PAY_Y" ||
-              selectedPromotion.type === "FIXED_COMBO"
-              ? 3
-              : 2;
-          }
-        }
-
-        // Fallback for all other active promotions
-        for (let promo of activePromotions) {
-          // If we already have a focused promotion, we don't care about others
-          if (selectedPromotion && promo.id === selectedPromotion.id) continue;
-
-          if (isProductInRule(promo, p)) {
-            return promo.type === "BUY_X_PAY_Y" || promo.type === "FIXED_COMBO"
-              ? 3
-              : 2;
-          }
-        }
-        return 0; // NONE
-      };
-
-      // Identifica o nível hierárquico do produto
-      const getPriority = (p: Product) => {
-        // Se há uma promoção ativa, o destaque só vale se o produto fizer parte dela
-        let isPartOfActivePromo = false;
-
-        if (activeCouponFilter) {
-          isPartOfActivePromo = isProductInRule(activeCouponFilter, p);
-        } else if (selectedPromotion) {
-          isPartOfActivePromo = isProductInRule(selectedPromotion, p);
-        }
-
-        // Prioridade 1: Destaques Manuais (agora condicional se promo ativa)
-        if (
-          p.isFeatured &&
-          ((!selectedPromotion && !activeCouponFilter) || isPartOfActivePromo)
-        )
-          return 4;
-
-        const promoScore = getPromoPriority(p);
-        // Prioridade 2: Promoções Estruturadas (Leve X Pague Y / Combos) => Score 3
-        // Prioridade 3: Ofertas de Preço (Descontos) => Score 2
-        if (promoScore > 0) return promoScore;
-
-        // Prioridade 4: Catálogo Geral
-        return 1;
-      };
-
       const aInStock = typeof a.stock === 'number' && a.stock > 0;
       const bInStock = typeof b.stock === 'number' && b.stock > 0;
 
@@ -2052,19 +2076,19 @@ export const Storefront: React.FC<StorefrontProps> = ({
       if (aInStock && !bInStock) return -1;
       if (!aInStock && bInStock) return 1;
 
-      const priorityA = getPriority(a);
-      const priorityB = getPriority(b);
+      // Use precalculated priority score (O(1) lookup, incredibly fast)
+      const priorityA = a._priority ?? 1;
+      const priorityB = b._priority ?? 1;
 
       // Aplica a ordem de prioridade comercial estrita (Destaque > Estruturada > Desconto > Geral)
       if (priorityA !== priorityB) {
         return priorityB - priorityA;
       }
 
-      const aName = normalizeStr(a.name);
-      const bName = normalizeStr(b.name);
-
       // Sub-ordenação de Relevância de Texto (quando estão na mesma prioridade e há busca)
       if (debouncedSearchTerm.length > 0) {
+        const aName = normalizeStr(a.name);
+        const bName = normalizeStr(b.name);
         const aStarts = aName.startsWith(processedTerm);
         const bStarts = bName.startsWith(processedTerm);
         if (aStarts && !bStarts) return -1;
