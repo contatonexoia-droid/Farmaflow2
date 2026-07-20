@@ -1124,6 +1124,8 @@ export const mapDbPromotionToApp = (p: any): PromotionRule => ({
     p.combo_discount_percentage || p.combodiscountpercentage,
   specificProductIds: p.specific_product_ids || p.specificproductids || [],
   filtersMetadata: p.filters_metadata || p.filtersmetadata,
+  bundlePrice: p.bundle_price ?? (p.filters_metadata || p.filtersmetadata)?.bundlePrice,
+  bundleSlots: p.bundle_slots ?? (p.filters_metadata || p.filtersmetadata)?.bundleSlots,
   highlightInCategoriesBar:
     p.highlight_in_categories_bar ??
     (p.filters_metadata || p.filtersmetadata)?.highlightInCategoriesBar,
@@ -1182,6 +1184,8 @@ export const savePromotion = async (promotion: PromotionRule) => {
       specific_product_ids: promotion.specificProductIds,
       filters_metadata: {
         ...(promotion.filtersMetadata || {}),
+        bundlePrice: promotion.bundlePrice,
+        bundleSlots: promotion.bundleSlots,
         highlightInCategoriesBar: promotion.highlightInCategoriesBar,
         highlightColor: promotion.highlightColor,
         highlightIcon: promotion.highlightIcon,

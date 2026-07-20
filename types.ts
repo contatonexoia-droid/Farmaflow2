@@ -261,10 +261,13 @@ export interface PromotionRule {
     | "PROGRESSIVE_DISCOUNT"
     | "FIXED_COMBO"
     | "LIGHTNING_OFFER"
-    | "DISCOUNT_ON_QTY";
-  targetType: "CATEGORY" | "MANUFACTURER" | "PRODUCT" | "SPECIFIC_SELECTION";
+    | "DISCOUNT_ON_QTY"
+    | "BUNDLE_FIXED_PRICE";
+  targetType: "CATEGORY" | "MANUFACTURER" | "PRODUCT" | "SPECIFIC_SELECTION" | "BUNDLE_SLOTS";
   targetValue: string; // Category name, Manufacturer name, or Product ID
   specificProductIds?: string[]; // For SPECIFIC_SELECTION
+  bundlePrice?: number;
+  bundleSlots?: string[][]; // Array of arrays of product IDs
   scheduleConfig?: FlashDealsScheduleConfig;
   filtersMetadata?: {
     category?: string | string[];
@@ -396,6 +399,10 @@ export const isPromotionActive = (
   return true;
 };
 
+// Performance optimization: Caches to prevent expensive O(N) filtering/searching of matrizProducts inside the product matching loop
+const ruleEanCache = new Map<string, string[]>();
+const ruleBarcodeCache = new Map<string, string | null>();
+
 export const checkProductMatchesRule = (
   rule: PromotionRule | CouponRule,
   p: Product,
@@ -409,8 +416,14 @@ export const checkProductMatchesRule = (
     if (rule.targetValue === p.id) return true;
     // Se for escopo de rede, targetValue é o ID do produto na matriz. Comparamos pelo código de barras (EAN)
     if (isNetworkScope && p.barcode) {
-      const matrizProd = matrizProducts.find((mp) => mp.id === rule.targetValue);
-      if (matrizProd && matrizProd.barcode === p.barcode) return true;
+      const cacheKey = `${rule.id}_${matrizProducts.length}`;
+      let targetBarcode = ruleBarcodeCache.get(cacheKey);
+      if (targetBarcode === undefined) {
+        const matrizProd = matrizProducts.find((mp) => mp && mp.id === rule.targetValue);
+        targetBarcode = matrizProd?.barcode || null;
+        ruleBarcodeCache.set(cacheKey, targetBarcode);
+      }
+      if (targetBarcode && targetBarcode === p.barcode) return true;
     }
     return false;
   }
@@ -428,10 +441,40 @@ export const checkProductMatchesRule = (
   if (rule.targetType === "SPECIFIC_SELECTION") {
     if (rule.specificProductIds?.includes(p.id)) return true;
     if (isNetworkScope && p.barcode) {
-      const targetEans = matrizProducts
-        .filter((mp) => rule.specificProductIds?.includes(mp.id) && mp.barcode)
-        .map((mp) => mp.barcode);
+      const cacheKey = `${rule.id}_${matrizProducts.length}`;
+      let targetEans = ruleEanCache.get(cacheKey);
+      if (!targetEans) {
+        targetEans = matrizProducts
+          .filter((mp) => mp && rule.specificProductIds?.includes(mp.id) && mp.barcode)
+          .map((mp) => mp.barcode as string);
+        ruleEanCache.set(cacheKey, targetEans);
+      }
       if (p.barcode && targetEans.includes(p.barcode)) return true;
+    }
+    return false;
+  }
+
+  if (rule.targetType === "BUNDLE_SLOTS") {
+    const bundlePromo = rule as PromotionRule;
+    if (!bundlePromo.bundleSlots) return false;
+    
+    // Check if the product is in ANY of the bundle slots
+    let slotIdx = 0;
+    for (const slot of bundlePromo.bundleSlots) {
+      if (!slot || !Array.isArray(slot)) continue;
+      if (slot.includes(p.id)) return true;
+      if (isNetworkScope && p.barcode) {
+        const cacheKey = `${rule.id}_slot_${slotIdx}_${matrizProducts.length}`;
+        let targetEans = ruleEanCache.get(cacheKey);
+        if (!targetEans) {
+          targetEans = matrizProducts
+            .filter((mp) => mp && slot.includes(mp.id) && mp.barcode)
+            .map((mp) => mp.barcode as string);
+          ruleEanCache.set(cacheKey, targetEans);
+        }
+        if (p.barcode && targetEans.includes(p.barcode)) return true;
+      }
+      slotIdx++;
     }
     return false;
   }
@@ -443,11 +486,108 @@ export const checkProductMatchesRule = (
   return false;
 };
 
+function getBundleDiscountForItem(
+  item: CartItem,
+  promo: PromotionRule,
+  cartItems: CartItem[],
+  matrizProducts: Product[],
+  tenantId?: string
+): number {
+  if (!promo.bundleSlots || promo.bundleSlots.length < 2 || !promo.bundlePrice) return 0;
+  
+  // To evaluate EAN matches if needed
+  const isNetworkScope = promo.scope === "NETWORK" || (tenantId && promo.tenantId !== tenantId);
+  const getProductEan = (id: string) => {
+    const p = cartItems.find(c => c.id === id);
+    if (p?.barcode) return p.barcode;
+    const mp = matrizProducts.find(m => m.id === id);
+    return mp?.barcode;
+  };
+
+  // Build a pool of available quantities for this promo
+  const pool = new Map<string, number>();
+  cartItems.forEach(ci => {
+    pool.set(ci.id, ci.quantity);
+  });
+  
+  let bundleCount = 0;
+  let itemsInBundle: Record<string, number> = {};
+  
+  while (true) {
+    let canFormBundle = true;
+    let currentBundleItems = [];
+    
+    for (const slot of promo.bundleSlots) {
+      let foundProductId: string | undefined = undefined;
+      // Find a product in the slot that has quantity > 0 in our pool
+      for (const id of slot) {
+        if ((pool.get(id) || 0) > 0) {
+          foundProductId = id;
+          break;
+        }
+        // Try EAN matching if it's network scope
+        if (isNetworkScope) {
+           const targetEan = getProductEan(id);
+           if (targetEan) {
+             for (const [cartItemId, qty] of pool.entries()) {
+               if (qty > 0 && getProductEan(cartItemId) === targetEan) {
+                 foundProductId = cartItemId;
+                 break;
+               }
+             }
+           }
+        }
+        if (foundProductId) break;
+      }
+      
+      if (foundProductId) {
+        currentBundleItems.push(foundProductId);
+      } else {
+        canFormBundle = false;
+        break;
+      }
+    }
+    
+    if (canFormBundle) {
+      // Deduct 1 from each used product
+      currentBundleItems.forEach(id => {
+        pool.set(id, pool.get(id)! - 1);
+        itemsInBundle[id] = (itemsInBundle[id] || 0) + 1;
+      });
+      bundleCount++;
+    } else {
+      break;
+    }
+  }
+  
+  if (bundleCount === 0) return 0;
+  
+  let totalBasePriceInBundles = 0;
+  for (const [id, qty] of Object.entries(itemsInBundle)) {
+    const cartItem = cartItems.find(ci => ci.id === id);
+    if (cartItem) {
+      totalBasePriceInBundles += cartItem.price * qty;
+    }
+  }
+  
+  const totalBundlePrice = bundleCount * promo.bundlePrice;
+  const totalDiscount = Math.max(0, totalBasePriceInBundles - totalBundlePrice);
+  
+  const itemQtyInBundle = itemsInBundle[item.id] || 0;
+  if (itemQtyInBundle === 0) return 0;
+  
+  const itemBasePriceInBundle = item.price * itemQtyInBundle;
+  const itemDiscountProportion = totalBasePriceInBundles > 0 ? (itemBasePriceInBundle / totalBasePriceInBundles) : 0;
+  
+  return totalDiscount * itemDiscountProportion;
+}
+
 export const calculateItemPromotionDetails = (
   item: CartItem,
   activePromotions: PromotionRule[] = [],
   matrizProducts: Product[] = [],
   tenantId?: string,
+  cartItems?: CartItem[]
 ): PromotionDetail => {
   const now = new Date();
   const applicablePromos = activePromotions.filter((p) => {
@@ -458,8 +598,10 @@ export const calculateItemPromotionDetails = (
   const baseTotal = item.price * item.quantity;
 
   if (applicablePromos.length > 0) {
-    // Sort to prioritize FIXED_COMBO rules or more specific rules
+    // Sort to prioritize BUNDLE_FIXED_PRICE and FIXED_COMBO rules or more specific rules
     applicablePromos.sort((a, b) => {
+      if (a.type === "BUNDLE_FIXED_PRICE" && b.type !== "BUNDLE_FIXED_PRICE") return -1;
+      if (b.type === "BUNDLE_FIXED_PRICE" && a.type !== "BUNDLE_FIXED_PRICE") return 1;
       if (a.type === "FIXED_COMBO" && b.type !== "FIXED_COMBO") return -1;
       if (b.type === "FIXED_COMBO" && a.type !== "FIXED_COMBO") return 1;
       return 0;
@@ -468,7 +610,14 @@ export const calculateItemPromotionDetails = (
     const promo = applicablePromos[0];
     let discountedTotal = baseTotal;
 
-    if (
+    if (promo.type === "BUNDLE_FIXED_PRICE" && promo.bundleSlots && promo.bundlePrice && cartItems) {
+      const discount = getBundleDiscountForItem(item, promo, cartItems, matrizProducts, tenantId);
+      return {
+        promotionId: promo.id,
+        promotionName: promo.name,
+        discount: discount,
+      };
+    } else if (
       promo.type === "BUY_X_PAY_Y" &&
       promo.buyX &&
       promo.payY &&
@@ -571,7 +720,8 @@ export const calculateItemTotal = (
   activePromotions: PromotionRule[] = [],
   matrizProducts: Product[] = [],
   tenantId?: string,
+  cartItems?: CartItem[]
 ): number => {
-  const details = calculateItemPromotionDetails(item, activePromotions, matrizProducts, tenantId);
+  const details = calculateItemPromotionDetails(item, activePromotions, matrizProducts, tenantId, cartItems);
   return item.price * item.quantity - details.discount;
 };

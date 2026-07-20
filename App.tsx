@@ -472,14 +472,6 @@ const App: React.FC = () => {
     if ((parsed.type === "SUPER_ADMIN" || parsed.type === "PHARMACY_ADMIN") && (!parsed.access_token || !parsed.refresh_token)) {
         parsed = { type: "GUEST" };
         localStorage.removeItem("ff_session");
-    } else if (parsed.access_token && parsed.refresh_token) {
-        supabase.auth.setSession({ access_token: parsed.access_token, refresh_token: parsed.refresh_token }).then(({ error }) => {
-            if (error) {
-                console.error("Session restore failed, logging out", error);
-                localStorage.removeItem("ff_session");
-                window.location.reload();
-            }
-        }).catch(e => console.error("Failed to restore session", e));
     }
     return parsed;
   });
@@ -536,6 +528,43 @@ const App: React.FC = () => {
 
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [zoomImage, setZoomImage] = useState<string | null>(null);
+
+  // Safe async session restoration on mount
+  useEffect(() => {
+    const restoreSession = async () => {
+      if (session && "access_token" in session && "refresh_token" in session && session.access_token && session.refresh_token) {
+        try {
+          const { error } = await supabase.auth.setSession({
+            access_token: session.access_token,
+            refresh_token: session.refresh_token,
+          });
+          if (error) {
+            console.warn("Session restore: session expired or missing. Resetting gracefully.", error);
+            localStorage.removeItem("ff_session");
+            setSession({ type: "GUEST" });
+          }
+        } catch (error) {
+          console.warn("Session restore exception caught and handled.", error);
+          localStorage.removeItem("ff_session");
+          setSession({ type: "GUEST" });
+        }
+      }
+    };
+    restoreSession();
+  }, []);
+
+  // Guard for guest sessions accessing admin views
+  useEffect(() => {
+    if (session.type === "GUEST") {
+      if (view === ViewMode.ADMIN_PHARMACY || view === ViewMode.ADMIN_SUPER) {
+        if (currentTenant) {
+          setView(ViewMode.CATALOG);
+        } else {
+          setView(ViewMode.LOGIN);
+        }
+      }
+    }
+  }, [session.type, view, currentTenant]);
 
   // --- DYNAMIC MANIFEST UPDATE ---
   useEffect(() => {
@@ -1634,7 +1663,7 @@ const App: React.FC = () => {
       let score = 0;
 
       if (fbtCounts[p.id]) {
-        score += fbtCounts[p.id] * 50;
+        score += fbtCounts[p.id] * 500; // Prioridade máxima para itens realmente comprados juntos
       }
 
       const pNameCat = normalize(p.name + " " + p.category);
@@ -1661,7 +1690,7 @@ const App: React.FC = () => {
         if (p.category === selectedProduct.category) {
           score += 15;
         } else if (affinityCategories.includes(p.category)) {
-          score += 10;
+          score += 25;
         }
       }
 
@@ -1669,11 +1698,25 @@ const App: React.FC = () => {
         p.promotionType === "DISCOUNT" &&
         p.originalPrice &&
         p.originalPrice > p.price;
-      if (p.isFeatured) score += 80;
-      if (hasDiscount) score += 60;
+      
+      // Diminuímos o peso genérico de destaque/desconto para evitar que os mesmos produtos sempre vençam
+      if (p.isFeatured) score += 40;
+      if (hasDiscount) score += 30;
 
       score += (salesCounts[p.id] || 0) * 0.1;
       score += p.stock * 0.001;
+
+      // Adiciona um fator pseudo-aleatório baseado no produto selecionado e no produto candidato.
+      // Isso garante que a lista de sugestões (quando usa fallback) seja diferente para cada produto,
+      // quebrando a repetição exata dos mesmos 10 produtos em destaque.
+      const hashStr = String(selectedProduct.id) + String(p.id);
+      let hash = 0;
+      for (let i = 0; i < hashStr.length; i++) {
+        hash = (hash << 5) - hash + hashStr.charCodeAt(i);
+        hash |= 0;
+      }
+      const jitter = (Math.abs(hash) % 100) / 100; // 0.00 a 0.99
+      score += jitter * 45; // Até 45 pontos de variabilidade
 
       return { product: p, score };
     });
@@ -1692,7 +1735,11 @@ const App: React.FC = () => {
     );
 
     let mixedSuggestions = [...sameCatSuggestions, ...diffCatSuggestions].sort(
-      () => Math.random() - 0.5,
+      (a, b) => {
+        const hashStrA = String(selectedProduct.id) + String(a.product.id);
+        const hashStrB = String(selectedProduct.id) + String(b.product.id);
+        return hashStrA.localeCompare(hashStrB);
+      },
     );
 
     let validSuggestions = mixedSuggestions.map((sp) => {
@@ -1719,15 +1766,20 @@ const App: React.FC = () => {
           sales: salesCounts[p.id] || 0,
           stock: p.stock,
         }))
-        .sort(
-          (a, b) =>
-            b.sales - a.sales || b.stock - a.stock || Math.random() - 0.5,
-        )
+        .sort((a, b) => {
+          const hashStrA = String(selectedProduct.id) + String(a.product.id);
+          const hashStrB = String(selectedProduct.id) + String(b.product.id);
+          return b.sales - a.sales || b.stock - a.stock || hashStrA.localeCompare(hashStrB);
+        })
         .slice(0, 10)
         .map((sp) => ({ ...sp.product, suggestionBadge: "Mais Vendidos" }));
 
       const selectedTop = topGeneral
-        .sort(() => Math.random() - 0.5)
+        .sort((a, b) => {
+          const hashStrA = String(selectedProduct.id) + String(a.id);
+          const hashStrB = String(selectedProduct.id) + String(b.id);
+          return hashStrA.localeCompare(hashStrB);
+        })
         .slice(0, 2);
       validSuggestions = [...selectedTop, ...validSuggestions];
     }
@@ -1748,10 +1800,11 @@ const App: React.FC = () => {
           sales: salesCounts[p.id] || 0,
           stock: p.stock,
         }))
-        .sort(
-          (a, b) =>
-            b.sales - a.sales || b.stock - a.stock || Math.random() - 0.5,
-        )
+        .sort((a, b) => {
+          const hashStrA = String(selectedProduct.id) + String(a.product.id);
+          const hashStrB = String(selectedProduct.id) + String(b.product.id);
+          return b.sales - a.sales || b.stock - a.stock || hashStrA.localeCompare(hashStrB);
+        })
         .map((sp) => ({ ...sp.product, suggestionBadge: "Mais Vendidos" }));
 
       validSuggestions.push(...fallbackProducts);
@@ -2422,9 +2475,9 @@ const App: React.FC = () => {
       let validatedTotal = 0;
       const cleanItems = cart.map((item) => {
         const { image, ...rest } = item;
-        const itemTotal = calculateItemTotal(item, promotions, matrizProducts, currentTenant?.id);
+        const itemTotal = calculateItemTotal(item, promotions, matrizProducts, currentTenant?.id, cart);
         validatedTotal += itemTotal;
-        const promoDetails = calculateItemPromotionDetails(item, promotions, matrizProducts, currentTenant?.id);
+        const promoDetails = calculateItemPromotionDetails(item, promotions, matrizProducts, currentTenant?.id, cart);
         return {
           ...rest,
           appliedPromotionId: promoDetails.promotionId,
@@ -2492,7 +2545,7 @@ const App: React.FC = () => {
       msg += `*🛒 PRODUTOS*\n\n`;
 
       cart.forEach((item) => {
-        const itemTotal = calculateItemTotal(item, promotions, matrizProducts, currentTenant?.id).toFixed(2);
+        const itemTotal = calculateItemTotal(item, promotions, matrizProducts, currentTenant?.id, cart).toFixed(2);
         msg += `*${item.quantity}x ${item.name}*\n`;
         if (item.internalCode) msg += `   🏷️ Ref: ${item.internalCode}\n`;
         msg += `   💲 R$ ${itemTotal}\n\n`;
@@ -3505,19 +3558,74 @@ const App: React.FC = () => {
                           <p className="text-[11px] font-bold text-red-100 uppercase tracking-wider">
                             {activePromotionForSelected.type === "BUY_X_PAY_Y"
                               ? `Leve ${activePromotionForSelected.buyX}, Pague ${activePromotionForSelected.payY}! Adicione ${activePromotionForSelected.buyX} unidades para ativar o desconto.`
-                              : activePromotionForSelected.type ===
-                                    "FIXED_COMBO" ||
-                                  (activePromotionForSelected.type ===
-                                    "LIGHTNING_OFFER" &&
-                                    activePromotionForSelected.buyX &&
-                                    activePromotionForSelected.payY)
-                                ? `${activePromotionForSelected.type === "LIGHTNING_OFFER" ? "OFERTA RELÂMPAGO" : "COMBO ESPECIAL"}: ${activePromotionForSelected.buyX || 1} unidades por R$ ${(activePromotionForSelected.payY || 0).toFixed(2)}! Economize R$ ${(selectedProduct.price * (activePromotionForSelected.buyX || 1) - (activePromotionForSelected.payY || 0)).toFixed(2)} no combo.`
+                              : activePromotionForSelected.type === "BUNDLE_FIXED_PRICE"
+                                ? (() => {
+                                    let comboExplanation = "";
+                                    if (activePromotionForSelected.bundleSlots && activePromotionForSelected.bundlePrice) {
+                                      const currentSlotIndex = activePromotionForSelected.bundleSlots.findIndex(slot => {
+                                        if (!slot || !Array.isArray(slot)) return false;
+                                        if (slot.includes(selectedProduct.id)) return true;
+                                        if (selectedProduct.barcode) {
+                                          const slotEans = products
+                                            .filter(p => p && slot.includes(p.id) && p.barcode)
+                                            .map(p => p.barcode);
+                                          if (slotEans.includes(selectedProduct.barcode)) return true;
+                                        }
+                                        return false;
+                                      });
+
+                                      if (currentSlotIndex !== -1) {
+                                        const otherSlotIndices = activePromotionForSelected.bundleSlots
+                                          .map((_, idx) => idx)
+                                          .filter(idx => idx !== currentSlotIndex);
+
+                                        const otherProductNames: string[] = [];
+                                        otherSlotIndices.forEach(idx => {
+                                          const slotProductIds = activePromotionForSelected!.bundleSlots?.[idx];
+                                          if (!slotProductIds || !Array.isArray(slotProductIds)) return;
+                                          const otherProd = products.find(p => {
+                                            if (!p) return false;
+                                            if (slotProductIds.includes(p.id)) return true;
+                                            if (p.barcode) {
+                                              const slotEans = products
+                                                .filter(sp => sp && slotProductIds.includes(sp.id) && sp.barcode)
+                                                .map(sp => sp.barcode);
+                                              if (slotEans.includes(p.barcode)) return true;
+                                            }
+                                            return false;
+                                          });
+                                          if (otherProd) {
+                                            otherProductNames.push(otherProd.name);
+                                          }
+                                        });
+
+                                        if (otherProductNames.length > 0) {
+                                          const otherProductsText = otherProductNames.length === 1 
+                                            ? otherProductNames[0] 
+                                            : `${otherProductNames[0]} ou outro item`;
+                                          comboExplanation = `Promoção Combo: Adicione este produto e mais 1 ${otherProductsText} ao carrinho para ativar o valor de R$ ${activePromotionForSelected.bundlePrice.toFixed(2)}`;
+                                        } else {
+                                          comboExplanation = `Promoção Combo: Adicione um produto de cada grupo elegível ao carrinho para ativar o valor de R$ ${activePromotionForSelected.bundlePrice.toFixed(2)}`;
+                                        }
+                                      } else {
+                                        comboExplanation = `Promoção Combo: Adicione um produto de cada grupo elegível ao carrinho para ativar o valor de R$ ${activePromotionForSelected.bundlePrice.toFixed(2)}`;
+                                      }
+                                    }
+                                    return comboExplanation;
+                                  })()
                                 : activePromotionForSelected.type ===
-                                    "LIGHTNING_OFFER"
-                                  ? activePromotionForSelected.lightningDiscountPercentage
-                                    ? `Aproveite ${activePromotionForSelected.lightningDiscountPercentage}% de desconto por tempo limitado!`
-                                    : `Aproveite a oferta relâmpago por tempo limitado!`
-                                  : `Desconto Progressivo: Ganhe até ${Math.max(0, ...(activePromotionForSelected.discountThresholds?.map((t) => t.discountPercentage) || []))}% de desconto!`}
+                                      "FIXED_COMBO" ||
+                                    (activePromotionForSelected.type ===
+                                      "LIGHTNING_OFFER" &&
+                                      activePromotionForSelected.buyX &&
+                                      activePromotionForSelected.payY)
+                                  ? `${activePromotionForSelected.type === "LIGHTNING_OFFER" ? "OFERTA RELÂMPAGO" : "COMBO ESPECIAL"}: ${activePromotionForSelected.buyX || 1} unidades por R$ ${(activePromotionForSelected.payY || 0).toFixed(2)}! Economize R$ ${(selectedProduct.price * (activePromotionForSelected.buyX || 1) - (activePromotionForSelected.payY || 0)).toFixed(2)} no combo.`
+                                  : activePromotionForSelected.type ===
+                                      "LIGHTNING_OFFER"
+                                    ? activePromotionForSelected.lightningDiscountPercentage
+                                      ? `Aproveite ${activePromotionForSelected.lightningDiscountPercentage}% de desconto por tempo limitado!`
+                                      : `Aproveite a oferta relâmpago por tempo limitado!`
+                                    : `Desconto Progressivo: Ganhe até ${Math.max(0, ...(activePromotionForSelected.discountThresholds?.map((t) => t.discountPercentage) || []))}% de desconto!`}
                           </p>
                         </div>
                       </div>
@@ -3555,7 +3663,7 @@ const App: React.FC = () => {
                           </span>
                         )}
                       </div>
-                      {activePromotionForSelected ? (
+                      {activePromotionForSelected && activePromotionForSelected.type !== "BUNDLE_FIXED_PRICE" ? (
                         <div className="flex flex-col">
                           <span className="text-xs font-bold text-gray-400 line-through">
                             R${" "}
@@ -3630,13 +3738,20 @@ const App: React.FC = () => {
                           </span>
                         </div>
                       ) : (
-                        <p className="text-3xl font-black text-emerald-600">
-                          R${" "}
-                          {(
-                            selectedProduct.originalPrice ||
-                            selectedProduct.price
-                          ).toFixed(2)}
-                        </p>
+                        <div className="flex flex-col">
+                          <span className="text-3xl font-black text-emerald-600">
+                            R${" "}
+                            {(
+                              selectedProduct.originalPrice ||
+                              selectedProduct.price
+                            ).toFixed(2)}
+                          </span>
+                          {activePromotionForSelected && activePromotionForSelected.type === "BUNDLE_FIXED_PRICE" && (
+                            <p className="text-[11px] font-bold text-pink-600 uppercase tracking-tight mt-1">
+                              Participa do Combo: {activePromotionForSelected.name}
+                            </p>
+                          )}
+                        </div>
                       )}
                     </div>
 

@@ -847,12 +847,30 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
       return;
     }
     if (
+      editingPromo.type !== "BUNDLE_FIXED_PRICE" &&
       editingPromo.targetType !== "SPECIFIC_SELECTION" &&
       !editingPromo.targetValue
     ) {
       toast.error("Por favor, selecione o alvo da promoção.");
       return;
     }
+    if (editingPromo.type === "BUNDLE_FIXED_PRICE") {
+      if (!editingPromo.bundleSlots || editingPromo.bundleSlots.length < 2) {
+        toast.error("O combo deve ter pelo menos 2 grupos de produtos (slots).");
+        return;
+      }
+      for (let i = 0; i < editingPromo.bundleSlots.length; i++) {
+        if (!editingPromo.bundleSlots[i] || editingPromo.bundleSlots[i].length === 0) {
+          toast.error(`O Slot ${i + 1} precisa ter pelo menos um produto selecionado.`);
+          return;
+        }
+      }
+      if (!editingPromo.bundlePrice || editingPromo.bundlePrice <= 0) {
+        toast.error("Por favor, defina um preço válido para o combo.");
+        return;
+      }
+    }
+
     setShowConfirmation(true);
   };
 
@@ -1101,6 +1119,7 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
                         setEditingPromo({
                           ...editingPromo,
                           type: e.target.value as any,
+                          targetType: e.target.value === "BUNDLE_FIXED_PRICE" ? "BUNDLE_SLOTS" : editingPromo.targetType,
                         })
                       }
                       className="w-full px-4 py-3 rounded-xl border-2 border-gray-100 focus:border-red-500 focus:ring-0 transition-all font-medium appearance-none bg-white"
@@ -1109,7 +1128,8 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
                       <option value="PROGRESSIVE_DISCOUNT">
                         Desconto Progressivo
                       </option>
-                      <option value="FIXED_COMBO">Combo Fixo</option>
+                      <option value="FIXED_COMBO">Combo Fixo Simples</option>
+                      <option value="BUNDLE_FIXED_PRICE">Combo c/ Escolha de Variações</option>
                       <option value="LIGHTNING_OFFER">
                         Oferta Relâmpago (Cronômetro na Topbar)
                       </option>
@@ -1127,6 +1147,8 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
                       Segmentação de Produtos
                     </span>
                   </div>
+
+                    {editingPromo.type !== "BUNDLE_FIXED_PRICE" && (
                   <div className="flex bg-gray-100 p-1 rounded-xl">
                     <button
                       onClick={() =>
@@ -1153,9 +1175,10 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
                       Regra Automática
                     </button>
                   </div>
+                )}
                 </div>
 
-                {editingPromo.targetType !== "SPECIFIC_SELECTION" ? (
+                {editingPromo.type !== "BUNDLE_FIXED_PRICE" && editingPromo.targetType !== "SPECIFIC_SELECTION" ? (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6 p-6 bg-blue-50/50 rounded-2xl border-2 border-blue-100/50">
                     <div className="space-y-2">
                       <label className="text-[11px] font-black uppercase text-blue-400 tracking-widest ml-1">
@@ -1344,7 +1367,9 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
                       </div>
                     )}
 
-                    {/* Preview Grid */}
+
+                    {editingPromo.type !== "BUNDLE_FIXED_PRICE" && (
+
                     <div className="border-2 border-gray-100 rounded-2xl overflow-hidden flex flex-col">
                       <div className="bg-gray-50 p-4 border-b border-gray-100 flex items-center justify-between flex-shrink-0">
                         <div className="flex items-center gap-4">
@@ -1445,6 +1470,7 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
                         </div>
                       </div>
                     </div>
+                    )}
                   </div>
                 )}
               </section>
@@ -1571,6 +1597,86 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
                   </div>
                 )}
 
+                {editingPromo.type === "BUNDLE_FIXED_PRICE" && (
+                  <div className="p-6 bg-pink-50 rounded-2xl border-2 border-pink-100 flex flex-col gap-6">
+                    <div className="space-y-2">
+                      <label className="text-[11px] font-black uppercase text-pink-400 tracking-widest ml-1">
+                        Preço Total do Combo (R$)
+                      </label>
+                      <SmartNumberInput
+                        value={editingPromo.bundlePrice || 0}
+                        onChangeValue={(val) =>
+                          setEditingPromo({ ...editingPromo, bundlePrice: val || 0 })
+                        }
+                        isFloat={true}
+                        className="w-full px-4 py-3 rounded-xl border-2 border-white focus:border-pink-500 focus:ring-0 transition-all font-bold text-pink-600"
+                      />
+                    </div>
+                    
+                    <div className="space-y-4">
+                      <div className="flex items-center justify-between">
+                        <label className="text-[11px] font-black uppercase text-pink-400 tracking-widest ml-1">
+                          Slots de Produtos (Grupos)
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const currentSlots = editingPromo.bundleSlots || [];
+                            setEditingPromo({
+                              ...editingPromo,
+                              bundleSlots: [...currentSlots, []]
+                            });
+                          }}
+                          className="text-[10px] font-bold uppercase tracking-wider text-pink-600 bg-pink-100 px-3 py-1.5 rounded-lg hover:bg-pink-200 transition-colors"
+                        >
+                          + Adicionar Slot
+                        </button>
+                      </div>
+                      
+                      {(!editingPromo.bundleSlots || editingPromo.bundleSlots.length === 0) && (
+                         <div className="text-sm font-medium text-pink-500/70 p-4 border-2 border-dashed border-pink-200 rounded-xl text-center">
+                           Adicione os grupos de produtos (slots) para formar o combo. O cliente precisará escolher 1 produto de cada slot.
+                         </div>
+                      )}
+                      
+                      {editingPromo.bundleSlots?.map((slot, index) => (
+                        <div key={index} className="bg-white p-4 rounded-xl border border-pink-100 space-y-3">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-black uppercase text-pink-500">Slot {index + 1}</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const newSlots = [...(editingPromo.bundleSlots || [])];
+                                newSlots.splice(index, 1);
+                                setEditingPromo({ ...editingPromo, bundleSlots: newSlots });
+                              }}
+                              className="text-red-400 hover:text-red-600 p-1"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
+                          
+                          <MultiSelect
+                            values={slot}
+                            onChange={(vals) => {
+                              const newSlots = [...(editingPromo.bundleSlots || [])];
+                              newSlots[index] = vals;
+                              setEditingPromo({ ...editingPromo, bundleSlots: newSlots });
+                            }}
+                            options={products
+                              .filter((p) => slot.includes(p.id) || filteredProducts.some(fp => fp.id === p.id))
+                              .map((p) => ({
+                              label: `${p.name} (${p.barcode || p.internalCode || 'S/N'})`,
+                              value: p.id,
+                            }))}
+                            placeholder="Selecione os produtos permitidos neste slot..."
+                            className="w-full px-3 py-2 rounded-lg border border-pink-100 text-xs font-bold bg-white focus-within:border-pink-400 transition-all"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 {(editingPromo.type === "FIXED_COMBO" ||
                   editingPromo.type === "LIGHTNING_OFFER") && (
                   <div
