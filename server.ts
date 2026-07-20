@@ -697,6 +697,61 @@ app.post("/api/v1/store/:tenantId/mercadopago/preference", async (req, res) => {
   }
 });
 
+const ENDPOINT_PHARMA_SYNONYMS: Record<string, string[]> = {
+  absorvente: ["absorvente", "abs"],
+  abs: ["absorvente", "abs"],
+  gotas: ["gotas", "gts"],
+  gts: ["gotas", "gts"],
+  comprimido: ["comprimido", "cp", "cpl", "cpr"],
+  comprimidos: ["comprimido", "cp", "cpl", "cpr"],
+  cp: ["comprimido", "cp", "cpl", "cpr"],
+  cpl: ["comprimido", "cp", "cpl", "cpr"],
+  cpr: ["comprimido", "cp", "cpl", "cpr"],
+  capsula: ["capsula", "cap"],
+  capsulas: ["capsula", "cap"],
+  cap: ["capsula", "cap"],
+  miligrama: ["miligrama", "mg"],
+  miligramas: ["miligrama", "mg"],
+  mg: ["miligrama", "mg"],
+  paracetamol: ["paracetamol", "tylenol"],
+  tylenol: ["paracetamol", "tylenol"],
+  dipirona: ["dipirona", "novalgina"],
+  novalgina: ["dipirona", "novalgina"],
+  ibuprofeno: ["ibuprofeno", "alivium"],
+  alivium: ["ibuprofeno", "alivium"]
+};
+
+function normalizeText(text: string): string {
+  return (text || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+}
+
+function getLevenshteinDistance(a: string, b: string): number {
+  const matrix = Array.from({ length: a.length + 1 }, () =>
+    Array(b.length + 1).fill(0)
+  );
+  for (let i = 0; i <= a.length; i++) matrix[i][0] = i;
+  for (let j = 0; j <= b.length; j++) matrix[0][j] = j;
+
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      if (a[i - 1] === b[j - 1]) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1,
+          matrix[i][j - 1] + 1,
+          matrix[i - 1][j] + 1
+        );
+      }
+    }
+  }
+  return matrix[a.length][b.length];
+}
+
 // Paginated Products Endpoint for Infinite Scroll & Reactive Search
 app.get("/api/v1/store/:tenantId/products", async (req, res) => {
   try {
@@ -709,6 +764,35 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
     const from = (page - 1) * limit;
     const to = from + limit - 1;
 
+    // 1. Try to use the high-performance Postgres RPC search if available
+    if (search && search.trim().length > 0) {
+      try {
+        const { data: rpcData, error: rpcError } = await supabase.rpc("search_products_v2", {
+          p_tenant_id: tenantId,
+          p_search_term: search,
+          p_category: category || "Todos",
+          p_limit: limit,
+          p_offset: from
+        });
+
+        if (!rpcError && Array.isArray(rpcData)) {
+          res.setHeader("Cache-Control", "public, s-maxage=60, stale-while-revalidate=300");
+          return res.json({
+            data: rpcData,
+            total: rpcData.length >= limit ? -1 : rpcData.length + from,
+            page,
+            limit,
+            source: "postgres_rpc"
+          });
+        } else {
+          console.warn("RPC search_products_v2 failed or not found, falling back to server intelligent search:", rpcError);
+        }
+      } catch (rpcExc) {
+        console.warn("Exception calling search_products_v2, falling back:", rpcExc);
+      }
+    }
+
+    // 2. Server-side intelligent search fallback
     let query = supabase
       .from("products")
       .select("*", { count: "exact" })
@@ -718,19 +802,117 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
       query = query.ilike("category", `%${category}%`);
     }
 
-    if (search) {
-      query = query.ilike("name", `%${search}%`);
+    if (search && search.trim().length > 0) {
+      const cleanSearch = normalizeText(search);
+      const searchTokens = cleanSearch.split(/\s+/).filter(t => t.length > 0);
+      
+      let expandedTokens = [...searchTokens];
+      searchTokens.forEach(token => {
+        const syns = ENDPOINT_PHARMA_SYNONYMS[token];
+        if (syns) {
+          expandedTokens = [...expandedTokens, ...syns];
+        }
+      });
+      expandedTokens = Array.from(new Set(expandedTokens));
+
+      const tsQueryFormated = expandedTokens.map(tok => `${tok}:*`).join(" | ");
+      query = query.or(
+        `name.fts.${tsQueryFormated},description.fts.${tsQueryFormated},category.fts.${tsQueryFormated},active_principle.fts.${tsQueryFormated}`
+      );
     }
 
     const { data, count, error } = await query.range(from, to);
-
     if (error) throw error;
+
+    let finalData = data || [];
+
+    if (search && search.trim().length > 0) {
+      const cleanSearch = normalizeText(search);
+      const searchTokens = cleanSearch.split(/\s+/).filter(t => t.length > 0);
+      
+      let expandedTokens = [...searchTokens];
+      searchTokens.forEach(token => {
+        const syns = ENDPOINT_PHARMA_SYNONYMS[token];
+        if (syns) {
+          expandedTokens = [...expandedTokens, ...syns];
+        }
+      });
+      expandedTokens = Array.from(new Set(expandedTokens));
+
+      const scoredProducts = finalData.map((prod: any) => {
+        const name = normalizeText(prod.name);
+        const cat = normalizeText(prod.category);
+        const act = normalizeText(prod.active_principle);
+        const desc = normalizeText(prod.description);
+
+        let score = 0;
+
+        if (name === cleanSearch) {
+          score += 1000;
+        } else if (name.startsWith(cleanSearch)) {
+          score += 800;
+        } else if (name.includes(cleanSearch)) {
+          score += 600;
+        }
+
+        searchTokens.forEach(token => {
+          if (name.includes(token)) score += 300;
+          if (cat.includes(token)) score += 200;
+          if (act.includes(token)) score += 200;
+          if (desc.includes(token)) {
+            score += 10;
+          }
+        });
+
+        expandedTokens.forEach(token => {
+          if (!searchTokens.includes(token)) {
+            if (name.includes(token)) score += 150;
+            if (cat.includes(token)) score += 100;
+            if (act.includes(token)) score += 100;
+            if (desc.includes(token)) score += 5;
+          }
+        });
+
+        const nameWords = name.split(/\s+/);
+        searchTokens.forEach(token => {
+          if (token.length > 3) {
+            nameWords.forEach(word => {
+              if (word.length > 3) {
+                const dist = getLevenshteinDistance(token, word);
+                if (dist <= 1) {
+                  score += 100;
+                }
+              }
+            });
+          }
+        });
+
+        const hasMainMatch = searchTokens.some(tok => name.includes(tok) || cat.includes(tok) || act.includes(tok)) ||
+                             expandedTokens.some(tok => name.includes(tok) || cat.includes(tok) || act.includes(tok));
+        
+        if (!hasMainMatch && desc.length > 0) {
+          score = score * 0.05;
+        }
+
+        if (prod.is_featured) {
+          score += 50;
+        }
+
+        return { ...prod, _score: score };
+      });
+
+      scoredProducts.sort((a, b) => b._score - a._score);
+      finalData = scoredProducts.map(p => {
+        const { _score, ...rest } = p;
+        return rest;
+      });
+    }
 
     res.setHeader(
       "Cache-Control",
       "public, s-maxage=60, stale-while-revalidate=300",
     );
-    res.json({ data: data || [], total: count || 0, page, limit });
+    res.json({ data: finalData, total: count || 0, page, limit });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }

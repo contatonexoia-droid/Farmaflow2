@@ -26,9 +26,15 @@ CREATE TABLE IF NOT EXISTS integration_logs (
 -- ALTER TABLE products DROP COLUMN IF EXISTS image_url_3;
 
 -- 4. Criar índices de busca (Full-Text Search) para alta performance
+-- Primeiro, criamos uma função auxiliar IMMUTABLE para permitir indexação FTS sem erros de mutabilidade
+CREATE OR REPLACE FUNCTION public.farmaflow_to_tsvector(text_val TEXT)
+RETURNS tsvector AS $$
+  SELECT to_tsvector('portuguese'::regconfig, coalesce(text_val, ''));
+$$ LANGUAGE sql IMMUTABLE;
+
 -- Primeiro, criamos uma coluna gerada para busca ou usamos índices individuais
-CREATE INDEX IF NOT EXISTS idx_products_name_fts ON products USING gin(to_tsvector('portuguese', name));
-CREATE INDEX IF NOT EXISTS idx_products_active_principle_fts ON products USING gin(to_tsvector('portuguese', COALESCE("activePrinciple", '')));
+CREATE INDEX IF NOT EXISTS idx_products_name_fts ON products USING gin(public.farmaflow_to_tsvector(name));
+CREATE INDEX IF NOT EXISTS idx_products_active_principle_fts ON products USING gin(public.farmaflow_to_tsvector("activePrinciple"));
 CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode);
 CREATE INDEX IF NOT EXISTS idx_products_internal_code ON products("internalCode");
 
