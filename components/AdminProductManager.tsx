@@ -2155,9 +2155,10 @@ const [selectedDeptForEdit, setSelectedDeptForEdit] = useState<string>('Outros')
                         changeTxt = `Definido como ${rowStock} un.`;
                     }
                 }
-                const newName = hasNameCol && name ? String(name) : p.name;
+                // Regra de negócio estrita: os campos de nome e código de barras não podem ser alterados para produtos já cadastrados
+                const newName = p.name; // Preserva sempre o nome do produto cadastrado
                 const newCode = hasCodeCol && code !== undefined ? String(code) : (p.internalCode ? String(p.internalCode).trim() : undefined);
-                const newEan = hasEanCol && ean ? String(ean).trim() : (p.barcode && String(p.barcode).trim() !== '' ? String(p.barcode).trim() : undefined);
+                const newEan = p.barcode && String(p.barcode).trim() !== '' ? String(p.barcode).trim() : (hasEanCol && ean ? String(ean).trim() : undefined); // Preserva o código de barras se já houver, caso contrário herda o novo se disponível
                 const newPrice = hasPriceCol && finalPrice > 0 ? finalPrice : p.price;
                 const newOriginalPrice = hasOriginalPriceCol ? (finalOriginalPrice > 0 ? finalOriginalPrice : 0) : p.originalPrice;
                 
@@ -2551,17 +2552,18 @@ const [selectedDeptForEdit, setSelectedDeptForEdit] = useState<string>('Outros')
                     }
 
                     if (existingDbItem) {
-                        // Preserva o nome limpo do banco no estado do frontend
+                        // Preserva o nome e o código de barras limpos do banco no estado do frontend
                         p.name = existingDbItem.name || p.name;
+                        p.barcode = existingDbItem.barcode || p.barcode;
                         
                         const updateItem: any = {
                             id: existingDbItem.id,
                             tenant_id: tenant.id
                         };
                         
-                        if (hasEanCol) updateItem.barcode = cleanBarcode || null;
+                        if (hasEanCol) updateItem.barcode = existingDbItem.barcode || cleanBarcode || null;
                         if (hasCodeCol) updateItem.internal_code = cleanCode || existingDbItem.internal_code;
-                        if (hasNameCol) updateItem.name = p.name;
+                        if (hasNameCol) updateItem.name = existingDbItem.name || p.name;
                         if (hasPriceCol) updateItem.price = p.price;
                         if (hasOriginalPriceCol) updateItem.original_price = p.originalPrice;
                         if (hasPromoTypeCol || hasOriginalPriceCol || hasPriceCol) updateItem.promotion_type = p.promotionType;
