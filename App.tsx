@@ -514,6 +514,9 @@ const App: React.FC = () => {
   );
 
   const [products, setProducts] = useState<Product[]>([]);
+  const validStorefrontProducts = useMemo(() => {
+    return products.filter((p) => typeof p.price === "number" && p.price > 0);
+  }, [products]);
   const [matrizProducts, setMatrizProducts] = useState<Product[]>([]);
   const [promotions, setPromotions] = useState<PromotionRule[]>([]);
   const [coupons, setCoupons] = useState<CouponRule[]>([]);
@@ -1331,7 +1334,7 @@ const App: React.FC = () => {
       );
 
       const otherProducts = products.filter(
-        (p) => p.id !== selectedProduct.id && p.stock > 0,
+        (p) => p.id !== selectedProduct.id && p.stock > 0 && typeof p.price === 'number' && p.price > 0,
       );
 
       const salesCounts: Record<string, number> = {};
@@ -3100,7 +3103,7 @@ const App: React.FC = () => {
           {view === ViewMode.CATALOG && currentTenant && (
             <Storefront
               tenant={currentTenant}
-              products={products}
+              products={validStorefrontProducts}
               promotions={promotions}
               coupons={coupons}
               cartCount={cart.reduce((a, c) => a + c.quantity, 0)}
