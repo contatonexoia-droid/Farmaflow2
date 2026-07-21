@@ -1953,8 +1953,10 @@ const App: React.FC = () => {
         // Se encontrou tenant pelo hostname ou se é dev testing via ?p (Opcional, mas mantido pra testes admin)
         const params = new URLSearchParams(window.location.search);
         const pParam = params.get("p");
+        const storeIdParam = params.get("storeId") || params.get("branch");
 
-        if (!targetTenant && pParam) {
+        if (!targetTenant && (pParam || storeIdParam)) {
+          const lookupParam = storeIdParam || pParam;
           const tenants = await getTenants();
           targetTenant =
             tenants.find((t) => {
@@ -1968,7 +1970,7 @@ const App: React.FC = () => {
                     .replace(/\s+/g, "-")
                 : "";
               return (
-                t.id === pParam || t.slug === pParam || cleanSlug === pParam
+                t.id === lookupParam || t.slug === lookupParam || cleanSlug === lookupParam || t.custom_domain === lookupParam
               );
             }) || null;
         }

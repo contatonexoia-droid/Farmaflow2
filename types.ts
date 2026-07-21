@@ -415,7 +415,7 @@ export const checkProductMatchesRule = (
   if (rule.targetType === "PRODUCT") {
     if (rule.targetValue === p.id) return true;
     // Se for escopo de rede, targetValue é o ID do produto na matriz. Comparamos pelo código de barras (EAN)
-    if (isNetworkScope && p.barcode) {
+    if (p.barcode) {
       const cacheKey = `${rule.id}_${matrizProducts.length}`;
       let targetBarcode = ruleBarcodeCache.get(cacheKey);
       if (targetBarcode === undefined) {
@@ -440,7 +440,7 @@ export const checkProductMatchesRule = (
 
   if (rule.targetType === "SPECIFIC_SELECTION") {
     if (rule.specificProductIds?.includes(p.id)) return true;
-    if (isNetworkScope && p.barcode) {
+    if (p.barcode) {
       const cacheKey = `${rule.id}_${matrizProducts.length}`;
       let targetEans = ruleEanCache.get(cacheKey);
       if (!targetEans) {
