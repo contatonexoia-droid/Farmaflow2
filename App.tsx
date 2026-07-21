@@ -1969,8 +1969,18 @@ const App: React.FC = () => {
                     .trim()
                     .replace(/\s+/g, "-")
                 : "";
+              const noSpecialCharsSlug = cleanSlug.replace(/[^a-z0-9]/g, "");
+              const cleanLookup = (lookupParam || "")
+                .toLowerCase()
+                .normalize("NFD")
+                .replace(/[\u0300-\u036f]/g, "")
+                .replace(/[^a-z0-9]/g, "");
               return (
-                t.id === lookupParam || t.slug === lookupParam || cleanSlug === lookupParam || t.custom_domain === lookupParam
+                t.id === lookupParam ||
+                t.slug === lookupParam ||
+                cleanSlug === lookupParam ||
+                noSpecialCharsSlug === cleanLookup ||
+                t.custom_domain === lookupParam
               );
             }) || null;
         }

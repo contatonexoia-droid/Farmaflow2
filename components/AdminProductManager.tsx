@@ -3149,7 +3149,7 @@ const [selectedDeptForEdit, setSelectedDeptForEdit] = useState<string>('Outros')
             <DynamicFlyerGenerator
                 onClose={() => setIsFlyerModalOpen(false)}
                 initialConfig={{
-                    tenantSlug: tenant.slug,
+                    tenantSlug: tenant.slug || tenant.id,
                     themeColor: tenant.primaryColor || '#1e40af',
                     themeSecondaryColor: tenant.accentColor || '#1e3a8a',
                     bannerTitle: tenant.bannerTitle || 'OFERTAS ESPECIAIS',

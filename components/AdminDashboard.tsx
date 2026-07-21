@@ -101,7 +101,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   }, [tenant?.networkId, tenant?.id]);
 
   const storeUrl = useMemo(() => {
-    if (tenant?.custom_domain) return `https://${tenant.custom_domain}?storeId=${tenant.id}`;
+    if (tenant?.custom_domain) return `https://${tenant.custom_domain}`;
     const rawSlug = tenant?.slug || tenantId || "";
     const cleanSlug = rawSlug
       .toLowerCase()
@@ -111,11 +111,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       .trim()
       .replace(/\s+/g, "-");
     
+    let finalSlug = cleanSlug;
+    
     const origin = window.location.origin;
     if (origin.includes("farmaflow.online")) {
-      return `https://${cleanSlug}.farmaflow.online?storeId=${tenant.id}`;
+      return `https://${finalSlug}.farmaflow.online`;
     }
-    return `${origin}/loja/${cleanSlug}?storeId=${tenant.id}`;
+    return `${origin}/loja/${finalSlug}?storeId=${tenant.id}`;
   }, [tenant, tenantId]);
 
   const fetchSearches = async () => {

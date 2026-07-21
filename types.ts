@@ -409,21 +409,24 @@ export const checkProductMatchesRule = (
   matrizProducts: Product[] = [],
   tenantId?: string,
 ): boolean => {
+  if (!rule || !p) return false;
   // Se a regra for de rede ou pertencer a um tenant diferente do produto, é escopo rede
   const isNetworkScope = rule.scope === "NETWORK" || (tenantId && rule.tenantId !== tenantId);
 
+  const productEan = (p.barcode || (p as any).ean)?.toString().trim();
+
   if (rule.targetType === "PRODUCT") {
-    if (rule.targetValue === p.id) return true;
+    if (p.id && rule.targetValue === p.id) return true;
     // Se for escopo de rede, targetValue é o ID do produto na matriz. Comparamos pelo código de barras (EAN)
-    if (p.barcode) {
+    if (productEan) {
       const cacheKey = `${rule.id}_${matrizProducts.length}`;
       let targetBarcode = ruleBarcodeCache.get(cacheKey);
       if (targetBarcode === undefined) {
         const matrizProd = matrizProducts.find((mp) => mp && mp.id === rule.targetValue);
-        targetBarcode = matrizProd?.barcode || null;
+        targetBarcode = (matrizProd?.barcode || (matrizProd as any)?.ean)?.toString().trim() || null;
         ruleBarcodeCache.set(cacheKey, targetBarcode);
       }
-      if (targetBarcode && targetBarcode === p.barcode) return true;
+      if (targetBarcode && targetBarcode === productEan) return true;
     }
     return false;
   }
@@ -439,17 +442,17 @@ export const checkProductMatchesRule = (
   }
 
   if (rule.targetType === "SPECIFIC_SELECTION") {
-    if (rule.specificProductIds?.includes(p.id)) return true;
-    if (p.barcode) {
+    if (p.id && rule.specificProductIds?.includes(p.id)) return true;
+    if (productEan) {
       const cacheKey = `${rule.id}_${matrizProducts.length}`;
       let targetEans = ruleEanCache.get(cacheKey);
       if (!targetEans) {
         targetEans = matrizProducts
-          .filter((mp) => mp && rule.specificProductIds?.includes(mp.id) && mp.barcode)
-          .map((mp) => mp.barcode as string);
+          .filter((mp) => mp && rule.specificProductIds?.includes(mp.id) && (mp.barcode || (mp as any).ean))
+          .map((mp) => (mp.barcode || (mp as any).ean)?.toString().trim() as string);
         ruleEanCache.set(cacheKey, targetEans);
       }
-      if (p.barcode && targetEans.includes(p.barcode)) return true;
+      if (targetEans.includes(productEan)) return true;
     }
     return false;
   }
@@ -462,17 +465,17 @@ export const checkProductMatchesRule = (
     let slotIdx = 0;
     for (const slot of bundlePromo.bundleSlots) {
       if (!slot || !Array.isArray(slot)) continue;
-      if (slot.includes(p.id)) return true;
-      if (isNetworkScope && p.barcode) {
+      if (p.id && slot.includes(p.id)) return true;
+      if (productEan) {
         const cacheKey = `${rule.id}_slot_${slotIdx}_${matrizProducts.length}`;
         let targetEans = ruleEanCache.get(cacheKey);
         if (!targetEans) {
           targetEans = matrizProducts
-            .filter((mp) => mp && slot.includes(mp.id) && mp.barcode)
-            .map((mp) => mp.barcode as string);
+            .filter((mp) => mp && slot.includes(mp.id) && (mp.barcode || (mp as any).ean))
+            .map((mp) => (mp.barcode || (mp as any).ean)?.toString().trim() as string);
           ruleEanCache.set(cacheKey, targetEans);
         }
-        if (p.barcode && targetEans.includes(p.barcode)) return true;
+        if (targetEans.includes(productEan)) return true;
       }
       slotIdx++;
     }

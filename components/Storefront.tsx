@@ -3144,26 +3144,32 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
                 >
                   {rowProducts.map((p, colIndex) => {
                     const globalIndex = startIndex + colIndex;
-                    return (
-                      <ProductCard
-                        key={p.id}
-                        product={p}
-                        tenant={tenant}
-                        promotions={activePromotions}
-                        onProductClick={onProductClick}
-                        isProductInRule={isProductInRule}
-                        products={products}
-                        onAddToCart={(e, p) => {
-                          e.stopPropagation();
-                          handleAddToCartWrapper(p);
-                        }}
-                        onNotify={(e, p) => {
-                          e.stopPropagation();
-                          handleNotifyMe(p);
-                        }}
-                        priority={globalIndex < 6}
-                      />
-                    );
+                    try {
+                      if (!p || typeof p !== "object") return null;
+                      return (
+                        <ProductCard
+                          key={p.id || globalIndex}
+                          product={p}
+                          tenant={tenant}
+                          promotions={activePromotions}
+                          onProductClick={onProductClick}
+                          isProductInRule={isProductInRule}
+                          products={products}
+                          onAddToCart={(e, prod) => {
+                            e.stopPropagation();
+                            handleAddToCartWrapper(prod);
+                          }}
+                          onNotify={(e, prod) => {
+                            e.stopPropagation();
+                            handleNotifyMe(prod);
+                          }}
+                          priority={globalIndex < 6}
+                        />
+                      );
+                    } catch (err) {
+                      console.error("Error rendering ProductCard:", p, err);
+                      return null;
+                    }
                   })}
                 </div>
               );

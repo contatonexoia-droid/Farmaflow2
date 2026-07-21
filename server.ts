@@ -70,7 +70,7 @@ app.get("/api/v1/resolve-tenant", async (req, res) => {
       const tenantSlug = parts[0];
       
       if (tenantSlug && tenantSlug !== "www" && tenantSlug !== "farmaflow" && tenantSlug !== "nexoia") {
-        const { data, error } = await supabase
+        let { data, error } = await supabase
           .from("tenants")
           .select("*")
           .eq("slug", tenantSlug)
@@ -78,6 +78,23 @@ app.get("/api/v1/resolve-tenant", async (req, res) => {
           
         if (!error && data) {
           tenantData = data;
+        } else {
+          // Fallback: busca flexível ignorando hifens/caracteres especiais
+          const { data: allTenants, error: allErr } = await supabase
+            .from("tenants")
+            .select("*");
+          if (!allErr && allTenants) {
+            const matched = allTenants.find(t => {
+              const clean = (t.slug || "")
+                .toLowerCase()
+                .replace(/[^a-z0-9]/g, "");
+              const searchClean = tenantSlug.toLowerCase().replace(/[^a-z0-9]/g, "");
+              return clean === searchClean;
+            });
+            if (matched) {
+              tenantData = matched;
+            }
+          }
         }
       }
     } 
