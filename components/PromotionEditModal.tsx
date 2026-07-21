@@ -851,12 +851,14 @@ const SlotMultiSelect = React.memo(({
 });
 SlotMultiSelect.displayName = "SlotMultiSelect";
 
-// ComboSlotItem Component (React.memo wrapped visual slot)
+// ComboSlotItem Component (Enhanced with Search, Category/Manufacturer Filters, Mass Actions & Selected Chips)
 interface ComboSlotItemProps {
   index: number;
   slot: string[];
   products: Product[];
-  filteredProductIdsSet: Set<string>;
+  categories?: string[];
+  manufacturers?: string[];
+  filteredProductIdsSet?: Set<string>;
   onRemoveSlot: (idx: number) => void;
   onUpdateSlot: (idx: number, vals: string[]) => void;
 }
@@ -865,43 +867,378 @@ const ComboSlotItem = React.memo(({
   index,
   slot,
   products,
-  filteredProductIdsSet,
+  categories = [],
+  manufacturers = [],
   onRemoveSlot,
   onUpdateSlot,
 }: ComboSlotItemProps) => {
-  const options = useMemo(() => {
-    const slotSet = new Set(slot);
-    return products
-      .filter((p) => slotSet.has(p.id) || filteredProductIdsSet.has(p.id))
-      .map((p) => ({
-        label: `${p.name} (${p.barcode || p.internalCode || "S/N"})`,
-        value: p.id,
-      }));
-  }, [products, slot, filteredProductIdsSet]);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState("");
+  const [selectedCategory, setSelectedCategory] = useState("TODAS");
+  const [selectedManufacturer, setSelectedManufacturer] = useState("TODOS");
+  const [showSelectedChips, setShowSelectedChips] = useState(true);
 
-  const handleChange = useCallback((vals: string[]) => {
-    onUpdateSlot(index, vals);
+  // Debounce search term to 200ms
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearchTerm(searchTerm);
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [searchTerm]);
+
+  // Derived unique categories
+  const categoryOptions = useMemo(() => {
+    const set = new Set<string>(categories.filter(Boolean));
+    products.forEach((p) => {
+      if (p.category) set.add(p.category);
+    });
+    return Array.from(set).sort();
+  }, [categories, products]);
+
+  // Derived unique manufacturers
+  const manufacturerOptions = useMemo(() => {
+    const set = new Set<string>(manufacturers.filter(Boolean));
+    products.forEach((p) => {
+      if (p.manufacturer) set.add(p.manufacturer);
+    });
+    return Array.from(set).sort();
+  }, [manufacturers, products]);
+
+  // Map of products by ID
+  const productMap = useMemo(() => {
+    const map = new Map<string, Product>();
+    products.forEach((p) => map.set(p.id, p));
+    return map;
+  }, [products]);
+
+  // Set of selected product IDs in this slot
+  const slotSet = useMemo(() => new Set(slot), [slot]);
+
+  // Array of selected product objects
+  const selectedProducts = useMemo(() => {
+    return slot.map((id) => productMap.get(id)).filter(Boolean) as Product[];
+  }, [slot, productMap]);
+
+  // Filtered products list
+  const filteredProducts = useMemo(() => {
+    const normalize = (str: string) =>
+      (str || "")
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "");
+
+    return products.filter((p) => {
+      // Category filter
+      if (selectedCategory !== "TODAS" && p.category !== selectedCategory) {
+        return false;
+      }
+      // Manufacturer filter
+      if (selectedManufacturer !== "TODOS" && p.manufacturer !== selectedManufacturer) {
+        return false;
+      }
+      // Search term filter (Name, Barcode/EAN, Active Principle)
+      if (debouncedSearchTerm.trim()) {
+        const term = normalize(debouncedSearchTerm);
+        const nameMatch = normalize(p.name).includes(term);
+        const barcodeMatch = p.barcode ? normalize(p.barcode).includes(term) : false;
+        const eanMatch = (p as any).ean ? normalize(String((p as any).ean)).includes(term) : false;
+        const internalCodeMatch = p.internalCode ? normalize(p.internalCode).includes(term) : false;
+        const activePrincipleMatch = p.activePrinciple ? normalize(p.activePrinciple).includes(term) : false;
+
+        return nameMatch || barcodeMatch || eanMatch || internalCodeMatch || activePrincipleMatch;
+      }
+
+      return true;
+    });
+  }, [products, selectedCategory, selectedManufacturer, debouncedSearchTerm]);
+
+  // Toggle single product selection
+  const toggleProduct = useCallback((id: string) => {
+    if (slotSet.has(id)) {
+      onUpdateSlot(index, slot.filter((v) => v !== id));
+    } else {
+      onUpdateSlot(index, [...slot, id]);
+    }
+  }, [slot, slotSet, index, onUpdateSlot]);
+
+  // Remove single product
+  const removeProduct = useCallback((id: string) => {
+    onUpdateSlot(index, slot.filter((v) => v !== id));
+  }, [slot, index, onUpdateSlot]);
+
+  // Select all currently filtered products
+  const selectAllFiltered = useCallback(() => {
+    const filteredIds = filteredProducts.map((p) => p.id);
+    const updated = Array.from(new Set([...slot, ...filteredIds]));
+    onUpdateSlot(index, updated);
+    toast.success(`${filteredIds.length} produto(s) adicionados ao Slot ${index + 1}`);
+  }, [filteredProducts, slot, index, onUpdateSlot]);
+
+  // Deselect all currently filtered products
+  const deselectFiltered = useCallback(() => {
+    const filteredIdsSet = new Set(filteredProducts.map((p) => p.id));
+    const updated = slot.filter((id) => !filteredIdsSet.has(id));
+    onUpdateSlot(index, updated);
+    toast.info(`Produtos filtrados removidos do Slot ${index + 1}`);
+  }, [filteredProducts, slot, index, onUpdateSlot]);
+
+  // Clear entire slot
+  const clearSlot = useCallback(() => {
+    onUpdateSlot(index, []);
+    toast.info(`Slot ${index + 1} limpo`);
   }, [index, onUpdateSlot]);
 
+  // Check if all filtered are selected
+  const isAllFilteredSelected = useMemo(() => {
+    if (filteredProducts.length === 0) return false;
+    return filteredProducts.every((p) => slotSet.has(p.id));
+  }, [filteredProducts, slotSet]);
+
   return (
-    <div className="bg-white p-4 rounded-xl border border-pink-100 space-y-3">
-      <div className="flex items-center justify-between">
-        <span className="text-xs font-black uppercase text-pink-500">Slot {index + 1}</span>
-        <button
-          type="button"
-          onClick={() => onRemoveSlot(index)}
-          className="text-red-400 hover:text-red-600 p-1"
-        >
-          <Trash2 size={14} />
-        </button>
+    <div className="bg-white p-5 rounded-2xl border-2 border-pink-100 shadow-sm space-y-4 transition-all">
+      {/* Header with Slot name, Count badge, Clear & Delete buttons */}
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-pink-50 pb-3">
+        <div className="flex items-center gap-2.5">
+          <span className="text-xs font-black uppercase tracking-wider text-pink-600 bg-pink-50 px-3 py-1 rounded-xl border border-pink-100">
+            Slot {index + 1}
+          </span>
+          <span className={`text-xs font-bold px-3 py-1 rounded-full flex items-center gap-1.5 ${
+            slot.length > 0 
+              ? "bg-emerald-100 text-emerald-800 border border-emerald-200" 
+              : "bg-gray-100 text-gray-500 border border-gray-200"
+          }`}>
+            <CheckCircle2 size={13} className={slot.length > 0 ? "text-emerald-600" : "text-gray-400"} />
+            {slot.length} produto{slot.length !== 1 ? "s" : ""} selecionado{slot.length !== 1 ? "s" : ""} no Slot {index + 1}
+          </span>
+        </div>
+
+        <div className="flex items-center gap-2">
+          {slot.length > 0 && (
+            <button
+              type="button"
+              onClick={clearSlot}
+              className="text-xs font-bold text-red-500 hover:text-red-700 bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded-xl transition-colors flex items-center gap-1"
+              title="Limpar seleção do slot"
+            >
+              <X size={14} />
+              Limpar Seleção
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => onRemoveSlot(index)}
+            className="text-gray-400 hover:text-red-600 p-1.5 hover:bg-gray-100 rounded-xl transition-colors"
+            title="Remover Slot"
+          >
+            <Trash2 size={16} />
+          </button>
+        </div>
       </div>
 
-      <SlotMultiSelect
-        values={slot}
-        onChange={handleChange}
-        options={options}
-        placeholder="Selecione os produtos permitidos neste slot..."
-      />
+      {/* Selected Products Chips Area */}
+      {selectedProducts.length > 0 && (
+        <div className="bg-pink-50/50 p-3.5 rounded-xl border border-pink-100 space-y-2">
+          <div className="flex items-center justify-between text-xs font-bold text-pink-900">
+            <span className="flex items-center gap-1">
+              Itens Adicionados ao Slot ({selectedProducts.length}):
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowSelectedChips(!showSelectedChips)}
+              className="text-[11px] text-pink-600 hover:underline font-bold"
+            >
+              {showSelectedChips ? "Ocultar lista de selecionados" : `Ver selecionados (${selectedProducts.length})`}
+            </button>
+          </div>
+
+          {showSelectedChips && (
+            <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto custom-scrollbar p-1">
+              {selectedProducts.map((p) => (
+                <span
+                  key={p.id}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white border border-pink-200 text-pink-950 text-xs font-medium shadow-xs hover:border-pink-300 transition-all"
+                >
+                  <span className="truncate max-w-[200px] font-bold">{p.name}</span>
+                  {(p.barcode || (p as any).ean) && (
+                    <span className="text-[10px] text-gray-400 font-mono">
+                      ({p.barcode || (p as any).ean})
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => removeProduct(p.id)}
+                    className="text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-full p-0.5 transition-colors ml-0.5"
+                    title="Remover produto do slot"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Inline Search & Category / Manufacturer Filters */}
+      <div className="space-y-3">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+          {/* Campo de Busca (Nome, EAN, Princípio Ativo) */}
+          <div className="relative">
+            <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-pink-400" />
+            <input
+              type="text"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              placeholder="Buscar por Nome, EAN ou P.A..."
+              className="w-full pl-9 pr-8 py-2 bg-gray-50 border border-pink-100 rounded-xl text-xs font-bold text-gray-800 placeholder:text-gray-400 focus:bg-white focus:border-pink-500 focus:ring-0 outline-none transition-all"
+            />
+            {searchTerm && (
+              <button
+                type="button"
+                onClick={() => setSearchTerm("")}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+              >
+                <X size={13} />
+              </button>
+            )}
+          </div>
+
+          {/* Filtro de Categoria */}
+          <div className="relative">
+            <select
+              value={selectedCategory}
+              onChange={(e) => setSelectedCategory(e.target.value)}
+              className="w-full px-3 py-2 bg-gray-50 border border-pink-100 rounded-xl text-xs font-bold text-gray-800 focus:bg-white focus:border-pink-500 outline-none transition-all cursor-pointer"
+            >
+              <option value="TODAS">Todas as Categorias</option>
+              {categoryOptions.map((cat) => (
+                <option key={cat} value={cat}>
+                  {cat}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Filtro por Marca/Laboratório */}
+          <div className="relative">
+            <select
+              value={selectedManufacturer}
+              onChange={(e) => setSelectedManufacturer(e.target.value)}
+              className="w-full px-3 py-2 bg-gray-50 border border-pink-100 rounded-xl text-xs font-bold text-gray-800 focus:bg-white focus:border-pink-500 outline-none transition-all cursor-pointer"
+            >
+              <option value="TODOS">Todos os Fabricantes/Marcas</option>
+              {manufacturerOptions.map((mfg) => (
+                <option key={mfg} value={mfg}>
+                  {mfg}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {/* Mass Action & Quick Selection Buttons */}
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-gray-100">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={selectAllFiltered}
+              disabled={filteredProducts.length === 0}
+              className="text-xs font-black text-pink-700 bg-pink-100 hover:bg-pink-200 disabled:opacity-40 disabled:cursor-not-allowed px-3 py-1.5 rounded-xl transition-all flex items-center gap-1.5"
+            >
+              <CheckCircle2 size={13} />
+              {selectedCategory !== "TODAS"
+                ? `Selecionar Todos da Categoria "${selectedCategory}" (${filteredProducts.length})`
+                : `Selecionar Todos Filtrados (${filteredProducts.length})`}
+            </button>
+
+            {isAllFilteredSelected && filteredProducts.length > 0 && (
+              <button
+                type="button"
+                onClick={deselectFiltered}
+                className="text-xs font-bold text-gray-600 hover:text-gray-800 bg-gray-100 hover:bg-gray-200 px-3 py-1.5 rounded-xl transition-all"
+              >
+                Deselecionar Filtrados
+              </button>
+            )}
+          </div>
+
+          <span className="text-[11px] font-bold text-gray-400">
+            {filteredProducts.length} produto(s) encontrado(s)
+          </span>
+        </div>
+      </div>
+
+      {/* Available Products Picker List */}
+      <div className="border border-pink-100 rounded-xl overflow-hidden bg-gray-50/50">
+        <div className="max-h-56 overflow-y-auto custom-scrollbar divide-y divide-gray-100">
+          {filteredProducts.length === 0 ? (
+            <div className="p-6 text-center text-xs text-gray-400 font-medium">
+              Nenhum produto encontrado com os filtros aplicados.
+            </div>
+          ) : (
+            filteredProducts.slice(0, 60).map((p) => {
+              const isSelected = slotSet.has(p.id);
+              return (
+                <div
+                  key={p.id}
+                  onClick={() => toggleProduct(p.id)}
+                  className={`px-3.5 py-2 text-xs flex items-center justify-between gap-3 cursor-pointer transition-colors ${
+                    isSelected ? "bg-pink-50/90 font-bold text-pink-950" : "hover:bg-white text-gray-700"
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      readOnly
+                      className="rounded border-gray-300 text-pink-600 focus:ring-pink-500 pointer-events-none w-4 h-4 shrink-0"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate font-bold text-gray-900">
+                        {p.name}
+                      </p>
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-gray-500">
+                        {(p.barcode || (p as any).ean) && (
+                          <span className="font-mono bg-gray-100 px-1.5 py-0.2 rounded text-gray-600">
+                            EAN: {p.barcode || (p as any).ean}
+                          </span>
+                        )}
+                        {p.activePrinciple && (
+                          <span className="text-pink-600 font-medium">
+                            PA: {p.activePrinciple}
+                          </span>
+                        )}
+                        {p.category && (
+                          <span className="bg-pink-100/60 text-pink-800 px-1.5 py-0.2 rounded font-semibold">
+                            {p.category}
+                          </span>
+                        )}
+                        {p.manufacturer && (
+                          <span className="text-gray-500 font-medium">
+                            {p.manufacturer}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="text-right shrink-0">
+                    <span className="font-black text-xs text-gray-900">
+                      R$ {p.price.toFixed(2).replace(".", ",")}
+                    </span>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        {filteredProducts.length > 60 && (
+          <div className="p-2 bg-pink-50/60 text-center text-[10px] font-bold text-pink-700 uppercase tracking-wider">
+            Mostrando 60 de {filteredProducts.length} produtos. Refine sua busca por Nome, Categoria ou Fabricante.
+          </div>
+        )}
+      </div>
     </div>
   );
 });
@@ -1733,6 +2070,8 @@ export const PromotionEditModal: React.FC<PromotionEditModalProps> = ({
                         index={index}
                         slot={slot}
                         products={products}
+                        categories={categories}
+                        manufacturers={manufacturers}
                         filteredProductIdsSet={filteredProductIdsSet}
                         onRemoveSlot={handleRemoveSlot}
                         onUpdateSlot={handleUpdateSlot}
