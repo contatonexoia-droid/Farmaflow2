@@ -483,7 +483,9 @@ export const checkProductMatchesRule = (
       if (!slot || !Array.isArray(slot)) continue;
       if (p.id && slot.includes(p.id)) return true;
       if (p.barcode && slot.includes(p.barcode.trim())) return true;
+      if ((p as any).ean && slot.includes((p as any).ean.toString().trim())) return true;
       if (productEan) {
+        if (slot.includes(productEan)) return true;
         const cacheKey = `${rule.id}_slot_${slotIdx}_${matrizProducts.length}`;
         let targetEans = ruleEanCache.get(cacheKey);
         if (!targetEans) {

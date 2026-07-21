@@ -1196,12 +1196,15 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
     promocao_id: string | null;
     cupom_id: string | null;
     termo_busca: string;
-  }>({
-    departamento: "Todos",
-    categoria: "Todos",
-    promocao_id: null,
-    cupom_id: null,
-    termo_busca: "",
+  }>(() => {
+    const params = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
+    return {
+      departamento: params?.get("dept_id") || "Todos",
+      categoria: params?.get("category_id") || "Todos",
+      promocao_id: params?.get("promo_id") || null,
+      cupom_id: params?.get("cupom_id") || null,
+      termo_busca: "",
+    };
   });
 
   const selectedDepartment = filters.departamento || "Todos";
@@ -1264,8 +1267,8 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
   }, [inheritedPromotions]);
 
   const activePromotions = useMemo(() => {
-    const idSet = new Set(activePromoIds.split(",").filter(Boolean));
-    return inheritedPromotions.filter((p) => idSet.has(p.id));
+    const now = new Date();
+    return inheritedPromotions.filter((p) => isPromotionActive(p, now));
   }, [inheritedPromotions, activePromoIds]);
 
   const selectedPromotion = useMemo(() => {
@@ -1515,14 +1518,16 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
       if (promoId) {
         const p = inheritedPromotions.find((pr) => pr.id === promoId);
         if (p) {
-          if (!p.isActive) {
+          if (!p.isActive || !isPromotionActive(p, new Date())) {
             toast.error(
               "Esta promoção não está mais ativa, mas confira outras ofertas!",
               { duration: 4000 },
             );
             resetFilters();
           } else {
-            selectPromotion(p.id);
+            if (filters.promocao_id !== p.id) {
+              selectPromotion(p.id);
+            }
           }
         } else {
           toast.error("Promoção não encontrada!", { duration: 4000 });
@@ -1530,7 +1535,7 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
         }
       }
     }
-  }, [inheritedPromotions]);
+  }, [inheritedPromotions, resetFilters, filters.promocao_id]);
 
   const previousActivePromoIdsRef = useRef<string>("");
 
@@ -1834,8 +1839,8 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
   }, [activePromotions, activeCouponFilter, matrizProducts, tenant.id]);
 
   const isProductInRule = useCallback((rule: PromotionRule | CouponRule, p: Product) => {
-    return checkProductMatchesRule(rule, p, matrizProducts, tenant.id);
-  }, [matrizProducts, tenant.id]);
+    return checkProductMatchesRule(rule, p, matrizProducts.length > 0 ? matrizProducts : products, tenant.id);
+  }, [matrizProducts, products, tenant.id]);
 
   const filteredProducts = useMemo<Product[]>(() => {
     const term = normalizeStr(debouncedSearchTerm);
@@ -1852,9 +1857,14 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
       processedTerm = TYPO_MAP[processedTerm];
     }
 
-    let sourceList = selectedPromotion
-      ? products.filter((p) => isProductInRule(selectedPromotion, p))
-      : products;
+    let sourceList = products;
+    if (filters.promocao_id) {
+      if (selectedPromotion) {
+        sourceList = products.filter((p) => isProductInRule(selectedPromotion, p));
+      } else {
+        sourceList = [];
+      }
+    }
 
     // Strict rule: Never show products with zero, negative or missing prices
     sourceList = sourceList.filter(p => typeof p.price === 'number' && p.price > 0);

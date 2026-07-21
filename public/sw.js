@@ -19,6 +19,14 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
+  const url = new URL(event.request.url);
+
+  // Bypass service worker interception for promo links and API calls
+  // This allows the browser to make direct network requests without SW promise rejections
+  if (url.searchParams.has('promo_id') || event.request.url.includes('promo_id') || url.pathname.includes('/api/')) {
+    return;
+  }
+
   // Pass-through strategy to satisfy PWA requirements with graceful error handling
   event.respondWith(
     fetch(event.request).catch((err) => {
