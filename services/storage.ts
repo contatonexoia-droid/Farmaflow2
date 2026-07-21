@@ -1107,51 +1107,78 @@ export const deleteOrder = async (orderId: string) => {
   }
 };
 
-export const mapDbPromotionToApp = (p: any): PromotionRule => ({
-  id: p.id,
-  tenantId: p.tenant_id || p.tenantid,
-  name: p.name || "",
-  type: p.type || "BUY_X_PAY_Y",
-  targetType: p.target_type || p.targettype || "PRODUCT",
-  targetValue: p.target_value || p.targetvalue || "",
-  buyX: p.buy_x || p.buyx,
-  payY: p.pay_y || p.payy,
-  lightningDiscountPercentage:
-    p.lightning_discount_percentage || p.lightningdiscountpercentage,
-  discountThresholds: p.discount_thresholds || p.discountthresholds || [],
-  comboProducts: p.combo_products || p.comboproducts || [],
-  comboDiscountPercentage:
-    p.combo_discount_percentage || p.combodiscountpercentage,
-  specificProductIds: p.specific_product_ids || p.specificproductids || [],
-  filtersMetadata: p.filters_metadata || p.filtersmetadata,
-  bundlePrice: p.bundle_price ?? (p.filters_metadata || p.filtersmetadata)?.bundlePrice,
-  bundleSlots: p.bundle_slots ?? (p.filters_metadata || p.filtersmetadata)?.bundleSlots,
-  highlightInCategoriesBar:
-    p.highlight_in_categories_bar ??
-    (p.filters_metadata || p.filtersmetadata)?.highlightInCategoriesBar,
-  highlightColor:
-    p.highlight_color ??
-    (p.filters_metadata || p.filtersmetadata)?.highlightColor,
-  highlightIcon:
-    p.highlight_icon ??
-    (p.filters_metadata || p.filtersmetadata)?.highlightIcon,
-  scheduleConfig: (p.filters_metadata || p.filtersmetadata)?.scheduleConfig,
-  startDate: p.start_date || p.startdate,
-  endDate: p.end_date || p.enddate,
-  isActive: p.is_active !== false && p.isactive !== false,
-  scope: p.scope || "SINGLE_STORE",
-});
+const safeParseJson = (field: any) => {
+  if (!field) return {};
+  if (typeof field === "string") {
+    try {
+      return JSON.parse(field);
+    } catch (e) {
+      console.error("Error parsing JSON field:", e);
+      return {};
+    }
+  }
+  return field;
+};
+
+export const mapDbPromotionToApp = (p: any): PromotionRule => {
+  const fm = safeParseJson(p.filters_metadata || p.filtersmetadata);
+  return {
+    id: p.id,
+    tenantId: p.tenant_id || p.tenantid,
+    name: p.name || "",
+    type: p.type || "BUY_X_PAY_Y",
+    targetType: p.target_type || p.targettype || "PRODUCT",
+    targetValue: p.target_value || p.targetvalue || "",
+    buyX: p.buy_x || p.buyx,
+    payY: p.pay_y || p.payy,
+    lightningDiscountPercentage:
+      p.lightning_discount_percentage || p.lightningdiscountpercentage,
+    discountThresholds: p.discount_thresholds || p.discountthresholds || [],
+    comboProducts: p.combo_products || p.comboproducts || [],
+    comboDiscountPercentage:
+      p.combo_discount_percentage || p.combodiscountpercentage,
+    specificProductIds: p.specific_product_ids || p.specificproductids || [],
+    filtersMetadata: fm,
+    bundlePrice: p.bundle_price ?? fm?.bundlePrice,
+    bundleSlots: p.bundle_slots ?? fm?.bundleSlots,
+    highlightInCategoriesBar:
+      p.highlight_in_categories_bar ?? fm?.highlightInCategoriesBar,
+    highlightColor:
+      p.highlight_color ?? fm?.highlightColor,
+    highlightIcon:
+      p.highlight_icon ?? fm?.highlightIcon,
+    scheduleConfig: fm?.scheduleConfig,
+    startDate: p.start_date || p.startdate,
+    endDate: p.end_date || p.enddate,
+    isActive: p.is_active !== false && p.isactive !== false,
+    scope: p.scope || "SINGLE_STORE",
+  };
+};
 
 export const getPromotionsByTenant = async (
   tenantId: string,
   networkId?: string,
 ): Promise<PromotionRule[]> => {
+  try {
+    // 1. Tenta buscar do endpoint público otimizado com cache (Init Fast Path)
+    const res = await fetch(`/api/v1/store/${tenantId}/init`);
+    if (res.ok) {
+      const json = await res.json();
+      if (json.promotions && Array.isArray(json.promotions)) {
+        return json.promotions.map(mapDbPromotionToApp);
+      }
+    }
+  } catch (e) {
+    console.warn("FALHA AO BUSCAR PROMOÇÕES PELO ENDPOINT DE INIT, USANDO FALLBACK SUPABASE:", e);
+  }
+
+  // Fallback: consulta direta ao Supabase
   if (!isSupabaseConfigured()) return [];
   try {
     return await retryRequest(async () => {
       let query = supabase.from("promotions").select("*");
       if (networkId) {
-        query = query.or(`tenant_id.eq.${tenantId},tenant_id.eq.${networkId}`);
+        query = query.or(`tenant_id.eq."${tenantId}",tenant_id.eq."${networkId}"`);
       } else {
         query = query.eq("tenant_id", tenantId);
       }
@@ -1222,34 +1249,51 @@ export const deletePromotion = async (id: string) => {
 
 import { CouponRule } from "../types";
 
-const mapCouponFromDB = (c: any): CouponRule => ({
-  id: c.id,
-  tenantId: c.tenant_id || c.tenantid,
-  code: c.code,
-  discountType: c.discount_type || c.discounttype,
-  discountValue: c.discount_value || c.discountvalue,
-  couponScope: c.coupon_scope || c.couponscope,
-  minPurchaseValue: c.min_purchase_value || c.minpurchasevalue,
-  targetType: c.target_type || c.targettype,
-  targetValue: c.target_value || c.targetvalue,
-  specificProductIds: c.specific_product_ids || c.specificproductids,
-  filtersMetadata: c.filters_metadata || c.filtersmetadata,
-  startDate: c.start_date || c.startdate,
-  endDate: c.end_date || c.enddate,
-  isActive: c.is_active !== false && c.isactive !== false,
-  scope: c.scope || "SINGLE_STORE",
-});
+const mapCouponFromDB = (c: any): CouponRule => {
+  const fm = safeParseJson(c.filters_metadata || c.filtersmetadata);
+  return {
+    id: c.id,
+    tenantId: c.tenant_id || c.tenantid,
+    code: c.code,
+    discountType: c.discount_type || c.discounttype,
+    discountValue: c.discount_value || c.discountvalue,
+    couponScope: c.coupon_scope || c.couponscope,
+    minPurchaseValue: c.min_purchase_value || c.minpurchasevalue,
+    targetType: c.target_type || c.targettype,
+    targetValue: c.target_value || c.targetvalue,
+    specificProductIds: c.specific_product_ids || c.specificproductids,
+    filtersMetadata: fm,
+    startDate: c.start_date || c.startdate,
+    endDate: c.end_date || c.enddate,
+    isActive: c.is_active !== false && c.isactive !== false,
+    scope: c.scope || "SINGLE_STORE",
+  };
+};
 
 export const getCouponsByTenant = async (
   tenantId: string,
   networkId?: string,
 ): Promise<CouponRule[]> => {
+  try {
+    // 1. Tenta buscar do endpoint público otimizado com cache (Init Fast Path)
+    const res = await fetch(`/api/v1/store/${tenantId}/init`);
+    if (res.ok) {
+      const json = await res.json();
+      if (json.coupons && Array.isArray(json.coupons)) {
+        return json.coupons.map(mapCouponFromDB);
+      }
+    }
+  } catch (e) {
+    console.warn("FALHA AO BUSCAR CUPONS PELO ENDPOINT DE INIT, USANDO FALLBACK SUPABASE:", e);
+  }
+
+  // Fallback: consulta direta ao Supabase
   if (!isSupabaseConfigured()) return [];
   try {
     return await retryRequest(async () => {
       let query = supabase.from("coupons").select("*");
       if (networkId) {
-        query = query.or(`tenant_id.eq.${tenantId},tenant_id.eq.${networkId}`);
+        query = query.or(`tenant_id.eq."${tenantId}",tenant_id.eq."${networkId}"`);
       } else {
         query = query.eq("tenant_id", tenantId);
       }
