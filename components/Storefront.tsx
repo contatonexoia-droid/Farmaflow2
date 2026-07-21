@@ -1109,7 +1109,7 @@ const HighlightText: React.FC<{ text: string; query: string }> = ({
   );
 };
 
-export const Storefront: React.FC<StorefrontProps> = ({
+export const Storefront: React.FC<StorefrontProps> = React.memo(({
   tenant,
   products,
   promotions = [],
@@ -3419,4 +3419,4 @@ export const Storefront: React.FC<StorefrontProps> = ({
       )}
     </div>
   );
-};
+});

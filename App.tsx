@@ -529,6 +529,15 @@ const App: React.FC = () => {
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [zoomImage, setZoomImage] = useState<string | null>(null);
 
+  const [activePromotionForSelected, setActivePromotionForSelected] = useState<PromotionRule | null>(null);
+  const [productSuggestions, setProductSuggestions] = useState<{
+    samePrinciple: any[];
+    samePrincipleTitle: string;
+    samePrincipleSubtitle: string;
+    otherSuggestions: any[];
+    selectedInfo: any;
+  } | null>(null);
+
   // Safe async session restoration on mount
   useEffect(() => {
     const restoreSession = async () => {
@@ -608,6 +617,26 @@ const App: React.FC = () => {
   const handleProductClick = useCallback((product: Product) => {
     setSelectedProduct(product);
     
+    let initialImage = fixImageUrl(product.image) || null;
+    const isGeneric =
+      product.drugType?.trim().toLowerCase() === "genérico" ||
+      product.drugType?.trim().toLowerCase() === "generico";
+    if (!initialImage && isGeneric) {
+      const mfgKey = product.manufacturer
+        ? Object.keys(currentTenant?.manufacturerLogos || {}).find(
+            (k) =>
+              k.trim().toLowerCase() ===
+              product.manufacturer?.trim().toLowerCase(),
+          )
+        : null;
+      if (mfgKey && currentTenant?.manufacturerLogos?.[mfgKey]) {
+        initialImage = fixImageUrl(currentTenant.manufacturerLogos[mfgKey]);
+      } else {
+        initialImage = GENERIC_PLACEHOLDER;
+      }
+    }
+    setPreviewImage(initialImage);
+    
     if (currentTenant?.id) {
       const source = sessionStorage.getItem("traffic_source") || "direct";
       fetch(`/api/v1/analytics/${currentTenant.id}/track-event`, {
@@ -620,7 +649,7 @@ const App: React.FC = () => {
         })
       }).catch(err => console.warn("Analytics tracking failed:", err));
     }
-  }, [currentTenant?.id]);
+  }, [currentTenant]);
 
   // --- NATIVE BACK BUTTON HANDLING (Browser History Sync) ---
   useEffect(() => {
@@ -1111,15 +1140,7 @@ const App: React.FC = () => {
     return () => clearInterval(interval);
   }, [promotions]);
 
-  const activePromotionForSelected = useMemo(() => {
-    if (!selectedProduct || promotions.length === 0) return null;
-    const idSet = new Set(activePromoIds.split(",").filter(Boolean));
 
-    return promotions.find((p) => {
-      if (!idSet.has(p.id)) return false;
-      return checkProductMatchesRule(p, selectedProduct, matrizProducts, currentTenant?.id);
-    });
-  }, [selectedProduct, promotions, activePromoIds, matrizProducts, currentTenant?.id]);
 
   // moved isMedicine logic to root level of component or file
   const normalize = (s: string) =>
@@ -1127,6 +1148,13 @@ const App: React.FC = () => {
       .toLowerCase()
       .normalize("NFD")
       .replace(/[\u0300-\u036f]/g, "");
+
+  const handleOpenCart = useCallback(() => handleViewChange(ViewMode.CART), [handleViewChange]);
+  const handleBackToDashboard = useCallback(() => {
+    if (session.type !== "GUEST") {
+      handleViewChange(session.type === "SUPER_ADMIN" ? ViewMode.ADMIN_SUPER : ViewMode.ADMIN_PHARMACY);
+    }
+  }, [handleViewChange, session.type]);
 
   const checkIsMedicine = (p: Product) => {
     const nCat = normalize(p.category);
@@ -1166,658 +1194,725 @@ const App: React.FC = () => {
     return false;
   };
 
-  const productSuggestions = useMemo(() => {
-    if (!selectedProduct || !currentTenant || products.length === 0)
-      return {
-        samePrinciple: [],
-        otherSuggestions: [],
-        selectedInfo: { dosage: "", presentationType: "" },
+  useEffect(() => {
+    if (!selectedProduct) {
+      setActivePromotionForSelected(null);
+      setProductSuggestions(null);
+      return;
+    }
+
+    setActivePromotionForSelected(null);
+    setProductSuggestions(null);
+
+    const timer = setTimeout(() => {
+      const idSet = new Set(activePromoIds.split(",").filter(Boolean));
+      const activePromo = promotions.find((p) => {
+        if (!idSet.has(p.id)) return false;
+        return checkProductMatchesRule(p, selectedProduct, matrizProducts, currentTenant?.id);
+      }) || null;
+      setActivePromotionForSelected(activePromo);
+
+      if (!currentTenant || products.length === 0) {
+        setProductSuggestions({
+          samePrinciple: [],
+          samePrincipleTitle: "Opções com a mesma fórmula",
+          samePrincipleSubtitle: "Mesma fórmula e apresentação",
+          otherSuggestions: [],
+          selectedInfo: { dosage: "", presentationType: "" },
+        });
+        return;
+      }
+
+      const parseDosageAndPresentation = (
+        productName: string,
+        presentationField?: string,
+      ) => {
+        const name = normalize(productName);
+        const pres = normalize(presentationField || "");
+
+        const dosageRegex =
+          /\b(\d+(?:[.,]\d+)?\s*(?:mg|g|mcg|ml|ui|u\.i\.|meq|%)(?:\/\d*(?:ml|g|mg))?)\b/i;
+
+        let dosage = "";
+        const nameDosageMatch = name.match(dosageRegex);
+        if (nameDosageMatch) {
+          dosage = nameDosageMatch[1].replace(/\s+/g, "");
+        } else {
+          const presDosageMatch = pres.match(dosageRegex);
+          if (presDosageMatch) {
+            dosage = presDosageMatch[1].replace(/\s+/g, "");
+          }
+        }
+
+        let presentationType = "";
+        const presTypes = [
+          {
+            type: "comprimido",
+            keywords: [
+              "comprimido",
+              "comprimidos",
+              "comp",
+              "cpr",
+              "drg",
+              "dragea",
+              "drageas",
+              "capsula",
+              "capsulas",
+              "cap",
+              "caps",
+              "cps",
+            ],
+          },
+          { type: "gotas", keywords: ["gotas", "gota", "gts"] },
+          {
+            type: "xarope",
+            keywords: [
+              "xarope",
+              "xaropes",
+              "xpe",
+              "solucao oral",
+              "suspensao oral",
+            ],
+          },
+          {
+            type: "pomada",
+            keywords: [
+              "pomada",
+              "pomadas",
+              "pom",
+              "creme",
+              "cremes",
+              "gel",
+              "geis",
+            ],
+          },
+          {
+            type: "injetavel",
+            keywords: [
+              "injetavel",
+              "injetaveis",
+              "inj",
+              "ampola",
+              "ampolas",
+              "amp",
+            ],
+          },
+          {
+            type: "supositorio",
+            keywords: ["supositorio", "supositorios", "sup"],
+          },
+          { type: "po", keywords: ["po", "envelope", "envelopes", "env"] },
+          { type: "spray", keywords: ["spray", "sprays", "aerosol", "aerosois"] },
+          {
+            type: "colirio",
+            keywords: ["colirio", "colirios", "solucao oftalmica"],
+          },
+        ];
+
+        for (const pt of presTypes) {
+          if (
+            pt.keywords.some(
+              (k) =>
+                name.match(new RegExp(`\\b${k}\\b`)) ||
+                pres.match(new RegExp(`\\b${k}\\b`)),
+            )
+          ) {
+            presentationType = pt.type;
+            break;
+          }
+        }
+
+        return { dosage, presentationType };
       };
 
-    const parseDosageAndPresentation = (
-      productName: string,
-      presentationField?: string,
-    ) => {
-      const name = normalize(productName);
-      const pres = normalize(presentationField || "");
-
-      const dosageRegex =
-        /\b(\d+(?:[.,]\d+)?\s*(?:mg|g|mcg|ml|ui|u\.i\.|meq|%)(?:\/\d*(?:ml|g|mg))?)\b/i;
-
-      let dosage = "";
-      const nameDosageMatch = name.match(dosageRegex);
-      if (nameDosageMatch) {
-        dosage = nameDosageMatch[1].replace(/\s+/g, "");
-      } else {
-        const presDosageMatch = pres.match(dosageRegex);
-        if (presDosageMatch) {
-          dosage = presDosageMatch[1].replace(/\s+/g, "");
-        }
-      }
-
-      let presentationType = "";
-      const presTypes = [
-        {
-          type: "comprimido",
-          keywords: [
-            "comprimido",
-            "comprimidos",
-            "comp",
-            "cpr",
-            "drg",
-            "dragea",
-            "drageas",
-            "capsula",
-            "capsulas",
-            "cap",
-            "caps",
-            "cps",
-          ],
-        },
-        { type: "gotas", keywords: ["gotas", "gota", "gts"] },
-        {
-          type: "xarope",
-          keywords: [
-            "xarope",
-            "xaropes",
-            "xpe",
-            "solucao oral",
-            "suspensao oral",
-          ],
-        },
-        {
-          type: "pomada",
-          keywords: [
-            "pomada",
-            "pomadas",
-            "pom",
-            "creme",
-            "cremes",
-            "gel",
-            "geis",
-          ],
-        },
-        {
-          type: "injetavel",
-          keywords: [
-            "injetavel",
-            "injetaveis",
-            "inj",
-            "ampola",
-            "ampolas",
-            "amp",
-          ],
-        },
-        {
-          type: "supositorio",
-          keywords: ["supositorio", "supositorios", "sup"],
-        },
-        { type: "po", keywords: ["po", "envelope", "envelopes", "env"] },
-        { type: "spray", keywords: ["spray", "sprays", "aerosol", "aerosois"] },
-        {
-          type: "colirio",
-          keywords: ["colirio", "colirios", "solucao oftalmica"],
-        },
-      ];
-
-      for (const pt of presTypes) {
-        if (
-          pt.keywords.some(
-            (k) =>
-              name.match(new RegExp(`\\b${k}\\b`)) ||
-              pres.match(new RegExp(`\\b${k}\\b`)),
-          )
-        ) {
-          presentationType = pt.type;
-          break;
-        }
-      }
-
-      return { dosage, presentationType };
-    };
-
-    const selectedInfo = parseDosageAndPresentation(
-      selectedProduct.name,
-      selectedProduct.presentation,
-    );
-
-    const otherProducts = products.filter(
-      (p) => p.id !== selectedProduct.id && p.stock > 0,
-    );
-
-    const salesCounts: Record<string, number> = {};
-    orders.forEach((order) => {
-      order.items.forEach((item) => {
-        salesCounts[item.id] = (salesCounts[item.id] || 0) + item.quantity;
-      });
-    });
-
-    const isSelectedMedicine = checkIsMedicine(selectedProduct);
-    const validPrinciple =
-      selectedProduct.activePrinciple &&
-      !["isento", "n/a", "nenhum", "nao se aplica"].includes(
-        normalize(selectedProduct.activePrinciple),
+      const selectedInfo = parseDosageAndPresentation(
+        selectedProduct.name,
+        selectedProduct.presentation,
       );
 
-    let samePrinciple: any[] = [];
-    let samePrincipleTitle = "Opções com a mesma fórmula";
-    let samePrincipleSubtitle = "Mesma fórmula e apresentação";
+      const otherProducts = products.filter(
+        (p) => p.id !== selectedProduct.id && p.stock > 0,
+      );
 
-    // Trava de Categoria (Hard Constraint)
-    const categoryRestrictedProducts = otherProducts.filter(
-      (p) => p.category === selectedProduct.category,
-    );
+      const salesCounts: Record<string, number> = {};
+      orders.forEach((order) => {
+        order.items.forEach((item) => {
+          salesCounts[item.id] = (salesCounts[item.id] || 0) + item.quantity;
+        });
+      });
 
-    if (isSelectedMedicine && validPrinciple) {
-      samePrinciple = categoryRestrictedProducts
-        .filter((p) => {
-          if (!p.activePrinciple) return false;
-          return (
-            normalize(p.activePrinciple) ===
-            normalize(selectedProduct.activePrinciple)
+      const isSelectedMedicine = checkIsMedicine(selectedProduct);
+      const validPrinciple =
+        selectedProduct.activePrinciple &&
+        !["isento", "n/a", "nenhum", "nao se aplica"].includes(
+          normalize(selectedProduct.activePrinciple),
+        );
+
+      let samePrinciple: any[] = [];
+      let samePrincipleTitle = "Opções com a mesma fórmula";
+      let samePrincipleSubtitle = "Mesma fórmula e apresentação";
+
+      const categoryRestrictedProducts = otherProducts.filter(
+        (p) => p.category === selectedProduct.category,
+      );
+
+      const PHARMA_SYNONYMS: Record<string, string[]> = {
+        "tegretol": ["carbamazepina"],
+        "novalgina": ["dipirona"],
+        "tylenol": ["paracetamol"],
+        "neosaldina": ["dipirona", "isometepteno", "cafeina"],
+        "dorflex": ["dipirona", "orfenadrina", "cafeina"],
+        "buscopan": ["escopolamina"],
+        "glifage": ["metformina"],
+        "rivotril": ["clonazepam"],
+        "roacutan": ["isotretinoina"],
+        "ozempic": ["semaglutida"],
+        "viagra": ["sildenafila"],
+        "cialis": ["tadalafila"]
+      };
+
+      if (isSelectedMedicine && validPrinciple) {
+        const selectedPrincipleNormalized = normalize(selectedProduct.activePrinciple);
+        const selectedNameNormalized = normalize(selectedProduct.name);
+        
+        let searchTokens = selectedPrincipleNormalized
+          .split(/[\s\+]+/)
+          .filter(t => t.length > 3);
+          
+        for (const [brand, synonyms] of Object.entries(PHARMA_SYNONYMS)) {
+          if (selectedNameNormalized.includes(brand)) {
+            searchTokens = [...searchTokens, ...synonyms];
+          }
+        }
+
+        samePrinciple = otherProducts
+          .filter((p) => {
+            const pPrinciple = p.activePrinciple ? normalize(p.activePrinciple) : "";
+            const pName = normalize(p.name);
+            
+            if (pPrinciple === selectedPrincipleNormalized) return true;
+            
+            if (searchTokens.length > 0) {
+               return searchTokens.some(token => 
+                 pPrinciple.includes(token) || pName.includes(token)
+               );
+            }
+            return false;
+          })
+          .map((p) => {
+            const pInfo = parseDosageAndPresentation(p.name, p.presentation);
+            let matchScore = 0;
+            if (selectedInfo.dosage && pInfo.dosage === selectedInfo.dosage)
+              matchScore += 2;
+            if (
+              selectedInfo.presentationType &&
+              pInfo.presentationType === selectedInfo.presentationType
+            )
+              matchScore += 1;
+            return { ...p, suggestionBadge: "Mesma Fórmula", matchScore };
+          })
+          .sort((a, b) => {
+            if (b.matchScore !== a.matchScore) return b.matchScore - a.matchScore;
+            return a.price - b.price;
+          });
+
+        if (selectedInfo.dosage || selectedInfo.presentationType) {
+          samePrincipleTitle =
+            `Opções equivalentes em ${selectedInfo.dosage || ""} ${selectedInfo.presentationType ? selectedInfo.presentationType.charAt(0).toUpperCase() + selectedInfo.presentationType.slice(1) : ""}`.trim();
+        }
+      } else {
+        const nCatStr = normalize(selectedProduct.category);
+        let customVariantWord = "opções";
+        if (
+          nCatStr.includes("desodorante") ||
+          nCatStr.includes("sabonete") ||
+          nCatStr.includes("perfume")
+        ) {
+          customVariantWord = "fragrâncias";
+        } else if (nCatStr.includes("fralda")) {
+          customVariantWord = "tamanhos";
+        } else if (
+          nCatStr.includes("cabelo") ||
+          nCatStr.includes("shampoo") ||
+          nCatStr.includes("tintura")
+        ) {
+          customVariantWord = "variações/cores";
+        }
+
+        if (selectedProduct.manufacturer) {
+          samePrincipleTitle = `Mais ${customVariantWord} de ${selectedProduct.manufacturer}`;
+        } else {
+          samePrincipleTitle = `Outras ${customVariantWord} deste produto`;
+        }
+
+        samePrincipleSubtitle = "Variações da mesma linha ou fabricante";
+
+        const hasGroupingSlug =
+          selectedProduct.groupingSlug &&
+          selectedProduct.groupingSlug.trim() !== "";
+
+        const getBaseTokens = (name: string) => {
+          let n = normalize(name);
+          n = n.replace(
+            /\b(kit|l\d+p\d+|leve\s*\d+\s*pague|pack|promocional|combo)\b/g,
+            "",
           );
-        })
-        .map((p) => {
-          const pInfo = parseDosageAndPresentation(p.name, p.presentation);
-          let matchScore = 0;
-          if (selectedInfo.dosage && pInfo.dosage === selectedInfo.dosage)
-            matchScore += 2;
+          n = n.replace(
+            /\b(\d+(?:[.,]\d+)?\s*(?:g|mg|ml|l|kg|un|unidades?))\b/g,
+            "",
+          );
+          n = n.replace(/\b(rn|p|m|g|gg|xg|xxg)\b/g, "");
+          return n.split(" ").filter((w) => w.length > 2);
+        };
+
+        const getCommercialType = (name: string) => {
+          const n = normalize(name);
           if (
-            selectedInfo.presentationType &&
-            pInfo.presentationType === selectedInfo.presentationType
+            n.includes("kit") ||
+            n.match(/l\d+p\d+/) ||
+            n.match(/leve\s*\d+\s*pague/)
           )
-            matchScore += 1;
-          return { ...p, suggestionBadge: "Mesma Fórmula", matchScore };
-        })
-        .sort((a, b) => {
+            return "kit";
+          return "unit";
+        };
+
+        const extractSizeOrVariant = (name: string, category: string) => {
+          const n = name.toUpperCase();
+          if (normalize(category).includes("fralda")) {
+            const match = n.match(/\b(RN|P|M|G|GG|XG|XXG)\b/);
+            if (match) return `Tam. ${match[1]}`;
+          }
+          const sizeMatch = n.match(
+            /\b(\d+(?:[.,]\d+)?\s*(?:G|MG|ML|L|KG|UN|UNIDADES?))\b/,
+          );
+          if (sizeMatch) return sizeMatch[1];
+          return "Variação";
+        };
+
+        const selectedTokens = getBaseTokens(selectedProduct.name);
+        const selectedCT = getCommercialType(selectedProduct.name);
+        const selectedPrice = selectedProduct.price;
+
+        const possibleSuggestions = categoryRestrictedProducts
+          .map((p) => {
+            let score = 0;
+            const isSameBrand =
+              p.manufacturer &&
+              selectedProduct.manufacturer &&
+              p.manufacturer === selectedProduct.manufacturer;
+            const isSamePrice = Math.abs(p.price - selectedPrice) < 0.01;
+            const isSimilarPrice =
+              p.price >= selectedPrice * 0.95 && p.price <= selectedPrice * 1.05;
+
+            if (
+              hasGroupingSlug &&
+              p.groupingSlug === selectedProduct.groupingSlug
+            ) {
+              score += 1000;
+            }
+
+            const pTokens = getBaseTokens(p.name);
+            let tokenMatches = 0;
+            selectedTokens.forEach((t) => {
+              if (pTokens.includes(t)) tokenMatches++;
+            });
+
+            const requiredMatches = Math.min(2, selectedTokens.length);
+            const isSameLine =
+              tokenMatches >= requiredMatches && tokenMatches > 0;
+
+            if (isSameLine) {
+              score += tokenMatches * 10;
+              score += 100;
+            }
+
+            const isCrossSell = isSameBrand && !isSameLine;
+
+            if (!isSameLine && !isCrossSell) {
+              return null;
+            }
+
+            if (isSameBrand) score += 10;
+
+            const pCT = getCommercialType(p.name);
+            if (pCT === selectedCT) {
+              score += 50;
+            }
+
+            if (isSamePrice) {
+              score += 200;
+            } else if (isSimilarPrice) {
+              score += 50;
+            }
+
+            if (!isSameLine && !isSimilarPrice) {
+              return null;
+            }
+
+            let badge = p.variantAttribute;
+            if (!badge) {
+              if (isSameLine) badge = extractSizeOrVariant(p.name, p.category);
+              else if (isCrossSell) badge = "Combinar";
+              else badge = pCT === "kit" ? "Opção em Kit" : "Unidade Genérica";
+            }
+
+            return { ...p, suggestionBadge: badge, matchScore: score };
+          })
+          .filter(Boolean);
+
+        samePrinciple = (possibleSuggestions as any[]).sort((a, b) => {
           if (b.matchScore !== a.matchScore) return b.matchScore - a.matchScore;
           return a.price - b.price;
         });
-
-      if (selectedInfo.dosage || selectedInfo.presentationType) {
-        samePrincipleTitle =
-          `Opções equivalentes em ${selectedInfo.dosage || ""} ${selectedInfo.presentationType ? selectedInfo.presentationType.charAt(0).toUpperCase() + selectedInfo.presentationType.slice(1) : ""}`.trim();
-      }
-    } else {
-      // Nova Lógica para Perfumaria, Dermo, Fraldas e Higiene (Priorizando Tipo Comercial)
-      const nCatStr = normalize(selectedProduct.category);
-      let customVariantWord = "opções";
-      if (
-        nCatStr.includes("desodorante") ||
-        nCatStr.includes("sabonete") ||
-        nCatStr.includes("perfume")
-      ) {
-        customVariantWord = "fragrâncias";
-      } else if (nCatStr.includes("fralda")) {
-        customVariantWord = "tamanhos";
-      } else if (
-        nCatStr.includes("cabelo") ||
-        nCatStr.includes("shampoo") ||
-        nCatStr.includes("tintura")
-      ) {
-        customVariantWord = "variações/cores";
       }
 
-      if (selectedProduct.manufacturer) {
-        // Se as palavras-chave já incluem a marca, evita "fragrâncias de Rexona de Rexona"
-        samePrincipleTitle = `Mais ${customVariantWord} de ${selectedProduct.manufacturer}`;
-      } else {
-        samePrincipleTitle = `Outras ${customVariantWord} deste produto`;
-      }
-
-      samePrincipleSubtitle = "Variações da mesma linha ou fabricante";
-
-      const hasGroupingSlug =
-        selectedProduct.groupingSlug &&
-        selectedProduct.groupingSlug.trim() !== "";
-
-      const getBaseTokens = (name: string) => {
-        let n = normalize(name);
-        n = n.replace(
-          /\b(kit|l\d+p\d+|leve\s*\d+\s*pague|pack|promocional|combo)\b/g,
-          "",
-        );
-        n = n.replace(
-          /\b(\d+(?:[.,]\d+)?\s*(?:g|mg|ml|l|kg|un|unidades?))\b/g,
-          "",
-        );
-        // Remove tamanhos de fralda
-        n = n.replace(/\b(rn|p|m|g|gg|xg|xxg)\b/g, "");
-        return n.split(" ").filter((w) => w.length > 2); // Palavras com mais de 2 letras
-      };
-
-      const getCommercialType = (name: string) => {
-        const n = normalize(name);
-        if (
-          n.includes("kit") ||
-          n.match(/l\d+p\d+/) ||
-          n.match(/leve\s*\d+\s*pague/)
-        )
-          return "kit";
-        return "unit";
-      };
-
-      const extractSizeOrVariant = (name: string, category: string) => {
-        const n = name.toUpperCase();
-        // Evitar conflito com "COM", "OU", etc.
-        if (normalize(category).includes("fralda")) {
-          const match = n.match(/\b(RN|P|M|G|GG|XG|XXG)\b/);
-          if (match) return `Tam. ${match[1]}`;
-        }
-        const sizeMatch = n.match(
-          /\b(\d+(?:[.,]\d+)?\s*(?:G|MG|ML|L|KG|UN|UNIDADES?))\b/,
-        );
-        if (sizeMatch) return sizeMatch[1];
-        return "Variação";
-      };
-
-      const selectedTokens = getBaseTokens(selectedProduct.name);
-      const selectedCT = getCommercialType(selectedProduct.name);
-      const selectedPrice = selectedProduct.price;
-
-      const possibleSuggestions = categoryRestrictedProducts
-        .map((p) => {
-          let score = 0;
-          const isSameBrand =
-            p.manufacturer &&
-            selectedProduct.manufacturer &&
-            p.manufacturer === selectedProduct.manufacturer;
-          const isSamePrice = Math.abs(p.price - selectedPrice) < 0.01;
-          const isSimilarPrice =
-            p.price >= selectedPrice * 0.95 && p.price <= selectedPrice * 1.05;
-
-          // Priority 0: Exact Grouping Slug match
-          if (
-            hasGroupingSlug &&
-            p.groupingSlug === selectedProduct.groupingSlug
-          ) {
-            score += 1000;
-          }
-
-          // Priority 1: Similar Base Name (Size Grid / Line Variation)
-          const pTokens = getBaseTokens(p.name);
-          let tokenMatches = 0;
-          selectedTokens.forEach((t) => {
-            if (pTokens.includes(t)) tokenMatches++;
+      const fbtCounts: Record<string, number> = {};
+      orders.forEach((order) => {
+        if (order.items.some((item) => item.id === selectedProduct.id)) {
+          order.items.forEach((item) => {
+            if (item.id !== selectedProduct.id) {
+              fbtCounts[item.id] = (fbtCounts[item.id] || 0) + 1;
+            }
           });
-
-          const requiredMatches = Math.min(2, selectedTokens.length);
-          const isSameLine =
-            tokenMatches >= requiredMatches && tokenMatches > 0;
-
-          if (isSameLine) {
-            score += tokenMatches * 10;
-            score += 100; // Base presence bonus
-          }
-
-          // Priority 2: Cross-Selling Same Brand (Already same category because of Category filter)
-          const isCrossSell = isSameBrand && !isSameLine;
-
-          if (!isSameLine && !isCrossSell) {
-            return null; // Don't suggest
-          }
-
-          if (isSameBrand) score += 10;
-
-          // Formato Comercial
-          const pCT = getCommercialType(p.name);
-          if (pCT === selectedCT) {
-            score += 50;
-          }
-
-          // Filtro de Assertividade (Preço idêntico = Mesma oferta de valor)
-          if (isSamePrice) {
-            score += 200; // Prioridade absurda
-          } else if (isSimilarPrice) {
-            score += 50;
-          }
-
-          // Se for cross-sell, precisa ser parecido no preço para não poluir
-          if (!isSameLine && !isSimilarPrice) {
-            return null;
-          }
-
-          let badge = p.variantAttribute;
-          if (!badge) {
-            if (isSameLine) badge = extractSizeOrVariant(p.name, p.category);
-            else if (isCrossSell) badge = "Combinar";
-            else badge = pCT === "kit" ? "Opção em Kit" : "Unidade Genérica";
-          }
-
-          return { ...p, suggestionBadge: badge, matchScore: score };
-        })
-        .filter(Boolean);
-
-      samePrinciple = (possibleSuggestions as any[]).sort((a, b) => {
-        if (b.matchScore !== a.matchScore) return b.matchScore - a.matchScore;
-        return a.price - b.price;
+        }
       });
-    }
 
-    const fbtCounts: Record<string, number> = {};
-    orders.forEach((order) => {
-      if (order.items.some((item) => item.id === selectedProduct.id)) {
-        order.items.forEach((item) => {
-          if (item.id !== selectedProduct.id) {
-            fbtCounts[item.id] = (fbtCounts[item.id] || 0) + 1;
+      const isPediatric = (name: string, cat: string) => {
+        const n = normalize(name + " " + cat);
+        return (
+          n.includes("infantil") ||
+          n.includes("bebe") ||
+          n.includes("pediatrico") ||
+          n.includes("fralda")
+        );
+      };
+
+      const selectedIsPediatric = isPediatric(
+        selectedProduct.name,
+        selectedProduct.category,
+      );
+
+      const TAG_AFFINITY = [
+        {
+          keywords: [
+            "dipirona",
+            "paracetamol",
+            "dor",
+            "febre",
+            "analgesico",
+            "ibuprofeno",
+          ],
+          affinities: [
+            "vitamina c",
+            "termometro",
+            "antigripal",
+            "gripe",
+            "resfriado",
+          ],
+        },
+        {
+          keywords: [
+            "antiacido",
+            "laxante",
+            "digestao",
+            "estomago",
+            "figado",
+            "epocler",
+            "eno",
+            "digestivo",
+          ],
+          affinities: ["probiotico", "cha", "soro", "reidratante", "flora"],
+        },
+        {
+          keywords: [
+            "pasta",
+            "dente",
+            "creme dental",
+            "higiene oral",
+            "bucal",
+            "colgate",
+            "sorriso",
+          ],
+          affinities: [
+            "fio dental",
+            "enxaguante",
+            "escova",
+            "antisseptico bucal",
+          ],
+        },
+        {
+          keywords: [
+            "absorvente",
+            "intimo",
+            "colica",
+            "feminino",
+            "mulher",
+            "sempre livre",
+            "intimus",
+          ],
+          affinities: [
+            "sabonete intimo",
+            "analgesico",
+            "hidratante",
+            "buscopan",
+            "ponstan",
+          ],
+        },
+        {
+          keywords: [
+            "barbear",
+            "barba",
+            "prestobarba",
+            "gillette",
+            "masculino",
+            "homem",
+          ],
+          affinities: ["pos-barba", "desodorante", "shampoo", "men"],
+        },
+        {
+          keywords: [
+            "curativo",
+            "gaze",
+            "primeiros socorros",
+            "band-aid",
+            "atadura",
+          ],
+          affinities: [
+            "antisseptico",
+            "esparadrapo",
+            "alcool",
+            "merthiolate",
+            "nebacetin",
+          ],
+        },
+        {
+          keywords: [
+            "protetor solar",
+            "dermocosmetico",
+            "solar",
+            "sundown",
+            "nivea sun",
+          ],
+          affinities: [
+            "hidratante facial",
+            "agua micelar",
+            "lip balm",
+            "pos sol",
+            "facial",
+          ],
+        },
+      ];
+
+      const prodNameCat = normalize(
+        selectedProduct.name + " " + selectedProduct.category,
+      );
+      let activeAffinities: string[] = [];
+      for (const mapping of TAG_AFFINITY) {
+        if (mapping.keywords.some((k) => prodNameCat.includes(normalize(k)))) {
+          activeAffinities.push(...mapping.affinities);
+        }
+      }
+
+      const relevantIds = new Set<string>();
+      otherProducts.forEach((p) => {
+        if (p.category === selectedProduct.category) {
+          relevantIds.add(p.id);
+        }
+      });
+      Object.keys(fbtCounts).forEach((id) => relevantIds.add(id));
+      if (selectedProduct.manufacturer) {
+        otherProducts.forEach((p) => {
+          if (p.manufacturer === selectedProduct.manufacturer) {
+            relevantIds.add(p.id);
           }
         });
       }
-    });
-
-    const isPediatric = (name: string, cat: string) => {
-      const n = normalize(name + " " + cat);
-      return (
-        n.includes("infantil") ||
-        n.includes("bebe") ||
-        n.includes("pediatrico") ||
-        n.includes("fralda")
-      );
-    };
-
-    const selectedIsPediatric = isPediatric(
-      selectedProduct.name,
-      selectedProduct.category,
-    );
-
-    const TAG_AFFINITY = [
-      {
-        keywords: [
-          "dipirona",
-          "paracetamol",
-          "dor",
-          "febre",
-          "analgesico",
-          "ibuprofeno",
-        ],
-        affinities: [
-          "vitamina c",
-          "termometro",
-          "antigripal",
-          "gripe",
-          "resfriado",
-        ],
-      },
-      {
-        keywords: [
-          "antiacido",
-          "laxante",
-          "digestao",
-          "estomago",
-          "figado",
-          "epocler",
-          "eno",
-          "digestivo",
-        ],
-        affinities: ["probiotico", "cha", "soro", "reidratante", "flora"],
-      },
-      {
-        keywords: [
-          "pasta",
-          "dente",
-          "creme dental",
-          "higiene oral",
-          "bucal",
-          "colgate",
-          "sorriso",
-        ],
-        affinities: [
-          "fio dental",
-          "enxaguante",
-          "escova",
-          "antisseptico bucal",
-        ],
-      },
-      {
-        keywords: [
-          "absorvente",
-          "intimo",
-          "colica",
-          "feminino",
-          "mulher",
-          "sempre livre",
-          "intimus",
-        ],
-        affinities: [
-          "sabonete intimo",
-          "analgesico",
-          "hidratante",
-          "buscopan",
-          "ponstan",
-        ],
-      },
-      {
-        keywords: [
-          "barbear",
-          "barba",
-          "prestobarba",
-          "gillette",
-          "masculino",
-          "homem",
-        ],
-        affinities: ["pos-barba", "desodorante", "shampoo", "men"],
-      },
-      {
-        keywords: [
-          "curativo",
-          "gaze",
-          "primeiros socorros",
-          "band-aid",
-          "atadura",
-        ],
-        affinities: [
-          "antisseptico",
-          "esparadrapo",
-          "alcool",
-          "merthiolate",
-          "nebacetin",
-        ],
-      },
-      {
-        keywords: [
-          "protetor solar",
-          "dermocosmetico",
-          "solar",
-          "sundown",
-          "nivea sun",
-        ],
-        affinities: [
-          "hidratante facial",
-          "agua micelar",
-          "lip balm",
-          "pos sol",
-          "facial",
-        ],
-      },
-    ];
-
-    const prodNameCat = normalize(
-      selectedProduct.name + " " + selectedProduct.category,
-    );
-    let activeAffinities: string[] = [];
-    for (const mapping of TAG_AFFINITY) {
-      if (mapping.keywords.some((k) => prodNameCat.includes(normalize(k)))) {
-        activeAffinities.push(...mapping.affinities);
-      }
-    }
-
-    let availableForSuggestion = otherProducts.filter(
-      (p) => !samePrinciple.find((s) => s.id === p.id),
-    );
-
-    const isSelectedControlled = isControlledProduct(selectedProduct);
-
-    if (!selectedIsPediatric) {
-      availableForSuggestion = availableForSuggestion.filter(
-        (p) => !isPediatric(p.name, p.category),
-      );
-    }
-
-    if (isSelectedControlled) {
-      availableForSuggestion = availableForSuggestion.filter(
-        (p) => !isControlledProduct(p),
-      );
-    }
-
-    const scoredProducts = availableForSuggestion.map((p) => {
-      let score = 0;
-
-      if (fbtCounts[p.id]) {
-        score += fbtCounts[p.id] * 500; // Prioridade máxima para itens realmente comprados juntos
+      otherProducts.forEach((p) => {
+        if (p.isFeatured) {
+          relevantIds.add(p.id);
+        }
+      });
+      if (relevantIds.size < 60) {
+        otherProducts.slice(0, 100).forEach((p) => relevantIds.add(p.id));
       }
 
-      const pNameCat = normalize(p.name + " " + p.category);
-      if (activeAffinities.some((aff) => pNameCat.includes(normalize(aff)))) {
-        score += 100;
-      }
+      let availableForSuggestion = otherProducts.filter(
+        (p) => relevantIds.has(p.id) && !samePrinciple.find((s) => s.id === p.id),
+      );
 
-      const affinityCategories =
-        THERAPEUTIC_AFFINITY[selectedProduct.category] ||
-        THERAPEUTIC_AFFINITY["Geral"] ||
-        [];
+      const isSelectedControlled = isControlledProduct(selectedProduct);
+
+      if (!selectedIsPediatric) {
+        availableForSuggestion = availableForSuggestion.filter(
+          (p) => !isPediatric(p.name, p.category),
+        );
+      }
 
       if (isSelectedControlled) {
-        if (
-          pNameCat.includes("higiene") ||
-          pNameCat.includes("beleza") ||
-          pNameCat.includes("perfumaria") ||
-          pNameCat.includes("vitamina") ||
-          pNameCat.includes("cuidados")
-        ) {
-          score += 50;
-        }
-      } else {
-        if (p.category === selectedProduct.category) {
-          score += 15;
-        } else if (affinityCategories.includes(p.category)) {
-          score += 25;
-        }
+        availableForSuggestion = availableForSuggestion.filter(
+          (p) => !isControlledProduct(p),
+        );
       }
 
-      const hasDiscount =
-        p.promotionType === "DISCOUNT" &&
-        p.originalPrice &&
-        p.originalPrice > p.price;
-      
-      // Diminuímos o peso genérico de destaque/desconto para evitar que os mesmos produtos sempre vençam
-      if (p.isFeatured) score += 40;
-      if (hasDiscount) score += 30;
+      const scoredProducts = availableForSuggestion.map((p) => {
+        let score = 0;
 
-      score += (salesCounts[p.id] || 0) * 0.1;
-      score += p.stock * 0.001;
+        if (fbtCounts[p.id]) {
+          score += fbtCounts[p.id] * 500;
+        }
 
-      // Adiciona um fator pseudo-aleatório baseado no produto selecionado e no produto candidato.
-      // Isso garante que a lista de sugestões (quando usa fallback) seja diferente para cada produto,
-      // quebrando a repetição exata dos mesmos 10 produtos em destaque.
-      const hashStr = String(selectedProduct.id) + String(p.id);
-      let hash = 0;
-      for (let i = 0; i < hashStr.length; i++) {
-        hash = (hash << 5) - hash + hashStr.charCodeAt(i);
-        hash |= 0;
-      }
-      const jitter = (Math.abs(hash) % 100) / 100; // 0.00 a 0.99
-      score += jitter * 45; // Até 45 pontos de variabilidade
+        const pNameCat = normalize(p.name + " " + p.category);
+        if (activeAffinities.some((aff) => pNameCat.includes(normalize(aff)))) {
+          score += 100;
+        }
 
-      return { product: p, score };
-    });
+        const affinityCategories =
+          THERAPEUTIC_AFFINITY[selectedProduct.category] ||
+          THERAPEUTIC_AFFINITY["Geral"] ||
+          [];
 
-    const sameCatProducts = scoredProducts
-      .filter((sp) => sp.product.category === selectedProduct.category)
-      .sort((a, b) => b.score - a.score);
-    const diffCatProducts = scoredProducts
-      .filter((sp) => sp.product.category !== selectedProduct.category)
-      .sort((a, b) => b.score - a.score);
+        if (isSelectedControlled) {
+          if (
+            pNameCat.includes("higiene") ||
+            pNameCat.includes("beleza") ||
+            pNameCat.includes("perfumaria") ||
+            pNameCat.includes("vitamina") ||
+            pNameCat.includes("cuidados")
+          ) {
+            score += 50;
+          }
+        } else {
+          if (p.category === selectedProduct.category) {
+            score += 15;
+          } else if (affinityCategories.includes(p.category)) {
+            score += 25;
+          }
+        }
 
-    const sameCatSuggestions = sameCatProducts.slice(0, 4);
-    const diffCatSuggestions = diffCatProducts.slice(
-      0,
-      10 - sameCatSuggestions.length,
-    );
+        const hasDiscount =
+          p.promotionType === "DISCOUNT" &&
+          p.originalPrice &&
+          p.originalPrice > p.price;
+        
+        if (p.isFeatured) score += 40;
+        if (hasDiscount) score += 30;
 
-    let mixedSuggestions = [...sameCatSuggestions, ...diffCatSuggestions].sort(
-      (a, b) => {
-        const hashStrA = String(selectedProduct.id) + String(a.product.id);
-        const hashStrB = String(selectedProduct.id) + String(b.product.id);
-        return hashStrA.localeCompare(hashStrB);
-      },
-    );
+        score += (salesCounts[p.id] || 0) * 0.1;
+        score += p.stock * 0.001;
 
-    let validSuggestions = mixedSuggestions.map((sp) => {
-      let badge = "Aproveite";
-      const hasDiscount =
-        sp.product.promotionType === "DISCOUNT" &&
-        sp.product.originalPrice &&
-        sp.product.originalPrice > sp.product.price;
+        const hashStr = String(selectedProduct.id) + String(p.id);
+        let hash = 0;
+        for (let i = 0; i < hashStr.length; i++) {
+          hash = (hash << 5) - hash + hashStr.charCodeAt(i);
+          hash |= 0;
+        }
+        const jitter = (Math.abs(hash) % 100) / 100;
+        score += jitter * 45;
 
-      if (sp.product.isFeatured) badge = "Oferta do Dia";
-      else if (hasDiscount) badge = "Melhor Preço";
-      else if (fbtCounts[sp.product.id]) badge = "Comprados Juntos";
-      else if (sp.score >= 100) badge = "Recomendado";
-      else if (salesCounts[sp.product.id] > 0) badge = "Mais Vendidos";
+        return { product: p, score };
+      });
 
-      return { ...sp.product, suggestionBadge: badge };
-    });
+      const sameCatProducts = scoredProducts
+        .filter((sp) => sp.product.category === selectedProduct.category)
+        .sort((a, b) => b.score - a.score);
+      const diffCatProducts = scoredProducts
+        .filter((sp) => sp.product.category !== selectedProduct.category)
+        .sort((a, b) => b.score - a.score);
 
-    if (isSelectedControlled) {
-      const topGeneral = availableForSuggestion
-        .filter((p) => !validSuggestions.find((v) => v.id === p.id))
-        .map((p) => ({
-          product: p,
-          sales: salesCounts[p.id] || 0,
-          stock: p.stock,
-        }))
-        .sort((a, b) => {
+      const sameCatSuggestions = sameCatProducts.slice(0, 8);
+      const diffCatSuggestions = diffCatProducts.slice(
+        0,
+        10 - sameCatSuggestions.length,
+      );
+
+      let mixedSuggestions = [...sameCatSuggestions, ...diffCatSuggestions].sort(
+        (a, b) => {
           const hashStrA = String(selectedProduct.id) + String(a.product.id);
           const hashStrB = String(selectedProduct.id) + String(b.product.id);
-          return b.sales - a.sales || b.stock - a.stock || hashStrA.localeCompare(hashStrB);
-        })
-        .slice(0, 10)
-        .map((sp) => ({ ...sp.product, suggestionBadge: "Mais Vendidos" }));
-
-      const selectedTop = topGeneral
-        .sort((a, b) => {
-          const hashStrA = String(selectedProduct.id) + String(a.id);
-          const hashStrB = String(selectedProduct.id) + String(b.id);
           return hashStrA.localeCompare(hashStrB);
-        })
-        .slice(0, 2);
-      validSuggestions = [...selectedTop, ...validSuggestions];
-    }
+        },
+      );
 
-    if (validSuggestions.length < 10) {
-      const fallbackProducts = availableForSuggestion
-        .filter((p) => !validSuggestions.find((v) => v.id === p.id))
-        .filter((p) => {
-          const nCat = normalize(p.category);
-          return (
-            nCat.includes("higiene") ||
-            nCat.includes("beleza") ||
-            nCat.includes("perfumaria")
-          );
-        })
-        .map((p) => ({
-          product: p,
-          sales: salesCounts[p.id] || 0,
-          stock: p.stock,
-        }))
-        .sort((a, b) => {
-          const hashStrA = String(selectedProduct.id) + String(a.product.id);
-          const hashStrB = String(selectedProduct.id) + String(b.product.id);
-          return b.sales - a.sales || b.stock - a.stock || hashStrA.localeCompare(hashStrB);
-        })
-        .map((sp) => ({ ...sp.product, suggestionBadge: "Mais Vendidos" }));
+      let validSuggestions = mixedSuggestions.map((sp) => {
+        let badge = "Aproveite";
+        const hasDiscount =
+          sp.product.promotionType === "DISCOUNT" &&
+          sp.product.originalPrice &&
+          sp.product.originalPrice > sp.product.price;
 
-      validSuggestions.push(...fallbackProducts);
-    }
+        if (sp.product.isFeatured) badge = "Oferta do Dia";
+        else if (hasDiscount) badge = "Melhor Preço";
+        else if (fbtCounts[sp.product.id]) badge = "Comprados Juntos";
+        else if (sp.score >= 100) badge = "Recomendado";
+        else if (salesCounts[sp.product.id] > 0) badge = "Mais Vendidos";
 
-    return {
-      samePrinciple: samePrinciple.slice(0, 5),
-      samePrincipleTitle,
-      samePrincipleSubtitle,
-      otherSuggestions: validSuggestions.slice(0, 10),
-      selectedInfo,
-    };
-  }, [selectedProduct, products, currentTenant, orders]);
+        return { ...sp.product, suggestionBadge: badge };
+      });
+
+      if (isSelectedControlled) {
+        const topGeneral = availableForSuggestion
+          .filter((p) => !validSuggestions.find((v) => v.id === p.id))
+          .map((p) => ({
+            product: p,
+            sales: salesCounts[p.id] || 0,
+            stock: p.stock,
+          }))
+          .sort((a, b) => {
+            const hashStrA = String(selectedProduct.id) + String(a.product.id);
+            const hashStrB = String(selectedProduct.id) + String(b.product.id);
+            return b.sales - a.sales || b.stock - a.stock || hashStrA.localeCompare(hashStrB);
+          })
+          .slice(0, 10)
+          .map((sp) => ({ ...sp.product, suggestionBadge: "Mais Vendidos" }));
+
+        const selectedTop = topGeneral
+          .sort((a, b) => {
+            const hashStrA = String(selectedProduct.id) + String(a.id);
+            const hashStrB = String(selectedProduct.id) + String(b.id);
+            return hashStrA.localeCompare(hashStrB);
+          })
+          .slice(0, 2);
+        validSuggestions = [...selectedTop, ...validSuggestions];
+      }
+
+      if (validSuggestions.length < 10) {
+        const fallbackProducts = availableForSuggestion
+          .filter((p) => !validSuggestions.find((v) => v.id === p.id))
+          .filter((p) => {
+            const nCat = normalize(p.category);
+            return (
+              nCat.includes("higiene") ||
+              nCat.includes("beleza") ||
+              nCat.includes("perfumaria")
+            );
+          })
+          .map((p) => ({
+            product: p,
+            sales: salesCounts[p.id] || 0,
+            stock: p.stock,
+          }))
+          .sort((a, b) => {
+            const hashStrA = String(selectedProduct.id) + String(a.product.id);
+            const hashStrB = String(selectedProduct.id) + String(b.product.id);
+            return b.sales - a.sales || b.stock - a.stock || hashStrA.localeCompare(hashStrB);
+          })
+          .map((sp) => ({ ...sp.product, suggestionBadge: "Mais Vendidos" }));
+
+        validSuggestions.push(...fallbackProducts);
+      }
+
+      const finalSamePrinciple = samePrinciple.slice(0, 10);
+      setProductSuggestions({
+        samePrinciple: finalSamePrinciple,
+        samePrincipleTitle,
+        samePrincipleSubtitle,
+        otherSuggestions: validSuggestions.slice(0, 10),
+        selectedInfo,
+      });
+    }, 35);
+
+    return () => clearTimeout(timer);
+  }, [selectedProduct, products, currentTenant, orders, promotions, activePromoIds, matrizProducts]);
 
   const licenseDays = useMemo(() => {
     if (!currentTenant?.licenseExpiration) return Infinity;
@@ -2418,7 +2513,7 @@ const App: React.FC = () => {
     }
   };
 
-  const addToCart = (
+  const addToCart = useCallback((
     product: Product,
     isMainProduct: boolean = false,
     showGlobalToast: boolean = true,
@@ -2445,7 +2540,7 @@ const App: React.FC = () => {
       setGlobalToast("Produto adicionado ao carrinho!");
       setTimeout(() => setGlobalToast(null), 2000);
     }
-  };
+  }, []);
 
   const updateCartQuantity = (id: string, delta: number) => {
     setCart((prev) =>
@@ -3011,17 +3106,8 @@ const App: React.FC = () => {
               cartCount={cart.reduce((a, c) => a + c.quantity, 0)}
               onAddToCart={addToCart}
               onProductClick={handleProductClick}
-              onOpenCart={() => handleViewChange(ViewMode.CART)}
-              onBack={
-                session.type !== "GUEST"
-                  ? () =>
-                      handleViewChange(
-                        session.type === "SUPER_ADMIN"
-                          ? ViewMode.ADMIN_SUPER
-                          : ViewMode.ADMIN_PHARMACY,
-                      )
-                  : undefined
-              }
+              onOpenCart={handleOpenCart}
+              onBack={session.type !== "GUEST" ? handleBackToDashboard : undefined}
               onSearch={handleSearch}
             />
           )}
@@ -3383,8 +3469,8 @@ const App: React.FC = () => {
                           className="max-w-full max-h-full object-contain rounded-xl shadow-sm transition-transform duration-500 group-hover:scale-105"
                           alt={selectedProduct.name}
                           referrerPolicy="no-referrer"
-                          loading="lazy"
-                          decoding="async"
+                          loading="eager"
+                          decoding="sync"
                         />
                       </picture>
                     ) : (
@@ -3564,14 +3650,7 @@ const App: React.FC = () => {
                                     if (activePromotionForSelected.bundleSlots && activePromotionForSelected.bundlePrice) {
                                       const currentSlotIndex = activePromotionForSelected.bundleSlots.findIndex(slot => {
                                         if (!slot || !Array.isArray(slot)) return false;
-                                        if (slot.includes(selectedProduct.id)) return true;
-                                        if (selectedProduct.barcode) {
-                                          const slotEans = products
-                                            .filter(p => p && slot.includes(p.id) && p.barcode)
-                                            .map(p => p.barcode);
-                                          if (slotEans.includes(selectedProduct.barcode)) return true;
-                                        }
-                                        return false;
+                                        return slot.includes(selectedProduct.id);
                                       });
 
                                       if (currentSlotIndex !== -1) {
@@ -3583,17 +3662,7 @@ const App: React.FC = () => {
                                         otherSlotIndices.forEach(idx => {
                                           const slotProductIds = activePromotionForSelected!.bundleSlots?.[idx];
                                           if (!slotProductIds || !Array.isArray(slotProductIds)) return;
-                                          const otherProd = products.find(p => {
-                                            if (!p) return false;
-                                            if (slotProductIds.includes(p.id)) return true;
-                                            if (p.barcode) {
-                                              const slotEans = products
-                                                .filter(sp => sp && slotProductIds.includes(sp.id) && sp.barcode)
-                                                .map(sp => sp.barcode);
-                                              if (slotEans.includes(p.barcode)) return true;
-                                            }
-                                            return false;
-                                          });
+                                          const otherProd = products.find(p => p && slotProductIds.includes(p.id));
                                           if (otherProd) {
                                             otherProductNames.push(otherProd.name);
                                           }
@@ -3880,89 +3949,114 @@ const App: React.FC = () => {
                 </div>
               </div>
 
-              {productSuggestions.samePrinciple &&
-                productSuggestions.samePrinciple.length > 0 && (
-                  <div className="mt-10 pt-8 border-t-2 border-dashed border-gray-100 p-6 md:p-0">
-                    <div className="flex items-center justify-between mb-6">
-                      <div className="flex items-center gap-2">
-                        <div
-                          className={`w-10 h-10 rounded-xl flex items-center justify-center animate-pulse ${checkIsMedicine(selectedProduct) ? "bg-blue-100 text-blue-600" : "bg-purple-100 text-purple-600"}`}
-                        >
-                          {checkIsMedicine(selectedProduct) ? (
-                            <FlaskConical size={20} />
-                          ) : (
-                            <Layers size={20} />
-                          )}
-                        </div>
-                        <div>
-                          <h3 className="text-xl font-black text-gray-900 tracking-tight">
-                            {productSuggestions.samePrincipleTitle}
-                          </h3>
-                          <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">
-                            {productSuggestions.samePrincipleSubtitle}
-                          </p>
-                        </div>
+              {!productSuggestions ? (
+                <div className="mt-10 pt-8 border-t-2 border-dashed border-gray-100 p-6 md:p-0 space-y-8">
+                  <div className="space-y-6">
+                    <div className="flex items-center gap-2">
+                      <div className="w-10 h-10 bg-gray-100 rounded-xl animate-pulse"></div>
+                      <div className="space-y-2 animate-pulse">
+                        <div className="h-4 bg-gray-100 rounded w-48"></div>
+                        <div className="h-2.5 bg-gray-100 rounded w-32"></div>
                       </div>
-                      <span className="hidden md:flex items-center gap-1 text-[10px] font-black text-gray-300 uppercase tracking-widest">
-                        Arraste para o lado <ChevronRight size={14} />
-                      </span>
                     </div>
-
-                    <div className="flex gap-4 overflow-x-auto pb-6 custom-scrollbar -mx-2 px-2 snap-x">
-                      {productSuggestions.samePrinciple.map((p: any) => (
-                        <SuggestionCard
-                          key={p.id}
-                          p={p}
-                          currentTenant={currentTenant}
-                          setSelectedProduct={handleProductClick}
-                          setPreviewImage={setPreviewImage}
-                          handleAddToCart={addToCart}
-                          promotions={promotions}
-                          activePromoIds={activePromoIds}
-                        />
+                    <div className="flex gap-4 overflow-x-auto pb-6">
+                      {[1, 2, 3, 4].map((i) => (
+                        <div key={i} className="bg-gray-50 border-2 border-gray-100 p-3 rounded-2xl w-[160px] md:w-[180px] shrink-0 animate-pulse space-y-3">
+                          <div className="aspect-square bg-gray-200 rounded-xl w-full"></div>
+                          <div className="h-3 bg-gray-200 rounded w-3/4"></div>
+                          <div className="h-3 bg-gray-200 rounded w-1/2"></div>
+                        </div>
                       ))}
                     </div>
                   </div>
-                )}
-
-              {productSuggestions.otherSuggestions &&
-                productSuggestions.otherSuggestions.length > 0 && (
-                  <div className="mt-10 pt-8 border-t-2 border-dashed border-gray-100 p-6 md:p-0">
-                    <div className="flex items-center justify-between mb-6">
-                      <div className="flex items-center gap-2">
-                        <div className="w-10 h-10 bg-emerald-100 text-emerald-600 rounded-xl flex items-center justify-center animate-pulse">
-                          <Sparkles size={20} />
+                </div>
+              ) : (
+                <>
+                  {productSuggestions.samePrinciple &&
+                    productSuggestions.samePrinciple.length > 0 && (
+                      <div className="mt-10 pt-8 border-t-2 border-dashed border-gray-100 p-6 md:p-0">
+                        <div className="flex items-center justify-between mb-6">
+                          <div className="flex items-center gap-2">
+                            <div
+                              className={`w-10 h-10 rounded-xl flex items-center justify-center animate-pulse ${checkIsMedicine(selectedProduct) ? "bg-blue-100 text-blue-600" : "bg-purple-100 text-purple-600"}`}
+                            >
+                              {checkIsMedicine(selectedProduct) ? (
+                                <FlaskConical size={20} />
+                              ) : (
+                                <Layers size={20} />
+                              )}
+                            </div>
+                            <div>
+                              <h3 className="text-xl font-black text-gray-900 tracking-tight">
+                                {productSuggestions.samePrincipleTitle}
+                              </h3>
+                              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">
+                                {productSuggestions.samePrincipleSubtitle}
+                              </p>
+                            </div>
+                          </div>
+                          <span className="hidden md:flex items-center gap-1 text-[10px] font-black text-gray-300 uppercase tracking-widest">
+                            Arraste para o lado <ChevronRight size={14} />
+                          </span>
                         </div>
-                        <div>
-                          <h3 className="text-xl font-black text-gray-900 tracking-tight">
-                            O que outros clientes levaram
-                          </h3>
-                          <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">
-                            Aproveite para completar sua cesta
-                          </p>
+
+                        <div className="flex gap-4 overflow-x-auto pb-6 custom-scrollbar -mx-2 px-2 snap-x">
+                          {productSuggestions.samePrinciple.map((p: any) => (
+                            <SuggestionCard
+                              key={p.id}
+                              p={p}
+                              currentTenant={currentTenant}
+                              setSelectedProduct={handleProductClick}
+                              setPreviewImage={setPreviewImage}
+                              handleAddToCart={addToCart}
+                              promotions={promotions}
+                              activePromoIds={activePromoIds}
+                            />
+                          ))}
                         </div>
                       </div>
-                      <span className="hidden md:flex items-center gap-1 text-[10px] font-black text-gray-300 uppercase tracking-widest">
-                        Arraste para o lado <ChevronRight size={14} />
-                      </span>
-                    </div>
+                    )}
 
-                    <div className="flex gap-4 overflow-x-auto pb-6 custom-scrollbar -mx-2 px-2 snap-x">
-                      {productSuggestions.otherSuggestions.map((p: any) => (
-                        <SuggestionCard
-                          key={p.id}
-                          p={p}
-                          currentTenant={currentTenant}
-                          setSelectedProduct={handleProductClick}
-                          setPreviewImage={setPreviewImage}
-                          handleAddToCart={addToCart}
-                          promotions={promotions}
-                          activePromoIds={activePromoIds}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                )}
+                  {productSuggestions.otherSuggestions &&
+                    productSuggestions.otherSuggestions.length > 0 && (
+                      <div className="mt-10 pt-8 border-t-2 border-dashed border-gray-100 p-6 md:p-0">
+                        <div className="flex items-center justify-between mb-6">
+                          <div className="flex items-center gap-2">
+                            <div className="w-10 h-10 bg-emerald-100 text-emerald-600 rounded-xl flex items-center justify-center animate-pulse">
+                              <Sparkles size={20} />
+                            </div>
+                            <div>
+                              <h3 className="text-xl font-black text-gray-900 tracking-tight">
+                                O que outros clientes levaram
+                              </h3>
+                              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">
+                                Aproveite para completar sua cesta
+                              </p>
+                            </div>
+                          </div>
+                          <span className="hidden md:flex items-center gap-1 text-[10px] font-black text-gray-300 uppercase tracking-widest">
+                            Arraste para o lado <ChevronRight size={14} />
+                          </span>
+                        </div>
+
+                        <div className="flex gap-4 overflow-x-auto pb-6 custom-scrollbar -mx-2 px-2 snap-x">
+                          {productSuggestions.otherSuggestions.map((p: any) => (
+                            <SuggestionCard
+                              key={p.id}
+                              p={p}
+                              currentTenant={currentTenant}
+                              setSelectedProduct={handleProductClick}
+                              setPreviewImage={setPreviewImage}
+                              handleAddToCart={addToCart}
+                              promotions={promotions}
+                              activePromoIds={activePromoIds}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                </>
+              )}
             </div>
           </div>
         </div>
