@@ -6,6 +6,7 @@ import React, {
   useDeferredValue,
   useCallback,
 } from "react";
+import { BundlePromoCard } from "./BundlePromoCard";
 import { flushSync } from "react-dom";
 import {
   Product,
@@ -16,6 +17,7 @@ import {
   CouponRule,
   isPromotionActive,
   checkProductMatchesRule,
+  isBundleType,
 } from "../types";
 import {
   Search,
@@ -639,7 +641,9 @@ const ProductCard = React.memo(
                             activePromo.buyX &&
                             activePromo.payY
                           ? `Leve ${activePromo.buyX} por R$ ${activePromo.payY.toFixed(2).replace(".", ",")}`
-                          : activePromo.name}
+                          : isBundleType(activePromo) && activePromo.bundlePrice
+                            ? `COMBO: R$ ${activePromo.bundlePrice.toFixed(2).replace(".", ",")}`
+                            : activePromo.name}
                   </span>
                 )}
                 {hasDiscount && !activePromo && (
@@ -1125,16 +1129,54 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
   const [isTransitioning, setIsTransitioning] = useState(false);
   const [matrizProducts, setMatrizProducts] = useState<Product[]>([]);
 
+  const inheritedPromotions = useMemo(() => {
+    if (!promotions || !Array.isArray(promotions)) return [];
+    return promotions.filter((p) => {
+      const isCurrentTenant = p.tenantId === tenant.id;
+      const isNetworkShared =
+        tenant.networkId &&
+        (p.tenantId === tenant.networkId || p.tenantId === tenant.id);
+      
+      if (isCurrentTenant) {
+        return true;
+      }
+      
+      if (isNetworkShared && p.filtersMetadata) {
+        const branchIds = p.filtersMetadata.branchIds;
+        if (Array.isArray(branchIds) && branchIds.length > 0) {
+          return branchIds.includes(tenant.id);
+        }
+      }
+      return isCurrentTenant || isNetworkShared;
+    });
+  }, [promotions, tenant.id, tenant.networkId]);
+
   const bundlePromotions = useMemo(() => {
     const now = new Date();
-    return promotions.filter(p => p.type === "BUNDLE_FIXED_PRICE" && p.bundlePrice && p.bundleSlots?.length && isPromotionActive(p, now));
-  }, [promotions]);
+    return inheritedPromotions.filter((p) => {
+      const isBundle =
+        p.type === "BUNDLE_FIXED_PRICE" ||
+        p.type === "COMBO_VARIATION" ||
+        p.type === "VARIATION_COMBO" ||
+        p.type === "SLOT_COMBO" ||
+        p.targetType === "BUNDLE_SLOTS" ||
+        Boolean(p.bundleSlots && p.bundleSlots.length > 0);
+
+      return (
+        isBundle &&
+        Boolean(p.bundlePrice) &&
+        Boolean(p.bundleSlots && p.bundleSlots.length > 0) &&
+        isPromotionActive(p, now)
+      );
+    });
+  }, [inheritedPromotions]);
 
   useEffect(() => {
     if (tenant?.networkId && tenant.networkId !== tenant.id) {
       getProductsByTenant(tenant.networkId, setMatrizProducts).catch(console.error);
     }
   }, [tenant?.networkId, tenant?.id]);
+
   useEffect(() => {
     if (tenant?.id) {
       const hostname = window.location.hostname;
@@ -1168,28 +1210,6 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
   const deferredSearchTerm = useDeferredValue(searchTerm);
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState("");
   const productsContainerRef = useRef<HTMLElement>(null);
-
-  const inheritedPromotions = useMemo(() => {
-    if (!promotions || !Array.isArray(promotions)) return [];
-    return promotions.filter((p) => {
-      const isCurrentTenant = p.tenantId === tenant.id;
-      const isNetworkShared =
-        tenant.networkId &&
-        (p.tenantId === tenant.networkId || p.tenantId === tenant.id);
-      
-      if (isCurrentTenant) {
-        return true;
-      }
-      
-      if (isNetworkShared && p.filtersMetadata) {
-        const branchIds = p.filtersMetadata.branchIds;
-        if (Array.isArray(branchIds) && branchIds.length > 0) {
-          return branchIds.includes(tenant.id);
-        }
-      }
-      return isCurrentTenant || isNetworkShared;
-    });
-  }, [promotions, tenant.id, tenant.networkId]);
 
   const inheritedCoupons = useMemo(() => {
     if (!coupons || !Array.isArray(coupons)) return [];
@@ -2759,9 +2779,11 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
           innerClassName="flex gap-5 md:gap-8 lg:gap-12 justify-start px-4 md:px-8 lg:px-12 pb-4"
         >
           {activePromotions
-            ?.filter((p) => p.highlightInCategoriesBar)
+            ?.filter((p) => p.highlightInCategoriesBar || isBundleType(p))
             .map((promo, index) => {
-              const Icon = getPromoIcon(promo.highlightIcon);
+              const Icon = getPromoIcon(
+                promo.highlightIcon || (isBundleType(promo) ? "Sparkles" : undefined)
+              );
               const colorMap: any = {
                 orange: "bg-orange-500 shadow-orange-500/30",
                 red: "bg-red-500 shadow-red-500/30",
@@ -3026,7 +3048,9 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
                           selectedPromotion.buyX &&
                           selectedPromotion.payY
                         ? `Exibindo produtos da oferta (Leve ${selectedPromotion.buyX} por R$ ${selectedPromotion.payY.toFixed(2).replace(".", ",")})`
-                        : `Mostrando apenas produtos desta promoção.`}
+                        : isBundleType(selectedPromotion) && selectedPromotion.bundlePrice
+                          ? `Escolha 1 item de cada grupo e pague apenas R$ ${selectedPromotion.bundlePrice.toFixed(2).replace(".", ",")}`
+                          : `Mostrando apenas produtos desta promoção.`}
                   </p>
                 </div>
               </div>

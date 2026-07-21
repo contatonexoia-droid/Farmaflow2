@@ -1139,8 +1139,8 @@ export const mapDbPromotionToApp = (p: any): PromotionRule => {
       p.combo_discount_percentage || p.combodiscountpercentage,
     specificProductIds: p.specific_product_ids || p.specificproductids || [],
     filtersMetadata: fm,
-    bundlePrice: p.bundle_price ?? fm?.bundlePrice,
-    bundleSlots: p.bundle_slots ?? fm?.bundleSlots,
+    bundlePrice: p.bundle_price ?? p.bundlePrice ?? fm?.bundlePrice ?? fm?.bundle_price,
+    bundleSlots: p.bundle_slots ?? p.bundleSlots ?? fm?.bundleSlots ?? fm?.bundle_slots ?? fm?.slots,
     highlightInCategoriesBar:
       p.highlight_in_categories_bar ?? fm?.highlightInCategoriesBar,
     highlightColor:

@@ -262,7 +262,10 @@ export interface PromotionRule {
     | "FIXED_COMBO"
     | "LIGHTNING_OFFER"
     | "DISCOUNT_ON_QTY"
-    | "BUNDLE_FIXED_PRICE";
+    | "BUNDLE_FIXED_PRICE"
+    | "COMBO_VARIATION"
+    | "VARIATION_COMBO"
+    | "SLOT_COMBO";
   targetType: "CATEGORY" | "MANUFACTURER" | "PRODUCT" | "SPECIFIC_SELECTION" | "BUNDLE_SLOTS";
   targetValue: string; // Category name, Manufacturer name, or Product ID
   specificProductIds?: string[]; // For SPECIFIC_SELECTION
@@ -403,6 +406,19 @@ export const isPromotionActive = (
 const ruleEanCache = new Map<string, string[]>();
 const ruleBarcodeCache = new Map<string, string | null>();
 
+export const isBundleType = (rule?: PromotionRule | CouponRule | null): boolean => {
+  if (!rule) return false;
+  const promoType = (rule as PromotionRule).type;
+  return (
+    rule.targetType === "BUNDLE_SLOTS" ||
+    promoType === "BUNDLE_FIXED_PRICE" ||
+    promoType === "COMBO_VARIATION" ||
+    promoType === "VARIATION_COMBO" ||
+    promoType === "SLOT_COMBO" ||
+    Boolean((rule as any).bundleSlots && (rule as any).bundleSlots.length > 0)
+  );
+};
+
 export const checkProductMatchesRule = (
   rule: PromotionRule | CouponRule,
   p: Product,
@@ -457,7 +473,7 @@ export const checkProductMatchesRule = (
     return false;
   }
 
-  if (rule.targetType === "BUNDLE_SLOTS") {
+  if (isBundleType(rule)) {
     const bundlePromo = rule as PromotionRule;
     if (!bundlePromo.bundleSlots) return false;
     
@@ -466,6 +482,7 @@ export const checkProductMatchesRule = (
     for (const slot of bundlePromo.bundleSlots) {
       if (!slot || !Array.isArray(slot)) continue;
       if (p.id && slot.includes(p.id)) return true;
+      if (p.barcode && slot.includes(p.barcode.trim())) return true;
       if (productEan) {
         const cacheKey = `${rule.id}_slot_${slotIdx}_${matrizProducts.length}`;
         let targetEans = ruleEanCache.get(cacheKey);

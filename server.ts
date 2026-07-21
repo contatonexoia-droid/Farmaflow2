@@ -144,14 +144,14 @@ app.get("/api/v1/store/:tenantId/init", async (req, res) => {
 
     let promoQuery = supabase.from("promotions").select("*");
     if (networkId) {
-      promoQuery = promoQuery.or(`tenant_id.eq.${tenantId},tenant_id.eq.${networkId}`);
+      promoQuery = promoQuery.or(`tenant_id.eq."${tenantId}",tenant_id.eq."${networkId}"`);
     } else {
       promoQuery = promoQuery.eq("tenant_id", tenantId);
     }
 
     let couponsQuery = supabase.from("coupons").select("*");
     if (networkId) {
-      couponsQuery = couponsQuery.or(`tenant_id.eq.${tenantId},tenant_id.eq.${networkId}`);
+      couponsQuery = couponsQuery.or(`tenant_id.eq."${tenantId}",tenant_id.eq."${networkId}"`);
     } else {
       couponsQuery = couponsQuery.eq("tenant_id", tenantId);
     }
@@ -192,7 +192,6 @@ app.get("/api/v1/store/:tenantId/init", async (req, res) => {
           publicCreds.public_key = pk;
         }
       }
-      // other gateways... if needed
       
       return {
         gateway_name: gw.gateway_name,
@@ -201,6 +200,86 @@ app.get("/api/v1/store/:tenantId/init", async (req, res) => {
       };
     });
 
+    // Ensure all combo slots and prices are cleanly serialized in promotions
+    const safePromotions = (promoRes.data || []).map((p: any) => {
+      const fm = typeof p.filters_metadata === "object" && p.filters_metadata ? p.filters_metadata : {};
+      const bundleSlots = p.bundle_slots ?? fm.bundleSlots ?? fm.bundle_slots ?? fm.slots ?? [];
+      const bundlePrice = p.bundle_price ?? fm.bundlePrice ?? fm.bundle_price ?? null;
+      return {
+        ...p,
+        bundle_slots: bundleSlots,
+        bundleSlots: bundleSlots,
+        bundle_price: bundlePrice,
+        bundlePrice: bundlePrice,
+      };
+    });
+
+    // Collect all slot product IDs across combo/bundle promotions to ensure they are available in store init
+    let initialProducts = productsRes.data || [];
+    const existingProductIds = new Set(initialProducts.map((p: any) => p.id));
+    const slotProductIds = new Set<string>();
+
+    safePromotions.forEach((p: any) => {
+      const slots = p.bundleSlots || [];
+      if (Array.isArray(slots)) {
+        slots.forEach((slot: any) => {
+          if (Array.isArray(slot)) {
+            slot.forEach((id: string) => {
+              if (id && !existingProductIds.has(id)) slotProductIds.add(id);
+            });
+          }
+        });
+      }
+      const comboProds = p.combo_products || [];
+      if (Array.isArray(comboProds)) {
+        comboProds.forEach((id: string) => {
+          if (id && !existingProductIds.has(id)) slotProductIds.add(id);
+        });
+      }
+      const specProds = p.specific_product_ids || [];
+      if (Array.isArray(specProds)) {
+        specProds.forEach((id: string) => {
+          if (id && !existingProductIds.has(id)) slotProductIds.add(id);
+        });
+      }
+    });
+
+    if (slotProductIds.size > 0) {
+      const { data: slotProducts } = await supabase
+        .from("products")
+        .select("*")
+        .in("id", Array.from(slotProductIds));
+
+      if (slotProducts && slotProducts.length > 0) {
+        const slotBarcodes = new Set<string>();
+        slotProducts.forEach((sp: any) => {
+          if (!existingProductIds.has(sp.id)) {
+            initialProducts.push(sp);
+            existingProductIds.add(sp.id);
+          }
+          if (sp.barcode) slotBarcodes.add(sp.barcode);
+        });
+
+        // Also fetch filial store products matching the slot barcodes if tenant is a filial
+        if (slotBarcodes.size > 0 && networkId) {
+          const { data: filialMatchingProds } = await supabase
+            .from("products")
+            .select("*")
+            .eq("tenant_id", tenantId)
+            .in("barcode", Array.from(slotBarcodes));
+
+          if (filialMatchingProds) {
+            filialMatchingProds.forEach((fp: any) => {
+              if (!existingProductIds.has(fp.id)) {
+                initialProducts.push(fp);
+                existingProductIds.add(fp.id);
+              }
+            });
+          }
+        }
+      }
+    }
+
     res.setHeader(
       "Cache-Control",
       "public, s-maxage=60, stale-while-revalidate=300",
@@ -208,9 +287,9 @@ app.get("/api/v1/store/:tenantId/init", async (req, res) => {
     
     res.json({
       tenant: tenantRes.data,
-      promotions: promoRes.data || [],
+      promotions: safePromotions,
       coupons: couponsRes.data || [],
-      products: productsRes.data || [],
+      products: initialProducts,
       paymentGateways: safeGateways
     });
   } catch (e: any) {
