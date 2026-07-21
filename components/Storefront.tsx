@@ -1272,10 +1272,9 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
   }, [inheritedPromotions, activePromoIds]);
 
   const selectedPromotion = useMemo(() => {
-    const p = activePromotions.find((p) => p.id === filters.promocao_id);
-    if (!p) return null;
-    return p;
-  }, [activePromotions, filters.promocao_id]);
+    if (!filters.promocao_id) return null;
+    return inheritedPromotions.find((p) => p.id === filters.promocao_id) || null;
+  }, [inheritedPromotions, filters.promocao_id]);
 
   const activeCouponFilter = useMemo(
     () => inheritedCoupons.find((c) => c.id === filters.cupom_id && c.couponScope !== "GLOBAL") || null,
@@ -1860,7 +1859,49 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
     let sourceList = products;
     if (filters.promocao_id) {
       if (selectedPromotion) {
-        sourceList = products.filter((p) => isProductInRule(selectedPromotion, p));
+        const slots = selectedPromotion.bundleSlots || (selectedPromotion as any).bundle_slots;
+        if (slots && Array.isArray(slots) && slots.length > 0) {
+          const slotProductIds = new Set<string>(
+            slots.flatMap((slot: any) => {
+              if (Array.isArray(slot)) {
+                return slot.map((item: any) => typeof item === "object" ? (item.id || item.productId || item.product_id || "") : String(item));
+              }
+              if (slot && typeof slot === "object") {
+                return [...(slot.productIds || []), ...(slot.product_ids || []), ...(slot.productIdsList || [])];
+              }
+              return [];
+            }).filter(Boolean).map((x: any) => String(x).trim())
+          );
+
+          const slotEans = new Set<string>(
+            slots.flatMap((slot: any) => {
+              if (Array.isArray(slot)) {
+                return slot.map((item: any) => typeof item === "object" ? (item.ean || item.barcode || "") : String(item));
+              }
+              if (slot && typeof slot === "object") {
+                return [...(slot.eans || []), ...(slot.barcodes || [])];
+              }
+              return [];
+            }).filter(Boolean).map((x: any) => String(x).trim())
+          );
+
+          const comboProds = selectedPromotion.comboProducts || (selectedPromotion as any).combo_products;
+          if (Array.isArray(comboProds)) {
+            comboProds.forEach((id: any) => slotProductIds.add(String(id).trim()));
+          }
+
+          sourceList = products.filter((p) => {
+            const pEan = (p.barcode || (p as any).ean)?.toString().trim();
+            if (p.id && slotProductIds.has(p.id)) return true;
+            if (p.barcode && (slotProductIds.has(p.barcode.trim()) || slotEans.has(p.barcode.trim()))) return true;
+            if ((p as any).ean && (slotProductIds.has((p as any).ean.toString().trim()) || slotEans.has((p as any).ean.toString().trim()))) return true;
+            if (pEan && slotEans.has(pEan)) return true;
+
+            return isProductInRule(selectedPromotion, p);
+          });
+        } else {
+          sourceList = products.filter((p) => isProductInRule(selectedPromotion, p));
+        }
       } else {
         sourceList = [];
       }

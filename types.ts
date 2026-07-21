@@ -415,7 +415,10 @@ export const isBundleType = (rule?: PromotionRule | CouponRule | null): boolean 
     promoType === "COMBO_VARIATION" ||
     promoType === "VARIATION_COMBO" ||
     promoType === "SLOT_COMBO" ||
-    Boolean((rule as any).bundleSlots && (rule as any).bundleSlots.length > 0)
+    Boolean((rule as any).bundleSlots && (rule as any).bundleSlots.length > 0) ||
+    Boolean((rule as any).bundle_slots && (rule as any).bundle_slots.length > 0) ||
+    Boolean((rule as any).comboProducts && (rule as any).comboProducts.length > 0) ||
+    Boolean((rule as any).combo_products && (rule as any).combo_products.length > 0)
   );
 };
 
@@ -460,7 +463,7 @@ export const checkProductMatchesRule = (
   if (rule.targetType === "SPECIFIC_SELECTION") {
     if (p.id && rule.specificProductIds?.includes(p.id)) return true;
     if (productEan) {
-      const cacheKey = `${rule.id}_${matrizProducts.length}`;
+      const cacheKey = `${rule.id}__${matrizProducts.length}`;
       let targetEans = ruleEanCache.get(cacheKey);
       if (!targetEans) {
         targetEans = matrizProducts
@@ -475,26 +478,58 @@ export const checkProductMatchesRule = (
 
   if (isBundleType(rule)) {
     const bundlePromo = rule as PromotionRule;
-    if (!bundlePromo.bundleSlots) return false;
-    
-    // Check if the product is in ANY of the bundle slots
+    const slots = bundlePromo.bundleSlots || (bundlePromo as any).bundle_slots;
+    const comboProds = bundlePromo.comboProducts || (bundlePromo as any).combo_products;
+
+    if (comboProds && Array.isArray(comboProds)) {
+      if (p.id && comboProds.includes(p.id)) return true;
+      if (p.barcode && comboProds.includes(p.barcode.trim())) return true;
+      if ((p as any).ean && comboProds.includes((p as any).ean.toString().trim())) return true;
+      if (productEan && comboProds.includes(productEan)) return true;
+    }
+
+    if (!slots || !Array.isArray(slots) || slots.length === 0) return false;
+
     let slotIdx = 0;
-    for (const slot of bundlePromo.bundleSlots) {
-      if (!slot || !Array.isArray(slot)) continue;
-      if (p.id && slot.includes(p.id)) return true;
-      if (p.barcode && slot.includes(p.barcode.trim())) return true;
-      if ((p as any).ean && slot.includes((p as any).ean.toString().trim())) return true;
-      if (productEan) {
-        if (slot.includes(productEan)) return true;
-        const cacheKey = `${rule.id}_slot_${slotIdx}_${matrizProducts.length}`;
-        let targetEans = ruleEanCache.get(cacheKey);
-        if (!targetEans) {
-          targetEans = matrizProducts
-            .filter((mp) => mp && slot.includes(mp.id) && (mp.barcode || (mp as any).ean))
-            .map((mp) => (mp.barcode || (mp as any).ean)?.toString().trim() as string);
-          ruleEanCache.set(cacheKey, targetEans);
+    for (const slot of slots) {
+      if (!slot) continue;
+
+      if (Array.isArray(slot)) {
+        if (p.id && slot.includes(p.id)) return true;
+        if (p.barcode && slot.includes(p.barcode.trim())) return true;
+        if ((p as any).ean && slot.includes((p as any).ean.toString().trim())) return true;
+        if (productEan && slot.includes(productEan)) return true;
+        if (productEan) {
+          const cacheKey = `${rule.id}_slot_${slotIdx}_${matrizProducts.length}`;
+          let targetEans = ruleEanCache.get(cacheKey);
+          if (!targetEans) {
+            targetEans = matrizProducts
+              .filter((mp) => mp && slot.includes(mp.id) && (mp.barcode || (mp as any).ean))
+              .map((mp) => (mp.barcode || (mp as any).ean)?.toString().trim() as string);
+            ruleEanCache.set(cacheKey, targetEans);
+          }
+          if (targetEans.includes(productEan)) return true;
         }
-        if (targetEans.includes(productEan)) return true;
+      } else if (typeof slot === "object") {
+        const pIds = (slot.productIds || slot.product_ids || slot.productIdsList || []).map((x: any) => String(x).trim());
+        const slotEans = (slot.eans || slot.barcodes || []).map((x: any) => String(x).trim());
+
+        if (p.id && pIds.includes(p.id)) return true;
+        if (p.barcode && (pIds.includes(p.barcode.trim()) || slotEans.includes(p.barcode.trim()))) return true;
+        if ((p as any).ean && (pIds.includes((p as any).ean.toString().trim()) || slotEans.includes((p as any).ean.toString().trim()))) return true;
+        if (productEan && (pIds.includes(productEan) || slotEans.includes(productEan))) return true;
+
+        if (productEan) {
+          const cacheKey = `${rule.id}_slot_obj_${slotIdx}_${matrizProducts.length}`;
+          let targetEans = ruleEanCache.get(cacheKey);
+          if (!targetEans) {
+            targetEans = matrizProducts
+              .filter((mp) => mp && pIds.includes(mp.id) && (mp.barcode || (mp as any).ean))
+              .map((mp) => (mp.barcode || (mp as any).ean)?.toString().trim() as string);
+            ruleEanCache.set(cacheKey, targetEans);
+          }
+          if (targetEans.includes(productEan)) return true;
+        }
       }
       slotIdx++;
     }
