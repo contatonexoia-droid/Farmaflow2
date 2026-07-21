@@ -1310,9 +1310,26 @@ if (!process.env.VERCEL) {
             `[Cron] Reconciling tenant ${tenant.id} with ERP ${tenant.erp_url}...`,
           );
 
+          let erpUrlStr = (tenant.erp_url || "").trim();
+          if (!erpUrlStr) {
+            throw new Error("ERP URL is empty");
+          }
+
+          // Prepend protocol if missing (e.g. "Siagold" -> "http://Siagold")
+          if (!/^https?:\/\//i.test(erpUrlStr)) {
+            erpUrlStr = `http://${erpUrlStr}`;
+          }
+
+          // Validate URL structure
+          try {
+            new URL(erpUrlStr);
+          } catch (urlErr) {
+            throw new Error(`Invalid URL format: "${tenant.erp_url}"`);
+          }
+
           // Simula a chamada ao ERP para buscar o dump de estoque
           // Na vida real, isso seria um fetch para o tenant.erp_url
-          const response = await fetch(`${tenant.erp_url}/api/stock-dump`, {
+          const response = await fetch(`${erpUrlStr}/api/stock-dump`, {
             headers: {
               "x-api-key": tenant.integration_token || "",
             },
