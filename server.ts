@@ -73,8 +73,8 @@ app.get("/api/v1/resolve-tenant", async (req, res) => {
         let { data, error } = await supabase
           .from("tenants")
           .select("*")
-          .eq("slug", tenantSlug)
-          .single();
+          .or(`slug.eq.${tenantSlug},id.eq.${tenantSlug}`)
+          .maybeSingle();
           
         if (!error && data) {
           tenantData = data;
@@ -85,11 +85,14 @@ app.get("/api/v1/resolve-tenant", async (req, res) => {
             .select("*");
           if (!allErr && allTenants) {
             const matched = allTenants.find(t => {
-              const clean = (t.slug || "")
+              const cleanSlug = (t.slug || "")
+                .toLowerCase()
+                .replace(/[^a-z0-9]/g, "");
+              const cleanId = (t.id || "")
                 .toLowerCase()
                 .replace(/[^a-z0-9]/g, "");
               const searchClean = tenantSlug.toLowerCase().replace(/[^a-z0-9]/g, "");
-              return clean === searchClean;
+              return cleanSlug === searchClean || cleanId === searchClean;
             });
             if (matched) {
               tenantData = matched;
