@@ -1142,6 +1142,34 @@ const safeParseJson = (field: any) => {
 
 export const mapDbPromotionToApp = (p: any): PromotionRule => {
   const fm = safeParseJson(p.filters_metadata || p.filtersmetadata);
+  const bundleSlots = p.bundle_slots ?? p.bundleSlots ?? fm?.bundleSlots ?? fm?.bundle_slots ?? fm?.slots;
+  
+  let slotProductIds: string[] = [];
+  if (Array.isArray(bundleSlots)) {
+    bundleSlots.forEach((slot: any) => {
+      if (Array.isArray(slot)) {
+        slot.forEach((x: any) => {
+          const id = typeof x === "object" ? String(x?.id || x?.productId || x?.product_id || x?.ean || x?.barcode || "").trim() : String(x || "").trim();
+          if (id) slotProductIds.push(id);
+        });
+      }
+    });
+  }
+
+  const rawSpecificIds = [
+    ...(Array.isArray(p.specific_product_ids) ? p.specific_product_ids : []),
+    ...(Array.isArray(p.specificproductids) ? p.specificproductids : []),
+    ...(Array.isArray(p.product_ids) ? p.product_ids : []),
+    ...(Array.isArray(p.productids) ? p.productids : []),
+    ...(Array.isArray(p.combo_products) ? p.combo_products : []),
+    ...(Array.isArray(fm?.specificProductIds) ? fm.specificProductIds : []),
+    ...(Array.isArray(fm?.product_ids) ? fm.product_ids : []),
+    ...(Array.isArray(fm?.productIds) ? fm.productIds : []),
+    ...slotProductIds,
+  ];
+
+  const mergedSpecificProductIds = Array.from(new Set(rawSpecificIds.map((x) => String(x).trim()).filter(Boolean)));
+
   return {
     id: p.id,
     tenantId: p.tenant_id || p.tenantid,
@@ -1154,13 +1182,17 @@ export const mapDbPromotionToApp = (p: any): PromotionRule => {
     lightningDiscountPercentage:
       p.lightning_discount_percentage || p.lightningdiscountpercentage,
     discountThresholds: p.discount_thresholds || p.discountthresholds || [],
-    comboProducts: p.combo_products || p.comboproducts || [],
+    comboProducts: mergedSpecificProductIds,
     comboDiscountPercentage:
       p.combo_discount_percentage || p.combodiscountpercentage,
-    specificProductIds: p.specific_product_ids || p.specificproductids || [],
-    filtersMetadata: fm,
+    specificProductIds: mergedSpecificProductIds,
+    filtersMetadata: {
+      ...(fm || {}),
+      product_ids: mergedSpecificProductIds,
+      specificProductIds: mergedSpecificProductIds,
+    },
     bundlePrice: p.bundle_price ?? p.bundlePrice ?? fm?.bundlePrice ?? fm?.bundle_price,
-    bundleSlots: p.bundle_slots ?? p.bundleSlots ?? fm?.bundleSlots ?? fm?.bundle_slots ?? fm?.slots,
+    bundleSlots: bundleSlots,
     highlightInCategoriesBar:
       p.highlight_in_categories_bar ?? fm?.highlightInCategoriesBar,
     highlightColor:
@@ -1215,6 +1247,33 @@ export const getPromotionsByTenant = async (
 export const savePromotion = async (promotion: PromotionRule) => {
   if (!isSupabaseConfigured()) throw new Error("CONFIG_MISSING");
   try {
+    // Extrai todos os IDs de produtos de todos os slots de combo
+    const rawSlots = promotion.bundleSlots || (promotion as any).bundle_slots || (promotion.filtersMetadata as any)?.bundleSlots || (promotion.filtersMetadata as any)?.bundle_slots || [];
+    let slotProductIds: string[] = [];
+    if (Array.isArray(rawSlots)) {
+      rawSlots.forEach((slot: any) => {
+        if (Array.isArray(slot)) {
+          slot.forEach((x: any) => {
+            const id = typeof x === "object" ? String(x?.id || x?.productId || x?.product_id || x?.ean || x?.barcode || "").trim() : String(x || "").trim();
+            if (id) slotProductIds.push(id);
+          });
+        }
+      });
+    }
+
+    const existingSpecIds = Array.isArray(promotion.specificProductIds) ? promotion.specificProductIds : [];
+    const existingComboProds = Array.isArray(promotion.comboProducts) ? promotion.comboProducts : [];
+    const existingProductIds = Array.isArray((promotion as any).product_ids) ? (promotion as any).product_ids : (Array.isArray((promotion as any).productIds) ? (promotion as any).productIds : []);
+
+    const mergedProductIds = Array.from(
+      new Set([
+        ...existingSpecIds,
+        ...existingComboProds,
+        ...existingProductIds,
+        ...slotProductIds,
+      ].map((x) => String(x).trim()).filter(Boolean))
+    );
+
     const payload: any = {
       id: promotion.id,
       tenant_id: promotion.tenantId,
@@ -1226,13 +1285,16 @@ export const savePromotion = async (promotion: PromotionRule) => {
       pay_y: promotion.payY,
       lightning_discount_percentage: promotion.lightningDiscountPercentage,
       discount_thresholds: promotion.discountThresholds,
-      combo_products: promotion.comboProducts,
+      combo_products: mergedProductIds,
       combo_discount_percentage: promotion.comboDiscountPercentage,
-      specific_product_ids: promotion.specificProductIds,
+      specific_product_ids: mergedProductIds,
       filters_metadata: {
         ...(promotion.filtersMetadata || {}),
         bundlePrice: promotion.bundlePrice,
-        bundleSlots: promotion.bundleSlots,
+        bundleSlots: rawSlots,
+        product_ids: mergedProductIds,
+        productIds: mergedProductIds,
+        specificProductIds: mergedProductIds,
         highlightInCategoriesBar: promotion.highlightInCategoriesBar,
         highlightColor: promotion.highlightColor,
         highlightIcon: promotion.highlightIcon,

@@ -205,14 +205,43 @@ app.get("/api/v1/store/:tenantId/init", async (req, res) => {
     // Ensure all combo slots and prices are cleanly serialized in promotions
     const safePromotions = (promoRes.data || []).map((p: any) => {
       const fm = typeof p.filters_metadata === "object" && p.filters_metadata ? p.filters_metadata : {};
-      const bundleSlots = p.bundle_slots ?? fm.bundleSlots ?? fm.bundle_slots ?? fm.slots ?? [];
-      const bundlePrice = p.bundle_price ?? fm.bundlePrice ?? fm.bundle_price ?? null;
+      const bundleSlots = p.bundle_slots ?? p.bundleSlots ?? fm.bundleSlots ?? fm.bundle_slots ?? fm.slots ?? [];
+      const bundlePrice = p.bundle_price ?? p.bundlePrice ?? fm.bundlePrice ?? fm.bundle_price ?? null;
+
+      let rawProductIds = [
+        ...(Array.isArray(p.specific_product_ids) ? p.specific_product_ids : []),
+        ...(Array.isArray(p.product_ids) ? p.product_ids : []),
+        ...(Array.isArray(p.combo_products) ? p.combo_products : []),
+        ...(Array.isArray(fm.specificProductIds) ? fm.specificProductIds : []),
+        ...(Array.isArray(fm.product_ids) ? fm.product_ids : []),
+        ...(Array.isArray(fm.productIds) ? fm.productIds : []),
+      ];
+
+      if (Array.isArray(bundleSlots)) {
+        bundleSlots.forEach((slot: any) => {
+          if (Array.isArray(slot)) {
+            slot.forEach((x: any) => {
+              const id = typeof x === "object" ? String(x?.id || x?.productId || x?.product_id || x?.ean || x?.barcode || "").trim() : String(x || "").trim();
+              if (id) rawProductIds.push(id);
+            });
+          }
+        });
+      }
+
+      const mergedProductIds = Array.from(new Set(rawProductIds.map((x) => String(x).trim()).filter(Boolean)));
+
       return {
         ...p,
         bundle_slots: bundleSlots,
         bundleSlots: bundleSlots,
         bundle_price: bundlePrice,
         bundlePrice: bundlePrice,
+        specific_product_ids: mergedProductIds,
+        specificProductIds: mergedProductIds,
+        product_ids: mergedProductIds,
+        productIds: mergedProductIds,
+        combo_products: mergedProductIds,
+        comboProducts: mergedProductIds,
       };
     });
 

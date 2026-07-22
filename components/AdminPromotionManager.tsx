@@ -691,9 +691,35 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
         }
       }
 
+      const rawSlots = promoToSave.bundleSlots || (promoToSave as any).bundle_slots || [];
+      let slotProductIds: string[] = [];
+      if (Array.isArray(rawSlots)) {
+        rawSlots.forEach((slot: any) => {
+          if (Array.isArray(slot)) {
+            slot.forEach((x: any) => {
+              const id = typeof x === "object" ? String(x?.id || x?.productId || x?.product_id || x?.ean || x?.barcode || "").trim() : String(x || "").trim();
+              if (id) slotProductIds.push(id);
+            });
+          }
+        });
+      }
+
+      const allProductIds = Array.from(
+        new Set([
+          ...(promoToSave.specificProductIds || []),
+          ...((promoToSave as any).product_ids || []),
+          ...((promoToSave as any).productIds || []),
+          ...(promoToSave.comboProducts || []),
+          ...slotProductIds,
+        ].map((x) => String(x).trim()).filter(Boolean))
+      );
+
       const finalizedPromo = {
         ...promoToSave,
         id: promoToSave.id || `promo_${Date.now()}`,
+        specificProductIds: allProductIds,
+        comboProducts: allProductIds,
+        bundleSlots: rawSlots,
         payY: isNaN(sanitizedPayY) ? 0 : sanitizedPayY,
         lightningDiscountPercentage: promoToSave.type === "LIGHTNING_OFFER" ? (promoToSave.lightningDiscountPercentage || 0) : promoToSave.lightningDiscountPercentage,
         createdAt: promoToSave.createdAt || new Date().toISOString(),
@@ -702,7 +728,17 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
         endDate:
           promoToSave.endDate ||
           new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+        filtersMetadata: {
+          ...(promoToSave.filtersMetadata || {}),
+          bundlePrice: promoToSave.bundlePrice,
+          bundleSlots: rawSlots,
+          product_ids: allProductIds,
+          productIds: allProductIds,
+          specificProductIds: allProductIds,
+        },
       } as PromotionRule;
+      (finalizedPromo as any).product_ids = allProductIds;
+      (finalizedPromo as any).productIds = allProductIds;
 
       await savePromotion(finalizedPromo);
 

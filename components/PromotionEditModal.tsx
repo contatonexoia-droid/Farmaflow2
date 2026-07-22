@@ -1140,17 +1140,48 @@ export const PromotionEditModal: React.FC<PromotionEditModalProps> = ({
   };
 
   const handleConfirmSave = async () => {
+    const rawSlots = editingPromo.bundleSlots || (editingPromo as any).bundle_slots || [];
+    let slotProductIds: string[] = [];
+    if (Array.isArray(rawSlots)) {
+      rawSlots.forEach((slot: any) => {
+        if (Array.isArray(slot)) {
+          slot.forEach((x: any) => {
+            const id = typeof x === "object" ? String(x?.id || x?.productId || x?.product_id || x?.ean || x?.barcode || "").trim() : String(x || "").trim();
+            if (id) slotProductIds.push(id);
+          });
+        }
+      });
+    }
+
+    const baseProductIds = editingPromo.targetType === "SPECIFIC_SELECTION" ? selectedProductIds : [];
+    const allProductIds = Array.from(
+      new Set([
+        ...baseProductIds,
+        ...(editingPromo.specificProductIds || []),
+        ...((editingPromo as any).product_ids || []),
+        ...((editingPromo as any).productIds || []),
+        ...(editingPromo.comboProducts || []),
+        ...slotProductIds,
+      ].map((x) => String(x).trim()).filter(Boolean))
+    );
+
     const promoToSave: PromotionRule = {
       ...editingPromo,
-      specificProductIds:
-        editingPromo.targetType === "SPECIFIC_SELECTION"
-          ? selectedProductIds
-          : [],
+      bundleSlots: rawSlots,
+      specificProductIds: allProductIds,
+      comboProducts: allProductIds,
       filtersMetadata: {
         ...(editingPromo.filtersMetadata || {}),
         ...(editingPromo.targetType === "SPECIFIC_SELECTION" ? filters : {}),
+        bundlePrice: editingPromo.bundlePrice,
+        bundleSlots: rawSlots,
+        product_ids: allProductIds,
+        productIds: allProductIds,
+        specificProductIds: allProductIds,
       },
     } as PromotionRule;
+    (promoToSave as any).product_ids = allProductIds;
+    (promoToSave as any).productIds = allProductIds;
 
     await onSave(promoToSave);
     setShowConfirmation(false);

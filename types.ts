@@ -484,6 +484,7 @@ export const checkProductMatchesRule = (
     const bundlePromo = rule as PromotionRule;
     const slots = bundlePromo.bundleSlots || (bundlePromo as any).bundle_slots;
     const comboProds = bundlePromo.comboProducts || (bundlePromo as any).combo_products;
+    const specProds = bundlePromo.specificProductIds || (bundlePromo as any).specific_product_ids || (bundlePromo as any).product_ids || (bundlePromo as any).productIds;
 
     if (comboProds && Array.isArray(comboProds)) {
       const normComboProds = comboProds.map((x: any) => String(x).trim());
@@ -491,6 +492,25 @@ export const checkProductMatchesRule = (
       if (pBarcodeStr && normComboProds.includes(pBarcodeStr)) return true;
       if (pEanStr && normComboProds.includes(pEanStr)) return true;
       if (productEan && normComboProds.includes(productEan)) return true;
+    }
+
+    if (specProds && Array.isArray(specProds) && specProds.length > 0) {
+      const normSpecProds = specProds.map((x: any) => String(x).trim());
+      if (pIdStr && normSpecProds.includes(pIdStr)) return true;
+      if (pBarcodeStr && normSpecProds.includes(pBarcodeStr)) return true;
+      if (pEanStr && normSpecProds.includes(pEanStr)) return true;
+      if (productEan && normSpecProds.includes(productEan)) return true;
+      if (productEan) {
+        const cacheKey = `${rule.id}_spec_${matrizProducts.length}`;
+        let targetEans = ruleEanCache.get(cacheKey);
+        if (!targetEans) {
+          targetEans = matrizProducts
+            .filter((mp) => mp && normSpecProds.includes(String(mp.id).trim()) && (mp.barcode || (mp as any).ean))
+            .map((mp) => (mp.barcode || (mp as any).ean)?.toString().trim() as string);
+          ruleEanCache.set(cacheKey, targetEans);
+        }
+        if (targetEans.includes(productEan)) return true;
+      }
     }
 
     if (!slots || !Array.isArray(slots) || slots.length === 0) return false;
