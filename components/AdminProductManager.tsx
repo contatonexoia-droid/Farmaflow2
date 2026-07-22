@@ -17,6 +17,7 @@ import Fuse from 'fuse.js';
 import ProductScanner from './ProductScanner';
 import { SmartNumberInput } from './SmartNumberInput';
 import { getDepartmentForCategory, DEPARTMENT_MAPPING } from '../lib/departments';
+import { getStoreUrl } from '../lib/store';
 import { AdminDepartmentManager } from './AdminDepartmentManager';
 import { DynamicFlyerGenerator } from './DynamicFlyerGenerator';
 import { getTenants, getProductsByTenant, saveProductsByTenant } from '../services/storage';
@@ -3147,7 +3148,12 @@ const [selectedDeptForEdit, setSelectedDeptForEdit] = useState<string>('Outros')
             <DynamicFlyerGenerator
                 onClose={() => setIsFlyerModalOpen(false)}
                 initialConfig={{
+                    tenant: tenant,
+                    tenantId: tenant.id,
                     tenantSlug: tenant.slug,
+                    tenantSubdomain: (tenant as any).subdomain,
+                    customDomain: tenant.custom_domain,
+                    storeUrl: getStoreUrl(tenant),
                     themeColor: tenant.primaryColor || '#1e40af',
                     themeSecondaryColor: tenant.accentColor || '#1e3a8a',
                     bannerTitle: tenant.bannerTitle || 'OFERTAS ESPECIAIS',

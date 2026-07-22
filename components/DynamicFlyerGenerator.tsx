@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { X, Printer, ImageIcon, Loader2, Sparkles, Phone, Truck, Info, Star, ChevronDown, AlertTriangle } from 'lucide-react';
 import { domToJpeg } from 'modern-screenshot';
+import { getStoreUrl } from '../lib/store';
 
 interface FlyerProduct {
     id: string;
@@ -30,6 +31,11 @@ interface FlyerConfig {
     logo?: string;
     tenantName: string;
     tenantSlug?: string;
+    tenantSubdomain?: string;
+    tenantId?: string;
+    customDomain?: string;
+    storeUrl?: string;
+    tenant?: any;
 }
 
 interface DynamicFlyerGeneratorProps {
@@ -107,15 +113,19 @@ export const DynamicFlyerGenerator: React.FC<DynamicFlyerGeneratorProps> = ({ in
     };
 
     const generateFlyerTextSupport = () => {
-        const rawSlug = config.tenantSlug || config.tenantName || 'loja';
-        const storeSlug = rawSlug.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9\s-]/g, "").trim().replace(/\s+/g, "-");
-        
-        let text = `💪🛡️ ${config.bannerTitle.toUpperCase()} NA ${config.tenantName.toUpperCase()}! 🛡️💪\n\n`;
-        text += `💊 Saúde e bem-estar com descontos imperdíveis diretamente no nosso site.\n\n`;
-        text += `🛒 Confira as ofertas e faça seu pedido na nossa loja online:\n`;
-        text += `🔗 https://${storeSlug}.farmaflow.online\n`;
+        const storeUrl = config.storeUrl || getStoreUrl(config.tenant) || getStoreUrl({
+            id: config.tenantId,
+            slug: config.tenantSlug,
+            subdomain: config.tenantSubdomain,
+            custom_domain: config.customDomain,
+            name: config.tenantName
+        });
 
-        return text;
+        const storeName = (config.tenantName || 'NOSSA LOJA').toUpperCase();
+        
+        const whatsappMessage = `💪🛡️ SEMPRE PERTO, CUIDANDO DE VOCÊ. NA ${storeName}! 🛡️💪\n\n💊 Saúde e bem-estar com descontos imperdíveis diretamente no nosso site.\n\n🛒 Confira as ofertas e faça seu pedido na nossa loja online:\n🔗 ${storeUrl}`;
+
+        return whatsappMessage;
     };
 
     const generateFlyerImageBlob = async () => {

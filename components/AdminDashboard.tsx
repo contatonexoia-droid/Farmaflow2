@@ -3,6 +3,7 @@ import { Order, CouponRule, PromotionRule, PharmacyConfig } from '../types';
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import { CalendarDays, TrendingUp, DollarSign, X, ExternalLink, Copy, CheckCircle, Clock, ShoppingBag, Globe, Info, Tag, Percent, Search, SearchX, Users, Plus, RefreshCw, AlertCircle } from 'lucide-react';
 import { getEmptySearches, isSupabaseConfigured, getTenants, getOrdersByTenant } from '../services/storage';
+import { getStoreUrl } from '../lib/store';
 import { supabase } from '../services/supabase';
 
 const isConfirmedOrder = (status: string): boolean => {
@@ -101,16 +102,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   }, [tenant?.networkId, tenant?.id]);
 
   const storeUrl = useMemo(() => {
-    if (tenant?.custom_domain) return `https://${tenant.custom_domain}`;
-    const rawSlug = tenant?.slug || tenantId || "";
-    const cleanSlug = rawSlug
-      .toLowerCase()
-      .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "")
-      .replace(/[^a-z0-9\s-]/g, "")
-      .trim()
-      .replace(/\s+/g, "-");
-    return `https://${cleanSlug}.farmaflow.online`;
+    return getStoreUrl(tenant || { id: tenantId });
   }, [tenant, tenantId]);
 
   const fetchSearches = async () => {
