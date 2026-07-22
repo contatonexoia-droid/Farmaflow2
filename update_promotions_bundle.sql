@@ -26,21 +26,19 @@ WHERE
 -- 3. Atualiza specific_product_ids com os IDs extraídos dos slots ou filters_metadata caso estejam vazios
 UPDATE public.promotions p
 SET specific_product_ids = (
-  SELECT COALESCE(array_agg(DISTINCT id_val), '{}'::text[])
-  FROM (
-    SELECT jsonb_array_elements_text(p.filters_metadata->'product_ids') AS id_val
-    WHERE jsonb_typeof(p.filters_metadata->'product_ids') = 'array'
-    UNION ALL
-    SELECT jsonb_array_elements_text(p.filters_metadata->'specificProductIds') AS id_val
-    WHERE jsonb_typeof(p.filters_metadata->'specificProductIds') = 'array'
-    UNION ALL
-    SELECT jsonb_array_elements_text(p.filters_metadata->'productIds') AS id_val
-    WHERE jsonb_typeof(p.filters_metadata->'productIds') = 'array'
-    UNION ALL
-    SELECT jsonb_array_elements_text(p.combo_products) AS id_val
-    WHERE jsonb_typeof(p.combo_products) = 'array'
-  ) sub
-  WHERE id_val IS NOT NULL AND id_val != ''
+  SELECT ARRAY(
+    SELECT DISTINCT id_val
+    FROM (
+      SELECT jsonb_array_elements_text(p.filters_metadata->'product_ids') AS id_val
+      UNION
+      SELECT jsonb_array_elements_text(p.filters_metadata->'specificProductIds') AS id_val
+      UNION
+      SELECT jsonb_array_elements_text(p.filters_metadata->'productIds') AS id_val
+      UNION
+      SELECT jsonb_array_elements_text(p.combo_products) AS id_val
+    ) sub
+    WHERE id_val IS NOT NULL AND id_val != ''
+  )
 )
 WHERE (p.specific_product_ids IS NULL OR cardinality(p.specific_product_ids) = 0)
-  AND (p.filters_metadata IS NOT NULL OR p.combo_products IS NOT NULL);
+  AND p.filters_metadata IS NOT NULL;
