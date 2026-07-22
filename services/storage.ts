@@ -66,6 +66,8 @@ import {
  *   combo_products JSONB,
  *   combo_discount_percentage NUMERIC,
  *   specific_product_ids TEXT[],
+ *   bundle_slots JSONB,
+ *   bundle_price NUMERIC,
  *   filters_metadata JSONB,
  *   start_date TIMESTAMP WITH TIME ZONE,
  *   end_date TIMESTAMP WITH TIME ZONE,
@@ -1274,6 +1276,13 @@ export const savePromotion = async (promotion: PromotionRule) => {
       ].map((x) => String(x).trim()).filter(Boolean))
     );
 
+    const bundlePrice =
+      promotion.bundlePrice ??
+      (promotion as any).bundle_price ??
+      (promotion.filtersMetadata as any)?.bundlePrice ??
+      (promotion.filtersMetadata as any)?.bundle_price ??
+      null;
+
     const payload: any = {
       id: promotion.id,
       tenant_id: promotion.tenantId,
@@ -1288,9 +1297,14 @@ export const savePromotion = async (promotion: PromotionRule) => {
       combo_products: mergedProductIds,
       combo_discount_percentage: promotion.comboDiscountPercentage,
       specific_product_ids: mergedProductIds,
+      bundle_slots: rawSlots && rawSlots.length > 0 ? rawSlots : null,
+      bundle_price:
+        bundlePrice !== null && bundlePrice !== undefined && bundlePrice !== ""
+          ? Number(bundlePrice)
+          : null,
       filters_metadata: {
         ...(promotion.filtersMetadata || {}),
-        bundlePrice: promotion.bundlePrice,
+        bundlePrice: bundlePrice,
         bundleSlots: rawSlots,
         product_ids: mergedProductIds,
         productIds: mergedProductIds,

@@ -6,7 +6,6 @@ import React, {
   useDeferredValue,
   useCallback,
 } from "react";
-import { BundlePromoCard } from "./BundlePromoCard";
 import { flushSync } from "react-dom";
 import {
   Product,
@@ -643,8 +642,10 @@ const ProductCard = React.memo(
                             activePromo!.buyX &&
                             activePromo!.payY
                           ? `Leve ${activePromo!.buyX} por R$ ${activePromo!.payY.toFixed(2).replace(".", ",")}`
-                          : isBundleType(activePromo!) && activePromo!.bundlePrice
-                            ? `COMBO: R$ ${activePromo!.bundlePrice.toFixed(2).replace(".", ",")}`
+                          : isBundleType(activePromo!)
+                            ? (activePromo!.bundlePrice
+                              ? `COMBO: R$ ${activePromo!.bundlePrice.toFixed(2).replace(".", ",")}`
+                              : `COMBO: ${activePromo!.name}`)
                             : activePromo!.name}
                   </span>
                 )}
@@ -3135,17 +3136,6 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
                 </button>
               </div>
             </div>
-
-            {isBundleType(selectedPromotion) && (
-              <div className="mt-6">
-                <BundlePromoCard
-                  promo={selectedPromotion}
-                  products={products}
-                  matrizProducts={matrizProducts}
-                  onAddToCart={(item) => handleAddToCartWrapper(item)}
-                />
-              </div>
-            )}
           </div>
         )}
 

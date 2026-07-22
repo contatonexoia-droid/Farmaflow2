@@ -205,7 +205,15 @@ app.get("/api/v1/store/:tenantId/init", async (req, res) => {
     // Ensure all combo slots and prices are cleanly serialized in promotions
     const safePromotions = (promoRes.data || []).map((p: any) => {
       const fm = typeof p.filters_metadata === "object" && p.filters_metadata ? p.filters_metadata : {};
-      const bundleSlots = p.bundle_slots ?? p.bundleSlots ?? fm.bundleSlots ?? fm.bundle_slots ?? fm.slots ?? [];
+      let rawBundleSlots = p.bundle_slots ?? p.bundleSlots ?? fm.bundleSlots ?? fm.bundle_slots ?? fm.slots ?? [];
+      if (typeof rawBundleSlots === "string") {
+        try {
+          rawBundleSlots = JSON.parse(rawBundleSlots);
+        } catch (e) {
+          rawBundleSlots = [];
+        }
+      }
+      const bundleSlots = Array.isArray(rawBundleSlots) ? rawBundleSlots : [];
       const bundlePrice = p.bundle_price ?? p.bundlePrice ?? fm.bundlePrice ?? fm.bundle_price ?? null;
 
       let rawProductIds = [
