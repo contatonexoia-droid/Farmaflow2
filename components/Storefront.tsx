@@ -223,6 +223,7 @@ interface StorefrontProps {
   promotions?: PromotionRule[];
   coupons?: CouponRule[];
   cartCount: number;
+  isLoading?: boolean;
   onAddToCart: (
     product: Product,
     isMainProduct?: boolean,
@@ -1119,6 +1120,7 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
   promotions = [],
   coupons = [],
   cartCount,
+  isLoading: externalIsLoading = false,
   onAddToCart,
   onProductClick,
   onOpenCart,
@@ -1128,6 +1130,11 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
   const [isLoading, setIsLoading] = useState(true);
   const [isTransitioning, setIsTransitioning] = useState(false);
   const [matrizProducts, setMatrizProducts] = useState<Product[]>([]);
+
+  // Clear search cache whenever products array changes or is populated
+  useEffect(() => {
+    searchCache.current = {};
+  }, [products]);
 
   const inheritedPromotions = useMemo(() => {
     if (!promotions || !Array.isArray(promotions)) return [];
@@ -1844,7 +1851,7 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
   const filteredProducts = useMemo<Product[]>(() => {
     const term = normalizeStr(debouncedSearchTerm);
     const activePromoIds = activePromotions.map((p) => p.id).join(",");
-    const cacheKey = `${term}_${selectedDepartment}_${selectedCategory}_${selectedPromotion?.id || "none"}_${activeCouponFilter?.id || "none"}_${activePromoIds}`;
+    const cacheKey = `${products.length}_${term}_${selectedDepartment}_${selectedCategory}_${selectedPromotion?.id || "none"}_${activeCouponFilter?.id || "none"}_${activePromoIds}`;
 
     if (searchCache.current[cacheKey]) {
       return searchCache.current[cacheKey];
@@ -1891,10 +1898,14 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
           }
 
           sourceList = products.filter((p) => {
-            const pEan = (p.barcode || (p as any).ean)?.toString().trim();
-            if (p.id && slotProductIds.has(p.id)) return true;
-            if (p.barcode && (slotProductIds.has(p.barcode.trim()) || slotEans.has(p.barcode.trim()))) return true;
-            if ((p as any).ean && (slotProductIds.has((p as any).ean.toString().trim()) || slotEans.has((p as any).ean.toString().trim()))) return true;
+            const pIdStr = p.id ? String(p.id).trim() : "";
+            const pBarcodeStr = p.barcode ? String(p.barcode).trim() : "";
+            const pEanStr = (p as any).ean ? String((p as any).ean).trim() : "";
+            const pEan = pBarcodeStr || pEanStr;
+
+            if (pIdStr && slotProductIds.has(pIdStr)) return true;
+            if (pBarcodeStr && (slotProductIds.has(pBarcodeStr) || slotEans.has(pBarcodeStr))) return true;
+            if (pEanStr && (slotProductIds.has(pEanStr) || slotEans.has(pEanStr))) return true;
             if (pEan && slotEans.has(pEan)) return true;
 
             return isProductInRule(selectedPromotion, p);
@@ -3160,13 +3171,13 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
             </div>
           )}
 
-        {isLoading || isTransitioning ? (
+        {externalIsLoading || isTransitioning || (products.length === 0 && (isLoading || externalIsLoading)) ? (
           <div className="py-32 text-center text-gray-500 font-black animate-pulse flex flex-col items-center justify-center gap-4">
             <div
               className="w-8 h-8 border-4 border-gray-200 border-t-brand rounded-full animate-spin"
               style={{ borderTopColor: tenant.primaryColor }}
             ></div>
-            Carregando visualização...
+            {filters.promocao_id ? "Carregando produtos da promoção..." : "Carregando visualização..."}
           </div>
         ) : filteredProducts.length === 0 ? (
           <div className="py-32 text-center space-y-6">

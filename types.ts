@@ -432,16 +432,19 @@ export const checkProductMatchesRule = (
   // Se a regra for de rede ou pertencer a um tenant diferente do produto, é escopo rede
   const isNetworkScope = rule.scope === "NETWORK" || (tenantId && rule.tenantId !== tenantId);
 
-  const productEan = (p.barcode || (p as any).ean)?.toString().trim();
+  const pIdStr = p.id ? String(p.id).trim() : "";
+  const pBarcodeStr = p.barcode ? String(p.barcode).trim() : "";
+  const pEanStr = (p as any).ean ? String((p as any).ean).trim() : "";
+  const productEan = (pBarcodeStr || pEanStr);
 
   if (rule.targetType === "PRODUCT") {
-    if (p.id && rule.targetValue === p.id) return true;
+    if (pIdStr && String(rule.targetValue).trim() === pIdStr) return true;
     // Se for escopo de rede, targetValue é o ID do produto na matriz. Comparamos pelo código de barras (EAN)
     if (productEan) {
       const cacheKey = `${rule.id}_${matrizProducts.length}`;
       let targetBarcode = ruleBarcodeCache.get(cacheKey);
       if (targetBarcode === undefined) {
-        const matrizProd = matrizProducts.find((mp) => mp && mp.id === rule.targetValue);
+        const matrizProd = matrizProducts.find((mp) => mp && String(mp.id).trim() === String(rule.targetValue).trim());
         targetBarcode = (matrizProd?.barcode || (matrizProd as any)?.ean)?.toString().trim() || null;
         ruleBarcodeCache.set(cacheKey, targetBarcode);
       }
@@ -461,13 +464,14 @@ export const checkProductMatchesRule = (
   }
 
   if (rule.targetType === "SPECIFIC_SELECTION") {
-    if (p.id && rule.specificProductIds?.includes(p.id)) return true;
+    const specificIds = (rule.specificProductIds || []).map((x) => String(x).trim());
+    if (pIdStr && specificIds.includes(pIdStr)) return true;
     if (productEan) {
       const cacheKey = `${rule.id}__${matrizProducts.length}`;
       let targetEans = ruleEanCache.get(cacheKey);
       if (!targetEans) {
         targetEans = matrizProducts
-          .filter((mp) => mp && rule.specificProductIds?.includes(mp.id) && (mp.barcode || (mp as any).ean))
+          .filter((mp) => mp && specificIds.includes(String(mp.id).trim()) && (mp.barcode || (mp as any).ean))
           .map((mp) => (mp.barcode || (mp as any).ean)?.toString().trim() as string);
         ruleEanCache.set(cacheKey, targetEans);
       }
@@ -482,10 +486,11 @@ export const checkProductMatchesRule = (
     const comboProds = bundlePromo.comboProducts || (bundlePromo as any).combo_products;
 
     if (comboProds && Array.isArray(comboProds)) {
-      if (p.id && comboProds.includes(p.id)) return true;
-      if (p.barcode && comboProds.includes(p.barcode.trim())) return true;
-      if ((p as any).ean && comboProds.includes((p as any).ean.toString().trim())) return true;
-      if (productEan && comboProds.includes(productEan)) return true;
+      const normComboProds = comboProds.map((x: any) => String(x).trim());
+      if (pIdStr && normComboProds.includes(pIdStr)) return true;
+      if (pBarcodeStr && normComboProds.includes(pBarcodeStr)) return true;
+      if (pEanStr && normComboProds.includes(pEanStr)) return true;
+      if (productEan && normComboProds.includes(productEan)) return true;
     }
 
     if (!slots || !Array.isArray(slots) || slots.length === 0) return false;
@@ -495,16 +500,23 @@ export const checkProductMatchesRule = (
       if (!slot) continue;
 
       if (Array.isArray(slot)) {
-        if (p.id && slot.includes(p.id)) return true;
-        if (p.barcode && slot.includes(p.barcode.trim())) return true;
-        if ((p as any).ean && slot.includes((p as any).ean.toString().trim())) return true;
-        if (productEan && slot.includes(productEan)) return true;
+        const normSlotItems = slot.map((x: any) => {
+          if (x && typeof x === "object") {
+            return String(x.id || x.productId || x.product_id || x.ean || x.barcode || "").trim();
+          }
+          return String(x).trim();
+        }).filter(Boolean);
+
+        if (pIdStr && normSlotItems.includes(pIdStr)) return true;
+        if (pBarcodeStr && normSlotItems.includes(pBarcodeStr)) return true;
+        if (pEanStr && normSlotItems.includes(pEanStr)) return true;
+        if (productEan && normSlotItems.includes(productEan)) return true;
         if (productEan) {
           const cacheKey = `${rule.id}_slot_${slotIdx}_${matrizProducts.length}`;
           let targetEans = ruleEanCache.get(cacheKey);
           if (!targetEans) {
             targetEans = matrizProducts
-              .filter((mp) => mp && slot.includes(mp.id) && (mp.barcode || (mp as any).ean))
+              .filter((mp) => mp && normSlotItems.includes(String(mp.id).trim()) && (mp.barcode || (mp as any).ean))
               .map((mp) => (mp.barcode || (mp as any).ean)?.toString().trim() as string);
             ruleEanCache.set(cacheKey, targetEans);
           }
@@ -514,9 +526,9 @@ export const checkProductMatchesRule = (
         const pIds = (slot.productIds || slot.product_ids || slot.productIdsList || []).map((x: any) => String(x).trim());
         const slotEans = (slot.eans || slot.barcodes || []).map((x: any) => String(x).trim());
 
-        if (p.id && pIds.includes(p.id)) return true;
-        if (p.barcode && (pIds.includes(p.barcode.trim()) || slotEans.includes(p.barcode.trim()))) return true;
-        if ((p as any).ean && (pIds.includes((p as any).ean.toString().trim()) || slotEans.includes((p as any).ean.toString().trim()))) return true;
+        if (pIdStr && (pIds.includes(pIdStr) || slotEans.includes(pIdStr))) return true;
+        if (pBarcodeStr && (pIds.includes(pBarcodeStr) || slotEans.includes(pBarcodeStr))) return true;
+        if (pEanStr && (pIds.includes(pEanStr) || slotEans.includes(pEanStr))) return true;
         if (productEan && (pIds.includes(productEan) || slotEans.includes(productEan))) return true;
 
         if (productEan) {
@@ -524,7 +536,7 @@ export const checkProductMatchesRule = (
           let targetEans = ruleEanCache.get(cacheKey);
           if (!targetEans) {
             targetEans = matrizProducts
-              .filter((mp) => mp && pIds.includes(mp.id) && (mp.barcode || (mp as any).ean))
+              .filter((mp) => mp && pIds.includes(String(mp.id).trim()) && (mp.barcode || (mp as any).ean))
               .map((mp) => (mp.barcode || (mp as any).ean)?.toString().trim() as string);
             ruleEanCache.set(cacheKey, targetEans);
           }

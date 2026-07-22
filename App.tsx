@@ -3119,6 +3119,7 @@ const App: React.FC = () => {
               promotions={promotions}
               coupons={coupons}
               cartCount={cart.reduce((a, c) => a + c.quantity, 0)}
+              isLoading={isLoading}
               onAddToCart={addToCart}
               onProductClick={handleProductClick}
               onOpenCart={handleOpenCart}

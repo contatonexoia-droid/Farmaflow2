@@ -316,9 +316,29 @@ export const getTenantByHostname = async (hostname: string): Promise<PharmacyCon
         return mapDbTenantToApp(json.tenant);
       }
     }
-    return null;
   } catch (e) {
-    console.warn("Failed to resolve tenant by hostname:", e);
+    console.warn("Failed to resolve tenant by hostname API:", e);
+  }
+
+  try {
+    const hostParts = hostname.split(".");
+    const subdomain = (hostParts.length >= 3 && hostParts[0] !== "www") ? hostParts[0] : "";
+    const cleanSubdomain = subdomain
+      ? subdomain.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "")
+      : "";
+
+    const tenants = await getTenants();
+    return tenants.find((t) => {
+      const cleanSlug = t.slug
+        ? t.slug.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "")
+        : "";
+      return (
+        t.custom_domain === hostname ||
+        (cleanSubdomain && (cleanSlug === cleanSubdomain || t.id === subdomain))
+      );
+    }) || null;
+  } catch (err) {
+    console.warn("Failed to resolve tenant by hostname fallback:", err);
     return null;
   }
 };
