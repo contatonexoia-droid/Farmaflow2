@@ -482,7 +482,14 @@ export const checkProductMatchesRule = (
 
   if (isBundleType(rule)) {
     const bundlePromo = rule as PromotionRule;
-    const slots = bundlePromo.bundleSlots || (bundlePromo as any).bundle_slots;
+    let slots = bundlePromo.bundleSlots || (bundlePromo as any).bundle_slots;
+    if (!slots && (bundlePromo as any).filtersMetadata) {
+      const fm = typeof (bundlePromo as any).filtersMetadata === "string" ? (() => { try { return JSON.parse((bundlePromo as any).filtersMetadata); } catch (e) { return {}; } })() : (bundlePromo as any).filtersMetadata;
+      slots = fm?.bundleSlots || fm?.bundle_slots || fm?.slots;
+    }
+    if (typeof slots === "string") {
+      try { slots = JSON.parse(slots); } catch (e) {}
+    }
     const comboProds = bundlePromo.comboProducts || (bundlePromo as any).combo_products;
     const specProds = bundlePromo.specificProductIds || (bundlePromo as any).specific_product_ids || (bundlePromo as any).product_ids || (bundlePromo as any).productIds;
 

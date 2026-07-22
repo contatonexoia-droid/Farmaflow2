@@ -1936,6 +1936,19 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
   }, [activePromotions, activeCouponFilter, matrizProducts, tenant.id]);
 
   const isProductInRule = useCallback((rule: PromotionRule | CouponRule, p: Product) => {
+    if (!rule || !p) return false;
+
+    const promoProductIds = extractAllProductIdsFromPromotion(rule);
+    if (promoProductIds.length > 0) {
+      const pIdStr = p.id ? String(p.id).trim() : "";
+      const pBarcodeStr = p.barcode ? String(p.barcode).trim() : "";
+      const pEanStr = (p as any).ean ? String((p as any).ean).trim() : "";
+
+      if (pIdStr && promoProductIds.includes(pIdStr)) return true;
+      if (pBarcodeStr && promoProductIds.includes(pBarcodeStr)) return true;
+      if (pEanStr && promoProductIds.includes(pEanStr)) return true;
+    }
+
     return checkProductMatchesRule(rule, p, matrizProducts.length > 0 ? matrizProducts : products, tenant.id);
   }, [matrizProducts, products, tenant.id]);
 
