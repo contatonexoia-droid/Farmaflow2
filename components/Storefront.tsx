@@ -363,10 +363,11 @@ const ProductCard = React.memo(
     products?: Product[];
   }) => {
     const isOutOfStock = product.stock <= 0;
-    const hasDiscount =
+    const hasDiscount = Boolean(
       product.promotionType === "DISCOUNT" &&
       product.originalPrice &&
-      product.originalPrice > product.price;
+      product.originalPrice > product.price
+    );
     const isKit = product.promotionType === "BUY_X_PAY_Y";
     const isDiscountOnQty = product.promotionType === "DISCOUNT_ON_QTY";
 
@@ -619,46 +620,46 @@ const ProductCard = React.memo(
               product.isFeatured ||
               (product as any)._justUpdated) && (
               <div className="absolute top-2 right-2 flex flex-col items-end gap-1">
-                {(product as any)._justUpdated && (
+                {Boolean((product as any)._justUpdated) && (
                   <span className="bg-orange-500 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1 animate-pulse">
                     Atualizado
                   </span>
                 )}
-                {product.isFeatured && (
+                {Boolean(product.isFeatured) && (
                   <span className="bg-yellow-400 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1">
                     <Star size={10} fill="currentColor" strokeWidth={4} />{" "}
                     Destaque
                   </span>
                 )}
-                {activePromo && (
+                {Boolean(activePromo) && (
                   <span className="bg-red-600 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1 animate-pulse">
                     <Tag size={10} strokeWidth={4} />
-                    {activePromo.type === "BUY_X_PAY_Y"
-                      ? `Leve ${activePromo.buyX} Pague ${activePromo.payY}`
-                      : activePromo.type === "LIGHTNING_OFFER" &&
-                          activePromo.lightningDiscountPercentage
-                        ? `GANHE ${activePromo.lightningDiscountPercentage}% OFF`
-                        : activePromo.type === "LIGHTNING_OFFER" &&
-                            activePromo.buyX &&
-                            activePromo.payY
-                          ? `Leve ${activePromo.buyX} por R$ ${activePromo.payY.toFixed(2).replace(".", ",")}`
-                          : isBundleType(activePromo) && activePromo.bundlePrice
-                            ? `COMBO: R$ ${activePromo.bundlePrice.toFixed(2).replace(".", ",")}`
-                            : activePromo.name}
+                    {activePromo!.type === "BUY_X_PAY_Y"
+                      ? `Leve ${activePromo!.buyX} Pague ${activePromo!.payY}`
+                      : activePromo!.type === "LIGHTNING_OFFER" &&
+                          activePromo!.lightningDiscountPercentage
+                        ? `GANHE ${activePromo!.lightningDiscountPercentage}% OFF`
+                        : activePromo!.type === "LIGHTNING_OFFER" &&
+                            activePromo!.buyX &&
+                            activePromo!.payY
+                          ? `Leve ${activePromo!.buyX} por R$ ${activePromo!.payY.toFixed(2).replace(".", ",")}`
+                          : isBundleType(activePromo!) && activePromo!.bundlePrice
+                            ? `COMBO: R$ ${activePromo!.bundlePrice.toFixed(2).replace(".", ",")}`
+                            : activePromo!.name}
                   </span>
                 )}
-                {hasDiscount && !activePromo && (
+                {Boolean(hasDiscount && !activePromo) && (
                   <span className="bg-red-500 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1 animate-pulse">
                     <Percent size={10} strokeWidth={4} /> Oferta
                   </span>
                 )}
-                {isKit && (
+                {Boolean(isKit) && (
                   <span className="bg-red-600 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1 animate-pulse">
                     <Layers size={10} strokeWidth={4} /> PROMOÇÃO: Leve{" "}
                     {product.buyX} Pague {product.payY}
                   </span>
                 )}
-                {isDiscountOnQty && (
+                {Boolean(isDiscountOnQty) && (
                   <span className="bg-red-600 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1 animate-pulse">
                     <Percent size={10} strokeWidth={4} /> PROMOÇÃO: A partir de{" "}
                     {product.discountQtyThreshold} unidades, ganhe{" "}
@@ -667,8 +668,7 @@ const ProductCard = React.memo(
                 )}
               </div>
             )}
-
-          {isOutOfStock && (
+          {Boolean(isOutOfStock) && (
             <div className="absolute inset-0 bg-white/60 backdrop-blur-[2px] flex items-center justify-center z-10">
               <span className="bg-gray-900 text-white px-2 py-1 rounded-xl font-black uppercase tracking-widest text-[7px] md:text-[8px]">
                 Esgotado
@@ -2665,7 +2665,7 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
 
                               <div className="flex-1 min-w-0">
                                 <p className="font-black text-gray-900 text-sm md:text-base leading-tight line-clamp-2 transition-colors flex items-center gap-1 md:gap-2">
-                                  {p.isFeatured && (
+                                  {Boolean(p.isFeatured) && (
                                     <Star
                                       size={10}
                                       fill="#fbbf24"
@@ -2700,10 +2700,11 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
                               <div className="text-right flex flex-col items-end shrink-0">
                                 {(() => {
                                   let currentPrice = p.price;
-                                  let hasDiscount =
+                                  let hasDiscount = Boolean(
                                     p.promotionType === "DISCOUNT" &&
                                     p.originalPrice &&
-                                    p.originalPrice > p.price;
+                                    p.originalPrice > p.price
+                                  );
 
                                   if (activePromo) {
                                     if (

@@ -1724,8 +1724,8 @@ export const Cart: React.FC<CartProps> = ({
               </span>
             </div>
 
-            {tenant?.minimumOrderValue &&
-            subtotal < tenant.minimumOrderValue ? (
+            {(tenant?.minimumOrderValue || 0) > 0 &&
+            subtotal < (tenant?.minimumOrderValue || 0) ? (
               <div className="bg-red-50 border border-red-100 rounded-2xl p-4 flex items-start gap-3">
                 <AlertTriangle
                   className="text-red-500 shrink-0 mt-0.5"
