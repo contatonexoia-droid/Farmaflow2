@@ -42,12 +42,10 @@ import {
   getPromotionsByTenant,
   getTenants,
 } from "../services/storage";
-import { supabase } from "../services/supabase";
 import { SmartNumberInput } from "./SmartNumberInput";
 import { ScheduleEditor } from "./ScheduleEditor";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { toast } from "sonner";
-import { PromotionEditModal } from "./PromotionEditModal";
 
 // Helper to convert an ISO date string (UTC) to a local datetime-local string (YYYY-MM-DDTHH:mm) safely
 const toLocalDateTimeString = (
@@ -566,6 +564,7 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
   const [editingPromo, setEditingPromo] =
     useState<Partial<PromotionRule> | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [showConfirmation, setShowConfirmation] = useState(false);
   const [networkBranches, setNetworkBranches] = useState<PharmacyConfig[]>([]);
 
   useEffect(() => {
@@ -629,6 +628,36 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [isEditing, isSaving]);
 
+  // Filter states for product selection
+  const [filters, setFilters] = useState<{
+    category: string[];
+    manufacturer: string[];
+    search: string;
+    minPrice: string;
+    maxPrice: string;
+    minStock?: string;
+  }>({
+    category: [],
+    manufacturer: [],
+    search: "",
+    minPrice: "",
+    maxPrice: "",
+    minStock: "",
+  });
+
+  // Debounced filters to avoid lag during typing
+  const [debouncedFilters, setDebouncedFilters] = useState(filters);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedFilters(filters);
+    }, 400); // 400ms debounce
+    return () => clearTimeout(timer);
+  }, [filters]);
+
+  const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
+  const parentRef = useRef<HTMLDivElement>(null);
+
   // Extract unique manufacturers and categories for targeting
   const manufacturers = useMemo(() => {
     const unique = Array.from(
@@ -670,86 +699,212 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
         minStock: "",
       },
     });
+    setSelectedProductIds([]);
+    setFilters({
+      category: [],
+      manufacturer: [],
+      search: "",
+      minPrice: "",
+      maxPrice: "",
+      minStock: "",
+    });
     setIsEditing(true);
   };
 
   const handleEdit = (promo: PromotionRule) => {
     setEditingPromo({ ...promo });
+    setSelectedProductIds(promo.specificProductIds || []);
+
+    // Restore filters from metadata if available
+    if (promo.filtersMetadata) {
+      setFilters({
+        category: Array.isArray(promo.filtersMetadata.category)
+          ? promo.filtersMetadata.category
+          : promo.filtersMetadata.category
+            ? [promo.filtersMetadata.category]
+            : [],
+        manufacturer: Array.isArray(promo.filtersMetadata.manufacturer)
+          ? promo.filtersMetadata.manufacturer
+          : promo.filtersMetadata.manufacturer
+            ? [promo.filtersMetadata.manufacturer]
+            : [],
+        search: promo.filtersMetadata.search || "",
+        minPrice: promo.filtersMetadata.minPrice || "",
+        maxPrice: promo.filtersMetadata.maxPrice || "",
+        minStock: promo.filtersMetadata.minStock || "",
+      });
+    } else {
+      setFilters({
+        category: [],
+        manufacturer: [],
+        search: "",
+        minPrice: "",
+        maxPrice: "",
+        minStock: "",
+      });
+    }
+
     setIsEditing(true);
   };
 
-  const handleSave = async (promoToSave: PromotionRule) => {
+  // Filtered products for the preview grid - using debounced filters
+  const filteredProducts = useMemo(() => {
+    return products.filter((p) => {
+      if (
+        debouncedFilters.category.length > 0 &&
+        !debouncedFilters.category.includes(p.category)
+      )
+        return false;
+      if (
+        debouncedFilters.manufacturer.length > 0 &&
+        !debouncedFilters.manufacturer.includes(p.manufacturer || "")
+      )
+        return false;
+      if (debouncedFilters.search) {
+        const s = debouncedFilters.search.toLowerCase();
+        if (
+          !p.name.toLowerCase().includes(s) &&
+          !p.barcode?.includes(s) &&
+          !p.internalCode?.includes(s)
+        )
+          return false;
+      }
+      if (
+        debouncedFilters.minPrice &&
+        p.price < parseFloat(debouncedFilters.minPrice)
+      )
+        return false;
+      if (
+        debouncedFilters.maxPrice &&
+        p.price > parseFloat(debouncedFilters.maxPrice)
+      )
+        return false;
+      if (
+        debouncedFilters.minStock &&
+        p.stock < parseInt(debouncedFilters.minStock, 10)
+      )
+        return false;
+      return true;
+    });
+  }, [products, debouncedFilters]);
+
+  // Virtualizer for the product list
+  const rowVirtualizer = useVirtualizer({
+    count: filteredProducts.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 52, // Estimated height of each row
+    overscan: 10,
+  });
+
+  const toggleProductSelection = useCallback((id: string) => {
+    setSelectedProductIds((prev) =>
+      prev.includes(id) ? prev.filter((i) => i !== id) : [...prev, id],
+    );
+  }, []);
+
+  const selectAllFiltered = useCallback(() => {
+    const filteredIds = filteredProducts.map((p) => p.id);
+    setSelectedProductIds((prev) =>
+      Array.from(new Set([...prev, ...filteredIds])),
+    );
+  }, [filteredProducts]);
+
+  const deselectAllFiltered = useCallback(() => {
+    const filteredIds = filteredProducts.map((p) => p.id);
+    setSelectedProductIds((prev) =>
+      prev.filter((id) => !filteredIds.includes(id)),
+    );
+  }, [filteredProducts]);
+
+  const handleSaveAttempt = () => {
+    if (!editingPromo?.name) {
+      toast.error("Por favor, preencha o nome da promoção.");
+      return;
+    }
+    if (editingPromo.type === "LIGHTNING_OFFER") {
+      const hasCombo = (editingPromo.buyX || 0) > 0 && (editingPromo.payY || 0) > 0;
+      const rawPerc = editingPromo.lightningDiscountPercentage;
+      const percNum = Number(rawPerc);
+      const hasPercentage = !isNaN(percNum) && percNum > 0 && percNum < 100;
+      
+      if (!hasCombo && !hasPercentage) {
+        toast.error("Defina um percentual de desconto ou configure as regras do combo (Quantidade e Valor Fixo).");
+        return;
+      }
+      
+      if (rawPerc !== undefined && rawPerc !== null && !isNaN(percNum) && percNum !== 0) {
+        if (percNum >= 100 || percNum < 0) {
+          toast.error("O percentual de desconto deve ser entre 1% e 99%.");
+          return;
+        }
+      }
+    }
+    if (
+      editingPromo.targetType === "SPECIFIC_SELECTION" &&
+      selectedProductIds.length === 0
+    ) {
+      toast.error("Por favor, selecione ao menos um produto para a promoção.");
+      return;
+    }
+    if (
+      editingPromo.targetType !== "SPECIFIC_SELECTION" &&
+      !editingPromo.targetValue
+    ) {
+      toast.error("Por favor, selecione o alvo da promoção.");
+      return;
+    }
+    setShowConfirmation(true);
+  };
+
+  const handleSave = async () => {
     setIsSaving(true);
     try {
       let sanitizedPayY = 0;
-      if (promoToSave?.payY !== undefined) {
-        if (typeof promoToSave.payY === "string") {
+      if (editingPromo?.payY !== undefined) {
+        if (typeof editingPromo.payY === "string") {
           sanitizedPayY = parseFloat(
-            String(promoToSave.payY).replace(",", "."),
+            String(editingPromo.payY).replace(",", "."),
           );
         } else {
-          sanitizedPayY = Number(promoToSave.payY);
+          sanitizedPayY = Number(editingPromo.payY);
         }
       }
 
-      const rawSlots = promoToSave.bundleSlots || (promoToSave as any).bundle_slots || [];
-      let slotProductIds: string[] = [];
-      if (Array.isArray(rawSlots)) {
-        rawSlots.forEach((slot: any) => {
-          if (Array.isArray(slot)) {
-            slot.forEach((x: any) => {
-              const id = typeof x === "object" ? String(x?.id || x?.productId || x?.product_id || x?.ean || x?.barcode || "").trim() : String(x || "").trim();
-              if (id) slotProductIds.push(id);
-            });
-          }
-        });
-      }
-
-      const allProductIds = Array.from(
-        new Set([
-          ...(promoToSave.specificProductIds || []),
-          ...((promoToSave as any).product_ids || []),
-          ...((promoToSave as any).productIds || []),
-          ...(promoToSave.comboProducts || []),
-          ...slotProductIds,
-        ].map((x) => String(x).trim()).filter(Boolean))
-      );
-
-      const finalizedPromo = {
-        ...promoToSave,
-        id: promoToSave.id || `promo_${Date.now()}`,
-        specificProductIds: allProductIds,
-        comboProducts: allProductIds,
-        bundleSlots: rawSlots,
+      const promoToSave = {
+        ...editingPromo,
+        id: editingPromo.id || `promo_${Date.now()}`,
         payY: isNaN(sanitizedPayY) ? 0 : sanitizedPayY,
-        lightningDiscountPercentage: promoToSave.type === "LIGHTNING_OFFER" ? (promoToSave.lightningDiscountPercentage || 0) : promoToSave.lightningDiscountPercentage,
-        createdAt: promoToSave.createdAt || new Date().toISOString(),
-        startDate: promoToSave.startDate || new Date().toISOString(),
-        scope: promoToSave.scope || "SINGLE_STORE",
-        endDate:
-          promoToSave.endDate ||
-          new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+        lightningDiscountPercentage: editingPromo.type === "LIGHTNING_OFFER" ? (editingPromo.lightningDiscountPercentage || 0) : editingPromo.lightningDiscountPercentage,
+        specificProductIds:
+          editingPromo.targetType === "SPECIFIC_SELECTION"
+            ? selectedProductIds
+            : [],
         filtersMetadata: {
-          ...(promoToSave.filtersMetadata || {}),
-          bundlePrice: promoToSave.bundlePrice,
-          bundleSlots: rawSlots,
-          product_ids: allProductIds,
-          productIds: allProductIds,
-          specificProductIds: allProductIds,
+          ...(editingPromo.filtersMetadata || {}),
+          ...(editingPromo.targetType === "SPECIFIC_SELECTION" ? filters : {})
         },
+        createdAt: editingPromo.createdAt || new Date().toISOString(),
+        startDate: editingPromo.startDate || new Date().toISOString(),
+        scope: editingPromo.scope || "SINGLE_STORE",
+        endDate:
+          editingPromo.endDate ||
+          new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
       } as PromotionRule;
-      (finalizedPromo as any).product_ids = allProductIds;
-      (finalizedPromo as any).productIds = allProductIds;
 
-      await savePromotion(finalizedPromo);
+      await savePromotion(promoToSave);
 
+      // Fetch fresh data from the database to ensure it was saved correctly and update the UI
       const updatedPromos = await getPromotionsByTenant(tenant.id);
 
       onPromotionsUpdate(updatedPromos);
       setIsEditing(false);
       setEditingPromo(null);
+      setShowConfirmation(false);
 
       toast.success("Promoção cadastrada com sucesso!");
+
+      // Note: In a real Next.js environment, we would call revalidatePath here.
+      // For this Vite app, the state update above handles the immediate UI refresh.
     } catch (error: any) {
       console.error("Error saving promotion:", error);
       toast.error(
@@ -764,60 +919,14 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
     if (!window.confirm("Tem certeza que deseja excluir esta promoção?"))
       return;
 
-    const backup = [...promotions];
-    // Fallback de Exclusão Local / Optimistic UI: remove imediatamente do estado para evitar congelar a tela
-    onPromotionsUpdate(promotions.filter((p) => p.id !== id));
-    const loadingToastId = toast.loading("Excluindo promoção...");
-
     try {
       await deletePromotion(id);
-      try {
-        const updatedPromos = await getPromotionsByTenant(tenant.id);
-        if (updatedPromos) {
-          onPromotionsUpdate(updatedPromos);
-        }
-      } catch (err) {
-        console.warn("Falha ao recarregar lista após exclusão:", err);
-      }
-      toast.success("Promoção excluída com sucesso!", { id: loadingToastId });
+      const updatedPromos = await getPromotionsByTenant(tenant.id);
+      onPromotionsUpdate(updatedPromos);
+      toast.success("Promoção excluída com sucesso!");
     } catch (error: any) {
       console.error("Error deleting promotion:", error);
-      const errMsg = String(error?.message || error?.originalError || error || "");
-      const isNetworkOrAuth =
-        error?.isNetworkOrAuth ||
-        errMsg.includes("sessão expirou") ||
-        errMsg.includes("instabilidade de rede") ||
-        errMsg.includes("Failed to fetch") ||
-        errMsg.includes("net::ERR_FAILED") ||
-        errMsg.includes("401") ||
-        errMsg.includes("403") ||
-        errMsg.includes("JWT");
-
-      if (isNetworkOrAuth) {
-        toast.error(
-          "Sua sessão expirou ou houve uma instabilidade de rede. Por favor, recarregue a página e tente novamente.",
-          { id: loadingToastId, duration: 6000 }
-        );
-
-        // Verifica validade da sessão no Supabase e redireciona para login/reload se sessão expirada
-        setTimeout(async () => {
-          try {
-            const { data } = await supabase.auth.getSession();
-            if (!data?.session) {
-              await supabase.auth.signOut().catch(() => {});
-              window.location.reload();
-            }
-          } catch (e) {
-            // Ignora erro
-          }
-        }, 2500);
-      } else {
-        // Se foi outro tipo de erro, restaura o backup e avisa o usuário
-        onPromotionsUpdate(backup);
-        toast.error(error.message || "Erro ao excluir promoção.", {
-          id: loadingToastId,
-        });
-      }
+      toast.error(error.message || "Erro ao excluir promoção.");
     }
   };
 
@@ -857,21 +966,1003 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
       </div>
 
       {isEditing && editingPromo && (
-        <PromotionEditModal
-          isOpen={isEditing}
-          onClose={() => {
-            setIsEditing(false);
-            setEditingPromo(null);
-          }}
-          promo={editingPromo}
-          products={products}
-          categories={categories}
-          manufacturers={manufacturers}
-          tenant={tenant}
-          networkBranches={networkBranches}
-          onSave={handleSave}
-          isSaving={isSaving}
-        />
+        <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-300">
+          <div className="bg-white rounded-3xl w-full max-h-[95vh] overflow-hidden shadow-2xl flex flex-col animate-in zoom-in-95 duration-300">
+            <div className="p-6 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-red-100 text-red-600 rounded-xl">
+                  <Tag size={20} />
+                </div>
+                <h3 className="text-xl font-black text-gray-900 tracking-tight">
+                  {editingPromo.id ? "Editar Promoção" : "Nova Promoção"}
+                </h3>
+              </div>
+              <button
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      "Tem certeza que deseja sair? As alterações não salvas serão perdidas.",
+                    )
+                  ) {
+                    setIsEditing(false);
+                  }
+                }}
+                className="p-2 hover:bg-white rounded-full transition-colors"
+              >
+                <X size={24} className="text-gray-400" />
+              </button>
+            </div>
+
+            <div className="p-8 overflow-y-auto space-y-8 custom-scrollbar">
+              {/* Network Configuration (Centralizado) */}
+              {tenant.isNetworkMaster && (
+                <section className="p-5 bg-gradient-to-r from-red-50/50 to-rose-50/50 border border-red-100 rounded-2xl space-y-4">
+                  <div className="flex items-center gap-2 text-rose-700">
+                    <div className="w-1 h-4 bg-red-600 rounded-full" />
+                    <span className="text-[11px] font-black uppercase tracking-widest">Configuração da Rede</span>
+                  </div>
+                  <div className="text-xs text-gray-500 leading-relaxed">
+                    Você é administrador de rede. Pode optar por criar esta promoção de forma centralizada para todas as filiais.
+                  </div>
+                  <div className="flex gap-4 items-center">
+                    <label className="relative flex items-center gap-2 cursor-pointer select-none">
+                      <input
+                        type="radio"
+                        name="promo_network_scope"
+                        checked={!editingPromo.scope || editingPromo.scope === 'SINGLE_STORE'}
+                        onChange={() => setEditingPromo({ ...editingPromo, scope: 'SINGLE_STORE' })}
+                        className="w-4 h-4 text-red-600 border-gray-300 focus:ring-red-500"
+                      />
+                      <span className="text-xs font-bold text-gray-700">Apenas esta filial</span>
+                    </label>
+                    <label className="relative flex items-center gap-2 cursor-pointer select-none">
+                      <input
+                        type="radio"
+                        name="promo_network_scope"
+                        checked={editingPromo.scope === 'NETWORK'}
+                        onChange={() => setEditingPromo({ ...editingPromo, scope: 'NETWORK' })}
+                        className="w-4 h-4 text-red-600 border-gray-300 focus:ring-red-500"
+                      />
+                      <span className="text-xs font-bold text-red-700">Compartilhar com toda a rede (Filiais)</span>
+                    </label>
+                  </div>
+
+                  {editingPromo.scope === 'NETWORK' && networkBranches.length > 0 && (
+                    <div className="mt-4 p-4 bg-white rounded-xl border border-red-100 space-y-3">
+                      <span className="text-xs font-bold text-gray-700 block">Selecionar filiais específicas (opcional):</span>
+                      <div className="text-[11px] text-gray-500 mb-2">Por padrão, aplica-se a todas as filiais se nenhuma for selecionada.</div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-40 overflow-y-auto">
+                        {networkBranches.map(branch => {
+                          const branchIds: string[] = editingPromo.filtersMetadata?.branchIds || [];
+                          const isChecked = branchIds.includes(branch.id);
+                          return (
+                            <label key={branch.id} className="flex items-center gap-2 cursor-pointer text-xs font-semibold text-gray-700">
+                              <input
+                                type="checkbox"
+                                checked={isChecked}
+                                onChange={() => {
+                                  const newBranchIds = isChecked
+                                    ? branchIds.filter(id => id !== branch.id)
+                                    : [...branchIds, branch.id];
+                                  setEditingPromo({
+                                    ...editingPromo,
+                                    filtersMetadata: {
+                                      ...(editingPromo.filtersMetadata || {}),
+                                      branchIds: newBranchIds
+                                    }
+                                  });
+                                }}
+                                className="rounded text-red-600 focus:ring-red-500 w-4 h-4"
+                              />
+                              <span>{branch.name} ({branch.cnpj || 'Sem CNPJ'})</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </section>
+              )}
+
+              {/* Basic Info */}
+              <section className="space-y-6">
+                <div className="flex items-center gap-2 text-gray-400 mb-2">
+                  <div className="w-1 h-4 bg-red-500 rounded-full" />
+                  <span className="text-[10px] font-black uppercase tracking-widest">
+                    Informações Básicas
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="space-y-2">
+                    <label className="text-[11px] font-black uppercase text-gray-400 tracking-widest ml-1">
+                      Nome da Promoção
+                    </label>
+                    <input
+                      type="text"
+                      value={editingPromo.name || ""}
+                      onChange={(e) =>
+                        setEditingPromo({
+                          ...editingPromo,
+                          name: e.target.value,
+                        })
+                      }
+                      placeholder="Ex: Festival Rexona - Leve 3 Pague 2"
+                      className="w-full px-4 py-3 rounded-xl border-2 border-gray-100 focus:border-red-500 focus:ring-0 transition-all font-medium"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-[11px] font-black uppercase text-gray-400 tracking-widest ml-1">
+                      Tipo de Regra
+                    </label>
+                    <select
+                      value={editingPromo.type || "BUY_X_PAY_Y"}
+                      onChange={(e) =>
+                        setEditingPromo({
+                          ...editingPromo,
+                          type: e.target.value as any,
+                        })
+                      }
+                      className="w-full px-4 py-3 rounded-xl border-2 border-gray-100 focus:border-red-500 focus:ring-0 transition-all font-medium appearance-none bg-white"
+                    >
+                      <option value="BUY_X_PAY_Y">Leve X Pague Y</option>
+                      <option value="PROGRESSIVE_DISCOUNT">
+                        Desconto Progressivo
+                      </option>
+                      <option value="FIXED_COMBO">Combo Fixo</option>
+                      <option value="LIGHTNING_OFFER">
+                        Oferta Relâmpago (Cronômetro na Topbar)
+                      </option>
+                    </select>
+                  </div>
+                </div>
+              </section>
+
+              {/* Targeting & Filters */}
+              <section className="space-y-6">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-gray-400">
+                    <div className="w-1 h-4 bg-blue-500 rounded-full" />
+                    <span className="text-[10px] font-black uppercase tracking-widest">
+                      Segmentação de Produtos
+                    </span>
+                  </div>
+                  <div className="flex bg-gray-100 p-1 rounded-xl">
+                    <button
+                      onClick={() =>
+                        setEditingPromo({
+                          ...editingPromo,
+                          targetType: "SPECIFIC_SELECTION",
+                          targetValue: "SELEÇÃO MANUAL",
+                        })
+                      }
+                      className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all ${editingPromo.targetType === "SPECIFIC_SELECTION" ? "bg-white text-blue-600 shadow-sm" : "text-gray-400"}`}
+                    >
+                      Seleção Manual
+                    </button>
+                    <button
+                      onClick={() =>
+                        setEditingPromo({
+                          ...editingPromo,
+                          targetType: "CATEGORY",
+                          targetValue: "",
+                        })
+                      }
+                      className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all ${editingPromo.targetType !== "SPECIFIC_SELECTION" ? "bg-white text-blue-600 shadow-sm" : "text-gray-400"}`}
+                    >
+                      Regra Automática
+                    </button>
+                  </div>
+                </div>
+
+                {editingPromo.targetType !== "SPECIFIC_SELECTION" ? (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6 p-6 bg-blue-50/50 rounded-2xl border-2 border-blue-100/50">
+                    <div className="space-y-2">
+                      <label className="text-[11px] font-black uppercase text-blue-400 tracking-widest ml-1">
+                        Tipo de Alvo
+                      </label>
+                      <select
+                        value={editingPromo.targetType || "PRODUCT"}
+                        onChange={(e) =>
+                          setEditingPromo({
+                            ...editingPromo,
+                            targetType: e.target.value as any,
+                            targetValue: "",
+                          })
+                        }
+                        className="w-full px-4 py-3 rounded-xl border-2 border-white focus:border-blue-500 focus:ring-0 transition-all font-medium appearance-none bg-white"
+                      >
+                        <option value="PRODUCT">Produto Específico</option>
+                        <option value="CATEGORY">Por Categoria</option>
+                        <option value="MANUFACTURER">
+                          Por Marca/Laboratório
+                        </option>
+                      </select>
+                    </div>
+
+                    <div className="space-y-2">
+                      <label className="text-[11px] font-black uppercase text-blue-400 tracking-widest ml-1">
+                        Selecionar Alvo
+                      </label>
+                      <SearchableSelect
+                        value={editingPromo.targetValue || ""}
+                        onChange={(val) =>
+                          setEditingPromo({ ...editingPromo, targetValue: val })
+                        }
+                        options={
+                          editingPromo.targetType === "PRODUCT"
+                            ? products.map((p) => ({
+                                label: `${p.name} (${p.barcode || p.internalCode})`,
+                                value: p.id,
+                              }))
+                            : editingPromo.targetType === "CATEGORY"
+                              ? categories.map((c) => ({ label: c, value: c }))
+                              : manufacturers.map((m) => ({
+                                  label: m,
+                                  value: m,
+                                }))
+                        }
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-6">
+                    {/* Filters */}
+                    <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-4 p-6 bg-gray-50 rounded-2xl border-2 border-gray-100">
+                      <div className="space-y-1">
+                        <label className="text-[9px] font-black uppercase text-gray-400 tracking-widest">
+                          Categoria
+                        </label>
+                        <MultiSelect
+                          values={filters.category}
+                          onChange={(vals) =>
+                            setFilters({ ...filters, category: vals })
+                          }
+                          options={categories.map((c) => ({
+                            label: c,
+                            value: c,
+                          }))}
+                          placeholder="Todas"
+                          className="w-full px-3 py-2 rounded-lg border border-gray-200 text-xs font-bold bg-white"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[9px] font-black uppercase text-gray-400 tracking-widest">
+                          Marca
+                        </label>
+                        <MultiSelect
+                          values={filters.manufacturer}
+                          onChange={(vals) =>
+                            setFilters({ ...filters, manufacturer: vals })
+                          }
+                          options={manufacturers.map((m) => ({
+                            label: m,
+                            value: m,
+                          }))}
+                          placeholder="Todas"
+                          className="w-full px-3 py-2 rounded-lg border border-gray-200 text-xs font-bold bg-white"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[9px] font-black uppercase text-gray-400 tracking-widest">
+                          Busca
+                        </label>
+                        <div className="relative">
+                          <Search
+                            size={14}
+                            className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
+                          />
+                          <input
+                            type="text"
+                            value={filters.search}
+                            onChange={(e) =>
+                              setFilters({ ...filters, search: e.target.value })
+                            }
+                            placeholder="Nome, EAN..."
+                            className="w-full pl-9 pr-3 py-2 rounded-lg border border-gray-200 text-xs font-bold bg-white"
+                          />
+                        </div>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[9px] font-black uppercase text-gray-400 tracking-widest">
+                          Preço Mín
+                        </label>
+                        <SmartNumberInput
+                          value={filters.minPrice}
+                          onChangeValue={(val) =>
+                            setFilters({
+                              ...filters,
+                              minPrice: val ? val.toString() : "",
+                            })
+                          }
+                          isFloat={true}
+                          className="w-full px-3 py-2 rounded-lg border border-gray-200 text-xs font-bold bg-white"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[9px] font-black uppercase text-gray-400 tracking-widest">
+                          Preço Máx
+                        </label>
+                        <SmartNumberInput
+                          value={filters.maxPrice}
+                          onChangeValue={(val) =>
+                            setFilters({
+                              ...filters,
+                              maxPrice: val ? val.toString() : "",
+                            })
+                          }
+                          isFloat={true}
+                          className="w-full px-3 py-2 rounded-lg border border-gray-200 text-xs font-bold bg-white"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[9px] font-black uppercase text-gray-400 tracking-widest">
+                          Estoque Mín
+                        </label>
+                        <SmartNumberInput
+                          value={filters.minStock}
+                          onChangeValue={(val) =>
+                            setFilters({
+                              ...filters,
+                              minStock: val ? val.toString() : "",
+                            })
+                          }
+                          isFloat={false}
+                          className="w-full px-3 py-2 rounded-lg border border-gray-200 text-xs font-bold bg-white"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Summary */}
+                    {(filters.category.length > 0 ||
+                      filters.manufacturer.length > 0) && (
+                      <div className="bg-blue-50/50 border border-blue-100 rounded-xl p-3 flex items-center justify-between">
+                        <div className="flex items-center gap-2 text-xs font-medium text-blue-800">
+                          <Filter size={14} className="text-blue-500" />
+                          <span>
+                            Filtros ativos:
+                            {filters.category.length > 0 && (
+                              <span className="font-bold ml-1">
+                                {filters.category.length} Categoria(s)
+                              </span>
+                            )}
+                            {filters.category.length > 0 &&
+                              filters.manufacturer.length > 0 && (
+                                <span> e </span>
+                              )}
+                            {filters.manufacturer.length > 0 && (
+                              <span className="font-bold ml-1">
+                                {filters.manufacturer.length} Marca(s)
+                              </span>
+                            )}
+                          </span>
+                        </div>
+                        <span className="text-xs font-bold text-blue-600 bg-blue-100 px-2 py-1 rounded-md">
+                          Total de {filteredProducts.length} produtos
+                          encontrados
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Preview Grid */}
+                    <div className="border-2 border-gray-100 rounded-2xl overflow-hidden flex flex-col">
+                      <div className="bg-gray-50 p-4 border-b border-gray-100 flex items-center justify-between flex-shrink-0">
+                        <div className="flex items-center gap-4">
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={
+                                filteredProducts.length > 0 &&
+                                filteredProducts.every((p) =>
+                                  selectedProductIds.includes(p.id),
+                                )
+                              }
+                              onChange={(e) =>
+                                e.target.checked
+                                  ? selectAllFiltered()
+                                  : deselectAllFiltered()
+                              }
+                              className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                            />
+                            <span className="text-[10px] font-black uppercase text-gray-500">
+                              Selecionar Todos
+                            </span>
+                          </div>
+                          <span className="text-[10px] font-black uppercase text-blue-600 bg-blue-50 px-2 py-1 rounded-md">
+                            {selectedProductIds.length} selecionados
+                          </span>
+                        </div>
+                        <span className="text-[10px] font-black uppercase text-gray-400">
+                          {filteredProducts.length} encontrados no filtro
+                        </span>
+                      </div>
+
+                      {/* Header */}
+                      <div className="overflow-x-auto custom-scrollbar">
+                        <div className="min-w-[600px]">
+                          <div className="bg-white border-b border-gray-100 flex items-center flex-shrink-0 z-20">
+                            <div className="p-3 text-[9px] font-black uppercase text-gray-400 tracking-widest w-10 flex-shrink-0"></div>
+                            <div className="p-3 text-[9px] font-black uppercase text-gray-400 tracking-widest w-12 flex-shrink-0">
+                              Foto
+                            </div>
+                            <div className="p-3 text-[9px] font-black uppercase text-gray-400 tracking-widest flex-1">
+                              Produto
+                            </div>
+                            <div className="p-3 text-[9px] font-black uppercase text-gray-400 tracking-widest w-32 flex-shrink-0">
+                              EAN
+                            </div>
+                            <div className="p-3 text-[9px] font-black uppercase text-gray-400 tracking-widest w-20 flex-shrink-0 text-right">
+                              Preço
+                            </div>
+                            <div className="p-3 text-[9px] font-black uppercase text-gray-400 tracking-widest w-16 flex-shrink-0 text-center">
+                              Ação
+                            </div>
+                          </div>
+
+                          <div
+                            ref={parentRef}
+                            className="h-[400px] overflow-y-auto custom-scrollbar relative bg-white"
+                          >
+                            <div
+                              style={{
+                                height: `${rowVirtualizer.getTotalSize()}px`,
+                                width: "100%",
+                                position: "relative",
+                              }}
+                            >
+                              {rowVirtualizer
+                                .getVirtualItems()
+                                .map((virtualRow) => {
+                                  const product =
+                                    filteredProducts[virtualRow.index];
+                                  return (
+                                    <ProductRow
+                                      key={virtualRow.key}
+                                      product={product}
+                                      isSelected={selectedProductIds.includes(
+                                        product.id,
+                                      )}
+                                      onToggle={toggleProductSelection}
+                                      style={{
+                                        position: "absolute",
+                                        top: 0,
+                                        left: 0,
+                                        width: "100%",
+                                        height: `${virtualRow.size}px`,
+                                        transform: `translateY(${virtualRow.start}px)`,
+                                      }}
+                                    />
+                                  );
+                                })}
+                            </div>
+                            {filteredProducts.length === 0 && (
+                              <div className="p-8 text-center text-gray-400 text-xs font-bold">
+                                Nenhum produto encontrado com os filtros
+                                aplicados.
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </section>
+
+              {/* Rule Config */}
+              <section className="space-y-6">
+                <div className="flex items-center gap-2 text-gray-400 mb-2">
+                  <div className="w-1 h-4 bg-red-500 rounded-full" />
+                  <span className="text-[10px] font-black uppercase tracking-widest">
+                    Configuração da Regra
+                  </span>
+                </div>
+                {editingPromo.type === "BUY_X_PAY_Y" && (
+                  <div className="p-6 bg-red-50 rounded-2xl border-2 border-red-100 grid grid-cols-2 gap-6">
+                    <div className="space-y-2">
+                      <label className="text-[11px] font-black uppercase text-red-400 tracking-widest ml-1">
+                        Leve (Qtd)
+                      </label>
+                      <SmartNumberInput
+                        value={editingPromo.buyX || 0}
+                        onChangeValue={(val) =>
+                          setEditingPromo({ ...editingPromo, buyX: val || 0 })
+                        }
+                        className="w-full px-4 py-3 rounded-xl border-2 border-white focus:border-red-500 focus:ring-0 transition-all font-bold text-red-600"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-[11px] font-black uppercase text-red-400 tracking-widest ml-1">
+                        Pague (Qtd)
+                      </label>
+                      <SmartNumberInput
+                        value={editingPromo.payY || 0}
+                        onChangeValue={(val) =>
+                          setEditingPromo({ ...editingPromo, payY: val || 0 })
+                        }
+                        className="w-full px-4 py-3 rounded-xl border-2 border-white focus:border-red-500 focus:ring-0 transition-all font-bold text-red-600"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {editingPromo.type === "PROGRESSIVE_DISCOUNT" && (
+                  <div className="space-y-4 p-6 bg-blue-50 rounded-2xl border-2 border-blue-100">
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-[11px] font-black uppercase text-blue-400 tracking-widest ml-1">
+                        Regras de Desconto
+                      </label>
+                      <button
+                        onClick={() =>
+                          setEditingPromo({
+                            ...editingPromo,
+                            discountThresholds: [
+                              ...(editingPromo.discountThresholds || []),
+                              { qty: 1, discountPercentage: 0 },
+                            ],
+                          })
+                        }
+                        className="text-[10px] font-black uppercase bg-blue-600 text-white px-3 py-1 rounded-lg"
+                      >
+                        Adicionar Faixa
+                      </button>
+                    </div>
+                    {editingPromo.discountThresholds?.map((d, idx) => (
+                      <div
+                        key={idx}
+                        className="flex items-center gap-4 bg-white p-3 rounded-xl shadow-sm"
+                      >
+                        <div className="flex-1 flex items-center gap-2">
+                          <span className="text-xs font-bold text-gray-400">
+                            Qtd:
+                          </span>
+                          <SmartNumberInput
+                            value={d.qty}
+                            onChangeValue={(val) => {
+                              const newDiscounts = [
+                                ...(editingPromo.discountThresholds || []),
+                              ];
+                              newDiscounts[idx].qty = val || 0;
+                              setEditingPromo({
+                                ...editingPromo,
+                                discountThresholds: newDiscounts,
+                              });
+                            }}
+                            className="w-full px-2 py-1 border-b-2 border-gray-100 focus:border-blue-500 outline-none font-bold"
+                          />
+                        </div>
+                        <div className="flex-1 flex items-center gap-2">
+                          <span className="text-xs font-bold text-gray-400">
+                            Desc %:
+                          </span>
+                          <SmartNumberInput
+                            value={d.discountPercentage}
+                            onChangeValue={(val) => {
+                              const newDiscounts = [
+                                ...(editingPromo.discountThresholds || []),
+                              ];
+                              newDiscounts[idx].discountPercentage = val || 0;
+                              setEditingPromo({
+                                ...editingPromo,
+                                discountThresholds: newDiscounts,
+                              });
+                            }}
+                            isFloat={true}
+                            className="w-full px-2 py-1 border-b-2 border-gray-100 focus:border-blue-500 outline-none font-bold text-blue-600"
+                          />
+                        </div>
+                        <button
+                          onClick={() => {
+                            const newDiscounts =
+                              editingPromo.discountThresholds?.filter(
+                                (_, i) => i !== idx,
+                              );
+                            setEditingPromo({
+                              ...editingPromo,
+                              discountThresholds: newDiscounts,
+                            });
+                          }}
+                          className="p-2 text-red-400 hover:bg-red-50 rounded-lg"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {(editingPromo.type === "FIXED_COMBO" ||
+                  editingPromo.type === "LIGHTNING_OFFER") && (
+                  <div
+                    className={`p-6 rounded-2xl border-2 grid grid-cols-2 gap-6 ${editingPromo.type === "LIGHTNING_OFFER" ? "bg-orange-50 border-orange-100" : "bg-purple-50 border-purple-100"}`}
+                  >
+                    <div className="space-y-2">
+                      <label
+                        className={`text-[11px] font-black uppercase tracking-widest ml-1 ${editingPromo.type === "LIGHTNING_OFFER" ? "text-orange-400" : "text-purple-400"}`}
+                      >
+                        Quantidade do Combo{" "}
+                        {editingPromo.type === "LIGHTNING_OFFER" &&
+                          "(Opcional)"}
+                      </label>
+                      <SmartNumberInput
+                        value={editingPromo.buyX || 0}
+                        onChangeValue={(val) =>
+                          setEditingPromo({ ...editingPromo, buyX: val || 0 })
+                        }
+                        className={`w-full px-4 py-3 rounded-xl border-2 border-white focus:ring-0 transition-all font-bold ${editingPromo.type === "LIGHTNING_OFFER" ? "focus:border-orange-500 text-orange-600" : "focus:border-purple-500 text-purple-600"}`}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label
+                        className={`text-[11px] font-black uppercase tracking-widest ml-1 ${editingPromo.type === "LIGHTNING_OFFER" ? "text-orange-400" : "text-purple-400"}`}
+                      >
+                        Valor Fixo (R$){" "}
+                        {editingPromo.type === "LIGHTNING_OFFER" &&
+                          "(Opcional)"}
+                      </label>
+                      <SmartNumberInput
+                        value={editingPromo.payY || 0}
+                        onChangeValue={(val) =>
+                          setEditingPromo({ ...editingPromo, payY: val || 0 })
+                        }
+                        isFloat={true}
+                        className={`w-full px-4 py-3 rounded-xl border-2 border-white focus:ring-0 transition-all font-bold ${editingPromo.type === "LIGHTNING_OFFER" ? "focus:border-orange-500 text-orange-600" : "focus:border-purple-500 text-purple-600"}`}
+                      />
+                    </div>
+                    {editingPromo.type === "LIGHTNING_OFFER" && (
+                      <div className="space-y-2">
+                        <label className="text-[11px] font-black uppercase text-orange-400 tracking-widest ml-1">
+                          Percentual Desconto (%)
+                        </label>
+                        <SmartNumberInput
+                          value={editingPromo.lightningDiscountPercentage || 0}
+                          onChangeValue={(val) =>
+                            setEditingPromo({
+                              ...editingPromo,
+                              lightningDiscountPercentage: val || 0,
+                            })
+                          }
+                          isFloat={true}
+                          className="w-full px-4 py-3 rounded-xl border-2 border-white focus:border-orange-500 focus:ring-0 transition-all font-bold text-orange-600"
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
+              </section>
+
+              {/* Validity & Status */}
+              <section className="space-y-6">
+                <div className="flex items-center gap-2 text-gray-400 mb-2">
+                  <div className="w-1 h-4 bg-emerald-500 rounded-full" />
+                  <span className="text-[10px] font-black uppercase tracking-widest">
+                    Validade e Status
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="space-y-2">
+                    <label className="text-[11px] font-black uppercase text-gray-400 tracking-widest ml-1">
+                      {editingPromo.type === "LIGHTNING_OFFER"
+                        ? "Início da Validade (Data e Hora)"
+                        : "Início da Validade"}
+                    </label>
+                    <input
+                      type={
+                        editingPromo.type === "LIGHTNING_OFFER"
+                          ? "datetime-local"
+                          : "date"
+                      }
+                      value={
+                        editingPromo.type === "LIGHTNING_OFFER"
+                          ? toLocalDateTimeString(editingPromo.startDate)
+                          : toLocalDateTimeString(editingPromo.startDate).split(
+                              "T",
+                            )[0] || ""
+                      }
+                      onChange={(e) =>
+                        setEditingPromo({
+                          ...editingPromo,
+                          startDate: e.target.value
+                            ? toUtcIsoString(e.target.value)
+                            : undefined,
+                        })
+                      }
+                      className="w-full px-4 py-3 rounded-xl border-2 border-gray-100 focus:border-red-500 focus:ring-0 transition-all font-medium"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[11px] font-black uppercase text-gray-400 tracking-widest ml-1">
+                      {editingPromo.type === "LIGHTNING_OFFER"
+                        ? "Fim da Validade (Cronômetro) - Data e Hora"
+                        : "Fim da Validade"}
+                    </label>
+                    <input
+                      type={
+                        editingPromo.type === "LIGHTNING_OFFER"
+                          ? "datetime-local"
+                          : "date"
+                      }
+                      value={
+                        editingPromo.type === "LIGHTNING_OFFER"
+                          ? toLocalDateTimeString(editingPromo.endDate)
+                          : toLocalDateTimeString(editingPromo.endDate).split(
+                              "T",
+                            )[0] || ""
+                      }
+                      onChange={(e) =>
+                        setEditingPromo({
+                          ...editingPromo,
+                          endDate: e.target.value
+                            ? toUtcIsoString(e.target.value)
+                            : undefined,
+                        })
+                      }
+                      className="w-full px-4 py-3 rounded-xl border-2 border-gray-100 focus:border-red-500 focus:ring-0 transition-all font-medium"
+                    />
+                  </div>
+                </div>
+
+                {editingPromo.type === "LIGHTNING_OFFER" && (
+                  <div className="mt-4">
+                    <ScheduleEditor
+                      config={editingPromo.scheduleConfig}
+                      onChange={(config) =>
+                        setEditingPromo({
+                          ...editingPromo,
+                          scheduleConfig: config,
+                        })
+                      }
+                    />
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between mt-4">
+                  <div className="flex items-center gap-3 p-4 bg-gray-50 rounded-2xl flex-1 mr-4">
+                    {(() => {
+                      let isEditingExpired = false;
+                      if (editingPromo.endDate) {
+                        let end: Date;
+                        if (
+                          editingPromo.type === "LIGHTNING_OFFER" ||
+                          editingPromo.endDate.includes("T")
+                        ) {
+                          end = new Date(editingPromo.endDate);
+                        } else {
+                          const [year, month, day] = editingPromo.endDate
+                            .split("T")[0]
+                            .split("-");
+                          end = new Date(
+                            Number(year),
+                            Number(month) - 1,
+                            Number(day),
+                            23,
+                            59,
+                            59,
+                            999,
+                          );
+                        }
+                        if (nowState > end) isEditingExpired = true;
+                      }
+
+                      return (
+                        <>
+                          <input
+                            type="checkbox"
+                            id="isActive"
+                            checked={
+                              isEditingExpired ? false : editingPromo.isActive
+                            }
+                            disabled={isEditingExpired}
+                            onChange={(e) =>
+                              setEditingPromo({
+                                ...editingPromo,
+                                isActive: e.target.checked,
+                              })
+                            }
+                            className="w-5 h-5 rounded border-gray-300 text-red-600 focus:ring-red-500 disabled:opacity-50"
+                          />
+                          <label
+                            htmlFor="isActive"
+                            className={`text-sm font-bold cursor-pointer flex items-center gap-2 ${isEditingExpired ? "text-gray-400" : "text-gray-700"}`}
+                          >
+                            Promoção Ativa
+                            {isEditingExpired && (
+                              <span className="text-[10px] bg-red-100 text-red-600 px-2 py-0.5 rounded-full uppercase tracking-wider">
+                                Expirada
+                              </span>
+                            )}
+                          </label>
+                        </>
+                      );
+                    })()}
+                  </div>
+
+                  <div className="flex items-center gap-3 p-4 bg-orange-50 rounded-2xl flex-1 border border-orange-100">
+                    <input
+                      type="checkbox"
+                      id="highlight"
+                      checked={editingPromo.highlightInCategoriesBar || false}
+                      onChange={(e) =>
+                        setEditingPromo({
+                          ...editingPromo,
+                          highlightInCategoriesBar: e.target.checked,
+                        })
+                      }
+                      className="w-5 h-5 rounded border-orange-300 text-orange-600 focus:ring-orange-500"
+                    />
+                    <div className="flex flex-col">
+                      <label
+                        htmlFor="highlight"
+                        className="text-sm font-bold text-orange-900 cursor-pointer"
+                      >
+                        Destacar na Barra de Categorias
+                      </label>
+                      <span className="text-xs text-orange-700/70">
+                        Aparece no topo da loja online
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {editingPromo.highlightInCategoriesBar && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-4 p-4 border border-orange-100 bg-orange-50/30 rounded-2xl animate-in fade-in slide-in-from-top-2">
+                    <div className="space-y-2">
+                      <label className="text-[11px] font-black uppercase text-orange-600 tracking-widest ml-1">
+                        Cor de Destaque
+                      </label>
+                      <select
+                        value={editingPromo.highlightColor || "orange"}
+                        onChange={(e) =>
+                          setEditingPromo({
+                            ...editingPromo,
+                            highlightColor: e.target.value,
+                          })
+                        }
+                        className="w-full px-4 py-3 rounded-xl border-2 border-orange-100 focus:border-orange-500 focus:ring-0 transition-all font-medium appearance-none bg-white"
+                      >
+                        <option value="orange">Laranja (Padrão)</option>
+                        <option value="red">Vermelho (Urgência)</option>
+                        <option value="purple">Roxo (Premium)</option>
+                        <option value="emerald">Verde (Economia)</option>
+                        <option value="blue">Azul (Tranquilidade)</option>
+                      </select>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-[11px] font-black uppercase text-orange-600 tracking-widest ml-1">
+                        Ícone
+                      </label>
+                      <select
+                        value={editingPromo.highlightIcon || "Flame"}
+                        onChange={(e) =>
+                          setEditingPromo({
+                            ...editingPromo,
+                            highlightIcon: e.target.value,
+                          })
+                        }
+                        className="w-full px-4 py-3 rounded-xl border-2 border-orange-100 focus:border-orange-500 focus:ring-0 transition-all font-medium appearance-none bg-white"
+                      >
+                        <option value="Flame">Fogo (Flame)</option>
+                        <option value="Gift">Presente (Gift)</option>
+                        <option value="Tag">Etiqueta (Tag)</option>
+                        <option value="Sparkles">Estrelas (Sparkles)</option>
+                        <option value="Clock">Relógio (Clock)</option>
+                        <option value="Percent">Porcentagem (Percent)</option>
+                      </select>
+                    </div>
+                  </div>
+                )}
+              </section>
+            </div>
+
+            <div className="p-6 border-t border-gray-100 bg-gray-50/50 flex items-center justify-end gap-4">
+              <button
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      "Tem certeza que deseja cancelar? As alterações não salvas serão perdidas.",
+                    )
+                  ) {
+                    setIsEditing(false);
+                  }
+                }}
+                className="px-6 py-3 rounded-2xl font-bold text-gray-500 hover:bg-white transition-all"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleSaveAttempt}
+                className="flex items-center gap-2 bg-gray-900 text-white px-8 py-3 rounded-2xl font-bold hover:bg-gray-800 transition-all shadow-lg hover:shadow-xl active:scale-95"
+              >
+                <CheckCircle2 size={20} />
+                Revisar e Ativar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirmation Modal */}
+      {showConfirmation && editingPromo && (
+        <div className="fixed inset-0 z-[300] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-300">
+          <div className="bg-white rounded-[2.5rem] w-full max-w-md overflow-hidden shadow-2xl animate-in zoom-in-95 duration-300">
+            <div className="p-8 text-center space-y-6">
+              <div className="w-20 h-20 bg-emerald-100 text-emerald-600 rounded-3xl flex items-center justify-center mx-auto shadow-inner">
+                <CheckCircle2 size={40} />
+              </div>
+
+              <div className="space-y-2">
+                <h3 className="text-2xl font-black text-gray-900 tracking-tight">
+                  Confirmar Ativação?
+                </h3>
+                <p className="text-gray-500 font-medium">
+                  Você está aplicando a promoção{" "}
+                  <span className="text-gray-900 font-black">
+                    "{editingPromo.name}"
+                  </span>
+                  .
+                </p>
+              </div>
+
+              <div className="bg-gray-50 rounded-2xl p-6 text-left space-y-4">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-gray-400 font-bold uppercase tracking-widest text-[10px]">
+                    Produtos
+                  </span>
+                  <span className="font-black text-gray-900">
+                    {editingPromo.targetType === "SPECIFIC_SELECTION"
+                      ? selectedProductIds.length
+                      : "Automático"}{" "}
+                    itens
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-gray-400 font-bold uppercase tracking-widest text-[10px]">
+                    Tipo
+                  </span>
+                  <span className="font-black text-gray-900">
+                    {editingPromo.type === "BUY_X_PAY_Y"
+                      ? "Leve X Pague Y"
+                      : "Desconto Progressivo"}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-gray-400 font-bold uppercase tracking-widest text-[10px]">
+                    Validade
+                  </span>
+                  <span className="font-black text-gray-900">
+                    {editingPromo.startDate
+                      ? new Date(editingPromo.startDate).toLocaleDateString(
+                          "pt-BR",
+                        )
+                      : "Hoje"}{" "}
+                    até{" "}
+                    {editingPromo.endDate
+                      ? new Date(editingPromo.endDate).toLocaleDateString(
+                          "pt-BR",
+                        )
+                      : "Indefinido"}
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-3">
+                <button
+                  onClick={handleSave}
+                  disabled={isSaving}
+                  className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-black hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-200 active:scale-95 disabled:opacity-50"
+                >
+                  {isSaving ? "Ativando..." : "Confirmar e Ativar"}
+                </button>
+                <button
+                  onClick={() => setShowConfirmation(false)}
+                  className="w-full py-4 rounded-2xl font-bold text-gray-400 hover:bg-gray-50 transition-all"
+                >
+                  Voltar e Ajustar
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">

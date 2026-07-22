@@ -16,7 +16,6 @@ import {
   CouponRule,
   isPromotionActive,
   checkProductMatchesRule,
-  isBundleType,
 } from "../types";
 import {
   Search,
@@ -61,10 +60,6 @@ import {
 import { saveAppReview, logSearch, getProductsByTenant } from "../services/storage";
 import { CouponBanner } from "./CouponBanner";
 import { toast } from "react-hot-toast";
-
-// Performance optimizations: caches to prevent expensive O(N^2) operations inside ProductCard render
-const storefrontSlotEansCache = new Map<string, string[]>();
-const storefrontSlotProductCache = new Map<string, Product | null>();
 import { useWindowVirtualizer } from "@tanstack/react-virtual";
 import {
   getDepartmentForCategory,
@@ -100,48 +95,6 @@ const fixImageUrl = (url?: string, width: number = 400): string | null => {
   const proxyUrl = `https://wsrv.nl/?url=${encodeURIComponent(url)}&output=webp&q=80&w=${width}&we&default=${encodeURIComponent(GENERIC_PLACEHOLDER)}`;
   return proxyUrl;
 };
-
-export function extractAllProductIdsFromPromotion(promo: any): string[] {
-  if (!promo) return [];
-
-  const ids = new Set<string>();
-
-  // Extrai de specific_product_ids / specificProductIds / product_ids / productIds / comboProducts / combo_products
-  const direct =
-    promo.specific_product_ids ||
-    promo.specificProductIds ||
-    promo.product_ids ||
-    promo.productIds ||
-    promo.comboProducts ||
-    promo.combo_products ||
-    (promo.targetType === "PRODUCT" ? [promo.targetValue] : []);
-
-  if (Array.isArray(direct)) {
-    direct.forEach((id: any) => {
-      if (typeof id === "string" || typeof id === "number") {
-        const str = String(id).trim();
-        if (str) ids.add(str);
-      } else if (id && typeof id === "object") {
-        const str = String(id.id || id.productId || id.product_id || id.ean || id.barcode || "").trim();
-        if (str) ids.add(str);
-      }
-    });
-  } else if (typeof direct === "string") {
-    try {
-      const parsed = JSON.parse(direct);
-      if (Array.isArray(parsed)) {
-        parsed.forEach((id: any) => {
-          const str = String(id).trim();
-          if (str) ids.add(str);
-        });
-      }
-    } catch (e) {
-      if (direct.trim()) ids.add(direct.trim());
-    }
-  }
-
-  return Array.from(ids).filter(Boolean);
-}
 
 // Mapa de afinidade terapêutica refinado para incluir Perfumaria e Conveniência obrigatoriamente
 const SEARCH_CROSS_SELL_MAP: Record<string, string[]> = {
@@ -264,7 +217,6 @@ interface StorefrontProps {
   promotions?: PromotionRule[];
   coupons?: CouponRule[];
   cartCount: number;
-  isLoading?: boolean;
   onAddToCart: (
     product: Product,
     isMainProduct?: boolean,
@@ -390,7 +342,6 @@ const ProductCard = React.memo(
     isCompact,
     priority = false,
     isProductInRule,
-    products = [],
   }: {
     product: Product;
     tenant: PharmacyConfig;
@@ -401,92 +352,38 @@ const ProductCard = React.memo(
     isCompact?: boolean;
     priority?: boolean;
     isProductInRule?: (rule: PromotionRule | CouponRule, p: Product) => boolean;
-    products?: Product[];
   }) => {
     const isOutOfStock = product.stock <= 0;
-    const hasDiscount = Boolean(
+    const hasDiscount =
       product.promotionType === "DISCOUNT" &&
       product.originalPrice &&
-      product.originalPrice > product.price
-    );
+      product.originalPrice > product.price;
     const isKit = product.promotionType === "BUY_X_PAY_Y";
     const isDiscountOnQty = product.promotionType === "DISCOUNT_ON_QTY";
 
     const activePromo = promotions.find((p) => {
+      // The promotions array passed here generally comes from activePromotions,
+      // but to be absolutely safe without needing real-time currentTime:
       if (isProductInRule) {
         return isProductInRule(p, product);
       }
-      return checkProductMatchesRule(p, product);
+      
+      if (p.targetType === "PRODUCT" && p.targetValue === product.id)
+        return true;
+      if (p.targetType === "CATEGORY" && p.targetValue === product.category)
+        return true;
+      if (
+        p.targetType === "MANUFACTURER" &&
+        p.targetValue === product.manufacturer
+      )
+        return true;
+      if (
+        p.targetType === "SPECIFIC_SELECTION" &&
+        p.specificProductIds?.includes(product.id)
+      )
+        return true;
+      return false;
     });
-
-    let comboMessage = "";
-    if (activePromo && activePromo.type === "BUNDLE_FIXED_PRICE" && activePromo.bundleSlots && activePromo.bundlePrice) {
-      const currentSlotIndex = activePromo.bundleSlots.findIndex((slot, idx) => {
-        if (!slot || !Array.isArray(slot)) return false;
-        if (slot.includes(product.id)) return true;
-        if (product.barcode) {
-          const cacheKey = `${activePromo.id}_slot_${idx}_${products.length}`;
-          let slotEans = storefrontSlotEansCache.get(cacheKey);
-          if (!slotEans) {
-            slotEans = products
-              .filter(p => p && slot.includes(p.id) && p.barcode)
-              .map(p => p.barcode as string);
-            storefrontSlotEansCache.set(cacheKey, slotEans);
-          }
-          if (slotEans.includes(product.barcode)) return true;
-        }
-        return false;
-      });
-
-      if (currentSlotIndex !== -1) {
-        const otherSlotIndices = activePromo.bundleSlots
-          .map((_, idx) => idx)
-          .filter(idx => idx !== currentSlotIndex);
-
-        const otherProductNames: string[] = [];
-        otherSlotIndices.forEach(idx => {
-          const slotProductIds = activePromo.bundleSlots?.[idx];
-          if (!slotProductIds || !Array.isArray(slotProductIds)) return;
-          
-          const prodCacheKey = `${activePromo.id}_prod_slot_${idx}_${products.length}`;
-          let otherProd = storefrontSlotProductCache.get(prodCacheKey);
-          if (otherProd === undefined) {
-            // Get pre-calculated slotEans once for this slot
-            const eansCacheKey = `${activePromo.id}_slot_${idx}_${products.length}`;
-            let slotEans = storefrontSlotEansCache.get(eansCacheKey);
-            if (!slotEans) {
-              slotEans = products
-                .filter(p => p && slotProductIds.includes(p.id) && p.barcode)
-                .map(p => p.barcode as string);
-              storefrontSlotEansCache.set(eansCacheKey, slotEans);
-            }
-
-            otherProd = products.find(p => {
-              if (!p) return false;
-              if (slotProductIds.includes(p.id)) return true;
-              if (p.barcode && slotEans!.includes(p.barcode)) return true;
-              return false;
-            }) || null;
-            storefrontSlotProductCache.set(prodCacheKey, otherProd);
-          }
-
-          if (otherProd) {
-            otherProductNames.push(otherProd.name);
-          }
-        });
-
-        if (otherProductNames.length > 0) {
-          const otherProductsText = otherProductNames.length === 1 
-            ? otherProductNames[0] 
-            : `${otherProductNames[0]} ou outro item`;
-          comboMessage = `Leve este item + 1 ${otherProductsText} por R$ ${activePromo.bundlePrice.toFixed(2)}`;
-        } else {
-          comboMessage = `Monte seu combo por R$ ${activePromo.bundlePrice.toFixed(2)}`;
-        }
-      } else {
-        comboMessage = `Monte seu combo por R$ ${activePromo.bundlePrice.toFixed(2)}`;
-      }
-    }
 
     let currentPrice = product.price;
     let fallbackOriginalPrice = product.originalPrice ?? product.price;
@@ -661,48 +558,44 @@ const ProductCard = React.memo(
               product.isFeatured ||
               (product as any)._justUpdated) && (
               <div className="absolute top-2 right-2 flex flex-col items-end gap-1">
-                {Boolean((product as any)._justUpdated) && (
+                {(product as any)._justUpdated && (
                   <span className="bg-orange-500 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1 animate-pulse">
                     Atualizado
                   </span>
                 )}
-                {Boolean(product.isFeatured) && (
+                {product.isFeatured && (
                   <span className="bg-yellow-400 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1">
                     <Star size={10} fill="currentColor" strokeWidth={4} />{" "}
                     Destaque
                   </span>
                 )}
-                {Boolean(activePromo) && (
+                {activePromo && (
                   <span className="bg-red-600 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1 animate-pulse">
                     <Tag size={10} strokeWidth={4} />
-                    {activePromo!.type === "BUY_X_PAY_Y"
-                      ? `Leve ${activePromo!.buyX} Pague ${activePromo!.payY}`
-                      : activePromo!.type === "LIGHTNING_OFFER" &&
-                          activePromo!.lightningDiscountPercentage
-                        ? `GANHE ${activePromo!.lightningDiscountPercentage}% OFF`
-                        : activePromo!.type === "LIGHTNING_OFFER" &&
-                            activePromo!.buyX &&
-                            activePromo!.payY
-                          ? `Leve ${activePromo!.buyX} por R$ ${activePromo!.payY.toFixed(2).replace(".", ",")}`
-                          : isBundleType(activePromo!)
-                            ? (activePromo!.bundlePrice
-                              ? `COMBO: R$ ${activePromo!.bundlePrice.toFixed(2).replace(".", ",")}`
-                              : `COMBO: ${activePromo!.name}`)
-                            : activePromo!.name}
+                    {activePromo.type === "BUY_X_PAY_Y"
+                      ? `Leve ${activePromo.buyX} Pague ${activePromo.payY}`
+                      : activePromo.type === "LIGHTNING_OFFER" &&
+                          activePromo.lightningDiscountPercentage
+                        ? `GANHE ${activePromo.lightningDiscountPercentage}% OFF`
+                        : activePromo.type === "LIGHTNING_OFFER" &&
+                            activePromo.buyX &&
+                            activePromo.payY
+                          ? `Leve ${activePromo.buyX} por R$ ${activePromo.payY.toFixed(2).replace(".", ",")}`
+                          : activePromo.name}
                   </span>
                 )}
-                {Boolean(hasDiscount && !activePromo) && (
+                {hasDiscount && !activePromo && (
                   <span className="bg-red-500 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1 animate-pulse">
                     <Percent size={10} strokeWidth={4} /> Oferta
                   </span>
                 )}
-                {Boolean(isKit) && (
+                {isKit && (
                   <span className="bg-red-600 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1 animate-pulse">
                     <Layers size={10} strokeWidth={4} /> PROMOÇÃO: Leve{" "}
                     {product.buyX} Pague {product.payY}
                   </span>
                 )}
-                {Boolean(isDiscountOnQty) && (
+                {isDiscountOnQty && (
                   <span className="bg-red-600 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1 animate-pulse">
                     <Percent size={10} strokeWidth={4} /> PROMOÇÃO: A partir de{" "}
                     {product.discountQtyThreshold} unidades, ganhe{" "}
@@ -711,7 +604,8 @@ const ProductCard = React.memo(
                 )}
               </div>
             )}
-          {Boolean(isOutOfStock) && (
+
+          {isOutOfStock && (
             <div className="absolute inset-0 bg-white/60 backdrop-blur-[2px] flex items-center justify-center z-10">
               <span className="bg-gray-900 text-white px-2 py-1 rounded-xl font-black uppercase tracking-widest text-[7px] md:text-[8px]">
                 Esgotado
@@ -766,11 +660,6 @@ const ProductCard = React.memo(
               >
                 R$ {currentPrice.toFixed(2)}
               </p>
-              {comboMessage && (
-                <p className="text-[9px] md:text-[10px] text-pink-600 font-bold mt-1 leading-tight">
-                  {comboMessage}
-                </p>
-              )}
               {promoDescription && !isCompact && (
                 <p className="text-[8px] md:text-[9px] text-emerald-600 font-bold mt-1 leading-tight">
                   {promoDescription}
@@ -1157,13 +1046,12 @@ const HighlightText: React.FC<{ text: string; query: string }> = ({
   );
 };
 
-export const Storefront: React.FC<StorefrontProps> = React.memo(({
+export const Storefront: React.FC<StorefrontProps> = ({
   tenant,
   products,
   promotions = [],
   coupons = [],
   cartCount,
-  isLoading: externalIsLoading = false,
   onAddToCart,
   onProductClick,
   onOpenCart,
@@ -1174,10 +1062,44 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
   const [isTransitioning, setIsTransitioning] = useState(false);
   const [matrizProducts, setMatrizProducts] = useState<Product[]>([]);
 
-  // Clear search cache whenever products array changes or is populated
   useEffect(() => {
-    searchCache.current = {};
-  }, [products]);
+    if (tenant?.networkId && tenant.networkId !== tenant.id) {
+      getProductsByTenant(tenant.networkId, setMatrizProducts).catch(console.error);
+    }
+  }, [tenant?.networkId, tenant?.id]);
+  useEffect(() => {
+    if (tenant?.id) {
+      const hostname = window.location.hostname;
+      const sessionKey = `farmaflow_visited_${hostname}_${tenant.slug || tenant.id}`;
+      if (!sessionStorage.getItem(sessionKey)) {
+        sessionStorage.setItem(sessionKey, "true");
+        fetch(`/api/v1/analytics/${tenant.id}/view`, { method: "POST" }).catch(
+          console.error,
+        );
+      }
+    }
+  }, [tenant]);
+
+  const [filters, setFilters] = useState<{
+    departamento: string | null;
+    categoria: string | null;
+    promocao_id: string | null;
+    cupom_id: string | null;
+    termo_busca: string;
+  }>({
+    departamento: "Todos",
+    categoria: "Todos",
+    promocao_id: null,
+    cupom_id: null,
+    termo_busca: "",
+  });
+
+  const selectedDepartment = filters.departamento || "Todos";
+  const selectedCategory = filters.categoria || "Todos";
+  const searchTerm = filters.termo_busca;
+  const deferredSearchTerm = useDeferredValue(searchTerm);
+  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState("");
+  const productsContainerRef = useRef<HTMLElement>(null);
 
   const inheritedPromotions = useMemo(() => {
     if (!promotions || !Array.isArray(promotions)) return [];
@@ -1200,69 +1122,6 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
       return isCurrentTenant || isNetworkShared;
     });
   }, [promotions, tenant.id, tenant.networkId]);
-
-  const bundlePromotions = useMemo(() => {
-    const now = new Date();
-    return inheritedPromotions.filter((p) => {
-      const isBundle =
-        p.type === "BUNDLE_FIXED_PRICE" ||
-        p.type === "COMBO_VARIATION" ||
-        p.type === "VARIATION_COMBO" ||
-        p.type === "SLOT_COMBO" ||
-        p.targetType === "BUNDLE_SLOTS" ||
-        Boolean(p.bundleSlots && p.bundleSlots.length > 0);
-
-      return (
-        isBundle &&
-        Boolean(p.bundlePrice) &&
-        Boolean(p.bundleSlots && p.bundleSlots.length > 0) &&
-        isPromotionActive(p, now)
-      );
-    });
-  }, [inheritedPromotions]);
-
-  useEffect(() => {
-    if (tenant?.networkId && tenant.networkId !== tenant.id) {
-      getProductsByTenant(tenant.networkId, setMatrizProducts).catch(console.error);
-    }
-  }, [tenant?.networkId, tenant?.id]);
-
-  useEffect(() => {
-    if (tenant?.id) {
-      const hostname = window.location.hostname;
-      const sessionKey = `farmaflow_visited_${hostname}_${tenant.slug || tenant.id}`;
-      if (!sessionStorage.getItem(sessionKey)) {
-        sessionStorage.setItem(sessionKey, "true");
-        fetch(`/api/v1/analytics/${tenant.id}/view`, { method: "POST" }).catch(
-          console.error,
-        );
-      }
-    }
-  }, [tenant]);
-
-  const [filters, setFilters] = useState<{
-    departamento: string | null;
-    categoria: string | null;
-    promocao_id: string | null;
-    cupom_id: string | null;
-    termo_busca: string;
-  }>(() => {
-    const params = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
-    return {
-      departamento: params?.get("dept_id") || "Todos",
-      categoria: params?.get("category_id") || "Todos",
-      promocao_id: params?.get("promo_id") || null,
-      cupom_id: params?.get("cupom_id") || null,
-      termo_busca: "",
-    };
-  });
-
-  const selectedDepartment = filters.departamento || "Todos";
-  const selectedCategory = filters.categoria || "Todos";
-  const searchTerm = filters.termo_busca;
-  const deferredSearchTerm = useDeferredValue(searchTerm);
-  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState("");
-  const productsContainerRef = useRef<HTMLElement>(null);
 
   const inheritedCoupons = useMemo(() => {
     if (!coupons || !Array.isArray(coupons)) return [];
@@ -1317,14 +1176,15 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
   }, [inheritedPromotions]);
 
   const activePromotions = useMemo(() => {
-    const now = new Date();
-    return inheritedPromotions.filter((p) => isPromotionActive(p, now));
+    const idSet = new Set(activePromoIds.split(",").filter(Boolean));
+    return inheritedPromotions.filter((p) => idSet.has(p.id));
   }, [inheritedPromotions, activePromoIds]);
 
   const selectedPromotion = useMemo(() => {
-    if (!filters.promocao_id) return null;
-    return inheritedPromotions.find((p) => p.id === filters.promocao_id) || null;
-  }, [inheritedPromotions, filters.promocao_id]);
+    const p = activePromotions.find((p) => p.id === filters.promocao_id);
+    if (!p) return null;
+    return p;
+  }, [activePromotions, filters.promocao_id]);
 
   const activeCouponFilter = useMemo(
     () => inheritedCoupons.find((c) => c.id === filters.cupom_id && c.couponScope !== "GLOBAL") || null,
@@ -1366,197 +1226,169 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
   }, []);
 
   const selectDepartment = (dept: string) => {
-    try {
-      setIsTransitioning(true);
-      searchCache.current = {};
-      window.scrollTo({ top: 0, behavior: "instant" });
-      setIsDrawerOpen(false);
-      setFilters((prev) => ({
-        ...prev,
-        departamento: dept,
-        categoria: "Todos", // Reset subcategoryId when changing department
-        promocao_id: null,
-        cupom_id: null,
-        termo_busca: "", // Intenção soberana limpa termo de busca
-      }));
-      setDebouncedSearchTerm("");
+    setIsTransitioning(true);
+    searchCache.current = {};
+    window.scrollTo({ top: 0, behavior: "instant" });
+    setIsDrawerOpen(false);
+    setFilters((prev) => ({
+      ...prev,
+      departamento: dept,
+      categoria: "Todos", // Reset subcategoryId when changing department
+      promocao_id: null,
+      cupom_id: null,
+      termo_busca: "", // Intenção soberana limpa termo de busca
+    }));
+    setDebouncedSearchTerm("");
 
-      // URL management
-      const url = new URL(window.location.href);
-      url.searchParams.delete("promo_id");
-      url.searchParams.delete("cupom_id");
-      url.searchParams.delete("category_id");
-      if (dept === "Todos") {
-        url.searchParams.delete("dept_id");
-      } else {
-        url.searchParams.set("dept_id", dept);
-      }
-      window.history.replaceState({}, "", url.toString());
-    } catch (err) {
-      console.error("Erro ao selecionar departamento:", err);
-    } finally {
-      setTimeout(() => setIsTransitioning(false), 300);
+    // URL management
+    const url = new URL(window.location.href);
+    url.searchParams.delete("promo_id");
+    url.searchParams.delete("cupom_id");
+    url.searchParams.delete("category_id");
+    if (dept === "Todos") {
+      url.searchParams.delete("dept_id");
+    } else {
+      url.searchParams.set("dept_id", dept);
     }
+    window.history.replaceState({}, "", url.toString());
+    setTimeout(() => setIsTransitioning(false), 300);
   };
 
   const selectDepartmentAndCategory = (dept: string, cat: string) => {
-    try {
-      setIsTransitioning(true);
-      searchCache.current = {};
-      window.scrollTo({ top: 0, behavior: "instant" });
-      setIsDrawerOpen(false);
-      setFilters({
-        departamento: dept,
-        categoria: cat,
-        promocao_id: null,
-        cupom_id: null,
-        termo_busca: "",
-      });
-      setDebouncedSearchTerm("");
+    setIsTransitioning(true);
+    searchCache.current = {};
+    window.scrollTo({ top: 0, behavior: "instant" });
+    setIsDrawerOpen(false);
+    setFilters({
+      departamento: dept,
+      categoria: cat,
+      promocao_id: null,
+      cupom_id: null,
+      termo_busca: "",
+    });
+    setDebouncedSearchTerm("");
 
-      // URL management
-      const url = new URL(window.location.href);
-      url.searchParams.delete("promo_id");
-      url.searchParams.delete("cupom_id");
-      if (dept === "Todos") {
-        url.searchParams.delete("dept_id");
-      } else {
-        url.searchParams.set("dept_id", dept);
-      }
-      if (cat === "Todos") {
-        url.searchParams.delete("category_id");
-      } else {
-        url.searchParams.set("category_id", cat);
-      }
-      window.history.replaceState({}, "", url.toString());
-    } catch (err) {
-      console.error("Erro ao selecionar departamento e categoria:", err);
-    } finally {
-      setTimeout(() => setIsTransitioning(false), 300);
+    // URL management
+    const url = new URL(window.location.href);
+    url.searchParams.delete("promo_id");
+    url.searchParams.delete("cupom_id");
+    if (dept === "Todos") {
+      url.searchParams.delete("dept_id");
+    } else {
+      url.searchParams.set("dept_id", dept);
     }
+    if (cat === "Todos") {
+      url.searchParams.delete("category_id");
+    } else {
+      url.searchParams.set("category_id", cat);
+    }
+    window.history.replaceState({}, "", url.toString());
+    setTimeout(() => setIsTransitioning(false), 300);
   };
 
   const selectCategory = (cat: string) => {
-    try {
-      setIsTransitioning(true);
-      searchCache.current = {};
-      window.scrollTo({ top: 0, behavior: "instant" });
-      setIsDrawerOpen(false);
-      setFilters((prev) => ({
-        ...prev,
-        categoria: cat,
-        promocao_id: null,
-        cupom_id: null,
-        termo_busca: "", // Intenção soberana limpa termo de busca
-      }));
-      setDebouncedSearchTerm("");
+    setIsTransitioning(true);
+    searchCache.current = {};
+    window.scrollTo({ top: 0, behavior: "instant" });
+    setIsDrawerOpen(false);
+    setFilters((prev) => ({
+      ...prev,
+      categoria: cat,
+      promocao_id: null,
+      cupom_id: null,
+      termo_busca: "", // Intenção soberana limpa termo de busca
+    }));
+    setDebouncedSearchTerm("");
 
-      // URL management
-      const url = new URL(window.location.href);
-      url.searchParams.delete("promo_id");
-      url.searchParams.delete("cupom_id");
-      if (cat === "Todos") {
-        url.searchParams.delete("category_id");
-      } else {
-        url.searchParams.set("category_id", cat);
-      }
-      window.history.replaceState({}, "", url.toString());
-    } catch (err) {
-      console.error("Erro ao selecionar categoria:", err);
-    } finally {
-      setTimeout(() => setIsTransitioning(false), 300);
+    // URL management
+    const url = new URL(window.location.href);
+    url.searchParams.delete("promo_id");
+    url.searchParams.delete("cupom_id");
+    if (cat === "Todos") {
+      url.searchParams.delete("category_id");
+    } else {
+      url.searchParams.set("category_id", cat);
     }
+    window.history.replaceState({}, "", url.toString());
+    setTimeout(() => setIsTransitioning(false), 300);
   };
 
   const selectPromotion = (promoId: string | null) => {
-    try {
-      setIsTransitioning(true);
-      searchCache.current = {};
-      window.scrollTo({ top: 0, behavior: "instant" });
-      setIsDrawerOpen(false);
-      setFilters((prev) => ({
-        ...prev,
-        promocao_id: promoId,
-        departamento: "Todos",
-        categoria: "Todos",
-        cupom_id: null,
-        termo_busca: "", // Intenção soberana limpa termo de busca
-      }));
-      setDebouncedSearchTerm("");
+    setIsTransitioning(true);
+    searchCache.current = {};
+    window.scrollTo({ top: 0, behavior: "instant" });
+    setIsDrawerOpen(false);
+    setFilters((prev) => ({
+      ...prev,
+      promocao_id: promoId,
+      departamento: "Todos",
+      categoria: "Todos",
+      cupom_id: null,
+      termo_busca: "", // Intenção soberana limpa termo de busca
+    }));
+    setDebouncedSearchTerm("");
 
-      // URL management
-      const url = new URL(window.location.href);
-      if (promoId) {
-        url.searchParams.set("promo_id", promoId);
-      } else {
-        url.searchParams.delete("promo_id");
-      }
-      url.searchParams.delete("category_id");
-      url.searchParams.delete("dept_id");
-      url.searchParams.delete("cupom_id");
-      window.history.replaceState({}, "", url.toString());
-    } catch (err) {
-      console.error("Erro ao selecionar promoção:", err);
-    } finally {
-      setTimeout(() => setIsTransitioning(false), 300);
+    // URL management
+    const url = new URL(window.location.href);
+    if (promoId) {
+      url.searchParams.set("promo_id", promoId);
+    } else {
+      url.searchParams.delete("promo_id");
     }
+    url.searchParams.delete("category_id");
+    url.searchParams.delete("dept_id");
+    url.searchParams.delete("cupom_id");
+    window.history.replaceState({}, "", url.toString());
+    setTimeout(() => setIsTransitioning(false), 300);
   };
 
   const selectCoupon = (coupon: CouponRule) => {
-    try {
-      window.scrollTo({ top: 0, behavior: "instant" });
-      setIsDrawerOpen(false);
-      setFilters((prev) => ({
-        ...prev,
-        cupom_id: coupon.id,
-        promocao_id: null,
-        departamento: "Todos",
-        categoria: "Todos",
-        termo_busca: "", // Intenção soberana limpa termo de busca
-      }));
-      setDebouncedSearchTerm("");
+    window.scrollTo({ top: 0, behavior: "instant" });
+    setIsDrawerOpen(false);
+    setFilters((prev) => ({
+      ...prev,
+      cupom_id: coupon.id,
+      promocao_id: null,
+      departamento: "Todos",
+      categoria: "Todos",
+      termo_busca: "", // Intenção soberana limpa termo de busca
+    }));
+    setDebouncedSearchTerm("");
 
-      // URL management
-      const url = new URL(window.location.href);
-      url.searchParams.set("cupom_id", coupon.id);
-      url.searchParams.delete("promo_id");
-      url.searchParams.delete("dept_id");
-      url.searchParams.delete("category_id");
-      window.history.replaceState({}, "", url.toString());
-    } catch (err) {
-      console.error("Erro ao selecionar cupom:", err);
-    }
+    // URL management
+    const url = new URL(window.location.href);
+    url.searchParams.set("cupom_id", coupon.id);
+    url.searchParams.delete("promo_id");
+    url.searchParams.delete("dept_id");
+    url.searchParams.delete("category_id");
+    window.history.replaceState({}, "", url.toString());
   };
 
   const resetFilters = useCallback(() => {
-    try {
-      setIsTransitioning(true);
-      searchCache.current = {};
-      window.scrollTo({ top: 0, behavior: "instant" });
-      setIsDrawerOpen(false);
+    setIsTransitioning(true);
+    searchCache.current = {};
+    window.scrollTo({ top: 0, behavior: "instant" });
+    setIsDrawerOpen(false);
 
-      // Do a single state update for all properties
-      setFilters({
-        departamento: "Todos",
-        categoria: "Todos",
-        promocao_id: null,
-        cupom_id: null,
-        termo_busca: "",
-      });
-      setDebouncedSearchTerm("");
+    // Do a single state update for all properties
+    setFilters({
+      departamento: "Todos",
+      categoria: "Todos",
+      promocao_id: null,
+      cupom_id: null,
+      termo_busca: "",
+    });
+    setDebouncedSearchTerm("");
 
-      // Clear URL parameters
-      const url = new URL(window.location.href);
-      url.searchParams.delete("promo_id");
-      url.searchParams.delete("dept_id");
-      url.searchParams.delete("category_id");
-      url.searchParams.delete("cupom_id");
-      window.history.replaceState({}, "", url.toString());
-    } catch (err) {
-      console.error("Erro ao limpar filtros:", err);
-    } finally {
-      setTimeout(() => setIsTransitioning(false), 300);
-    }
+    // Clear URL parameters
+    const url = new URL(window.location.href);
+    url.searchParams.delete("promo_id");
+    url.searchParams.delete("dept_id");
+    url.searchParams.delete("category_id");
+    url.searchParams.delete("cupom_id");
+    window.history.replaceState({}, "", url.toString());
+
+    setTimeout(() => setIsTransitioning(false), 300);
   }, []);
 
   useEffect(() => {
@@ -1567,16 +1399,14 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
       if (promoId) {
         const p = inheritedPromotions.find((pr) => pr.id === promoId);
         if (p) {
-          if (!p.isActive || !isPromotionActive(p, new Date())) {
+          if (!p.isActive) {
             toast.error(
               "Esta promoção não está mais ativa, mas confira outras ofertas!",
               { duration: 4000 },
             );
             resetFilters();
           } else {
-            if (filters.promocao_id !== p.id) {
-              selectPromotion(p.id);
-            }
+            selectPromotion(p.id);
           }
         } else {
           toast.error("Promoção não encontrada!", { duration: 4000 });
@@ -1584,7 +1414,7 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
         }
       }
     }
-  }, [inheritedPromotions, resetFilters, filters.promocao_id]);
+  }, [inheritedPromotions]);
 
   const previousActivePromoIdsRef = useRef<string>("");
 
@@ -1888,26 +1718,13 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
   }, [activePromotions, activeCouponFilter, matrizProducts, tenant.id]);
 
   const isProductInRule = useCallback((rule: PromotionRule | CouponRule, p: Product) => {
-    if (!rule || !p) return false;
-
-    const promoProductIds = extractAllProductIdsFromPromotion(rule);
-    if (promoProductIds.length > 0) {
-      const pIdStr = p.id ? String(p.id).trim() : "";
-      const pBarcodeStr = p.barcode ? String(p.barcode).trim() : "";
-      const pEanStr = (p as any).ean ? String((p as any).ean).trim() : "";
-
-      if (pIdStr && promoProductIds.includes(pIdStr)) return true;
-      if (pBarcodeStr && promoProductIds.includes(pBarcodeStr)) return true;
-      if (pEanStr && promoProductIds.includes(pEanStr)) return true;
-    }
-
-    return checkProductMatchesRule(rule, p, matrizProducts.length > 0 ? matrizProducts : products, tenant.id);
-  }, [matrizProducts, products, tenant.id]);
+    return checkProductMatchesRule(rule, p, matrizProducts, tenant.id);
+  }, [matrizProducts, tenant.id]);
 
   const filteredProducts = useMemo<Product[]>(() => {
     const term = normalizeStr(debouncedSearchTerm);
     const activePromoIds = activePromotions.map((p) => p.id).join(",");
-    const cacheKey = `${products.length}_${term}_${selectedDepartment}_${selectedCategory}_${selectedPromotion?.id || "none"}_${activeCouponFilter?.id || "none"}_${activePromoIds}`;
+    const cacheKey = `${term}_${selectedDepartment}_${selectedCategory}_${selectedPromotion?.id || "none"}_${activeCouponFilter?.id || "none"}_${activePromoIds}`;
 
     if (searchCache.current[cacheKey]) {
       return searchCache.current[cacheKey];
@@ -1919,14 +1736,9 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
       processedTerm = TYPO_MAP[processedTerm];
     }
 
-    let sourceList = products;
-    if (filters.promocao_id) {
-      if (selectedPromotion) {
-        sourceList = products.filter((p) => isProductInRule(selectedPromotion, p));
-      } else {
-        sourceList = [];
-      }
-    }
+    let sourceList = selectedPromotion
+      ? products.filter((p) => isProductInRule(selectedPromotion, p))
+      : products;
 
     // Strict rule: Never show products with zero, negative or missing prices
     sourceList = sourceList.filter(p => typeof p.price === 'number' && p.price > 0);
@@ -2675,7 +2487,7 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
 
                               <div className="flex-1 min-w-0">
                                 <p className="font-black text-gray-900 text-sm md:text-base leading-tight line-clamp-2 transition-colors flex items-center gap-1 md:gap-2">
-                                  {Boolean(p.isFeatured) && (
+                                  {p.isFeatured && (
                                     <Star
                                       size={10}
                                       fill="#fbbf24"
@@ -2710,11 +2522,10 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
                               <div className="text-right flex flex-col items-end shrink-0">
                                 {(() => {
                                   let currentPrice = p.price;
-                                  let hasDiscount = Boolean(
+                                  let hasDiscount =
                                     p.promotionType === "DISCOUNT" &&
                                     p.originalPrice &&
-                                    p.originalPrice > p.price
-                                  );
+                                    p.originalPrice > p.price;
 
                                   if (activePromo) {
                                     if (
@@ -2852,11 +2663,9 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
           innerClassName="flex gap-5 md:gap-8 lg:gap-12 justify-start px-4 md:px-8 lg:px-12 pb-4"
         >
           {activePromotions
-            ?.filter((p) => p.highlightInCategoriesBar || isBundleType(p))
+            ?.filter((p) => p.highlightInCategoriesBar)
             .map((promo, index) => {
-              const Icon = getPromoIcon(
-                promo.highlightIcon || (isBundleType(promo) ? "Sparkles" : undefined)
-              );
+              const Icon = getPromoIcon(promo.highlightIcon);
               const colorMap: any = {
                 orange: "bg-orange-500 shadow-orange-500/30",
                 red: "bg-red-500 shadow-red-500/30",
@@ -3121,9 +2930,7 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
                           selectedPromotion.buyX &&
                           selectedPromotion.payY
                         ? `Exibindo produtos da oferta (Leve ${selectedPromotion.buyX} por R$ ${selectedPromotion.payY.toFixed(2).replace(".", ",")})`
-                        : isBundleType(selectedPromotion) && selectedPromotion.bundlePrice
-                          ? `Escolha 1 item de cada grupo e pague apenas R$ ${selectedPromotion.bundlePrice.toFixed(2).replace(".", ",")}`
-                          : `Mostrando apenas produtos desta promoção.`}
+                        : `Mostrando apenas produtos desta promoção.`}
                   </p>
                 </div>
               </div>
@@ -3138,7 +2945,6 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
             </div>
           </div>
         )}
-
         {!(debouncedSearchTerm.length > 0 && filteredProducts.length > 0) && (
           <SmartBanner
             searchTerm={debouncedSearchTerm}
@@ -3182,13 +2988,13 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
             </div>
           )}
 
-        {externalIsLoading || isTransitioning || (products.length === 0 && (isLoading || externalIsLoading)) ? (
+        {isLoading || isTransitioning ? (
           <div className="py-32 text-center text-gray-500 font-black animate-pulse flex flex-col items-center justify-center gap-4">
             <div
               className="w-8 h-8 border-4 border-gray-200 border-t-brand rounded-full animate-spin"
               style={{ borderTopColor: tenant.primaryColor }}
             ></div>
-            {filters.promocao_id ? "Carregando produtos da promoção..." : "Carregando visualização..."}
+            Carregando visualização...
           </div>
         ) : filteredProducts.length === 0 ? (
           <div className="py-32 text-center space-y-6">
@@ -3241,32 +3047,25 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
                 >
                   {rowProducts.map((p, colIndex) => {
                     const globalIndex = startIndex + colIndex;
-                    try {
-                      if (!p || typeof p !== "object") return null;
-                      return (
-                        <ProductCard
-                          key={p.id || globalIndex}
-                          product={p}
-                          tenant={tenant}
-                          promotions={activePromotions}
-                          onProductClick={onProductClick}
-                          isProductInRule={isProductInRule}
-                          products={products}
-                          onAddToCart={(e, prod) => {
-                            e.stopPropagation();
-                            handleAddToCartWrapper(prod);
-                          }}
-                          onNotify={(e, prod) => {
-                            e.stopPropagation();
-                            handleNotifyMe(prod);
-                          }}
-                          priority={globalIndex < 6}
-                        />
-                      );
-                    } catch (err) {
-                      console.error("Error rendering ProductCard:", p, err);
-                      return null;
-                    }
+                    return (
+                      <ProductCard
+                        key={p.id}
+                        product={p}
+                        tenant={tenant}
+                        promotions={activePromotions}
+                        onProductClick={onProductClick}
+                        isProductInRule={isProductInRule}
+                        onAddToCart={(e, p) => {
+                          e.stopPropagation();
+                          handleAddToCartWrapper(p);
+                        }}
+                        onNotify={(e, p) => {
+                          e.stopPropagation();
+                          handleNotifyMe(p);
+                        }}
+                        priority={globalIndex < 6}
+                      />
+                    );
                   })}
                 </div>
               );
@@ -3301,7 +3100,6 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
                   promotions={activePromotions}
                   onProductClick={onProductClick}
                   isProductInRule={isProductInRule}
-                  products={products}
                   onAddToCart={(e, p) => {
                     e.stopPropagation();
                     handleAddToCartWrapper(p);
@@ -3522,4 +3320,4 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
       )}
     </div>
   );
-});
+};

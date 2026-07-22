@@ -261,16 +261,10 @@ export interface PromotionRule {
     | "PROGRESSIVE_DISCOUNT"
     | "FIXED_COMBO"
     | "LIGHTNING_OFFER"
-    | "DISCOUNT_ON_QTY"
-    | "BUNDLE_FIXED_PRICE"
-    | "COMBO_VARIATION"
-    | "VARIATION_COMBO"
-    | "SLOT_COMBO";
-  targetType: "CATEGORY" | "MANUFACTURER" | "PRODUCT" | "SPECIFIC_SELECTION" | "BUNDLE_SLOTS";
+    | "DISCOUNT_ON_QTY";
+  targetType: "CATEGORY" | "MANUFACTURER" | "PRODUCT" | "SPECIFIC_SELECTION";
   targetValue: string; // Category name, Manufacturer name, or Product ID
   specificProductIds?: string[]; // For SPECIFIC_SELECTION
-  bundlePrice?: number;
-  bundleSlots?: string[][]; // Array of arrays of product IDs
   scheduleConfig?: FlashDealsScheduleConfig;
   filtersMetadata?: {
     category?: string | string[];
@@ -402,53 +396,21 @@ export const isPromotionActive = (
   return true;
 };
 
-// Performance optimization: Caches to prevent expensive O(N) filtering/searching of matrizProducts inside the product matching loop
-const ruleEanCache = new Map<string, string[]>();
-const ruleBarcodeCache = new Map<string, string | null>();
-
-export const isBundleType = (rule?: PromotionRule | CouponRule | null): boolean => {
-  if (!rule) return false;
-  const promoType = (rule as PromotionRule).type;
-  return (
-    rule.targetType === "BUNDLE_SLOTS" ||
-    promoType === "BUNDLE_FIXED_PRICE" ||
-    promoType === "COMBO_VARIATION" ||
-    promoType === "VARIATION_COMBO" ||
-    promoType === "SLOT_COMBO" ||
-    Boolean((rule as any).bundleSlots && (rule as any).bundleSlots.length > 0) ||
-    Boolean((rule as any).bundle_slots && (rule as any).bundle_slots.length > 0) ||
-    Boolean((rule as any).comboProducts && (rule as any).comboProducts.length > 0) ||
-    Boolean((rule as any).combo_products && (rule as any).combo_products.length > 0)
-  );
-};
-
 export const checkProductMatchesRule = (
   rule: PromotionRule | CouponRule,
   p: Product,
   matrizProducts: Product[] = [],
   tenantId?: string,
 ): boolean => {
-  if (!rule || !p) return false;
   // Se a regra for de rede ou pertencer a um tenant diferente do produto, é escopo rede
   const isNetworkScope = rule.scope === "NETWORK" || (tenantId && rule.tenantId !== tenantId);
 
-  const pIdStr = p.id ? String(p.id).trim() : "";
-  const pBarcodeStr = p.barcode ? String(p.barcode).trim() : "";
-  const pEanStr = (p as any).ean ? String((p as any).ean).trim() : "";
-  const productEan = (pBarcodeStr || pEanStr);
-
   if (rule.targetType === "PRODUCT") {
-    if (pIdStr && String(rule.targetValue).trim() === pIdStr) return true;
+    if (rule.targetValue === p.id) return true;
     // Se for escopo de rede, targetValue é o ID do produto na matriz. Comparamos pelo código de barras (EAN)
-    if (productEan) {
-      const cacheKey = `${rule.id}_${matrizProducts.length}`;
-      let targetBarcode = ruleBarcodeCache.get(cacheKey);
-      if (targetBarcode === undefined) {
-        const matrizProd = matrizProducts.find((mp) => mp && String(mp.id).trim() === String(rule.targetValue).trim());
-        targetBarcode = (matrizProd?.barcode || (matrizProd as any)?.ean)?.toString().trim() || null;
-        ruleBarcodeCache.set(cacheKey, targetBarcode);
-      }
-      if (targetBarcode && targetBarcode === productEan) return true;
+    if (isNetworkScope && p.barcode) {
+      const matrizProd = matrizProducts.find((mp) => mp.id === rule.targetValue);
+      if (matrizProd && matrizProd.barcode === p.barcode) return true;
     }
     return false;
   }
@@ -464,113 +426,12 @@ export const checkProductMatchesRule = (
   }
 
   if (rule.targetType === "SPECIFIC_SELECTION") {
-    const specificIds = (rule.specificProductIds || []).map((x) => String(x).trim());
-    if (pIdStr && specificIds.includes(pIdStr)) return true;
-    if (productEan) {
-      const cacheKey = `${rule.id}__${matrizProducts.length}`;
-      let targetEans = ruleEanCache.get(cacheKey);
-      if (!targetEans) {
-        targetEans = matrizProducts
-          .filter((mp) => mp && specificIds.includes(String(mp.id).trim()) && (mp.barcode || (mp as any).ean))
-          .map((mp) => (mp.barcode || (mp as any).ean)?.toString().trim() as string);
-        ruleEanCache.set(cacheKey, targetEans);
-      }
-      if (targetEans.includes(productEan)) return true;
-    }
-    return false;
-  }
-
-  if (isBundleType(rule)) {
-    const bundlePromo = rule as PromotionRule;
-    let slots = bundlePromo.bundleSlots || (bundlePromo as any).bundle_slots;
-    if (!slots && (bundlePromo as any).filtersMetadata) {
-      const fm = typeof (bundlePromo as any).filtersMetadata === "string" ? (() => { try { return JSON.parse((bundlePromo as any).filtersMetadata); } catch (e) { return {}; } })() : (bundlePromo as any).filtersMetadata;
-      slots = fm?.bundleSlots || fm?.bundle_slots || fm?.slots;
-    }
-    if (typeof slots === "string") {
-      try { slots = JSON.parse(slots); } catch (e) {}
-    }
-    const comboProds = bundlePromo.comboProducts || (bundlePromo as any).combo_products;
-    const specProds = bundlePromo.specificProductIds || (bundlePromo as any).specific_product_ids || (bundlePromo as any).product_ids || (bundlePromo as any).productIds;
-
-    if (comboProds && Array.isArray(comboProds)) {
-      const normComboProds = comboProds.map((x: any) => String(x).trim());
-      if (pIdStr && normComboProds.includes(pIdStr)) return true;
-      if (pBarcodeStr && normComboProds.includes(pBarcodeStr)) return true;
-      if (pEanStr && normComboProds.includes(pEanStr)) return true;
-      if (productEan && normComboProds.includes(productEan)) return true;
-    }
-
-    if (specProds && Array.isArray(specProds) && specProds.length > 0) {
-      const normSpecProds = specProds.map((x: any) => String(x).trim());
-      if (pIdStr && normSpecProds.includes(pIdStr)) return true;
-      if (pBarcodeStr && normSpecProds.includes(pBarcodeStr)) return true;
-      if (pEanStr && normSpecProds.includes(pEanStr)) return true;
-      if (productEan && normSpecProds.includes(productEan)) return true;
-      if (productEan) {
-        const cacheKey = `${rule.id}_spec_${matrizProducts.length}`;
-        let targetEans = ruleEanCache.get(cacheKey);
-        if (!targetEans) {
-          targetEans = matrizProducts
-            .filter((mp) => mp && normSpecProds.includes(String(mp.id).trim()) && (mp.barcode || (mp as any).ean))
-            .map((mp) => (mp.barcode || (mp as any).ean)?.toString().trim() as string);
-          ruleEanCache.set(cacheKey, targetEans);
-        }
-        if (targetEans.includes(productEan)) return true;
-      }
-    }
-
-    if (!slots || !Array.isArray(slots) || slots.length === 0) return false;
-
-    let slotIdx = 0;
-    for (const slot of slots) {
-      if (!slot) continue;
-
-      if (Array.isArray(slot)) {
-        const normSlotItems = slot.map((x: any) => {
-          if (x && typeof x === "object") {
-            return String(x.id || x.productId || x.product_id || x.ean || x.barcode || "").trim();
-          }
-          return String(x).trim();
-        }).filter(Boolean);
-
-        if (pIdStr && normSlotItems.includes(pIdStr)) return true;
-        if (pBarcodeStr && normSlotItems.includes(pBarcodeStr)) return true;
-        if (pEanStr && normSlotItems.includes(pEanStr)) return true;
-        if (productEan && normSlotItems.includes(productEan)) return true;
-        if (productEan) {
-          const cacheKey = `${rule.id}_slot_${slotIdx}_${matrizProducts.length}`;
-          let targetEans = ruleEanCache.get(cacheKey);
-          if (!targetEans) {
-            targetEans = matrizProducts
-              .filter((mp) => mp && normSlotItems.includes(String(mp.id).trim()) && (mp.barcode || (mp as any).ean))
-              .map((mp) => (mp.barcode || (mp as any).ean)?.toString().trim() as string);
-            ruleEanCache.set(cacheKey, targetEans);
-          }
-          if (targetEans.includes(productEan)) return true;
-        }
-      } else if (typeof slot === "object") {
-        const pIds = (slot.productIds || slot.product_ids || slot.productIdsList || []).map((x: any) => String(x).trim());
-        const slotEans = (slot.eans || slot.barcodes || []).map((x: any) => String(x).trim());
-
-        if (pIdStr && (pIds.includes(pIdStr) || slotEans.includes(pIdStr))) return true;
-        if (pBarcodeStr && (pIds.includes(pBarcodeStr) || slotEans.includes(pBarcodeStr))) return true;
-        if (pEanStr && (pIds.includes(pEanStr) || slotEans.includes(pEanStr))) return true;
-        if (productEan && (pIds.includes(productEan) || slotEans.includes(productEan))) return true;
-
-        if (productEan) {
-          const cacheKey = `${rule.id}_slot_obj_${slotIdx}_${matrizProducts.length}`;
-          let targetEans = ruleEanCache.get(cacheKey);
-          if (!targetEans) {
-            targetEans = matrizProducts
-              .filter((mp) => mp && pIds.includes(String(mp.id).trim()) && (mp.barcode || (mp as any).ean))
-              .map((mp) => (mp.barcode || (mp as any).ean)?.toString().trim() as string);
-            ruleEanCache.set(cacheKey, targetEans);
-          }
-          if (targetEans.includes(productEan)) return true;
-        }
-      }
-      slotIdx++;
+    if (rule.specificProductIds?.includes(p.id)) return true;
+    if (isNetworkScope && p.barcode) {
+      const targetEans = matrizProducts
+        .filter((mp) => rule.specificProductIds?.includes(mp.id) && mp.barcode)
+        .map((mp) => mp.barcode);
+      if (p.barcode && targetEans.includes(p.barcode)) return true;
     }
     return false;
   }
@@ -582,108 +443,11 @@ export const checkProductMatchesRule = (
   return false;
 };
 
-function getBundleDiscountForItem(
-  item: CartItem,
-  promo: PromotionRule,
-  cartItems: CartItem[],
-  matrizProducts: Product[],
-  tenantId?: string
-): number {
-  if (!promo.bundleSlots || promo.bundleSlots.length < 2 || !promo.bundlePrice) return 0;
-  
-  // To evaluate EAN matches if needed
-  const isNetworkScope = promo.scope === "NETWORK" || (tenantId && promo.tenantId !== tenantId);
-  const getProductEan = (id: string) => {
-    const p = cartItems.find(c => c.id === id);
-    if (p?.barcode) return p.barcode;
-    const mp = matrizProducts.find(m => m.id === id);
-    return mp?.barcode;
-  };
-
-  // Build a pool of available quantities for this promo
-  const pool = new Map<string, number>();
-  cartItems.forEach(ci => {
-    pool.set(ci.id, ci.quantity);
-  });
-  
-  let bundleCount = 0;
-  let itemsInBundle: Record<string, number> = {};
-  
-  while (true) {
-    let canFormBundle = true;
-    let currentBundleItems = [];
-    
-    for (const slot of promo.bundleSlots) {
-      let foundProductId: string | undefined = undefined;
-      // Find a product in the slot that has quantity > 0 in our pool
-      for (const id of slot) {
-        if ((pool.get(id) || 0) > 0) {
-          foundProductId = id;
-          break;
-        }
-        // Try EAN matching if it's network scope
-        if (isNetworkScope) {
-           const targetEan = getProductEan(id);
-           if (targetEan) {
-             for (const [cartItemId, qty] of pool.entries()) {
-               if (qty > 0 && getProductEan(cartItemId) === targetEan) {
-                 foundProductId = cartItemId;
-                 break;
-               }
-             }
-           }
-        }
-        if (foundProductId) break;
-      }
-      
-      if (foundProductId) {
-        currentBundleItems.push(foundProductId);
-      } else {
-        canFormBundle = false;
-        break;
-      }
-    }
-    
-    if (canFormBundle) {
-      // Deduct 1 from each used product
-      currentBundleItems.forEach(id => {
-        pool.set(id, pool.get(id)! - 1);
-        itemsInBundle[id] = (itemsInBundle[id] || 0) + 1;
-      });
-      bundleCount++;
-    } else {
-      break;
-    }
-  }
-  
-  if (bundleCount === 0) return 0;
-  
-  let totalBasePriceInBundles = 0;
-  for (const [id, qty] of Object.entries(itemsInBundle)) {
-    const cartItem = cartItems.find(ci => ci.id === id);
-    if (cartItem) {
-      totalBasePriceInBundles += cartItem.price * qty;
-    }
-  }
-  
-  const totalBundlePrice = bundleCount * promo.bundlePrice;
-  const totalDiscount = Math.max(0, totalBasePriceInBundles - totalBundlePrice);
-  
-  const itemQtyInBundle = itemsInBundle[item.id] || 0;
-  if (itemQtyInBundle === 0) return 0;
-  
-  const itemBasePriceInBundle = item.price * itemQtyInBundle;
-  const itemDiscountProportion = totalBasePriceInBundles > 0 ? (itemBasePriceInBundle / totalBasePriceInBundles) : 0;
-  
-  return totalDiscount * itemDiscountProportion;
-}
-
 export const calculateItemPromotionDetails = (
   item: CartItem,
   activePromotions: PromotionRule[] = [],
   matrizProducts: Product[] = [],
   tenantId?: string,
-  cartItems?: CartItem[]
 ): PromotionDetail => {
   const now = new Date();
   const applicablePromos = activePromotions.filter((p) => {
@@ -694,10 +458,8 @@ export const calculateItemPromotionDetails = (
   const baseTotal = item.price * item.quantity;
 
   if (applicablePromos.length > 0) {
-    // Sort to prioritize BUNDLE_FIXED_PRICE and FIXED_COMBO rules or more specific rules
+    // Sort to prioritize FIXED_COMBO rules or more specific rules
     applicablePromos.sort((a, b) => {
-      if (a.type === "BUNDLE_FIXED_PRICE" && b.type !== "BUNDLE_FIXED_PRICE") return -1;
-      if (b.type === "BUNDLE_FIXED_PRICE" && a.type !== "BUNDLE_FIXED_PRICE") return 1;
       if (a.type === "FIXED_COMBO" && b.type !== "FIXED_COMBO") return -1;
       if (b.type === "FIXED_COMBO" && a.type !== "FIXED_COMBO") return 1;
       return 0;
@@ -706,14 +468,7 @@ export const calculateItemPromotionDetails = (
     const promo = applicablePromos[0];
     let discountedTotal = baseTotal;
 
-    if (promo.type === "BUNDLE_FIXED_PRICE" && promo.bundleSlots && promo.bundlePrice && cartItems) {
-      const discount = getBundleDiscountForItem(item, promo, cartItems, matrizProducts, tenantId);
-      return {
-        promotionId: promo.id,
-        promotionName: promo.name,
-        discount: discount,
-      };
-    } else if (
+    if (
       promo.type === "BUY_X_PAY_Y" &&
       promo.buyX &&
       promo.payY &&
@@ -816,8 +571,7 @@ export const calculateItemTotal = (
   activePromotions: PromotionRule[] = [],
   matrizProducts: Product[] = [],
   tenantId?: string,
-  cartItems?: CartItem[]
 ): number => {
-  const details = calculateItemPromotionDetails(item, activePromotions, matrizProducts, tenantId, cartItems);
+  const details = calculateItemPromotionDetails(item, activePromotions, matrizProducts, tenantId);
   return item.price * item.quantity - details.discount;
 };

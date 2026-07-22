@@ -70,34 +70,14 @@ app.get("/api/v1/resolve-tenant", async (req, res) => {
       const tenantSlug = parts[0];
       
       if (tenantSlug && tenantSlug !== "www" && tenantSlug !== "farmaflow" && tenantSlug !== "nexoia") {
-        let { data, error } = await supabase
+        const { data, error } = await supabase
           .from("tenants")
           .select("*")
-          .or(`slug.eq.${tenantSlug},id.eq.${tenantSlug}`)
-          .maybeSingle();
+          .eq("slug", tenantSlug)
+          .single();
           
         if (!error && data) {
           tenantData = data;
-        } else {
-          // Fallback: busca flexível ignorando hifens/caracteres especiais
-          const { data: allTenants, error: allErr } = await supabase
-            .from("tenants")
-            .select("*");
-          if (!allErr && allTenants) {
-            const matched = allTenants.find(t => {
-              const cleanSlug = (t.slug || "")
-                .toLowerCase()
-                .replace(/[^a-z0-9]/g, "");
-              const cleanId = (t.id || "")
-                .toLowerCase()
-                .replace(/[^a-z0-9]/g, "");
-              const searchClean = tenantSlug.toLowerCase().replace(/[^a-z0-9]/g, "");
-              return cleanSlug === searchClean || cleanId === searchClean;
-            });
-            if (matched) {
-              tenantData = matched;
-            }
-          }
         }
       }
     } 
@@ -134,8 +114,6 @@ app.get("/api/v1/resolve-tenant", async (req, res) => {
 // Fast Storefront Initialization Endpoint
 app.get("/api/v1/store/:tenantId/init", async (req, res) => {
   try {
-    // Vercel cache control: validate frequently to ensure fresh data for storefront
-    res.setHeader('Cache-Control', 's-maxage=1, stale-while-revalidate=9');
     const tenantId = req.params.tenantId;
 
     const tenantRes = await supabase.from("tenants").select("*").eq("id", tenantId).single();
@@ -146,14 +124,14 @@ app.get("/api/v1/store/:tenantId/init", async (req, res) => {
 
     let promoQuery = supabase.from("promotions").select("*");
     if (networkId) {
-      promoQuery = promoQuery.or(`tenant_id.eq."${tenantId}",tenant_id.eq."${networkId}"`);
+      promoQuery = promoQuery.or(`tenant_id.eq.${tenantId},tenant_id.eq.${networkId}`);
     } else {
       promoQuery = promoQuery.eq("tenant_id", tenantId);
     }
 
     let couponsQuery = supabase.from("coupons").select("*");
     if (networkId) {
-      couponsQuery = couponsQuery.or(`tenant_id.eq."${tenantId}",tenant_id.eq."${networkId}"`);
+      couponsQuery = couponsQuery.or(`tenant_id.eq.${tenantId},tenant_id.eq.${networkId}`);
     } else {
       couponsQuery = couponsQuery.eq("tenant_id", tenantId);
     }
@@ -194,6 +172,7 @@ app.get("/api/v1/store/:tenantId/init", async (req, res) => {
           publicCreds.public_key = pk;
         }
       }
+      // other gateways... if needed
       
       return {
         gateway_name: gw.gateway_name,
@@ -202,123 +181,6 @@ app.get("/api/v1/store/:tenantId/init", async (req, res) => {
       };
     });
 
-    // Ensure all combo slots and prices are cleanly serialized in promotions
-    const safePromotions = (promoRes.data || []).map((p: any) => {
-      const fm = typeof p.filters_metadata === "object" && p.filters_metadata ? p.filters_metadata : {};
-      let rawBundleSlots = p.bundle_slots ?? p.bundleSlots ?? fm.bundleSlots ?? fm.bundle_slots ?? fm.slots ?? [];
-      if (typeof rawBundleSlots === "string") {
-        try {
-          rawBundleSlots = JSON.parse(rawBundleSlots);
-        } catch (e) {
-          rawBundleSlots = [];
-        }
-      }
-      const bundleSlots = Array.isArray(rawBundleSlots) ? rawBundleSlots : [];
-      const bundlePrice = p.bundle_price ?? p.bundlePrice ?? fm.bundlePrice ?? fm.bundle_price ?? null;
-
-      let rawProductIds = [
-        ...(Array.isArray(p.specific_product_ids) ? p.specific_product_ids : []),
-        ...(Array.isArray(p.product_ids) ? p.product_ids : []),
-        ...(Array.isArray(p.combo_products) ? p.combo_products : []),
-        ...(Array.isArray(fm.specificProductIds) ? fm.specificProductIds : []),
-        ...(Array.isArray(fm.product_ids) ? fm.product_ids : []),
-        ...(Array.isArray(fm.productIds) ? fm.productIds : []),
-      ];
-
-      if (Array.isArray(bundleSlots)) {
-        bundleSlots.forEach((slot: any) => {
-          if (Array.isArray(slot)) {
-            slot.forEach((x: any) => {
-              const id = typeof x === "object" ? String(x?.id || x?.productId || x?.product_id || x?.ean || x?.barcode || "").trim() : String(x || "").trim();
-              if (id) rawProductIds.push(id);
-            });
-          }
-        });
-      }
-
-      const mergedProductIds = Array.from(new Set(rawProductIds.map((x) => String(x).trim()).filter(Boolean)));
-
-      return {
-        ...p,
-        bundle_slots: bundleSlots,
-        bundleSlots: bundleSlots,
-        bundle_price: bundlePrice,
-        bundlePrice: bundlePrice,
-        specific_product_ids: mergedProductIds,
-        specificProductIds: mergedProductIds,
-        product_ids: mergedProductIds,
-        productIds: mergedProductIds,
-        combo_products: mergedProductIds,
-        comboProducts: mergedProductIds,
-      };
-    });
-
-    // Collect all slot product IDs across combo/bundle promotions to ensure they are available in store init
-    let initialProducts = productsRes.data || [];
-    const existingProductIds = new Set(initialProducts.map((p: any) => p.id));
-    const slotProductIds = new Set<string>();
-
-    safePromotions.forEach((p: any) => {
-      const slots = p.bundleSlots || [];
-      if (Array.isArray(slots)) {
-        slots.forEach((slot: any) => {
-          if (Array.isArray(slot)) {
-            slot.forEach((id: string) => {
-              if (id && !existingProductIds.has(id)) slotProductIds.add(id);
-            });
-          }
-        });
-      }
-      const comboProds = p.combo_products || [];
-      if (Array.isArray(comboProds)) {
-        comboProds.forEach((id: string) => {
-          if (id && !existingProductIds.has(id)) slotProductIds.add(id);
-        });
-      }
-      const specProds = p.specific_product_ids || [];
-      if (Array.isArray(specProds)) {
-        specProds.forEach((id: string) => {
-          if (id && !existingProductIds.has(id)) slotProductIds.add(id);
-        });
-      }
-    });
-
-    if (slotProductIds.size > 0) {
-      const { data: slotProducts } = await supabase
-        .from("products")
-        .select("*")
-        .in("id", Array.from(slotProductIds));
-
-      if (slotProducts && slotProducts.length > 0) {
-        const slotBarcodes = new Set<string>();
-        slotProducts.forEach((sp: any) => {
-          if (!existingProductIds.has(sp.id)) {
-            initialProducts.push(sp);
-            existingProductIds.add(sp.id);
-          }
-          if (sp.barcode) slotBarcodes.add(sp.barcode);
-        });
-
-        // Also fetch filial store products matching the slot barcodes if tenant is a filial
-        if (slotBarcodes.size > 0 && networkId) {
-          const { data: filialMatchingProds } = await supabase
-            .from("products")
-            .select("*")
-            .eq("tenant_id", tenantId)
-            .in("barcode", Array.from(slotBarcodes));
-
-          if (filialMatchingProds) {
-            filialMatchingProds.forEach((fp: any) => {
-              if (!existingProductIds.has(fp.id)) {
-                initialProducts.push(fp);
-                existingProductIds.add(fp.id);
-              }
-            });
-          }
-        }
-      }
-    }
-
     res.setHeader(
       "Cache-Control",
       "public, s-maxage=60, stale-while-revalidate=300",
@@ -326,9 +188,9 @@ app.get("/api/v1/store/:tenantId/init", async (req, res) => {
     
     res.json({
       tenant: tenantRes.data,
-      promotions: safePromotions,
+      promotions: promoRes.data || [],
       coupons: couponsRes.data || [],
-      products: initialProducts,
+      products: productsRes.data || [],
       paymentGateways: safeGateways
     });
   } catch (e: any) {
@@ -893,8 +755,6 @@ function getLevenshteinDistance(a: string, b: string): number {
 // Paginated Products Endpoint for Infinite Scroll & Reactive Search
 app.get("/api/v1/store/:tenantId/products", async (req, res) => {
   try {
-    // Vercel cache control
-    res.setHeader('Cache-Control', 's-maxage=1, stale-while-revalidate=9');
     const tenantId = req.params.tenantId;
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 50;
@@ -1450,26 +1310,9 @@ if (!process.env.VERCEL) {
             `[Cron] Reconciling tenant ${tenant.id} with ERP ${tenant.erp_url}...`,
           );
 
-          let erpUrlStr = (tenant.erp_url || "").trim();
-          if (!erpUrlStr) {
-            throw new Error("ERP URL is empty");
-          }
-
-          // Prepend protocol if missing (e.g. "Siagold" -> "http://Siagold")
-          if (!/^https?:\/\//i.test(erpUrlStr)) {
-            erpUrlStr = `http://${erpUrlStr}`;
-          }
-
-          // Validate URL structure
-          try {
-            new URL(erpUrlStr);
-          } catch (urlErr) {
-            throw new Error(`Invalid URL format: "${tenant.erp_url}"`);
-          }
-
           // Simula a chamada ao ERP para buscar o dump de estoque
           // Na vida real, isso seria um fetch para o tenant.erp_url
-          const response = await fetch(`${erpUrlStr}/api/stock-dump`, {
+          const response = await fetch(`${tenant.erp_url}/api/stock-dump`, {
             headers: {
               "x-api-key": tenant.integration_token || "",
             },

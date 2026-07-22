@@ -66,8 +66,6 @@ import {
  *   combo_products JSONB,
  *   combo_discount_percentage NUMERIC,
  *   specific_product_ids TEXT[],
- *   bundle_slots JSONB,
- *   bundle_price NUMERIC,
  *   filters_metadata JSONB,
  *   start_date TIMESTAMP WITH TIME ZONE,
  *   end_date TIMESTAMP WITH TIME ZONE,
@@ -318,29 +316,9 @@ export const getTenantByHostname = async (hostname: string): Promise<PharmacyCon
         return mapDbTenantToApp(json.tenant);
       }
     }
+    return null;
   } catch (e) {
-    console.warn("Failed to resolve tenant by hostname API:", e);
-  }
-
-  try {
-    const hostParts = hostname.split(".");
-    const subdomain = (hostParts.length >= 3 && hostParts[0] !== "www") ? hostParts[0] : "";
-    const cleanSubdomain = subdomain
-      ? subdomain.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "")
-      : "";
-
-    const tenants = await getTenants();
-    return tenants.find((t) => {
-      const cleanSlug = t.slug
-        ? t.slug.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "")
-        : "";
-      return (
-        t.custom_domain === hostname ||
-        (cleanSubdomain && (cleanSlug === cleanSubdomain || t.id === subdomain))
-      );
-    }) || null;
-  } catch (err) {
-    console.warn("Failed to resolve tenant by hostname fallback:", err);
+    console.warn("Failed to resolve tenant by hostname:", e);
     return null;
   }
 };
@@ -715,7 +693,7 @@ export const getProductsByTenant = async (
     // Performance Optimization: TTFB/FCP Fast Path
     // If there is no cache, fetch a small optimized payload from the init endpoint instantly
     try {
-      const initResponse = await fetch(`/api/v1/store/${tenantId}/init?t=${Date.now()}`, { signal: abortSignal });
+      const initResponse = await fetch(`/api/v1/store/${tenantId}/init`, { signal: abortSignal });
       if (initResponse.ok) {
         const initJson = await initResponse.json();
         if (initJson.products) {
@@ -1129,110 +1107,49 @@ export const deleteOrder = async (orderId: string) => {
   }
 };
 
-const safeParseJson = (field: any) => {
-  if (!field) return {};
-  if (typeof field === "string") {
-    try {
-      return JSON.parse(field);
-    } catch (e) {
-      console.error("Error parsing JSON field:", e);
-      return {};
-    }
-  }
-  return field;
-};
-
-export const mapDbPromotionToApp = (p: any): PromotionRule => {
-  const fm = safeParseJson(p.filters_metadata || p.filtersmetadata);
-  const bundleSlots = p.bundle_slots ?? p.bundleSlots ?? fm?.bundleSlots ?? fm?.bundle_slots ?? fm?.slots;
-  
-  let slotProductIds: string[] = [];
-  if (Array.isArray(bundleSlots)) {
-    bundleSlots.forEach((slot: any) => {
-      if (Array.isArray(slot)) {
-        slot.forEach((x: any) => {
-          const id = typeof x === "object" ? String(x?.id || x?.productId || x?.product_id || x?.ean || x?.barcode || "").trim() : String(x || "").trim();
-          if (id) slotProductIds.push(id);
-        });
-      }
-    });
-  }
-
-  const rawSpecificIds = [
-    ...(Array.isArray(p.specific_product_ids) ? p.specific_product_ids : []),
-    ...(Array.isArray(p.specificproductids) ? p.specificproductids : []),
-    ...(Array.isArray(p.product_ids) ? p.product_ids : []),
-    ...(Array.isArray(p.productids) ? p.productids : []),
-    ...(Array.isArray(p.combo_products) ? p.combo_products : []),
-    ...(Array.isArray(fm?.specificProductIds) ? fm.specificProductIds : []),
-    ...(Array.isArray(fm?.product_ids) ? fm.product_ids : []),
-    ...(Array.isArray(fm?.productIds) ? fm.productIds : []),
-    ...slotProductIds,
-  ];
-
-  const mergedSpecificProductIds = Array.from(new Set(rawSpecificIds.map((x) => String(x).trim()).filter(Boolean)));
-
-  return {
-    id: p.id,
-    tenantId: p.tenant_id || p.tenantid,
-    name: p.name || "",
-    type: p.type || "BUY_X_PAY_Y",
-    targetType: p.target_type || p.targettype || "PRODUCT",
-    targetValue: p.target_value || p.targetvalue || "",
-    buyX: p.buy_x || p.buyx,
-    payY: p.pay_y || p.payy,
-    lightningDiscountPercentage:
-      p.lightning_discount_percentage || p.lightningdiscountpercentage,
-    discountThresholds: p.discount_thresholds || p.discountthresholds || [],
-    comboProducts: mergedSpecificProductIds,
-    comboDiscountPercentage:
-      p.combo_discount_percentage || p.combodiscountpercentage,
-    specificProductIds: mergedSpecificProductIds,
-    filtersMetadata: {
-      ...(fm || {}),
-      product_ids: mergedSpecificProductIds,
-      specificProductIds: mergedSpecificProductIds,
-    },
-    bundlePrice: p.bundle_price ?? p.bundlePrice ?? fm?.bundlePrice ?? fm?.bundle_price,
-    bundleSlots: bundleSlots,
-    highlightInCategoriesBar:
-      p.highlight_in_categories_bar ?? fm?.highlightInCategoriesBar,
-    highlightColor:
-      p.highlight_color ?? fm?.highlightColor,
-    highlightIcon:
-      p.highlight_icon ?? fm?.highlightIcon,
-    scheduleConfig: fm?.scheduleConfig,
-    startDate: p.start_date || p.startdate,
-    endDate: p.end_date || p.enddate,
-    isActive: p.is_active !== false && p.isactive !== false,
-    scope: p.scope || "SINGLE_STORE",
-  };
-};
+export const mapDbPromotionToApp = (p: any): PromotionRule => ({
+  id: p.id,
+  tenantId: p.tenant_id || p.tenantid,
+  name: p.name || "",
+  type: p.type || "BUY_X_PAY_Y",
+  targetType: p.target_type || p.targettype || "PRODUCT",
+  targetValue: p.target_value || p.targetvalue || "",
+  buyX: p.buy_x || p.buyx,
+  payY: p.pay_y || p.payy,
+  lightningDiscountPercentage:
+    p.lightning_discount_percentage || p.lightningdiscountpercentage,
+  discountThresholds: p.discount_thresholds || p.discountthresholds || [],
+  comboProducts: p.combo_products || p.comboproducts || [],
+  comboDiscountPercentage:
+    p.combo_discount_percentage || p.combodiscountpercentage,
+  specificProductIds: p.specific_product_ids || p.specificproductids || [],
+  filtersMetadata: p.filters_metadata || p.filtersmetadata,
+  highlightInCategoriesBar:
+    p.highlight_in_categories_bar ??
+    (p.filters_metadata || p.filtersmetadata)?.highlightInCategoriesBar,
+  highlightColor:
+    p.highlight_color ??
+    (p.filters_metadata || p.filtersmetadata)?.highlightColor,
+  highlightIcon:
+    p.highlight_icon ??
+    (p.filters_metadata || p.filtersmetadata)?.highlightIcon,
+  scheduleConfig: (p.filters_metadata || p.filtersmetadata)?.scheduleConfig,
+  startDate: p.start_date || p.startdate,
+  endDate: p.end_date || p.enddate,
+  isActive: p.is_active !== false && p.isactive !== false,
+  scope: p.scope || "SINGLE_STORE",
+});
 
 export const getPromotionsByTenant = async (
   tenantId: string,
   networkId?: string,
 ): Promise<PromotionRule[]> => {
-  try {
-    // 1. Tenta buscar do endpoint público otimizado com cache (Init Fast Path)
-    const res = await fetch(`/api/v1/store/${tenantId}/init`);
-    if (res.ok) {
-      const json = await res.json();
-      if (json.promotions && Array.isArray(json.promotions)) {
-        return json.promotions.map(mapDbPromotionToApp);
-      }
-    }
-  } catch (e) {
-    console.warn("FALHA AO BUSCAR PROMOÇÕES PELO ENDPOINT DE INIT, USANDO FALLBACK SUPABASE:", e);
-  }
-
-  // Fallback: consulta direta ao Supabase
   if (!isSupabaseConfigured()) return [];
   try {
     return await retryRequest(async () => {
       let query = supabase.from("promotions").select("*");
       if (networkId) {
-        query = query.or(`tenant_id.eq."${tenantId}",tenant_id.eq."${networkId}"`);
+        query = query.or(`tenant_id.eq.${tenantId},tenant_id.eq.${networkId}`);
       } else {
         query = query.eq("tenant_id", tenantId);
       }
@@ -1249,40 +1166,6 @@ export const getPromotionsByTenant = async (
 export const savePromotion = async (promotion: PromotionRule) => {
   if (!isSupabaseConfigured()) throw new Error("CONFIG_MISSING");
   try {
-    // Extrai todos os IDs de produtos de todos os slots de combo
-    const rawSlots = promotion.bundleSlots || (promotion as any).bundle_slots || (promotion.filtersMetadata as any)?.bundleSlots || (promotion.filtersMetadata as any)?.bundle_slots || [];
-    let slotProductIds: string[] = [];
-    if (Array.isArray(rawSlots)) {
-      rawSlots.forEach((slot: any) => {
-        if (Array.isArray(slot)) {
-          slot.forEach((x: any) => {
-            const id = typeof x === "object" ? String(x?.id || x?.productId || x?.product_id || x?.ean || x?.barcode || "").trim() : String(x || "").trim();
-            if (id) slotProductIds.push(id);
-          });
-        }
-      });
-    }
-
-    const existingSpecIds = Array.isArray(promotion.specificProductIds) ? promotion.specificProductIds : [];
-    const existingComboProds = Array.isArray(promotion.comboProducts) ? promotion.comboProducts : [];
-    const existingProductIds = Array.isArray((promotion as any).product_ids) ? (promotion as any).product_ids : (Array.isArray((promotion as any).productIds) ? (promotion as any).productIds : []);
-
-    const mergedProductIds = Array.from(
-      new Set([
-        ...existingSpecIds,
-        ...existingComboProds,
-        ...existingProductIds,
-        ...slotProductIds,
-      ].map((x) => String(x).trim()).filter(Boolean))
-    );
-
-    const bundlePrice =
-      promotion.bundlePrice ??
-      (promotion as any).bundle_price ??
-      (promotion.filtersMetadata as any)?.bundlePrice ??
-      (promotion.filtersMetadata as any)?.bundle_price ??
-      null;
-
     const payload: any = {
       id: promotion.id,
       tenant_id: promotion.tenantId,
@@ -1294,21 +1177,11 @@ export const savePromotion = async (promotion: PromotionRule) => {
       pay_y: promotion.payY,
       lightning_discount_percentage: promotion.lightningDiscountPercentage,
       discount_thresholds: promotion.discountThresholds,
-      combo_products: mergedProductIds,
+      combo_products: promotion.comboProducts,
       combo_discount_percentage: promotion.comboDiscountPercentage,
-      specific_product_ids: mergedProductIds,
-      bundle_slots: rawSlots && rawSlots.length > 0 ? rawSlots : null,
-      bundle_price:
-        bundlePrice !== null && bundlePrice !== undefined && bundlePrice !== ""
-          ? Number(bundlePrice)
-          : null,
+      specific_product_ids: promotion.specificProductIds,
       filters_metadata: {
         ...(promotion.filtersMetadata || {}),
-        bundlePrice: bundlePrice,
-        bundleSlots: rawSlots,
-        product_ids: mergedProductIds,
-        productIds: mergedProductIds,
-        specificProductIds: mergedProductIds,
         highlightInCategoriesBar: promotion.highlightInCategoriesBar,
         highlightColor: promotion.highlightColor,
         highlightIcon: promotion.highlightIcon,
@@ -1339,76 +1212,40 @@ export const deletePromotion = async (id: string) => {
       if (error) throw error;
     });
   } catch (e: any) {
-    const errorMsg = handleNetworkError(e, "Excluir Promoção");
-    const rawMsg = String(e?.message || e?.details || e || "");
-    const isAuthOrNetwork =
-      rawMsg.includes("Failed to fetch") ||
-      rawMsg.includes("net::ERR_FAILED") ||
-      rawMsg.includes("JWT") ||
-      rawMsg.includes("fetch") ||
-      e?.status === 401 ||
-      e?.status === 403 ||
-      e?.code === "PGRST301";
-
-    if (isAuthOrNetwork) {
-      const customErr = new Error(
-        "Sua sessão expirou ou houve uma instabilidade de rede. Por favor, recarregue a página e tente novamente."
-      );
-      (customErr as any).isNetworkOrAuth = true;
-      (customErr as any).originalError = e;
-      throw customErr;
-    }
-    throw new Error(errorMsg);
+    throw new Error(handleNetworkError(e, "Excluir Promoção"));
   }
 };
 
 import { CouponRule } from "../types";
 
-const mapCouponFromDB = (c: any): CouponRule => {
-  const fm = safeParseJson(c.filters_metadata || c.filtersmetadata);
-  return {
-    id: c.id,
-    tenantId: c.tenant_id || c.tenantid,
-    code: c.code,
-    discountType: c.discount_type || c.discounttype,
-    discountValue: c.discount_value || c.discountvalue,
-    couponScope: c.coupon_scope || c.couponscope,
-    minPurchaseValue: c.min_purchase_value || c.minpurchasevalue,
-    targetType: c.target_type || c.targettype,
-    targetValue: c.target_value || c.targetvalue,
-    specificProductIds: c.specific_product_ids || c.specificproductids,
-    filtersMetadata: fm,
-    startDate: c.start_date || c.startdate,
-    endDate: c.end_date || c.enddate,
-    isActive: c.is_active !== false && c.isactive !== false,
-    scope: c.scope || "SINGLE_STORE",
-  };
-};
+const mapCouponFromDB = (c: any): CouponRule => ({
+  id: c.id,
+  tenantId: c.tenant_id || c.tenantid,
+  code: c.code,
+  discountType: c.discount_type || c.discounttype,
+  discountValue: c.discount_value || c.discountvalue,
+  couponScope: c.coupon_scope || c.couponscope,
+  minPurchaseValue: c.min_purchase_value || c.minpurchasevalue,
+  targetType: c.target_type || c.targettype,
+  targetValue: c.target_value || c.targetvalue,
+  specificProductIds: c.specific_product_ids || c.specificproductids,
+  filtersMetadata: c.filters_metadata || c.filtersmetadata,
+  startDate: c.start_date || c.startdate,
+  endDate: c.end_date || c.enddate,
+  isActive: c.is_active !== false && c.isactive !== false,
+  scope: c.scope || "SINGLE_STORE",
+});
 
 export const getCouponsByTenant = async (
   tenantId: string,
   networkId?: string,
 ): Promise<CouponRule[]> => {
-  try {
-    // 1. Tenta buscar do endpoint público otimizado com cache (Init Fast Path)
-    const res = await fetch(`/api/v1/store/${tenantId}/init`);
-    if (res.ok) {
-      const json = await res.json();
-      if (json.coupons && Array.isArray(json.coupons)) {
-        return json.coupons.map(mapCouponFromDB);
-      }
-    }
-  } catch (e) {
-    console.warn("FALHA AO BUSCAR CUPONS PELO ENDPOINT DE INIT, USANDO FALLBACK SUPABASE:", e);
-  }
-
-  // Fallback: consulta direta ao Supabase
   if (!isSupabaseConfigured()) return [];
   try {
     return await retryRequest(async () => {
       let query = supabase.from("coupons").select("*");
       if (networkId) {
-        query = query.or(`tenant_id.eq."${tenantId}",tenant_id.eq."${networkId}"`);
+        query = query.or(`tenant_id.eq.${tenantId},tenant_id.eq.${networkId}`);
       } else {
         query = query.eq("tenant_id", tenantId);
       }

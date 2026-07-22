@@ -321,7 +321,7 @@ export const Cart: React.FC<CartProps> = ({
   };
 
   const subtotal = items.reduce(
-    (acc, curr) => acc + calculateItemTotal(curr, promotions, matrizProducts, tenant?.id, items),
+    (acc, curr) => acc + calculateItemTotal(curr, promotions, matrizProducts, tenant?.id),
     0,
   );
 
@@ -353,7 +353,7 @@ export const Cart: React.FC<CartProps> = ({
         let isApplicable = checkProductMatchesRule(activeProductCoupon, item, matrizProducts, tenant?.id);
 
         if (isApplicable) {
-          return acc + calculateItemTotal(item, promotions, matrizProducts, tenant?.id, items);
+          return acc + calculateItemTotal(item, promotions, matrizProducts, tenant?.id);
         }
         return acc;
       }, 0);
@@ -945,13 +945,12 @@ export const Cart: React.FC<CartProps> = ({
         <div className="space-y-4">
           {items.map((item) => {
             const isMaxStock = item.quantity >= item.stock;
-            const itemTotal = calculateItemTotal(item, promotions, matrizProducts, tenant?.id, items);
+            const itemTotal = calculateItemTotal(item, promotions, matrizProducts, tenant?.id);
             const promoDetails = calculateItemPromotionDetails(
               item,
               promotions,
               matrizProducts,
               tenant?.id,
-              items,
             );
             let activePromo =
               promotions.find((p) => p.id === promoDetails.promotionId) ||
@@ -1084,66 +1083,6 @@ export const Cart: React.FC<CartProps> = ({
                           <p className="text-[9px] font-bold text-emerald-600 uppercase tracking-tight">
                             Desconto Aplicado!
                           </p>
-                        )}
-                      {activePromo.type === "BUNDLE_FIXED_PRICE" &&
-                        promoDetails.discount > 0 && (
-                          <p className="text-[9px] font-bold text-emerald-600 uppercase tracking-tight">
-                            Desconto de Combo Aplicado! Você economizou R${" "}
-                            {promoDetails.discount?.toFixed(2) || "0.00"}
-                          </p>
-                        )}
-                      {activePromo.type === "BUNDLE_FIXED_PRICE" &&
-                        (!promoDetails.discount || promoDetails.discount === 0) && (
-                          (() => {
-                            const currentSlotIndex = activePromo.bundleSlots?.findIndex(slot => {
-                              if (slot.includes(item.id)) return true;
-                              if (item.barcode) {
-                                const slotEans = (matrizProducts.length > 0 ? matrizProducts : items)
-                                  .filter(p => slot.includes(p.id) && p.barcode)
-                                  .map(p => p.barcode);
-                                if (slotEans.includes(item.barcode)) return true;
-                              }
-                              return false;
-                            });
-                            
-                            if (currentSlotIndex !== undefined && currentSlotIndex !== -1 && activePromo.bundleSlots) {
-                              const otherSlotIndices = activePromo.bundleSlots
-                                .map((_, idx) => idx)
-                                .filter(idx => idx !== currentSlotIndex);
-                              
-                              const otherProductNames: string[] = [];
-                              otherSlotIndices.forEach(idx => {
-                                const slotProductIds = activePromo!.bundleSlots![idx];
-                                const otherProd = matrizProducts?.find(p => {
-                                  if (slotProductIds.includes(p.id)) return true;
-                                  if (p.barcode) {
-                                    const slotEans = matrizProducts
-                                      .filter(sp => slotProductIds.includes(sp.id) && sp.barcode)
-                                      .map(sp => sp.barcode);
-                                    if (slotEans.includes(p.barcode)) return true;
-                                  }
-                                  return false;
-                                });
-                                if (otherProd) {
-                                  otherProductNames.push(otherProd.name);
-                                }
-                              });
-                              
-                              const otherText = otherProductNames.length > 0 
-                                ? otherProductNames[0] 
-                                : "o outro item do combo";
-                              return (
-                                <p className="text-[9px] font-bold text-red-400 uppercase tracking-tight">
-                                  Adicione {otherText} para ativar o combo!
-                                </p>
-                              );
-                            }
-                            return (
-                              <p className="text-[9px] font-bold text-red-400 uppercase tracking-tight">
-                                Complete o combo para ganhar desconto!
-                              </p>
-                            );
-                          })()
                         )}
                     </div>
                   )}
@@ -1724,8 +1663,8 @@ export const Cart: React.FC<CartProps> = ({
               </span>
             </div>
 
-            {(tenant?.minimumOrderValue || 0) > 0 &&
-            subtotal < (tenant?.minimumOrderValue || 0) ? (
+            {tenant?.minimumOrderValue &&
+            subtotal < tenant.minimumOrderValue ? (
               <div className="bg-red-50 border border-red-100 rounded-2xl p-4 flex items-start gap-3">
                 <AlertTriangle
                   className="text-red-500 shrink-0 mt-0.5"

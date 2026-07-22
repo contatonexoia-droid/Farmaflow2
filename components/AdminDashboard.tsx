@@ -110,14 +110,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       .replace(/[^a-z0-9\s-]/g, "")
       .trim()
       .replace(/\s+/g, "-");
-    
-    let finalSlug = cleanSlug;
-    
-    const origin = window.location.origin;
-    if (origin.includes("farmaflow.online")) {
-      return `https://${finalSlug}.farmaflow.online`;
-    }
-    return `${origin}/loja/${finalSlug}?storeId=${tenant.id}`;
+    return `https://${cleanSlug}.farmaflow.online`;
   }, [tenant, tenantId]);
 
   const fetchSearches = async () => {
