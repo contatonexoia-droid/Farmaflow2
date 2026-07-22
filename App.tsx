@@ -1999,8 +1999,9 @@ const App: React.FC = () => {
           setCurrentTenant(targetTenant);
           setView(ViewMode.CATALOG);
 
+          const hasPromoId = new URLSearchParams(window.location.search).has("promo_id");
           const [prods, promos, coups] = await Promise.all([
-            getProductsByTenant(targetTenant.id, setProducts),
+            getProductsByTenant(targetTenant.id, setProducts, hasPromoId),
             getPromotionsByTenant(targetTenant.id, targetTenant.networkId),
             getCouponsByTenant(targetTenant.id, targetTenant.networkId),
           ]);
@@ -2032,7 +2033,7 @@ const App: React.FC = () => {
                 if (tenant) {
                   setCurrentTenant(tenant);
                   const [prods, ords, promos, coups] = await Promise.all([
-                    getProductsByTenant(tenant.id, setProducts),
+                    getProductsByTenant(tenant.id, setProducts, new URLSearchParams(window.location.search).has("promo_id")),
                     getOrdersByTenant(tenant.id),
                     getPromotionsByTenant(tenant.id, tenant.networkId),
                     getCouponsByTenant(tenant.id, tenant.networkId),
@@ -2103,7 +2104,7 @@ const App: React.FC = () => {
             }
 
             const [prods, promos, coups] = await Promise.all([
-              getProductsByTenant(tenant.id, setProducts),
+              getProductsByTenant(tenant.id, setProducts, new URLSearchParams(window.location.search).has("promo_id")),
               getPromotionsByTenant(tenant.id, tenant.networkId),
               getCouponsByTenant(tenant.id, tenant.networkId),
             ]);
@@ -2178,7 +2179,7 @@ const App: React.FC = () => {
             }
 
             const [prods, promos, coups] = await Promise.all([
-              getProductsByTenant(tenant.id, setProducts),
+              getProductsByTenant(tenant.id, setProducts, new URLSearchParams(window.location.search).has("promo_id")),
               getPromotionsByTenant(tenant.id, tenant.networkId),
               getCouponsByTenant(tenant.id, tenant.networkId),
             ]);
@@ -2355,16 +2356,20 @@ const App: React.FC = () => {
       return;
     }
     if (!window.confirm("Tem certeza que deseja excluir este produto?")) return;
+
+    const backup = [...products];
+    setProducts((prev) => prev.filter((p) => p.id !== productId));
+    const loadingToastId = toast.loading("Excluindo produto...");
+
     try {
       await deleteProduct(productId);
-      setProducts((prev) => prev.filter((p) => p.id !== productId));
       // CORREÇÃO CRÍTICA: Limpa o cache localforage do tenant após exclusão
       await clearProductsCache(currentTenant.id).catch(console.error);
+      toast.success("Produto excluído com sucesso!", { id: loadingToastId });
     } catch (error: any) {
       console.error("Erro completo:", error);
-      alert(
-        "Falha ao excluir produto: " + (error.message || "Tente novamente"),
-      );
+      setProducts(backup);
+      toast.error("Falha ao excluir produto: " + (error.message || "Tente novamente"), { id: loadingToastId });
     }
   };
 
@@ -2373,13 +2378,19 @@ const App: React.FC = () => {
       alert("Erro crítico: Empresa não identificada. Recarregue a página.");
       return;
     }
+
+    const backup = [...products];
+    setProducts((prev) => prev.filter((p) => !productIds.includes(p.id)));
+    const loadingToastId = toast.loading("Excluindo produtos...");
+
     try {
       await deleteProducts(productIds);
-      setProducts((prev) => prev.filter((p) => !productIds.includes(p.id)));
       // CORREÇÃO CRÍTICA: Limpa o cache localforage do tenant após exclusão em massa
       await clearProductsCache(currentTenant.id).catch(console.error);
+      toast.success("Produtos excluídos com sucesso!", { id: loadingToastId });
     } catch (error: any) {
-      alert("Erro na exclusão em massa: " + error.message);
+      setProducts(backup);
+      toast.error("Erro na exclusão em massa: " + error.message, { id: loadingToastId });
       throw error;
     }
   };
@@ -2448,7 +2459,7 @@ const App: React.FC = () => {
       setIsLoading(true);
       try {
         const [prods, ords, promos, coups] = await Promise.all([
-          getProductsByTenant(tenant.id, setProducts),
+          getProductsByTenant(tenant.id, setProducts, new URLSearchParams(window.location.search).has("promo_id")),
           getOrdersByTenant(tenant.id),
           getPromotionsByTenant(tenant.id, tenant.networkId),
           getCouponsByTenant(tenant.id, tenant.networkId),

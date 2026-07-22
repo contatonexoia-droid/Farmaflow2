@@ -134,6 +134,8 @@ app.get("/api/v1/resolve-tenant", async (req, res) => {
 // Fast Storefront Initialization Endpoint
 app.get("/api/v1/store/:tenantId/init", async (req, res) => {
   try {
+    // Vercel cache control: validate frequently to ensure fresh data for storefront
+    res.setHeader('Cache-Control', 's-maxage=1, stale-while-revalidate=9');
     const tenantId = req.params.tenantId;
 
     const tenantRes = await supabase.from("tenants").select("*").eq("id", tenantId).single();
@@ -854,6 +856,8 @@ function getLevenshteinDistance(a: string, b: string): number {
 // Paginated Products Endpoint for Infinite Scroll & Reactive Search
 app.get("/api/v1/store/:tenantId/products", async (req, res) => {
   try {
+    // Vercel cache control
+    res.setHeader('Cache-Control', 's-maxage=1, stale-while-revalidate=9');
     const tenantId = req.params.tenantId;
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 50;

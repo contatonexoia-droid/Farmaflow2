@@ -713,7 +713,7 @@ export const getProductsByTenant = async (
     // Performance Optimization: TTFB/FCP Fast Path
     // If there is no cache, fetch a small optimized payload from the init endpoint instantly
     try {
-      const initResponse = await fetch(`/api/v1/store/${tenantId}/init`, { signal: abortSignal });
+      const initResponse = await fetch(`/api/v1/store/${tenantId}/init?t=${Date.now()}`, { signal: abortSignal });
       if (initResponse.ok) {
         const initJson = await initResponse.json();
         if (initJson.products) {

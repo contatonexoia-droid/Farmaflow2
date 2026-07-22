@@ -727,14 +727,19 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
     if (!window.confirm("Tem certeza que deseja excluir esta promoção?"))
       return;
 
+    const backup = [...promotions];
+    onPromotionsUpdate(promotions.filter(p => p.id !== id));
+    const loadingToastId = toast.loading("Excluindo promoção...");
+
     try {
       await deletePromotion(id);
       const updatedPromos = await getPromotionsByTenant(tenant.id);
       onPromotionsUpdate(updatedPromos);
-      toast.success("Promoção excluída com sucesso!");
+      toast.success("Promoção excluída com sucesso!", { id: loadingToastId });
     } catch (error: any) {
       console.error("Error deleting promotion:", error);
-      toast.error(error.message || "Erro ao excluir promoção.");
+      onPromotionsUpdate(backup);
+      toast.error(error.message || "Erro ao excluir promoção.", { id: loadingToastId });
     }
   };
 

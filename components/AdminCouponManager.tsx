@@ -629,14 +629,19 @@ const AdminCouponManager: React.FC<AdminCouponManagerProps> = ({ tenant, product
   const handleDelete = async (id: string) => {
     if (!window.confirm('Tem certeza que deseja excluir este cupom?')) return;
 
+    const backup = [...coupons];
+    onCouponsUpdate(coupons.filter(c => c.id !== id));
+    const loadingToastId = toast.loading('Excluindo cupom...');
+
     try {
       await deleteCoupon(id);
       const updatedCoupons = await getCouponsByTenant(tenant.id);
       onCouponsUpdate(updatedCoupons);
-      toast.success('Cupom excluído com sucesso!');
+      toast.success('Cupom excluído com sucesso!', { id: loadingToastId });
     } catch (error: any) {
       console.error('Error deleting coupon:', error);
-      toast.error(error.message || 'Erro ao excluir cupom.');
+      onCouponsUpdate(backup);
+      toast.error(error.message || 'Erro ao excluir cupom.', { id: loadingToastId });
     }
   };
 
