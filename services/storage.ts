@@ -1339,7 +1339,26 @@ export const deletePromotion = async (id: string) => {
       if (error) throw error;
     });
   } catch (e: any) {
-    throw new Error(handleNetworkError(e, "Excluir Promoção"));
+    const errorMsg = handleNetworkError(e, "Excluir Promoção");
+    const rawMsg = String(e?.message || e?.details || e || "");
+    const isAuthOrNetwork =
+      rawMsg.includes("Failed to fetch") ||
+      rawMsg.includes("net::ERR_FAILED") ||
+      rawMsg.includes("JWT") ||
+      rawMsg.includes("fetch") ||
+      e?.status === 401 ||
+      e?.status === 403 ||
+      e?.code === "PGRST301";
+
+    if (isAuthOrNetwork) {
+      const customErr = new Error(
+        "Sua sessão expirou ou houve uma instabilidade de rede. Por favor, recarregue a página e tente novamente."
+      );
+      (customErr as any).isNetworkOrAuth = true;
+      (customErr as any).originalError = e;
+      throw customErr;
+    }
+    throw new Error(errorMsg);
   }
 };
 

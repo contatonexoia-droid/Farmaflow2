@@ -42,6 +42,7 @@ import {
   getPromotionsByTenant,
   getTenants,
 } from "../services/storage";
+import { supabase } from "../services/supabase";
 import { SmartNumberInput } from "./SmartNumberInput";
 import { ScheduleEditor } from "./ScheduleEditor";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -764,18 +765,59 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
       return;
 
     const backup = [...promotions];
-    onPromotionsUpdate(promotions.filter(p => p.id !== id));
+    // Fallback de Exclusão Local / Optimistic UI: remove imediatamente do estado para evitar congelar a tela
+    onPromotionsUpdate(promotions.filter((p) => p.id !== id));
     const loadingToastId = toast.loading("Excluindo promoção...");
 
     try {
       await deletePromotion(id);
-      const updatedPromos = await getPromotionsByTenant(tenant.id);
-      onPromotionsUpdate(updatedPromos);
+      try {
+        const updatedPromos = await getPromotionsByTenant(tenant.id);
+        if (updatedPromos) {
+          onPromotionsUpdate(updatedPromos);
+        }
+      } catch (err) {
+        console.warn("Falha ao recarregar lista após exclusão:", err);
+      }
       toast.success("Promoção excluída com sucesso!", { id: loadingToastId });
     } catch (error: any) {
       console.error("Error deleting promotion:", error);
-      onPromotionsUpdate(backup);
-      toast.error(error.message || "Erro ao excluir promoção.", { id: loadingToastId });
+      const errMsg = String(error?.message || error?.originalError || error || "");
+      const isNetworkOrAuth =
+        error?.isNetworkOrAuth ||
+        errMsg.includes("sessão expirou") ||
+        errMsg.includes("instabilidade de rede") ||
+        errMsg.includes("Failed to fetch") ||
+        errMsg.includes("net::ERR_FAILED") ||
+        errMsg.includes("401") ||
+        errMsg.includes("403") ||
+        errMsg.includes("JWT");
+
+      if (isNetworkOrAuth) {
+        toast.error(
+          "Sua sessão expirou ou houve uma instabilidade de rede. Por favor, recarregue a página e tente novamente.",
+          { id: loadingToastId, duration: 6000 }
+        );
+
+        // Verifica validade da sessão no Supabase e redireciona para login/reload se sessão expirada
+        setTimeout(async () => {
+          try {
+            const { data } = await supabase.auth.getSession();
+            if (!data?.session) {
+              await supabase.auth.signOut().catch(() => {});
+              window.location.reload();
+            }
+          } catch (e) {
+            // Ignora erro
+          }
+        }, 2500);
+      } else {
+        // Se foi outro tipo de erro, restaura o backup e avisa o usuário
+        onPromotionsUpdate(backup);
+        toast.error(error.message || "Erro ao excluir promoção.", {
+          id: loadingToastId,
+        });
+      }
     }
   };
 
