@@ -217,6 +217,7 @@ interface StorefrontProps {
   promotions?: PromotionRule[];
   coupons?: CouponRule[];
   cartCount: number;
+  cartItems?: CartItem[];
   onAddToCart: (
     product: Product,
     isMainProduct?: boolean,
@@ -342,6 +343,7 @@ const ProductCard = React.memo(
     isCompact,
     priority = false,
     isProductInRule,
+    cartItems = [],
   }: {
     product: Product;
     tenant: PharmacyConfig;
@@ -352,14 +354,18 @@ const ProductCard = React.memo(
     isCompact?: boolean;
     priority?: boolean;
     isProductInRule?: (rule: PromotionRule | CouponRule, p: Product) => boolean;
+    cartItems?: CartItem[];
   }) => {
     const isOutOfStock = product.stock <= 0;
-    const hasDiscount =
+    const cartItem = cartItems?.find((item) => item.id === product.id);
+    const itemQuantity = cartItem ? (cartItem.quantity || 0) : 0;
+    const hasDiscount = Boolean(
       product.promotionType === "DISCOUNT" &&
       product.originalPrice &&
-      product.originalPrice > product.price;
-    const isKit = product.promotionType === "BUY_X_PAY_Y";
-    const isDiscountOnQty = product.promotionType === "DISCOUNT_ON_QTY";
+      product.originalPrice > product.price
+    );
+    const isKit = Boolean(product.promotionType === "BUY_X_PAY_Y");
+    const isDiscountOnQty = Boolean(product.promotionType === "DISCOUNT_ON_QTY");
 
     const activePromo = promotions.find((p) => {
       // The promotions array passed here generally comes from activePromotions,
@@ -436,7 +442,7 @@ const ProductCard = React.memo(
     }
 
     // Force original price to show crossed if there is an active discount
-    const showOriginalPrice = hasDiscount || currentPrice < product.price;
+    const showOriginalPrice = Boolean(hasDiscount || currentPrice < product.price);
     const finalOriginalPrice = showOriginalPrice
       ? hasDiscount
         ? Math.max(product.originalPrice || 0, product.price)
@@ -530,6 +536,13 @@ const ProductCard = React.memo(
           className={`relative cursor-pointer flex items-center justify-center overflow-hidden bg-white ${isCompact ? "h-24 md:h-32 p-2" : "h-32 md:h-44 p-3"}`}
           onClick={() => onProductClick(product)}
         >
+          {itemQuantity > 0 && (
+            <span className="cart-item-quantity-badge absolute top-2 left-2 z-10 bg-emerald-600 text-white font-black text-[9px] md:text-[10px] px-2 py-0.5 rounded-full shadow-lg flex items-center gap-1 animate-in zoom-in duration-200">
+              <ShoppingBag size={10} strokeWidth={3} />
+              {itemQuantity}
+            </span>
+          )}
+
           {displayImage && !imgError ? (
             <picture>
               <source srcSet={displayImage} type="image/webp" />
@@ -551,25 +564,27 @@ const ProductCard = React.memo(
           )}
 
           {!isOutOfStock &&
-            (hasDiscount ||
+            Boolean(
+              hasDiscount ||
               isKit ||
               isDiscountOnQty ||
               activePromo ||
               product.isFeatured ||
-              (product as any)._justUpdated) && (
+              (product as any)._justUpdated
+            ) && (
               <div className="absolute top-2 right-2 flex flex-col items-end gap-1">
-                {(product as any)._justUpdated && (
+                {Boolean((product as any)._justUpdated) && (
                   <span className="bg-orange-500 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1 animate-pulse">
                     Atualizado
                   </span>
                 )}
-                {product.isFeatured && (
+                {Boolean(product.isFeatured) && (
                   <span className="bg-yellow-400 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1">
                     <Star size={10} fill="currentColor" strokeWidth={4} />{" "}
                     Destaque
                   </span>
                 )}
-                {activePromo && (
+                {Boolean(activePromo) && (
                   <span className="bg-red-600 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1 animate-pulse">
                     <Tag size={10} strokeWidth={4} />
                     {activePromo.type === "BUY_X_PAY_Y"
@@ -584,18 +599,18 @@ const ProductCard = React.memo(
                           : activePromo.name}
                   </span>
                 )}
-                {hasDiscount && !activePromo && (
+                {Boolean(hasDiscount && !activePromo) && (
                   <span className="bg-red-500 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1 animate-pulse">
                     <Percent size={10} strokeWidth={4} /> Oferta
                   </span>
                 )}
-                {isKit && (
+                {Boolean(isKit) && (
                   <span className="bg-red-600 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1 animate-pulse">
                     <Layers size={10} strokeWidth={4} /> PROMOÇÃO: Leve{" "}
                     {product.buyX} Pague {product.payY}
                   </span>
                 )}
-                {isDiscountOnQty && (
+                {Boolean(isDiscountOnQty) && (
                   <span className="bg-red-600 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1 animate-pulse">
                     <Percent size={10} strokeWidth={4} /> PROMOÇÃO: A partir de{" "}
                     {product.discountQtyThreshold} unidades, ganhe{" "}
@@ -1052,6 +1067,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
   promotions = [],
   coupons = [],
   cartCount,
+  cartItems = [],
   onAddToCart,
   onProductClick,
   onOpenCart,
@@ -2522,10 +2538,11 @@ export const Storefront: React.FC<StorefrontProps> = ({
                               <div className="text-right flex flex-col items-end shrink-0">
                                 {(() => {
                                   let currentPrice = p.price;
-                                  let hasDiscount =
+                                  let hasDiscount = Boolean(
                                     p.promotionType === "DISCOUNT" &&
                                     p.originalPrice &&
-                                    p.originalPrice > p.price;
+                                    p.originalPrice > p.price
+                                  );
 
                                   if (activePromo) {
                                     if (
@@ -2585,9 +2602,10 @@ export const Storefront: React.FC<StorefrontProps> = ({
                                     currentPrice = p.originalPrice || p.price;
                                   }
 
-                                  const showOriginalPrice =
+                                  const showOriginalPrice = Boolean(
                                     activePromo ||
-                                    (hasDiscount && !activePromo);
+                                    (hasDiscount && !activePromo)
+                                  );
                                   const origPrice = showOriginalPrice
                                     ? Math.max(p.originalPrice || 0, p.price)
                                     : p.price;
@@ -3053,6 +3071,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
                         product={p}
                         tenant={tenant}
                         promotions={activePromotions}
+                        cartItems={cartItems}
                         onProductClick={onProductClick}
                         isProductInRule={isProductInRule}
                         onAddToCart={(e, p) => {
@@ -3098,6 +3117,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
                   product={p}
                   tenant={tenant}
                   promotions={activePromotions}
+                  cartItems={cartItems}
                   onProductClick={onProductClick}
                   isProductInRule={isProductInRule}
                   onAddToCart={(e, p) => {

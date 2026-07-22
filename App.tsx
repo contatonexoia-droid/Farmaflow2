@@ -219,10 +219,11 @@ const SuggestionCard = ({
   const [isAdding, setIsAdding] = useState(false);
 
   // Configuração Dinâmica de Preço Relacionado a Promoções (Idêntico ao ProductCard)
-  const hasDiscount =
+  const hasDiscount = Boolean(
     p.promotionType === "DISCOUNT" &&
     p.originalPrice &&
-    p.originalPrice > p.price;
+    p.originalPrice > p.price
+  );
   const isKit = p.promotionType === "BUY_X_PAY_Y";
   const isDiscountOnQty = p.promotionType === "DISCOUNT_ON_QTY";
 
@@ -288,7 +289,7 @@ const SuggestionCard = ({
     currentPrice = p.originalPrice || p.price;
   }
 
-  const showOriginalPrice = activePromo || (hasDiscount && !activePromo);
+  const showOriginalPrice = Boolean(activePromo || (hasDiscount && !activePromo));
   const finalOriginalPrice = showOriginalPrice
     ? Math.max(p.originalPrice || 0, p.price)
     : p.price;
@@ -2980,6 +2981,7 @@ const App: React.FC = () => {
               promotions={promotions}
               coupons={coupons}
               cartCount={cart.reduce((a, c) => a + c.quantity, 0)}
+              cartItems={cart}
               onAddToCart={addToCart}
               onProductClick={handleProductClick}
               onOpenCart={() => handleViewChange(ViewMode.CART)}
