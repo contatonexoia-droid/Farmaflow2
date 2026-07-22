@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from "react";
-import { PromotionRule, Product, CartItem } from "../types";
+import { PromotionRule, Product, CartItem, isProductInRule, checkProductMatchesRule } from "../types";
 import { Check, ShoppingBag, Sparkles, Tag } from "lucide-react";
 import { toast } from "react-hot-toast";
 
@@ -28,10 +28,39 @@ export const BundlePromoCard: React.FC<BundlePromoCardProps> = ({
 }) => {
   const [selectedProducts, setSelectedProducts] = useState<Record<number, Product>>({});
 
+  const effectiveSlots = useMemo(() => {
+    const slots = promo.bundleSlots || (promo as any).bundle_slots;
+    if (Array.isArray(slots) && slots.length > 0) {
+      return slots;
+    }
+    const fm = (promo.filtersMetadata as any) || {};
+    const fmSlots = fm.bundleSlots || fm.bundle_slots || fm.slots;
+    if (Array.isArray(fmSlots) && fmSlots.length > 0) {
+      return fmSlots;
+    }
+    const specIds = promo.specificProductIds || (promo as any).specific_product_ids || (promo as any).product_ids || (promo as any).productIds || promo.comboProducts || [];
+    if (Array.isArray(specIds) && specIds.length > 0) {
+      return [specIds];
+    }
+    return [];
+  }, [promo]);
+
+  const effectiveSlotsToUse = useMemo(() => {
+    if (effectiveSlots.length > 0) return effectiveSlots;
+    const matching = products.filter(p => checkProductMatchesRule(promo, p, matrizProducts));
+    const ids = matching.map(p => p.id);
+    if (ids.length > 0) return [ids];
+    return [];
+  }, [effectiveSlots, products, promo, matrizProducts]);
+
   const getProductsForSlot = (slotProductIds: string[]) => {
-    if (!slotProductIds || !Array.isArray(slotProductIds)) return [];
-    
-    const sanitizedIds = new Set(slotProductIds.map(id => String(id).trim()));
+    let sanitizedIds = new Set<string>();
+    if (Array.isArray(slotProductIds)) {
+      slotProductIds.forEach(id => {
+        const strId = typeof id === "object" ? String((id as any)?.id || (id as any)?.productId || (id as any)?.product_id || (id as any)?.ean || (id as any)?.barcode || "").trim() : String(id).trim();
+        if (strId) sanitizedIds.add(strId);
+      });
+    }
 
     const targetEans = new Set<string>();
     matrizProducts.forEach(mp => {
@@ -54,21 +83,28 @@ export const BundlePromoCard: React.FC<BundlePromoCardProps> = ({
       }
     });
 
-    return products.filter(p => {
+    const matched = products.filter(p => {
       if (!p) return false;
       const pId = p.id ? String(p.id).trim() : "";
       const pBarcode = p.barcode ? String(p.barcode).trim() : "";
+      const pEan = (p as any).ean ? String((p as any).ean).trim() : "";
       if (pId && sanitizedIds.has(pId)) return true;
       if (pBarcode && sanitizedIds.has(pBarcode)) return true;
+      if (pEan && sanitizedIds.has(pEan)) return true;
       if (pBarcode && targetEans.has(pBarcode)) return true;
+      if (pEan && targetEans.has(pEan)) return true;
       return false;
     });
+
+    if (matched.length > 0) return matched;
+
+    return products.filter(p => checkProductMatchesRule(promo, p, matrizProducts));
   };
 
   const isComplete = useMemo(() => {
-    if (!promo.bundleSlots) return false;
-    return promo.bundleSlots.every((_, index) => !!selectedProducts[index]);
-  }, [promo.bundleSlots, selectedProducts]);
+    if (effectiveSlotsToUse.length === 0) return false;
+    return effectiveSlotsToUse.every((_, index) => !!selectedProducts[index]);
+  }, [effectiveSlotsToUse, selectedProducts]);
 
   const selectedList = Object.values(selectedProducts);
 
@@ -106,9 +142,17 @@ export const BundlePromoCard: React.FC<BundlePromoCardProps> = ({
     setSelectedProducts({}); // Reset selection
   };
 
-  if (!promo.bundleSlots || promo.bundleSlots.length === 0) return null;
+  if (effectiveSlotsToUse.length === 0 && products.length === 0) {
+    return (
+      <div className="bg-pink-50 rounded-3xl p-6 border-2 border-pink-200 mb-8 text-center animate-pulse">
+        <p className="text-sm font-bold text-pink-700">Carregando itens do combo...</p>
+      </div>
+    );
+  }
 
-  const totalSlots = promo.bundleSlots.length;
+  if (effectiveSlotsToUse.length === 0) return null;
+
+  const totalSlots = effectiveSlotsToUse.length;
   const completedSlots = Object.keys(selectedProducts).length;
 
   return (
@@ -153,7 +197,7 @@ export const BundlePromoCard: React.FC<BundlePromoCardProps> = ({
 
       {/* Slots Grid */}
       <div className={`grid grid-cols-1 ${totalSlots === 2 ? 'md:grid-cols-2' : totalSlots >= 3 ? 'md:grid-cols-2 lg:grid-cols-3' : ''} gap-4 mb-6`}>
-        {promo.bundleSlots.map((slotProductIds, index) => {
+        {effectiveSlotsToUse.map((slotProductIds, index) => {
           const slotProducts = getProductsForSlot(slotProductIds);
           const selected = selectedProducts[index];
           

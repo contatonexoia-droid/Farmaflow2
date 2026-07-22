@@ -1897,6 +1897,11 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
             comboProds.forEach((id: any) => slotProductIds.add(String(id).trim()));
           }
 
+          const specProds = selectedPromotion.specificProductIds || (selectedPromotion as any).specific_product_ids || (selectedPromotion as any).product_ids;
+          if (Array.isArray(specProds)) {
+            specProds.forEach((id: any) => slotProductIds.add(String(id).trim()));
+          }
+
           sourceList = products.filter((p) => {
             const pIdStr = p.id ? String(p.id).trim() : "";
             const pBarcodeStr = p.barcode ? String(p.barcode).trim() : "";
@@ -1908,10 +1913,14 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
             if (pEanStr && (slotProductIds.has(pEanStr) || slotEans.has(pEanStr))) return true;
             if (pEan && slotEans.has(pEan)) return true;
 
-            return isProductInRule(selectedPromotion, p);
+            return checkProductMatchesRule(selectedPromotion, p, matrizProducts, tenant?.id);
           });
+
+          if (sourceList.length === 0) {
+            sourceList = products.filter((p) => checkProductMatchesRule(selectedPromotion, p, matrizProducts, tenant?.id));
+          }
         } else {
-          sourceList = products.filter((p) => isProductInRule(selectedPromotion, p));
+          sourceList = products.filter((p) => checkProductMatchesRule(selectedPromotion, p, matrizProducts, tenant?.id));
         }
       } else {
         sourceList = [];
@@ -3126,6 +3135,17 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
                 </button>
               </div>
             </div>
+
+            {isBundleType(selectedPromotion) && (
+              <div className="mt-6">
+                <BundlePromoCard
+                  promo={selectedPromotion}
+                  products={products}
+                  matrizProducts={matrizProducts}
+                  onAddToCart={(item) => handleAddToCartWrapper(item)}
+                />
+              </div>
+            )}
           </div>
         )}
 
