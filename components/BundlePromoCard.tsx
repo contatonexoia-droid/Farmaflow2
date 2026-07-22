@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from "react";
-import { PromotionRule, Product, CartItem, isProductInRule, checkProductMatchesRule } from "../types";
+import { PromotionRule, Product, CartItem, checkProductMatchesRule } from "../types";
 import { Check, ShoppingBag, Sparkles, Tag } from "lucide-react";
 import { toast } from "react-hot-toast";
 

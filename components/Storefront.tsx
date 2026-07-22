@@ -101,6 +101,96 @@ const fixImageUrl = (url?: string, width: number = 400): string | null => {
   return proxyUrl;
 };
 
+export function extractAllProductIdsFromPromotion(promo: any): string[] {
+  if (!promo) return [];
+
+  const ids = new Set<string>();
+
+  // 1. Extrai de specific_product_ids / specificProductIds / product_ids / productIds / comboProducts / combo_products
+  const direct =
+    promo.specific_product_ids ||
+    promo.specificProductIds ||
+    promo.product_ids ||
+    promo.productIds ||
+    promo.comboProducts ||
+    promo.combo_products ||
+    [];
+
+  if (Array.isArray(direct)) {
+    direct.forEach((id: any) => {
+      if (typeof id === "string" || typeof id === "number") {
+        const str = String(id).trim();
+        if (str) ids.add(str);
+      } else if (id && typeof id === "object") {
+        const str = String(id.id || id.productId || id.product_id || id.ean || id.barcode || "").trim();
+        if (str) ids.add(str);
+      }
+    });
+  } else if (typeof direct === "string") {
+    try {
+      const parsed = JSON.parse(direct);
+      if (Array.isArray(parsed)) {
+        parsed.forEach((id: any) => {
+          const str = String(id).trim();
+          if (str) ids.add(str);
+        });
+      }
+    } catch (e) {
+      if (direct.trim()) ids.add(direct.trim());
+    }
+  }
+
+  // 2. Extrai de bundle_slots (Suporta Matriz de Strings OU Array de Objetos OU JSON string)
+  let slots = promo.bundle_slots || promo.bundleSlots;
+  if (!slots && promo.filtersMetadata) {
+    const fm = typeof promo.filtersMetadata === "string" ? (() => { try { return JSON.parse(promo.filtersMetadata); } catch (e) { return {}; } })() : promo.filtersMetadata;
+    slots = fm?.bundleSlots || fm?.bundle_slots || fm?.slots;
+  }
+  if (typeof slots === "string") {
+    try {
+      slots = JSON.parse(slots);
+    } catch (e) {
+      //
+    }
+  }
+
+  if (Array.isArray(slots)) {
+    slots.forEach((slot: any) => {
+      if (Array.isArray(slot)) {
+        // É matriz de strings: [["id1"], ["id2"]]
+        slot.forEach((item: any) => {
+          if (typeof item === "string" || typeof item === "number") {
+            const str = String(item).trim();
+            if (str) ids.add(str);
+          } else if (item && typeof item === "object") {
+            const str = String(item.id || item.productId || item.product_id || item.ean || item.barcode || "").trim();
+            if (str) ids.add(str);
+          }
+        });
+      } else if (slot && typeof slot === "object") {
+        // É objeto: { productIds: [...] } ou { product_ids: [...] }
+        const pIds = slot.productIds || slot.product_ids || slot.productIdsList || slot.products || [];
+        if (Array.isArray(pIds)) {
+          pIds.forEach((item: any) => {
+            if (typeof item === "string" || typeof item === "number") {
+              const str = String(item).trim();
+              if (str) ids.add(str);
+            } else if (item && typeof item === "object") {
+              const str = String(item.id || item.productId || item.product_id || item.ean || item.barcode || "").trim();
+              if (str) ids.add(str);
+            }
+          });
+        }
+      } else if (typeof slot === "string" || typeof slot === "number") {
+        const str = String(slot).trim();
+        if (str) ids.add(str);
+      }
+    });
+  }
+
+  return Array.from(ids).filter(Boolean);
+}
+
 // Mapa de afinidade terapêutica refinado para incluir Perfumaria e Conveniência obrigatoriamente
 const SEARCH_CROSS_SELL_MAP: Record<string, string[]> = {
   dor: ["Analgésico", "Anti-inflamatório", "Doces", "Conveniência", "Higiene"],
@@ -1867,52 +1957,18 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
     let sourceList = products;
     if (filters.promocao_id) {
       if (selectedPromotion) {
-        const slots = selectedPromotion.bundleSlots || (selectedPromotion as any).bundle_slots;
-        if (slots && Array.isArray(slots) && slots.length > 0) {
-          const slotProductIds = new Set<string>(
-            slots.flatMap((slot: any) => {
-              if (Array.isArray(slot)) {
-                return slot.map((item: any) => typeof item === "object" ? (item.id || item.productId || item.product_id || "") : String(item));
-              }
-              if (slot && typeof slot === "object") {
-                return [...(slot.productIds || []), ...(slot.product_ids || []), ...(slot.productIdsList || [])];
-              }
-              return [];
-            }).filter(Boolean).map((x: any) => String(x).trim())
-          );
+        const promoProductIds = extractAllProductIdsFromPromotion(selectedPromotion);
+        const promoIdSet = new Set(promoProductIds);
 
-          const slotEans = new Set<string>(
-            slots.flatMap((slot: any) => {
-              if (Array.isArray(slot)) {
-                return slot.map((item: any) => typeof item === "object" ? (item.ean || item.barcode || "") : String(item));
-              }
-              if (slot && typeof slot === "object") {
-                return [...(slot.eans || []), ...(slot.barcodes || [])];
-              }
-              return [];
-            }).filter(Boolean).map((x: any) => String(x).trim())
-          );
-
-          const comboProds = selectedPromotion.comboProducts || (selectedPromotion as any).combo_products;
-          if (Array.isArray(comboProds)) {
-            comboProds.forEach((id: any) => slotProductIds.add(String(id).trim()));
-          }
-
-          const specProds = selectedPromotion.specificProductIds || (selectedPromotion as any).specific_product_ids || (selectedPromotion as any).product_ids;
-          if (Array.isArray(specProds)) {
-            specProds.forEach((id: any) => slotProductIds.add(String(id).trim()));
-          }
-
+        if (promoIdSet.size > 0) {
           sourceList = products.filter((p) => {
             const pIdStr = p.id ? String(p.id).trim() : "";
             const pBarcodeStr = p.barcode ? String(p.barcode).trim() : "";
             const pEanStr = (p as any).ean ? String((p as any).ean).trim() : "";
-            const pEan = pBarcodeStr || pEanStr;
 
-            if (pIdStr && slotProductIds.has(pIdStr)) return true;
-            if (pBarcodeStr && (slotProductIds.has(pBarcodeStr) || slotEans.has(pBarcodeStr))) return true;
-            if (pEanStr && (slotProductIds.has(pEanStr) || slotEans.has(pEanStr))) return true;
-            if (pEan && slotEans.has(pEan)) return true;
+            if (pIdStr && promoIdSet.has(pIdStr)) return true;
+            if (pBarcodeStr && promoIdSet.has(pBarcodeStr)) return true;
+            if (pEanStr && promoIdSet.has(pEanStr)) return true;
 
             return checkProductMatchesRule(selectedPromotion, p, matrizProducts, tenant?.id);
           });
