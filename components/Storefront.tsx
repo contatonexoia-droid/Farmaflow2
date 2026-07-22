@@ -106,7 +106,7 @@ export function extractAllProductIdsFromPromotion(promo: any): string[] {
 
   const ids = new Set<string>();
 
-  // 1. Extrai de specific_product_ids / specificProductIds / product_ids / productIds / comboProducts / combo_products
+  // Extrai de specific_product_ids / specificProductIds / product_ids / productIds / comboProducts / combo_products
   const direct =
     promo.specific_product_ids ||
     promo.specificProductIds ||
@@ -114,7 +114,7 @@ export function extractAllProductIdsFromPromotion(promo: any): string[] {
     promo.productIds ||
     promo.comboProducts ||
     promo.combo_products ||
-    [];
+    (promo.targetType === "PRODUCT" ? [promo.targetValue] : []);
 
   if (Array.isArray(direct)) {
     direct.forEach((id: any) => {
@@ -138,54 +138,6 @@ export function extractAllProductIdsFromPromotion(promo: any): string[] {
     } catch (e) {
       if (direct.trim()) ids.add(direct.trim());
     }
-  }
-
-  // 2. Extrai de bundle_slots (Suporta Matriz de Strings OU Array de Objetos OU JSON string)
-  let slots = promo.bundle_slots || promo.bundleSlots;
-  if (!slots && promo.filtersMetadata) {
-    const fm = typeof promo.filtersMetadata === "string" ? (() => { try { return JSON.parse(promo.filtersMetadata); } catch (e) { return {}; } })() : promo.filtersMetadata;
-    slots = fm?.bundleSlots || fm?.bundle_slots || fm?.slots;
-  }
-  if (typeof slots === "string") {
-    try {
-      slots = JSON.parse(slots);
-    } catch (e) {
-      //
-    }
-  }
-
-  if (Array.isArray(slots)) {
-    slots.forEach((slot: any) => {
-      if (Array.isArray(slot)) {
-        // É matriz de strings: [["id1"], ["id2"]]
-        slot.forEach((item: any) => {
-          if (typeof item === "string" || typeof item === "number") {
-            const str = String(item).trim();
-            if (str) ids.add(str);
-          } else if (item && typeof item === "object") {
-            const str = String(item.id || item.productId || item.product_id || item.ean || item.barcode || "").trim();
-            if (str) ids.add(str);
-          }
-        });
-      } else if (slot && typeof slot === "object") {
-        // É objeto: { productIds: [...] } ou { product_ids: [...] }
-        const pIds = slot.productIds || slot.product_ids || slot.productIdsList || slot.products || [];
-        if (Array.isArray(pIds)) {
-          pIds.forEach((item: any) => {
-            if (typeof item === "string" || typeof item === "number") {
-              const str = String(item).trim();
-              if (str) ids.add(str);
-            } else if (item && typeof item === "object") {
-              const str = String(item.id || item.productId || item.product_id || item.ean || item.barcode || "").trim();
-              if (str) ids.add(str);
-            }
-          });
-        }
-      } else if (typeof slot === "string" || typeof slot === "number") {
-        const str = String(slot).trim();
-        if (str) ids.add(str);
-      }
-    });
   }
 
   return Array.from(ids).filter(Boolean);
@@ -1970,28 +1922,7 @@ export const Storefront: React.FC<StorefrontProps> = React.memo(({
     let sourceList = products;
     if (filters.promocao_id) {
       if (selectedPromotion) {
-        const promoProductIds = extractAllProductIdsFromPromotion(selectedPromotion);
-        const promoIdSet = new Set(promoProductIds);
-
-        if (promoIdSet.size > 0) {
-          sourceList = products.filter((p) => {
-            const pIdStr = p.id ? String(p.id).trim() : "";
-            const pBarcodeStr = p.barcode ? String(p.barcode).trim() : "";
-            const pEanStr = (p as any).ean ? String((p as any).ean).trim() : "";
-
-            if (pIdStr && promoIdSet.has(pIdStr)) return true;
-            if (pBarcodeStr && promoIdSet.has(pBarcodeStr)) return true;
-            if (pEanStr && promoIdSet.has(pEanStr)) return true;
-
-            return checkProductMatchesRule(selectedPromotion, p, matrizProducts, tenant?.id);
-          });
-
-          if (sourceList.length === 0) {
-            sourceList = products.filter((p) => checkProductMatchesRule(selectedPromotion, p, matrizProducts, tenant?.id));
-          }
-        } else {
-          sourceList = products.filter((p) => checkProductMatchesRule(selectedPromotion, p, matrizProducts, tenant?.id));
-        }
+        sourceList = products.filter((p) => isProductInRule(selectedPromotion, p));
       } else {
         sourceList = [];
       }
