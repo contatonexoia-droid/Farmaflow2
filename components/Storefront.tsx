@@ -16,6 +16,7 @@ import {
   CouponRule,
   isPromotionActive,
   checkProductMatchesRule,
+  CartItem,
 } from "../types";
 import {
   Search,
