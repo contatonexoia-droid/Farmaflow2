@@ -57,6 +57,7 @@ import {
   Gift,
   Clock,
   ChevronDown,
+  Info,
 } from "lucide-react";
 import { saveAppReview, logSearch, getProductsByTenant } from "../services/storage";
 import { CouponBanner } from "./CouponBanner";
@@ -1738,10 +1739,35 @@ export const Storefront: React.FC<StorefrontProps> = ({
     return checkProductMatchesRule(rule, p, matrizProducts, tenant.id);
   }, [matrizProducts, tenant.id]);
 
+  const searchFallback = useMemo(() => {
+    const term = normalizeStr(debouncedSearchTerm);
+    if (!term || term.trim().length === 0) return null;
+    
+    const strongMatches = products.filter(p => p.id && normalizeStr(p.name).includes(term));
+    
+    if (strongMatches.length > 0) {
+      const hasInStock = strongMatches.some(p => p.stock > 0);
+      if (!hasInStock) {
+        const reference = strongMatches[0];
+        const principle = reference.activePrinciple ? normalizeStr(reference.activePrinciple) : null;
+        const presentation = reference.presentation ? normalizeStr(reference.presentation) : null;
+        
+        if (principle) {
+           return {
+             originalName: reference.name,
+             principle,
+             presentation
+           };
+        }
+      }
+    }
+    return null;
+  }, [debouncedSearchTerm, products]);
+
   const filteredProducts = useMemo<Product[]>(() => {
     const term = normalizeStr(debouncedSearchTerm);
     const activePromoIds = activePromotions.map((p) => p.id).join(",");
-    const cacheKey = `${term}_${selectedDepartment}_${selectedCategory}_${selectedPromotion?.id || "none"}_${activeCouponFilter?.id || "none"}_${activePromoIds}`;
+    const cacheKey = `${term}_${selectedDepartment}_${selectedCategory}_${selectedPromotion?.id || "none"}_${activeCouponFilter?.id || "none"}_${activePromoIds}_${searchFallback ? "fallback" : "nofallback"}`;
 
     if (searchCache.current[cacheKey]) {
       return searchCache.current[cacheKey];
@@ -1961,8 +1987,24 @@ export const Storefront: React.FC<StorefrontProps> = ({
 
         let matchScore = 0;
 
+        // Fallback Logic overrides normal search
+        if (searchFallback) {
+           if (p.stock <= 0) return null; // must be in stock
+           const pPrinciple = normalizeStr(p.activePrinciple || "");
+           const pPres = normalizeStr(p.presentation || "");
+           
+           const matchesPrinciple = searchFallback.principle === pPrinciple;
+           // optionally check presentation, if presentation exists in both
+           const matchesPres = !searchFallback.presentation || !pPres || searchFallback.presentation === pPres;
+           
+           if (matchesPrinciple && matchesPres) {
+              matchScore += 500; // high score for fallback match
+           } else {
+              return null; // strictly filter out everything else
+           }
+        }
         // 4. NLP / Search logic: Only executed if there is a search term query active
-        if (searchTokens.length > 0) {
+        else if (searchTokens.length > 0) {
           const pName = normalizeStr(p.name);
           const pActive = normalizeStr(p.activePrinciple || "");
           const pType = normalizeStr(p.drugType || "");
@@ -2962,6 +3004,21 @@ export const Storefront: React.FC<StorefrontProps> = ({
                 </button>
               </div>
             </div>
+          </div>
+        )}
+        {searchFallback && (
+          <div className="mb-6 p-4 md:p-6 bg-blue-50 border border-blue-100 rounded-2xl flex items-start gap-4">
+             <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center shrink-0 text-blue-500">
+               <Info size={20} />
+             </div>
+             <div>
+               <h4 className="text-blue-900 font-bold text-sm md:text-base">
+                 Não encontramos '{searchFallback.originalName}' disponível no momento.
+               </h4>
+               <p className="text-blue-700 text-xs md:text-sm mt-1 font-medium">
+                 Mas temos opções com a mesma fórmula ({searchFallback.principle}) {searchFallback.presentation ? `e apresentação (${searchFallback.presentation})` : ''} em estoque para você:
+               </p>
+             </div>
           </div>
         )}
         {!(debouncedSearchTerm.length > 0 && filteredProducts.length > 0) && (
