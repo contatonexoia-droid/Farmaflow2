@@ -595,6 +595,7 @@ export const mapDbOrderToApp = (o: any): Order => ({
   observation: o.observation || "",
   receiptFile: o.receipt_file || o.receiptfile || "",
   appliedCoupon: o.applied_coupon || o.appliedCoupon || undefined,
+  deliveryMode: o.delivery_mode || o.deliveryMode || "delivery",
   couponDiscount:
     Number(
       o.coupon_discount ||
@@ -1054,6 +1055,7 @@ export const saveOrderByTenant = async (tenantId: string, order: Order) => {
       observation: order.observation,
       receipt_file: order.receiptFile,
       applied_coupon: order.appliedCoupon,
+      delivery_mode: order.deliveryMode || "delivery",
     };
     await retryRequest(async () => {
       const { error } = await supabase.from("orders").insert(payload);

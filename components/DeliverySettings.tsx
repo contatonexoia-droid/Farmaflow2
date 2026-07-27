@@ -280,6 +280,47 @@ export const DeliverySettings: React.FC<DeliverySettingsProps> = ({ settings, on
           </div>
         )}
       </div>
+
+      {/* Retirada em Loja Config */}
+      <div className="bg-gray-50/50 rounded-[2.5rem] p-6 md:p-8 border border-gray-100">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
+          <div className="flex items-start gap-4">
+            <div className="w-12 h-12 bg-blue-50 text-blue-600 rounded-2xl flex items-center justify-center shrink-0">
+              <MapPin size={24} />
+            </div>
+            <div>
+              <h3 className="text-lg font-black text-gray-900">Retirada na Loja</h3>
+              <p className="text-sm text-gray-500 mt-0.5">Permitir que os clientes retirem os pedidos no balcão da farmácia.</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-3 self-start md:self-auto">
+            <span className={`text-sm font-black uppercase tracking-wider ${settings.storePickupEnabled ? 'text-blue-600' : 'text-gray-400'}`}>
+              {settings.storePickupEnabled ? 'Ativa' : 'Inativa'}
+            </span>
+            <button
+              type="button"
+              onClick={() => onChange({ ...settings, storePickupEnabled: !settings.storePickupEnabled })}
+              className={`relative inline-flex h-8 w-14 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                settings.storePickupEnabled ? 'bg-blue-600' : 'bg-gray-200'
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-7 w-7 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                  settings.storePickupEnabled ? 'translate-x-6' : 'translate-x-0'
+                }`}
+              />
+            </button>
+          </div>
+        </div>
+        {settings.storePickupEnabled && (
+          <div className="mt-6 bg-blue-50/50 border border-blue-100/50 rounded-2xl p-4 flex items-start gap-3">
+            <Info className="text-blue-600 shrink-0 mt-0.5" size={16} />
+            <div className="text-xs text-blue-800 leading-relaxed font-medium">
+              A opção de "Retirar na Loja" será exibida no carrinho. Se o cliente escolher essa opção, os campos de endereço de entrega serão ocultados durante o checkout.
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 };

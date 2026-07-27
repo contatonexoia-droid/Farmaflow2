@@ -2440,6 +2440,7 @@ const App: React.FC = () => {
     appliedCoupon?: CouponRule,
     couponDiscount: number = 0,
     calculatedDeliveryFee: number = 0,
+    deliveryMode: "delivery" | "pickup" = "delivery",
   ) => {
     if (!currentTenant) return;
     try {
@@ -2489,6 +2490,7 @@ const App: React.FC = () => {
         appliedCoupon:
           finalCouponDiscount > 0 ? appliedCoupon?.code : undefined,
         couponDiscount: finalCouponDiscount,
+        deliveryMode,
       };
 
       await saveOrderByTenant(currentTenant.id, newOrder);
@@ -2504,7 +2506,11 @@ const App: React.FC = () => {
       msg += `*Nome:* ${customer.name}\n`;
       msg += `*Tel:* ${customer.phone}\n\n`;
 
-      if (customer.address) {
+      if (deliveryMode === 'pickup') {
+        msg += `*📍 RETIRADA NA LOJA*\n`;
+        msg += `O cliente irá retirar o pedido no balcão.\n`;
+        msg += `\n────────────────\n`;
+      } else if (customer.address) {
         msg += `*📍 ENTREGA*\n`;
         msg += `${customer.address}, ${customer.addressNumber}\n`;
         if (customer.complement) msg += `*Comp:* ${customer.complement}\n`;

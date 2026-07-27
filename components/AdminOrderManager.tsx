@@ -508,8 +508,11 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                     <div class="row"><span>Telefone:</span> <strong>${order.customer?.phone}</strong></div>
                 </div>
                 <div>
-                    <div class="row"><span>Endereço:</span> <strong>${order.customer?.address || "N/A"}, ${order.customer?.addressNumber || ""}</strong></div>
-                    <div class="row"><span>Cidade:</span> <strong>${order.customer?.neighborhood} - ${order.customer?.city}</strong></div>
+                    ${order.deliveryMode === "pickup" ? 
+                      `<div class="row"><strong style="font-size: 16px;">RETIRADA NA LOJA</strong></div>` : 
+                      `<div class="row"><span>Endereço:</span> <strong>${order.customer?.address || "N/A"}, ${order.customer?.addressNumber || ""}</strong></div>
+                       <div class="row"><span>Cidade:</span> <strong>${order.customer?.neighborhood} - ${order.customer?.city}</strong></div>`
+                    }
                 </div>
             </div>
 
@@ -795,11 +798,19 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                         <MapPin size={16} />
                       </div>
                       <p className="text-sm text-gray-700 font-bold leading-relaxed">
-                        {order.customer?.address || "Endereço não informado"},{" "}
-                        {order.customer?.addressNumber || "S/N"}
-                        <br />
-                        {order.customer?.neighborhood || "-"} —{" "}
-                        {order.customer?.city || "-"}
+                        {order.deliveryMode === "pickup" ? (
+                          <span className="bg-blue-100 text-blue-800 font-black px-2 py-1 rounded-md text-xs uppercase tracking-wider border border-blue-200">
+                            Retirada na Loja
+                          </span>
+                        ) : (
+                          <>
+                            {order.customer?.address || "Endereço não informado"},{" "}
+                            {order.customer?.addressNumber || "S/N"}
+                            <br />
+                            {order.customer?.neighborhood || "-"} —{" "}
+                            {order.customer?.city || "-"}
+                          </>
+                        )}
                       </p>
                     </div>
                     {order.observation && (
@@ -1135,11 +1146,19 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                     className="text-emerald-500 mt-1 shrink-0"
                   />
                   <p className="text-sm text-gray-700 font-medium leading-relaxed min-w-0 flex-1 break-words">
-                    {viewingOrder.customer?.address},{" "}
-                    {viewingOrder.customer?.addressNumber || "S/N"}
-                    <br />
-                    {viewingOrder.customer?.neighborhood} —{" "}
-                    {viewingOrder.customer?.city}
+                    {viewingOrder.deliveryMode === "pickup" ? (
+                      <span className="bg-blue-100 text-blue-800 font-black px-2 py-1 rounded-md text-xs uppercase tracking-wider border border-blue-200">
+                        Retirada na Loja
+                      </span>
+                    ) : (
+                      <>
+                        {viewingOrder.customer?.address},{" "}
+                        {viewingOrder.customer?.addressNumber || "S/N"}
+                        <br />
+                        {viewingOrder.customer?.neighborhood} —{" "}
+                        {viewingOrder.customer?.city}
+                      </>
+                    )}
                   </p>
                 </div>
               </div>

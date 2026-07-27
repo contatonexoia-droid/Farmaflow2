@@ -94,6 +94,7 @@ export interface Order {
   appliedCoupon?: string;
   couponDiscount?: number;
   networkId?: string;
+  deliveryMode?: "delivery" | "pickup";
 }
 
 export interface AppReview {
@@ -130,6 +131,7 @@ export interface DeliverySettingsConfig {
   fee: number;
   ranges?: DeliveryFeeRange[];
   minOrderForFreeDelivery?: number;
+  storePickupEnabled?: boolean;
 }
 
 export interface PharmacyConfig {

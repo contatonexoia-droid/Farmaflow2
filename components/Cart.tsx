@@ -57,6 +57,8 @@ interface CartProps {
     appliedCoupon?: CouponRule,
     couponDiscount?: number,
     calculatedDeliveryFee?: number,
+    deliveryMode?: "delivery" | "pickup",
+    deliveryMode?: "delivery" | "pickup",
   ) => Promise<void> | void;
   onBackToStore: () => void;
 }
@@ -157,6 +159,7 @@ export const Cart: React.FC<CartProps> = ({
 
   const [couponError, setCouponError] = useState("");
   const [cepError, setCepError] = useState("");
+  const [deliveryMode, setDeliveryMode] = useState<"delivery" | "pickup">("delivery");
   const inputRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
   const hasControlledItems = items.some((item) => isControlledProduct(item));
@@ -394,7 +397,7 @@ export const Cart: React.FC<CartProps> = ({
   const discount = calculateCouponDiscount();
   
   useEffect(() => {
-    if (!tenant?.deliverySettings?.enabled) {
+    if (!tenant?.deliverySettings?.enabled || deliveryMode === "pickup") {
       setDeliveryFee(0);
       setDeliveryError("");
       return;
@@ -481,6 +484,7 @@ export const Cart: React.FC<CartProps> = ({
 
   const isAddressIncomplete = !getFinalSubmitValue("address") || !getFinalSubmitValue("neighborhood") || !getFinalSubmitValue("city");
   const isDeliveryPending = Boolean(
+    deliveryMode === "delivery" &&
     tenant?.deliverySettings?.enabled &&
     tenant?.deliverySettings?.type === "dynamic" &&
     isAddressIncomplete &&
@@ -642,11 +646,10 @@ export const Cart: React.FC<CartProps> = ({
     const requiredFields = [
       "name",
       "phone",
-      "address",
-      "addressNumber",
-      "neighborhood",
-      "city",
     ];
+    if (deliveryMode === "delivery") {
+      requiredFields.push("address", "addressNumber", "neighborhood", "city");
+    }
 
     requiredFields.forEach((field) => {
       // @ts-ignore
@@ -812,6 +815,7 @@ export const Cart: React.FC<CartProps> = ({
         activeProductCoupon || activeGlobalCoupon || undefined,
         discount,
         deliveryFee,
+        deliveryMode
       );
       localStorage.removeItem("farmaflow_coupon_code");
       setActiveProductCoupon(null);
@@ -1192,7 +1196,40 @@ export const Cart: React.FC<CartProps> = ({
                 onChange={(e) => handleFieldChange("name", e.target.value)}
               />
             </div>
-            <div className="space-y-4 pt-4 border-t border-gray-50">
+            {tenant?.deliverySettings?.storePickupEnabled && (
+              <div className="space-y-4 pt-4 border-t border-gray-50 animate-in fade-in">
+                <h4 className="font-black text-gray-900 text-lg">Opção de Recebimento</h4>
+                <div className="flex gap-4">
+                  <button
+                    type="button"
+                    onClick={() => setDeliveryMode("delivery")}
+                    className={`flex-1 py-4 px-4 rounded-2xl border-2 font-bold transition-all flex flex-col items-center gap-2 ${
+                      deliveryMode === "delivery"
+                        ? "border-emerald-600 bg-emerald-50 text-emerald-700"
+                        : "border-gray-100 bg-white text-gray-500 hover:border-emerald-200"
+                    }`}
+                  >
+                    <Truck size={24} />
+                    <span>Receber em Casa</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDeliveryMode("pickup")}
+                    className={`flex-1 py-4 px-4 rounded-2xl border-2 font-bold transition-all flex flex-col items-center gap-2 ${
+                      deliveryMode === "pickup"
+                        ? "border-blue-600 bg-blue-50 text-blue-700"
+                        : "border-gray-100 bg-white text-gray-500 hover:border-blue-200"
+                    }`}
+                  >
+                    <MapPin size={24} />
+                    <span>Retirar na Loja</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {deliveryMode === "delivery" && (
+              <div className="space-y-4 pt-4 border-t border-gray-50 animate-in slide-in-from-top-4">
               <div className="flex items-center justify-between">
                 <h4 className="font-black text-gray-900 text-lg">
                   Local de Entrega
@@ -1398,6 +1435,7 @@ export const Cart: React.FC<CartProps> = ({
                 </div>
               </div>
             </div>
+            )}
             <div className="space-y-4 pt-4 border-t border-gray-50">
               <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest px-1">
                 Pagamento
