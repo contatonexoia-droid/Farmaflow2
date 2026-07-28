@@ -1328,71 +1328,8 @@ export const Cart: React.FC<CartProps> = ({
             Finalizar Pedido
           </h3>
           <div className="space-y-8">
-            <div className="space-y-2">
-              <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest px-1">
-                WhatsApp{" "}
-                {errors.phone && <span className="text-red-500">*</span>}
-              </label>
-              <div className="relative">
-                <input
-                  ref={(el) => {
-                    inputRefs.current["phone"] = el;
-                  }}
-                  type="tel"
-                  placeholder="(00) 00000-0000"
-                  className={getInputClass("phone")}
-                  value={formatPhone(customer.phone)}
-                  onChange={(e) => {
-                    const raw = e.target.value.replace(/\D/g, "").slice(0, 11);
-                    handleFieldChange("phone", raw);
-                  }}
-                  maxLength={15}
-                />
-                {isFetchingCrm && (
-                  <div className="absolute right-4 top-1/2 -translate-y-1/2">
-                    <Loader2
-                      size={18}
-                      className="animate-spin text-emerald-500"
-                    />
-                  </div>
-                )}
-              </div>
-              {dataRecovered && (
-                <div className="flex items-center gap-1 mt-1 px-2 text-emerald-600 animate-in fade-in slide-in-from-top-2">
-                  <CheckCircle size={12} />
-                  <span className="text-[10px] font-bold">
-                    Dados de entrega recuperados automaticamente!
-                  </span>
-                </div>
-              )}
-            </div>
-            <div className="space-y-2">
-              <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest px-1">
-                Seu Nome Completo{" "}
-                {errors.name && <span className="text-red-500">*</span>}
-              </label>
-              <input
-                ref={(el) => {
-                  inputRefs.current["name"] = el;
-                }}
-                type="text"
-                placeholder="Como devemos lhe chamar?"
-                className={getInputClass("name")}
-                value={getDisplayValue("name")}
-                onFocus={() => {
-                  if (
-                    realCustomerData &&
-                    realCustomerData.name &&
-                    !editedFields.name
-                  ) {
-                    handleFieldChange("name", "");
-                  }
-                }}
-                onChange={(e) => handleFieldChange("name", e.target.value)}
-              />
-            </div>
             {tenant?.deliverySettings?.storePickupEnabled && (
-              <div className="space-y-4 pt-4 border-t border-gray-50 animate-in fade-in">
+              <div className="space-y-4 animate-in fade-in">
                 <h4 className="font-black text-gray-900 text-lg">Opção de Recebimento</h4>
                 <div className="flex gap-4">
                   <button
@@ -1422,6 +1359,75 @@ export const Cart: React.FC<CartProps> = ({
                 </div>
               </div>
             )}
+
+            <div className={`space-y-4 animate-in fade-in ${tenant?.deliverySettings?.storePickupEnabled ? "pt-4 border-t border-gray-50" : ""}`}>
+              <h4 className="font-black text-gray-900 text-lg">Identificação do Cliente</h4>
+              <div className="space-y-6">
+                <div className="space-y-2">
+                  <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest px-1">
+                    WhatsApp / Telefone{" "}
+                    {errors.phone && <span className="text-red-500">*</span>}
+                  </label>
+                  <div className="relative">
+                    <input
+                      ref={(el) => {
+                        inputRefs.current["phone"] = el;
+                      }}
+                      type="tel"
+                      placeholder="(00) 00000-0000"
+                      className={getInputClass("phone")}
+                      value={formatPhone(customer.phone)}
+                      onChange={(e) => {
+                        const raw = e.target.value.replace(/\D/g, "").slice(0, 11);
+                        handleFieldChange("phone", raw);
+                      }}
+                      maxLength={15}
+                    />
+                    {isFetchingCrm && (
+                      <div className="absolute right-4 top-1/2 -translate-y-1/2">
+                        <Loader2
+                          size={18}
+                          className="animate-spin text-emerald-500"
+                        />
+                      </div>
+                    )}
+                  </div>
+                  {dataRecovered && (
+                    <div className="flex items-center gap-1 mt-1 px-2 text-emerald-600 animate-in fade-in slide-in-from-top-2">
+                      <CheckCircle size={12} />
+                      <span className="text-[10px] font-bold">
+                        Dados de entrega recuperados automaticamente!
+                      </span>
+                    </div>
+                  )}
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest px-1">
+                    Seu Nome Completo{" "}
+                    {errors.name && <span className="text-red-500">*</span>}
+                  </label>
+                  <input
+                    ref={(el) => {
+                      inputRefs.current["name"] = el;
+                    }}
+                    type="text"
+                    placeholder="Como devemos lhe chamar?"
+                    className={getInputClass("name")}
+                    value={getDisplayValue("name")}
+                    onFocus={() => {
+                      if (
+                        realCustomerData &&
+                        realCustomerData.name &&
+                        !editedFields.name
+                      ) {
+                        handleFieldChange("name", "");
+                      }
+                    }}
+                    onChange={(e) => handleFieldChange("name", e.target.value)}
+                  />
+                </div>
+              </div>
+            </div>
 
             {deliveryMode === "delivery" && (
               <div className="space-y-4 pt-4 border-t border-gray-50 animate-in slide-in-from-top-4">
@@ -1651,6 +1657,7 @@ export const Cart: React.FC<CartProps> = ({
               </div>
             </div>
             )}
+
             <div className="space-y-4 pt-4 border-t border-gray-50">
               <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest px-1">
                 Pagamento
