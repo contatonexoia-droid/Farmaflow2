@@ -1457,9 +1457,30 @@ export const searchProductsByFilters = async (
         termoNorm.includes("anticoncepcional de emergencia") ||
         termoNorm.includes("anticoncepcional do dia seguinte");
 
+      const isEstomago = 
+        termoNorm.includes("estomago") || 
+        termoNorm.includes("estômago") || 
+        termoNorm.includes("gastrico") || 
+        termoNorm.includes("gástrico") || 
+        termoNorm.includes("protetor gastrico") || 
+        termoNorm.includes("protetor gástrico") || 
+        termoNorm.includes("digestao") || 
+        termoNorm.includes("digestão") || 
+        termoNorm.includes("azia") || 
+        termoNorm.includes("digestivo") || 
+        termoNorm.includes("digestivos") ||
+        termoNorm.includes("antiacido") ||
+        termoNorm.includes("antiácido");
+
       if (isDiaSeguinte) {
         const emergencyKeywords = ["dia d", "diad", "dia-d", "pozato", "neodia", "pilem", "levonorgestrel", "postinor", "evenose", "emergencia"];
         const tsQueryFormated = emergencyKeywords.map(s => `${s}:*`).join(" | ");
+        query = query.or(
+          `name.fts.${tsQueryFormated},description.fts.${tsQueryFormated}`
+        );
+      } else if (isEstomago) {
+        const gastricoKeywords = ["omeprazol", "pantoprazol", "esomeprazol", "lansoprazol", "rabeprazol", "dexlansoprazol", "peprazol", "pantocal", "gastrium", "estomago", "gastrico", "digestivo", "digestao", "azia", "antiacido", "eno", "estomazil", "luftal", "simeticona", "ranitidina", "antidin", "pepto", "domperidona", "metoclopramida", "plasil", "digesan", "gastro"];
+        const tsQueryFormated = gastricoKeywords.map(s => `${s}:*`).join(" | ");
         query = query.or(
           `name.fts.${tsQueryFormated},description.fts.${tsQueryFormated}`
         );

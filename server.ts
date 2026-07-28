@@ -774,9 +774,26 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
         cleanSearch.includes("anticoncepcional de emergencia") ||
         cleanSearch.includes("anticoncepcional do dia seguinte");
 
+      const isEstomago = 
+        cleanSearch.includes("estomago") || 
+        cleanSearch.includes("estômago") || 
+        cleanSearch.includes("gastrico") || 
+        cleanSearch.includes("gástrico") || 
+        cleanSearch.includes("protetor gastrico") || 
+        cleanSearch.includes("protetor gástrico") || 
+        cleanSearch.includes("digestao") || 
+        cleanSearch.includes("digestão") || 
+        cleanSearch.includes("azia") || 
+        cleanSearch.includes("digestivo") || 
+        cleanSearch.includes("digestivos") ||
+        cleanSearch.includes("antiacido") ||
+        cleanSearch.includes("antiácido");
+
       const searchTermToUse = isDiaSeguinte 
         ? "dia d | diad | dia-d | pozato | neodia | pilem | levonorgestrel | postinor | evenose | emergencia"
-        : search;
+        : isEstomago
+          ? "omeprazol | pantoprazol | esomeprazol | lansoprazol | rabeprazol | dexlansoprazol | peprazol | pantocal | gastrium | estomago | gastrico | digestivo | digestao | azia | antiacido | eno | estomazil | luftal | simeticona | ranitidina | antidin | pepto | domperidona | metoclopramida | plasil | digesan | gastro"
+          : search;
 
       try {
         const { data: rpcData, error: rpcError } = await supabase.rpc("search_products_v2", {
@@ -822,10 +839,31 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
       cleanSearchText.includes("anticoncepcional de emergencia") ||
       cleanSearchText.includes("anticoncepcional do dia seguinte");
 
+    const isEstomagoFallback = 
+      cleanSearchText.includes("estomago") || 
+      cleanSearchText.includes("estômago") || 
+      cleanSearchText.includes("gastrico") || 
+      cleanSearchText.includes("gástrico") || 
+      cleanSearchText.includes("protetor gastrico") || 
+      cleanSearchText.includes("protetor gástrico") || 
+      cleanSearchText.includes("digestao") || 
+      cleanSearchText.includes("digestão") || 
+      cleanSearchText.includes("azia") || 
+      cleanSearchText.includes("digestivo") || 
+      cleanSearchText.includes("digestivos") ||
+      cleanSearchText.includes("antiacido") ||
+      cleanSearchText.includes("antiácido");
+
     if (search && search.trim().length > 0) {
       if (isDiaSeguinteFallback) {
         const emergencyTokens = ["dia", "d", "diad", "pozato", "neodia", "pilem", "levonorgestrel", "postinor", "evenose", "emergencia"];
         const tsQueryFormated = emergencyTokens.map(tok => `${tok}:*`).join(" | ");
+        query = query.or(
+          `name.fts.${tsQueryFormated},description.fts.${tsQueryFormated},category.fts.${tsQueryFormated},active_principle.fts.${tsQueryFormated}`
+        );
+      } else if (isEstomagoFallback) {
+        const gastricoTokens = ["omeprazol", "pantoprazol", "esomeprazol", "lansoprazol", "rabeprazol", "dexlansoprazol", "peprazol", "pantocal", "gastrium", "estomago", "gastrico", "digestivo", "digestao", "azia", "antiacido", "eno", "estomazil", "luftal", "simeticona", "ranitidina", "antidin", "pepto", "domperidona", "metoclopramida", "plasil", "digesan", "gastro"];
+        const tsQueryFormated = gastricoTokens.map(tok => `${tok}:*`).join(" | ");
         query = query.or(
           `name.fts.${tsQueryFormated},description.fts.${tsQueryFormated},category.fts.${tsQueryFormated},active_principle.fts.${tsQueryFormated}`
         );
@@ -889,6 +927,54 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
             (act.includes("levonorgestrel") && !act.includes("etinilestradiol"));
           
           if (isEmergency) score += 1000;
+        } else if (isEstomagoFallback) {
+          const isGastrico = 
+            name.includes("omeprazol") ||
+            name.includes("pantoprazol") ||
+            name.includes("esomeprazol") ||
+            name.includes("lansoprazol") ||
+            name.includes("rabeprazol") ||
+            name.includes("dexlansoprazol") ||
+            name.includes("peprazol") ||
+            name.includes("pantocal") ||
+            name.includes("gastrium") ||
+            name.includes("estomago") ||
+            name.includes("gastrico") ||
+            name.includes("digestivo") ||
+            name.includes("digestao") ||
+            name.includes("azia") ||
+            name.includes("antiacido") ||
+            name.includes("eno") ||
+            name.includes("estomazil") ||
+            name.includes("luftal") ||
+            name.includes("simeticona") ||
+            name.includes("ranitidina") ||
+            name.includes("antidin") ||
+            name.includes("pepto") ||
+            name.includes("domperidona") ||
+            name.includes("metoclopramida") ||
+            name.includes("plasil") ||
+            name.includes("digesan") ||
+            cat.includes("gastro") ||
+            cat.includes("antiacido") ||
+            cat.includes("antiulceroso") ||
+            cat.includes("ulcer") ||
+            desc.includes("estomago") ||
+            desc.includes("gastrico") ||
+            desc.includes("azia") ||
+            desc.includes("ulcer") ||
+            act.includes("omeprazol") ||
+            act.includes("pantoprazol") ||
+            act.includes("esomeprazol") ||
+            act.includes("lansoprazol") ||
+            act.includes("rabeprazol") ||
+            act.includes("dexlansoprazol") ||
+            act.includes("simeticona") ||
+            act.includes("ranitidina") ||
+            act.includes("domperidona") ||
+            act.includes("metoclopramida");
+
+          if (isGastrico) score += 1000;
         } else {
           if (name === cleanSearch) {
             score += 1000;

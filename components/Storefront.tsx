@@ -1956,6 +1956,22 @@ export const Storefront: React.FC<StorefrontProps> = ({
       processedTerm.includes("anticoncepcional de emergencia") ||
       processedTerm.includes("anticoncepcional do dia seguinte");
 
+    const isEstomago = 
+      processedTerm.includes("estomago") || 
+      processedTerm.includes("estômago") || 
+      processedTerm.includes("gastrico") || 
+      processedTerm.includes("gástrico") || 
+      processedTerm.includes("protetor gastrico") || 
+      processedTerm.includes("protetor gástrico") || 
+      processedTerm.includes("digestao") || 
+      processedTerm.includes("digestão") || 
+      processedTerm.includes("azia") || 
+      processedTerm.includes("digestivo") || 
+      processedTerm.includes("digestivos") ||
+      processedTerm.includes("antiacido") ||
+      processedTerm.includes("antiácido");
+
+
     let searchTokens_raw = processedTerm.split(" ").filter((t) => t.length > 0);
     let searchTokens = searchTokens_raw
       .filter((t, i, arr) => {
@@ -2028,6 +2044,64 @@ export const Storefront: React.FC<StorefrontProps> = ({
             (pActive.includes("levonorgestrel") && !pActive.includes("etinilestradiol"));
 
           if (isEmergencyContraceptive) {
+            matchScore = 1000;
+          } else {
+            return null;
+          }
+        }
+        else if (isEstomago) {
+          const pName = normalizeStr(p.name);
+          const pActive = normalizeStr(p.activePrinciple || "");
+          const pCat = normalizeStr(p.category || "");
+          const pInd = normalizeStr(p.indications || "");
+
+          const isGastrico = 
+            pName.includes("omeprazol") ||
+            pName.includes("pantoprazol") ||
+            pName.includes("esomeprazol") ||
+            pName.includes("lansoprazol") ||
+            pName.includes("rabeprazol") ||
+            pName.includes("dexlansoprazol") ||
+            pName.includes("peprazol") ||
+            pName.includes("pantocal") ||
+            pName.includes("gastrium") ||
+            pName.includes("estomago") ||
+            pName.includes("gastrico") ||
+            pName.includes("digestivo") ||
+            pName.includes("digestao") ||
+            pName.includes("azia") ||
+            pName.includes("antiacido") ||
+            pName.includes("eno") ||
+            pName.includes("estomazil") ||
+            pName.includes("luftal") ||
+            pName.includes("simeticona") ||
+            pName.includes("ranitidina") ||
+            pName.includes("antidin") ||
+            pName.includes("pepto") ||
+            pName.includes("domperidona") ||
+            pName.includes("metoclopramida") ||
+            pName.includes("plasil") ||
+            pName.includes("digesan") ||
+            pCat.includes("gastro") ||
+            pCat.includes("antiacido") ||
+            pCat.includes("antiulceroso") ||
+            pCat.includes("ulcer") ||
+            pInd.includes("estomago") ||
+            pInd.includes("gastrico") ||
+            pInd.includes("azia") ||
+            pInd.includes("ulcer") ||
+            pActive.includes("omeprazol") ||
+            pActive.includes("pantoprazol") ||
+            pActive.includes("esomeprazol") ||
+            pActive.includes("lansoprazol") ||
+            pActive.includes("rabeprazol") ||
+            pActive.includes("dexlansoprazol") ||
+            pActive.includes("simeticona") ||
+            pActive.includes("ranitidina") ||
+            pActive.includes("domperidona") ||
+            pActive.includes("metoclopramida");
+
+          if (isGastrico) {
             matchScore = 1000;
           } else {
             return null;
@@ -2360,6 +2434,21 @@ export const Storefront: React.FC<StorefrontProps> = ({
       term.includes("anticoncepcional de emergencia") ||
       term.includes("anticoncepcional do dia seguinte");
 
+    const isEstomago = 
+      term.includes("estomago") || 
+      term.includes("estômago") || 
+      term.includes("gastrico") || 
+      term.includes("gástrico") || 
+      term.includes("protetor gastrico") || 
+      term.includes("protetor gástrico") || 
+      term.includes("digestao") || 
+      term.includes("digestão") || 
+      term.includes("azia") || 
+      term.includes("digestivo") || 
+      term.includes("digestivos") ||
+      term.includes("antiacido") ||
+      term.includes("antiácido");
+
     if (isDiaSeguinte) {
       return products
         .filter((p) => {
@@ -2381,6 +2470,64 @@ export const Storefront: React.FC<StorefrontProps> = ({
             pCat.includes("emergencia") ||
             pInd.includes("emergencia") ||
             (pActive.includes("levonorgestrel") && !pActive.includes("etinilestradiol"))
+          );
+        })
+        .slice(0, 8);
+    }
+
+    if (isEstomago) {
+      return products
+        .filter((p) => {
+          const pName = normalizeStr(p.name);
+          const pActive = normalizeStr(p.activePrinciple || "");
+          const pCat = normalizeStr(p.category || "");
+          const pInd = normalizeStr(p.indications || "");
+
+          return (
+            pName.includes("omeprazol") ||
+            pName.includes("pantoprazol") ||
+            pName.includes("esomeprazol") ||
+            pName.includes("lansoprazol") ||
+            pName.includes("rabeprazol") ||
+            pName.includes("dexlansoprazol") ||
+            pName.includes("peprazol") ||
+            pName.includes("pantocal") ||
+            pName.includes("gastrium") ||
+            pName.includes("estomago") ||
+            pName.includes("gastrico") ||
+            pName.includes("digestivo") ||
+            pName.includes("digestao") ||
+            pName.includes("azia") ||
+            pName.includes("antiacido") ||
+            pName.includes("eno") ||
+            pName.includes("estomazil") ||
+            pName.includes("luftal") ||
+            pName.includes("simeticona") ||
+            pName.includes("ranitidina") ||
+            pName.includes("antidin") ||
+            pName.includes("pepto") ||
+            pName.includes("domperidona") ||
+            pName.includes("metoclopramida") ||
+            pName.includes("plasil") ||
+            pName.includes("digesan") ||
+            pCat.includes("gastro") ||
+            pCat.includes("antiacido") ||
+            pCat.includes("antiulceroso") ||
+            pCat.includes("ulcer") ||
+            pInd.includes("estomago") ||
+            pInd.includes("gastrico") ||
+            pInd.includes("azia") ||
+            pInd.includes("ulcer") ||
+            pActive.includes("omeprazol") ||
+            pActive.includes("pantoprazol") ||
+            pActive.includes("esomeprazol") ||
+            pActive.includes("lansoprazol") ||
+            pActive.includes("rabeprazol") ||
+            pActive.includes("dexlansoprazol") ||
+            pActive.includes("simeticona") ||
+            pActive.includes("ranitidina") ||
+            pActive.includes("domperidona") ||
+            pActive.includes("metoclopramida")
           );
         })
         .slice(0, 8);
