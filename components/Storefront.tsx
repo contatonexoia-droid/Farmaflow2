@@ -196,6 +196,79 @@ const TYPO_MAP: Record<string, string> = {
   tyleno: "tylenol",
 };
 
+const SYNONYM_MAP: Record<string, string[]> = {
+      absorvente: [
+        "absorvente",
+        "abs",
+        "protetor",
+        "intimo",
+        "calcinha",
+        "tampa",
+        "diario",
+      ],
+      abs: ["absorvente", "abs"],
+      gotas: ["gotas", "gts"],
+      gts: ["gotas", "gts"],
+      comprimido: ["comprimido", "comprimidos", "cp", "cpl", "cpr"],
+      comprimidos: ["comprimido", "comprimidos", "cp", "cpl", "cpr"],
+      cp: ["comprimido", "comprimidos", "cp", "cpl", "cpr"],
+      cpl: ["comprimido", "comprimidos", "cp", "cpl", "cpr"],
+      cpr: ["comprimido", "comprimidos", "cp", "cpl", "cpr"],
+      paracetamol: ["paracetamol", "tylenol"],
+      tylenol: ["paracetamol", "tylenol"],
+      dipirona: ["dipirona", "novalgina"],
+      novalgina: ["dipirona", "novalgina"],
+      ibuprofeno: ["ibuprofeno", "alivium"],
+      alivium: ["ibuprofeno", "alivium"],
+      desodorante: [
+        "desodorante",
+        "antitranspirante",
+        "rollon",
+        "roll-on",
+        "aerosol",
+      ],
+      remedio: [
+        "medicamento",
+        "comprimido",
+        "gotas",
+        "xarope",
+        "pilula",
+        "capsula",
+      ],
+      cabelo: [
+        "shampoo",
+        "condicionador",
+        "creme",
+        "mascara",
+        "tinta",
+        "coloracao",
+      ],
+      pele: ["hidratante", "protetor solar", "creme", "locao", "sabonete"],
+      higiene: [
+        "sabonete",
+        "desodorante",
+        "creme dental",
+        "escova",
+        "fio dental",
+        "enxaguante",
+        "cotonete",
+        "papel higienico",
+        "higiene intima",
+      ],
+      bebe: [
+        "fralda",
+        "lenco umedecido",
+        "chupeta",
+        "mamadeira",
+        "pomada",
+        "pomadinha",
+      ],
+      shampoo: ["shampoo", "sh", "xampu", "champu"],
+      sh: ["shampoo", "sh", "xampu", "champu"],
+      xampu: ["shampoo", "sh", "xampu", "champu"],
+  };
+
+
 const levenshteinDistance = (s1: string, s2: string) => {
   if (s1.length < s2.length) return levenshteinDistance(s2, s1);
   if (s2.length === 0) return s1.length;
@@ -1098,6 +1171,14 @@ export const Storefront: React.FC<StorefrontProps> = ({
     }
   }, [tenant]);
 
+  useEffect(() => {
+    const handleSetCategory = (e: any) => {
+      setFilters((prev) => ({ ...prev, termo_busca: e.detail, categoria: "Todos", departamento: "Todos", promocao_id: null, cupom_id: null }));
+    };
+    window.addEventListener("ff_search", handleSetCategory);
+    return () => window.removeEventListener("ff_search", handleSetCategory);
+  }, []);
+
   const [filters, setFilters] = useState<{
     departamento: string | null;
     categoria: string | null;
@@ -1867,74 +1948,6 @@ export const Storefront: React.FC<StorefrontProps> = ({
       });
     }
 
-    const SYNONYM_MAP: Record<string, string[]> = {
-      absorvente: [
-        "absorvente",
-        "abs",
-        "protetor",
-        "intimo",
-        "calcinha",
-        "tampa",
-        "diario",
-      ],
-      abs: ["absorvente", "abs"],
-      gotas: ["gotas", "gts"],
-      gts: ["gotas", "gts"],
-      comprimido: ["comprimido", "comprimidos", "cp", "cpl", "cpr"],
-      comprimidos: ["comprimido", "comprimidos", "cp", "cpl", "cpr"],
-      cp: ["comprimido", "comprimidos", "cp", "cpl", "cpr"],
-      cpl: ["comprimido", "comprimidos", "cp", "cpl", "cpr"],
-      cpr: ["comprimido", "comprimidos", "cp", "cpl", "cpr"],
-      paracetamol: ["paracetamol", "tylenol"],
-      tylenol: ["paracetamol", "tylenol"],
-      dipirona: ["dipirona", "novalgina"],
-      novalgina: ["dipirona", "novalgina"],
-      ibuprofeno: ["ibuprofeno", "alivium"],
-      alivium: ["ibuprofeno", "alivium"],
-      desodorante: [
-        "desodorante",
-        "antitranspirante",
-        "rollon",
-        "roll-on",
-        "aerosol",
-      ],
-      remedio: [
-        "medicamento",
-        "comprimido",
-        "gotas",
-        "xarope",
-        "pilula",
-        "capsula",
-      ],
-      cabelo: [
-        "shampoo",
-        "condicionador",
-        "creme",
-        "mascara",
-        "tinta",
-        "coloracao",
-      ],
-      pele: ["hidratante", "protetor solar", "creme", "locao", "sabonete"],
-      higiene: [
-        "sabonete",
-        "desodorante",
-        "creme dental",
-        "escova",
-        "fio dental",
-        "enxaguante",
-        "cotonete",
-        "papel higienico",
-        "higiene intima",
-      ],
-      bebe: [
-        "fralda",
-        "lenco umedecido",
-        "chupeta",
-        "mamadeira",
-        "pomada",
-        "pomadinha",
-      ],
-    };
 
     let searchTokens_raw = processedTerm.split(" ").filter((t) => t.length > 0);
     let searchTokens = searchTokens_raw
@@ -2039,6 +2052,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
           let manufacturerMatched = false;
           let categoryMatched = false;
           let tokensMatchedCount = 0;
+          let exactWordMatched = false;
 
           searchTokens.forEach((token) => {
             let matchedManuf = false;
@@ -2050,13 +2064,34 @@ export const Storefront: React.FC<StorefrontProps> = ({
               // Para caracteres únicos (como "C" ou "E"), precisamos que seja uma palavra isolada e no nome/ativo apenas
               const regex = new RegExp(`(?:^|\\s|-)${token}(?:\\s|-|$)`, "i");
               nameMatched = regex.test(pName) || regex.test(pActive);
+              if (nameMatched) exactWordMatched = true;
             } else {
               matchedManuf = pManuf.includes(token);
               matchedCat =
                 pCat.includes(token) ||
                 SYNONYM_MAP[token]?.some((syn) => pCat.includes(syn));
-              nameMatched = pName.includes(token) || pActive.includes(token);
-              otherMatched = pInd.includes(token) || pType.includes(token);
+              nameMatched = 
+                pName.includes(token) || 
+                pActive.includes(token) ||
+                SYNONYM_MAP[token]?.some((syn) => pName.includes(syn) || pActive.includes(syn));
+              otherMatched = 
+                pInd.includes(token) || 
+                pType.includes(token) ||
+                SYNONYM_MAP[token]?.some((syn) => pInd.includes(syn) || pType.includes(syn));
+
+              // Check for exact word boundary match for higher relevancy scoring
+              const regex = new RegExp(`(?:^|\\s|-|\\+|\\/)${token}(?:\\s|-|\\+|\\/|$)`, "i");
+              if (regex.test(pName) || regex.test(pActive) || regex.test(pCat)) exactWordMatched = true;
+              
+              if (!exactWordMatched && SYNONYM_MAP[token]) {
+                for (const syn of SYNONYM_MAP[token]) {
+                  const regexSyn = new RegExp(`(?:^|\\s|-|\\+|\\/)${syn}(?:\\s|-|\\+|\\/|$)`, "i");
+                  if (regexSyn.test(pName) || regexSyn.test(pActive) || regexSyn.test(pCat)) {
+                    exactWordMatched = true;
+                    break;
+                  }
+                }
+              }
             }
 
             if (matchedManuf) manufacturerMatched = true;
@@ -2091,8 +2126,14 @@ export const Storefront: React.FC<StorefrontProps> = ({
             matchScore += 300; // Peso 3: Marca pesquisada + Categoria
           } else if (manufacturerMatched) {
             matchScore += 200; // Peso 2: Marca pesquisada + Termo da mesma linha
+          } else if (categoryMatched) {
+            matchScore += 200; // Peso 2: Apenas Categoria
           } else {
             matchScore += 100; // Match exato (todos os tokens presentes)
+          }
+
+          if (exactWordMatched) {
+            matchScore += 1000; // Huge boost for exact word or synonym match (avoids 'sh' matching 'blush' above 'shampoo')
           }
 
           if (
@@ -2306,11 +2347,15 @@ export const Storefront: React.FC<StorefrontProps> = ({
             // to prevent matching almost all products.
             otherMatched = false;
           } else {
-            nameMatched = pName.includes(token) || pActive.includes(token);
+            nameMatched = 
+              pName.includes(token) || 
+              pActive.includes(token) ||
+              SYNONYM_MAP[token]?.some((syn) => pName.includes(syn) || pActive.includes(syn));
             otherMatched =
               pInd.includes(token) ||
               pCat.includes(token) ||
-              pManuf.includes(token);
+              pManuf.includes(token) ||
+              SYNONYM_MAP[token]?.some((syn) => pInd.includes(syn) || pCat.includes(syn) || pManuf.includes(syn));
           }
           return nameMatched || otherMatched;
         });
