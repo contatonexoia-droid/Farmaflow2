@@ -1949,6 +1949,13 @@ export const Storefront: React.FC<StorefrontProps> = ({
     }
 
 
+    const isDiaSeguinte = 
+      processedTerm.includes("pilula do dia seguinte") || 
+      processedTerm.includes("pilula dia seguinte") || 
+      processedTerm.includes("dia seguinte") ||
+      processedTerm.includes("anticoncepcional de emergencia") ||
+      processedTerm.includes("anticoncepcional do dia seguinte");
+
     let searchTokens_raw = processedTerm.split(" ").filter((t) => t.length > 0);
     let searchTokens = searchTokens_raw
       .filter((t, i, arr) => {
@@ -2000,8 +2007,34 @@ export const Storefront: React.FC<StorefrontProps> = ({
 
         let matchScore = 0;
 
+        if (isDiaSeguinte) {
+          const pName = normalizeStr(p.name);
+          const pActive = normalizeStr(p.activePrinciple || "");
+          const pCat = normalizeStr(p.category || "");
+          const pInd = normalizeStr(p.indications || "");
+
+          const isEmergencyContraceptive = 
+            pName.includes("dia d") ||
+            pName.includes("diad") ||
+            pName.includes("dia-d") ||
+            pName.includes("pozato") ||
+            pName.includes("neodia") ||
+            pName.includes("pilem") ||
+            pName.includes("postinor") ||
+            pName.includes("evenose") ||
+            pName.includes("emergencia") ||
+            pCat.includes("emergencia") ||
+            pInd.includes("emergencia") ||
+            (pActive.includes("levonorgestrel") && !pActive.includes("etinilestradiol"));
+
+          if (isEmergencyContraceptive) {
+            matchScore = 1000;
+          } else {
+            return null;
+          }
+        }
         // Fallback Logic overrides normal search
-        if (searchFallback) {
+        else if (searchFallback) {
            if (p.stock <= 0) return null; // must be in stock
            const pPrinciple = normalizeStr(p.activePrinciple || "");
            const pPres = normalizeStr(p.presentation || "");
@@ -2319,6 +2352,39 @@ export const Storefront: React.FC<StorefrontProps> = ({
     if (debouncedSearchTerm.length < 3) return [];
     let term = normalizeStr(debouncedSearchTerm);
     if (TYPO_MAP[term]) term = TYPO_MAP[term];
+
+    const isDiaSeguinte = 
+      term.includes("pilula do dia seguinte") || 
+      term.includes("pilula dia seguinte") || 
+      term.includes("dia seguinte") ||
+      term.includes("anticoncepcional de emergencia") ||
+      term.includes("anticoncepcional do dia seguinte");
+
+    if (isDiaSeguinte) {
+      return products
+        .filter((p) => {
+          const pName = normalizeStr(p.name);
+          const pActive = normalizeStr(p.activePrinciple || "");
+          const pCat = normalizeStr(p.category || "");
+          const pInd = normalizeStr(p.indications || "");
+
+          return (
+            pName.includes("dia d") ||
+            pName.includes("diad") ||
+            pName.includes("dia-d") ||
+            pName.includes("pozato") ||
+            pName.includes("neodia") ||
+            pName.includes("pilem") ||
+            pName.includes("postinor") ||
+            pName.includes("evenose") ||
+            pName.includes("emergencia") ||
+            pCat.includes("emergencia") ||
+            pInd.includes("emergencia") ||
+            (pActive.includes("levonorgestrel") && !pActive.includes("etinilestradiol"))
+          );
+        })
+        .slice(0, 8);
+    }
 
     const searchTokens_raw = term.split(" ").filter((t) => t.length > 0);
     const searchTokens = searchTokens_raw

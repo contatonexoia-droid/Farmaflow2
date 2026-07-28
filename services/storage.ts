@@ -1448,43 +1448,60 @@ export const searchProductsByFilters = async (
 
     if (filters.termo_busca && filters.termo_busca.trim().length > 0) {
       const termo = filters.termo_busca.trim();
-      const palavras = termo.split(/\s+/);
+      const termoNorm = termo.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
-      const temLetraIsolada = palavras.some((p) => p.length === 1);
+      const isDiaSeguinte = 
+        termoNorm.includes("pilula do dia seguinte") || 
+        termoNorm.includes("pilula dia seguinte") || 
+        termoNorm.includes("dia seguinte") ||
+        termoNorm.includes("anticoncepcional de emergencia") ||
+        termoNorm.includes("anticoncepcional do dia seguinte");
 
-      if (temLetraIsolada) {
-        // Fallback para ILIKE combinando os termos (Trigram/Wildcard approach) para palavras pequenas ("Vitamina C")
-        let ilikePatterns: string[] = [""];
-        palavras.forEach((p) => {
-            const norm = p.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-            const syns = PHARMA_SYNONYMS[norm] || [p];
-            const newPatterns: string[] = [];
-            ilikePatterns.forEach(pattern => {
-                syns.forEach(syn => {
-                    newPatterns.push(pattern + (pattern ? "%" : "") + syn);
-                });
-            });
-            ilikePatterns = newPatterns;
-        });
-        const orClauses = ilikePatterns.map(pattern => {
-            const finalPattern = `%${pattern}%`;
-            return `name.ilike.${finalPattern},description.ilike.${finalPattern}`;
-        }).join(",");
-        query = query.or(orClauses);
-      } else {
-        // Busca Otimizada em Full-Text Search
-        const tsQueryFormated = palavras.map((p) => {
-            const norm = p.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-            const syns = PHARMA_SYNONYMS[norm] || [p];
-            if (syns.length > 1) {
-               return `(${syns.map(s => `${s}:*`).join(" | ")})`;
-            }
-            return `${p}:*`;
-        }).join(" & ");
-        
+      if (isDiaSeguinte) {
+        const emergencyKeywords = ["dia d", "diad", "dia-d", "pozato", "neodia", "pilem", "levonorgestrel", "postinor", "evenose", "emergencia"];
+        const tsQueryFormated = emergencyKeywords.map(s => `${s}:*`).join(" | ");
         query = query.or(
-          `name.fts.${tsQueryFormated},description.fts.${tsQueryFormated}`,
+          `name.fts.${tsQueryFormated},description.fts.${tsQueryFormated}`
         );
+      } else {
+        const palavras = termo.split(/\s+/);
+
+        const temLetraIsolada = palavras.some((p) => p.length === 1);
+
+        if (temLetraIsolada) {
+          // Fallback para ILIKE combinando os termos (Trigram/Wildcard approach) para palavras pequenas ("Vitamina C")
+          let ilikePatterns: string[] = [""];
+          palavras.forEach((p) => {
+              const norm = p.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+              const syns = PHARMA_SYNONYMS[norm] || [p];
+              const newPatterns: string[] = [];
+              ilikePatterns.forEach(pattern => {
+                  syns.forEach(syn => {
+                      newPatterns.push(pattern + (pattern ? "%" : "") + syn);
+                  });
+              });
+              ilikePatterns = newPatterns;
+          });
+          const orClauses = ilikePatterns.map(pattern => {
+              const finalPattern = `%${pattern}%`;
+              return `name.ilike.${finalPattern},description.ilike.${finalPattern}`;
+          }).join(",");
+          query = query.or(orClauses);
+        } else {
+          // Busca Otimizada em Full-Text Search
+          const tsQueryFormated = palavras.map((p) => {
+              const norm = p.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+              const syns = PHARMA_SYNONYMS[norm] || [p];
+              if (syns.length > 1) {
+                 return `(${syns.map(s => `${s}:*`).join(" | ")})`;
+              }
+              return `${p}:*`;
+          }).join(" & ");
+          
+          query = query.or(
+            `name.fts.${tsQueryFormated},description.fts.${tsQueryFormated}`,
+          );
+        }
       }
     }
 

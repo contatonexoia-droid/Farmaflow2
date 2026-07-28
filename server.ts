@@ -766,10 +766,22 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
 
     // 1. Try to use the high-performance Postgres RPC search if available
     if (search && search.trim().length > 0) {
+      const cleanSearch = normalizeText(search);
+      const isDiaSeguinte = 
+        cleanSearch.includes("pilula do dia seguinte") || 
+        cleanSearch.includes("pilula dia seguinte") || 
+        cleanSearch.includes("dia seguinte") ||
+        cleanSearch.includes("anticoncepcional de emergencia") ||
+        cleanSearch.includes("anticoncepcional do dia seguinte");
+
+      const searchTermToUse = isDiaSeguinte 
+        ? "dia d | diad | dia-d | pozato | neodia | pilem | levonorgestrel | postinor | evenose | emergencia"
+        : search;
+
       try {
         const { data: rpcData, error: rpcError } = await supabase.rpc("search_products_v2", {
           p_tenant_id: tenantId,
-          p_search_term: search,
+          p_search_term: searchTermToUse,
           p_category: category || "Todos",
           p_limit: limit,
           p_offset: from
@@ -802,23 +814,38 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
       query = query.ilike("category", `%${category}%`);
     }
 
-    if (search && search.trim().length > 0) {
-      const cleanSearch = normalizeText(search);
-      const searchTokens = cleanSearch.split(/\s+/).filter(t => t.length > 0);
-      
-      let expandedTokens = [...searchTokens];
-      searchTokens.forEach(token => {
-        const syns = ENDPOINT_PHARMA_SYNONYMS[token];
-        if (syns) {
-          expandedTokens = [...expandedTokens, ...syns];
-        }
-      });
-      expandedTokens = Array.from(new Set(expandedTokens));
+    const cleanSearchText = search ? normalizeText(search) : "";
+    const isDiaSeguinteFallback = 
+      cleanSearchText.includes("pilula do dia seguinte") || 
+      cleanSearchText.includes("pilula dia seguinte") || 
+      cleanSearchText.includes("dia seguinte") ||
+      cleanSearchText.includes("anticoncepcional de emergencia") ||
+      cleanSearchText.includes("anticoncepcional do dia seguinte");
 
-      const tsQueryFormated = expandedTokens.map(tok => `${tok}:*`).join(" | ");
-      query = query.or(
-        `name.fts.${tsQueryFormated},description.fts.${tsQueryFormated},category.fts.${tsQueryFormated},active_principle.fts.${tsQueryFormated}`
-      );
+    if (search && search.trim().length > 0) {
+      if (isDiaSeguinteFallback) {
+        const emergencyTokens = ["dia", "d", "diad", "pozato", "neodia", "pilem", "levonorgestrel", "postinor", "evenose", "emergencia"];
+        const tsQueryFormated = emergencyTokens.map(tok => `${tok}:*`).join(" | ");
+        query = query.or(
+          `name.fts.${tsQueryFormated},description.fts.${tsQueryFormated},category.fts.${tsQueryFormated},active_principle.fts.${tsQueryFormated}`
+        );
+      } else {
+        const searchTokens = cleanSearchText.split(/\s+/).filter(t => t.length > 0);
+        
+        let expandedTokens = [...searchTokens];
+        searchTokens.forEach(token => {
+          const syns = ENDPOINT_PHARMA_SYNONYMS[token];
+          if (syns) {
+            expandedTokens = [...expandedTokens, ...syns];
+          }
+        });
+        expandedTokens = Array.from(new Set(expandedTokens));
+
+        const tsQueryFormated = expandedTokens.map(tok => `${tok}:*`).join(" | ");
+        query = query.or(
+          `name.fts.${tsQueryFormated},description.fts.${tsQueryFormated},category.fts.${tsQueryFormated},active_principle.fts.${tsQueryFormated}`
+        );
+      }
     }
 
     const { data, count, error } = await query.range(from, to);
@@ -847,31 +874,48 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
 
         let score = 0;
 
-        if (name === cleanSearch) {
-          score += 1000;
-        } else if (name.startsWith(cleanSearch)) {
-          score += 800;
-        } else if (name.includes(cleanSearch)) {
-          score += 600;
+        if (isDiaSeguinteFallback) {
+          const isEmergency = 
+            name.includes("dia d") ||
+            name.includes("diad") ||
+            name.includes("dia-d") ||
+            name.includes("pozato") ||
+            name.includes("neodia") ||
+            name.includes("pilem") ||
+            name.includes("postinor") ||
+            name.includes("evenose") ||
+            name.includes("emergencia") ||
+            cat.includes("emergencia") ||
+            (act.includes("levonorgestrel") && !act.includes("etinilestradiol"));
+          
+          if (isEmergency) score += 1000;
+        } else {
+          if (name === cleanSearch) {
+            score += 1000;
+          } else if (name.startsWith(cleanSearch)) {
+            score += 800;
+          } else if (name.includes(cleanSearch)) {
+            score += 600;
+          }
+
+          searchTokens.forEach(token => {
+            if (name.includes(token)) score += 300;
+            if (cat.includes(token)) score += 200;
+            if (act.includes(token)) score += 200;
+            if (desc.includes(token)) {
+              score += 10;
+            }
+          });
+
+          expandedTokens.forEach(token => {
+            if (!searchTokens.includes(token)) {
+              if (name.includes(token)) score += 150;
+              if (cat.includes(token)) score += 100;
+              if (act.includes(token)) score += 100;
+              if (desc.includes(token)) score += 5;
+            }
+          });
         }
-
-        searchTokens.forEach(token => {
-          if (name.includes(token)) score += 300;
-          if (cat.includes(token)) score += 200;
-          if (act.includes(token)) score += 200;
-          if (desc.includes(token)) {
-            score += 10;
-          }
-        });
-
-        expandedTokens.forEach(token => {
-          if (!searchTokens.includes(token)) {
-            if (name.includes(token)) score += 150;
-            if (cat.includes(token)) score += 100;
-            if (act.includes(token)) score += 100;
-            if (desc.includes(token)) score += 5;
-          }
-        });
 
         const nameWords = name.split(/\s+/);
         searchTokens.forEach(token => {
