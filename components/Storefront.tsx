@@ -1630,14 +1630,14 @@ export const Storefront: React.FC<StorefrontProps> = ({
   // Track last search to prevent loops
   const lastSearchRef = useRef({ term: "", count: -1 });
 
-  // Debouncing: Atualiza o termo de busca real após 300ms de inatividade
+  // Debouncing: Atualiza o termo de busca real após 500ms de inatividade
   useEffect(() => {
     const handler = setTimeout(() => {
       // Só processa busca se tiver 3+ caracteres ou se estiver limpando a busca
       if (deferredSearchTerm.length >= 3 || deferredSearchTerm.length === 0) {
         setDebouncedSearchTerm(deferredSearchTerm);
       }
-    }, 300);
+    }, 500);
 
     return () => clearTimeout(handler);
   }, [deferredSearchTerm]);

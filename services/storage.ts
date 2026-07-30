@@ -1149,13 +1149,23 @@ export const getPromotionsByTenant = async (
   if (!isSupabaseConfigured()) return [];
   try {
     return await retryRequest(async () => {
-      let query = supabase.from("promotions").select("*");
-      if (networkId) {
-        query = query.or(`tenant_id.eq.${tenantId},tenant_id.eq.${networkId}`);
-      } else {
-        query = query.eq("tenant_id", tenantId);
+      let { data, error } = await supabase.rpc("get_store_offers", {
+        p_tenant_id: tenantId,
+        p_network_id: networkId || null,
+      });
+
+      // Fallback to table if RPC fails (e.g., if schema is old)
+      if (error && error.message && error.message.includes("Could not find")) {
+        let query = supabase.from("promotions").select("*");
+        if (networkId) {
+          query = query.or(`tenant_id.eq.${tenantId},tenant_id.eq.${networkId}`);
+        } else {
+          query = query.eq("tenant_id", tenantId);
+        }
+        const fallbackResult = await query;
+        data = fallbackResult.data;
+        error = fallbackResult.error;
       }
-      const { data, error } = await query;
       if (error) throw error;
       return (data || []).map(mapDbPromotionToApp);
     });

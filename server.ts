@@ -1436,6 +1436,11 @@ if (!process.env.VERCEL) {
 
       for (const tenant of tenants) {
         try {
+          if (!tenant.erp_url || !tenant.erp_url.startsWith("http")) {
+            console.log(`[Cron] Skipping tenant ${tenant.id} due to invalid ERP URL: ${tenant.erp_url}`);
+            continue;
+          }
+
           console.log(
             `[Cron] Reconciling tenant ${tenant.id} with ERP ${tenant.erp_url}...`,
           );
