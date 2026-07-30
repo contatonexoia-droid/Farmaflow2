@@ -3783,10 +3783,17 @@ app.post("/api/v1/integration/heartbeat", async (req, res) => {
       updateQuery = updateQuery.eq('tenant_id', activeApiKey);
     }
 
-    const { error: updateError } = await updateQuery.eq('is_active', true);
+    const { data: updateData, error: updateError } = await updateQuery.eq('is_active', true).select();
 
     if (updateError) {
+      console.error("[HEARTBEAT ERROR]", updateError);
       return res.status(500).json({ error: "Erro ao atualizar heartbeat.", details: updateError.message });
+    }
+    
+    if (!updateData || updateData.length === 0) {
+       console.log("[HEARTBEAT WARNING] No rows updated for API key:", activeApiKey);
+    } else {
+       console.log("[HEARTBEAT SUCCESS] Updated for API key:", activeApiKey);
     }
 
     res.json({ success: true });
