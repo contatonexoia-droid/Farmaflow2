@@ -1057,10 +1057,23 @@ export const saveOrderByTenant = async (tenantId: string, order: Order) => {
       applied_coupon: order.appliedCoupon,
       delivery_mode: order.deliveryMode || "delivery",
     };
+
     await retryRequest(async () => {
       const { error } = await supabase.from("orders").insert(payload);
       if (error) throw error;
+      
+      // Call new deduct-stock endpoint
+      try {
+        await fetch("/api/checkout/deduct-stock", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tenantId, items: order.items })
+        });
+      } catch (e) {
+        console.error("Erro ao notificar baixa de estoque", e);
+      }
     });
+
   } catch (e) {
     handleNetworkError(e, "Finalizar Pedido");
     throw e;

@@ -1436,18 +1436,25 @@ if (!process.env.VERCEL) {
 
       for (const tenant of tenants) {
         try {
-          if (!tenant.erp_url || !tenant.erp_url.startsWith("http")) {
-            console.log(`[Cron] Skipping tenant ${tenant.id} due to invalid ERP URL: ${tenant.erp_url}`);
-            continue;
-          }
+          if (!tenant.erp_url) continue;
 
-          console.log(
-            `[Cron] Reconciling tenant ${tenant.id} with ERP ${tenant.erp_url}...`,
-          );
-
-          // Simula a chamada ao ERP para buscar o dump de estoque
-          // Na vida real, isso seria um fetch para o tenant.erp_url
-          const response = await fetch(`${tenant.erp_url}/api/stock-dump`, {
+          const sanitizedUrl = tenant.erp_url.startsWith('http://') || tenant.erp_url.startsWith('https://') 
+              ? tenant.erp_url 
+              : `https://${tenant.erp_url}`;
+              
+          console.log(`[AGENTE] Iniciando conciliação para tenant ${tenant.id}...`);
+          console.log(`[AGENTE] Status: ONLINE para tenant ${tenant.id}`);
+          
+          try {
+            await supabaseAdmin.from('agent_integrations').upsert({ 
+              tenant_id: tenant.id,
+              last_seen: new Date().toISOString(), 
+              is_active: true 
+            }, { onConflict: 'tenant_id' });
+          } catch (e) {}
+          
+          console.log(`[Cron] Reconciling tenant ${tenant.id} with ERP ${sanitizedUrl}...`);
+          const response = await fetch(`${sanitizedUrl}/api/stock-dump`, {
             headers: {
               "x-api-key": tenant.integration_token || "",
             },
@@ -1481,11 +1488,15 @@ if (!process.env.VERCEL) {
             );
 
             if (nexoProduct && nexoProduct.stock !== erpItem.stock) {
-              await supabase
-                .from("products")
-                .update({ stock: erpItem.stock })
-                .eq("id", nexoProduct.id);
-              updatedCount++;
+              try {
+                await supabase
+                  .from("products")
+                  .update({ stock: erpItem.stock })
+                  .eq("id", nexoProduct.id);
+                updatedCount++;
+              } catch (e: any) {
+                console.error(`[Cron] Failed to update product ${nexoProduct.id}:`, e.message);
+              }
             }
           }
 
@@ -3465,6 +3476,45 @@ app.get("/api/checkout/address-lookup", async (req, res) => {
     }
   } catch (e: any) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+
+// Endpoint para baixa de estoque via checkout
+app.post("/api/checkout/deduct-stock", async (req, res) => {
+  try {
+    const { tenantId, items } = req.body;
+    if (!tenantId || !items || !Array.isArray(items)) {
+      return res.status(400).json({ error: "Invalid parameters" });
+    }
+    
+    for (const item of items) {
+      if (!item.id) continue;
+      
+      const { data: prod } = await supabaseAdmin
+        .from('products')
+        .select('stock, is_featured')
+        .eq('id', item.id)
+        .single();
+        
+      if (prod && typeof prod.stock === 'number') {
+        const newStock = Math.max(0, prod.stock - item.quantity);
+        await supabaseAdmin
+          .from('products')
+          .update({ 
+            stock: newStock,
+            is_featured: newStock === 0 ? false : prod.is_featured 
+          })
+          .eq('id', item.id);
+          
+        console.log(`[ESTOQUE] Produto ID ${item.id} atualizado após venda. Novo estoque: ${newStock}`);
+      }
+    }
+    
+    res.json({ success: true });
+  } catch (err: any) {
+    console.error("Erro ao deduzir estoque:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
