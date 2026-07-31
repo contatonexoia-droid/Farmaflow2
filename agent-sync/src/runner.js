@@ -62,15 +62,17 @@ async function startAgent(expectedErpType, ConnectorClass) {
 
     const connector = new ConnectorClass(config.dbConfig);
 
+    async function heartbeatLoop() {
+        try {
+            await sendHeartbeat(config.apiKey);
+        } catch (hbError) {
+            console.log(`⚠️ Alerta: Não foi possível atualizar o status (heartbeat) com o servidor: ${hbError.message}`);
+        }
+        setTimeout(heartbeatLoop, 60000); // 1 minuto, independentemente do sucesso
+    }
+
     async function loop() {
         try {
-            // Envia o ping (heartbeat) para manter o status "Online" no monitor
-            try {
-                await sendHeartbeat(config.apiKey);
-            } catch (hbError) {
-                console.log(`⚠️ Alerta: Não foi possível atualizar o status (heartbeat) com o servidor: ${hbError.message}`);
-            }
-
             console.log(`[${new Date().toISOString()}] Verificando atualizações no banco...`);
             const lastSync = getLastSyncDate();
             
@@ -98,6 +100,8 @@ async function startAgent(expectedErpType, ConnectorClass) {
         }
     }
 
+    // Inicia os loops
+    heartbeatLoop();
     loop();
 }
 

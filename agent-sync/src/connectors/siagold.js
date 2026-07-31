@@ -1,5 +1,9 @@
 const sql = require('mssql');
 
+sql.on('error', err => {
+    console.error('Erro global na conexão MSSQL:', err.message);
+});
+
 class SiagoldConnector {
     constructor(dbConfig) {
         this.dbConfig = {
