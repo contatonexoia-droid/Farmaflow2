@@ -1,5 +1,6 @@
 const axios = require('axios');
 const path = require('path');
+const os = require('os');
 
 // Tenta carregar as variáveis de ambiente a partir do arquivo .env no diretório de execução atual (process.cwd())
 try {
@@ -8,17 +9,31 @@ try {
     // dotenv é opcional, se falhar ou não houver arquivo, segue com o padrão
 }
 
+function getMachineId() {
+    try {
+        return process.env.MACHINE_ID || process.env.COMPUTERNAME || os.hostname() || 'unknown';
+    } catch (e) {
+        return 'unknown';
+    }
+}
+
 // Admite que a API_BASE pode ser sobreposta via variável de ambiente API_BASE_URL (ex: http://localhost:3000/api/v1)
 const API_BASE = process.env.API_BASE_URL || 'https://farmaflow.nexoia.online/api/v1';
 
 async function validateToken(token) {
     const targetUrl = `${API_BASE}/integration/validate-token`;
+    const machineId = getMachineId();
     console.log(`\n[DEBUG] Iniciando validação de token...`);
     console.log(`- URL Alvo: "${targetUrl}"`);
-    console.log(`- Payload enviado: { token: "${token ? token.substring(0, 8) + '...' : 'vazio'}" }`);
+    console.log(`- Payload enviado: { token: "${token ? token.substring(0, 8) + '...' : 'vazio'}", machineId: "${machineId}" }`);
 
     try {
-        const response = await axios.post(targetUrl, { token });
+        const response = await axios.post(targetUrl, { token, machineId, machine_id: machineId }, {
+            headers: {
+                'x-machine-id': machineId,
+                'Content-Type': 'application/json'
+            }
+        });
         console.log(`[DEBUG] Token validado com sucesso!`);
         console.log(`- Código de Status HTTP: ${response.status} (${response.statusText})`);
         return response.data; // Espera: { erpType, dbConfig, apiKey }
@@ -52,10 +67,12 @@ async function validateToken(token) {
 
 async function sendData(apiKey, data) {
     const targetUrl = `${API_BASE}/integration`;
+    const machineId = getMachineId();
     try {
-        const response = await axios.post(targetUrl, { dados: data }, {
+        const response = await axios.post(targetUrl, { dados: data, machineId, machine_id: machineId }, {
             headers: {
                 'x-api-key': apiKey,
+                'x-machine-id': machineId,
                 'Content-Type': 'application/json'
             },
             timeout: 15000
@@ -76,10 +93,12 @@ async function sendData(apiKey, data) {
 
 async function sendHeartbeat(apiKey) {
     const targetUrl = `${API_BASE}/integration/heartbeat`;
+    const machineId = getMachineId();
     try {
-        await axios.post(targetUrl, { apiKey }, {
+        await axios.post(targetUrl, { apiKey, machineId, machine_id: machineId }, {
             headers: {
                 'x-api-key': apiKey,
+                'x-machine-id': machineId,
                 'Content-Type': 'application/json'
             },
             timeout: 5000
@@ -90,4 +109,4 @@ async function sendHeartbeat(apiKey) {
     }
 }
 
-module.exports = { validateToken, sendData, sendHeartbeat };
+module.exports = { validateToken, sendData, sendHeartbeat, getMachineId };

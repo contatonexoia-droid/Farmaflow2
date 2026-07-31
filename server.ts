@@ -3742,12 +3742,15 @@ app.get("/api/v1/agent/download/:erpType", (req, res) => {
   }
 });
 
-app.post("/api/v1/integration/validate-token", async (req, res) => {
+const validateTokenHandler = async (req: express.Request, res: express.Response) => {
   console.log(`\n[SERVER BACKEND] Recebida requisição de validação em /api/v1/integration/validate-token`);
   try {
-    const { token, machineId } = req.body;
+    const { token, machineId, machine_id, machine, hostname } = req.body || {};
+    const headerMachineId = req.headers['x-machine-id'] || req.headers['machine-id'];
+    const mId = machineId || machine_id || machine || hostname || headerMachineId || 'unknown';
+
     console.log(`- Token recebido: "${token ? token.substring(0, 8) + '...' : 'não fornecido'}"`);
-    console.log(`- Machine ID: "${machineId || 'não fornecido'}"`);
+    console.log(`- Machine ID: "${mId}"`);
 
     if (!token) {
       console.warn(`[SERVER BACKEND] Validação recusada: Token não fornecido (400 Bad Request)`);
@@ -3783,7 +3786,7 @@ app.post("/api/v1/integration/validate-token", async (req, res) => {
         .upsert({
           tenant_id: tokenData.tenant_id,
           activation_token: token,
-          machine_id: machineId || 'unknown',
+          machine_id: mId,
           is_active: true,
           last_seen: new Date().toISOString()
         }, { onConflict: 'tenant_id' });
@@ -3811,46 +3814,111 @@ app.post("/api/v1/integration/validate-token", async (req, res) => {
     console.error(`[SERVER BACKEND] Erro interno durante validação do token (500):`, error.message);
     res.status(500).json({ error: "Erro interno no servidor", details: error.message });
   }
-});
+};
 
-app.post("/api/v1/integration/heartbeat", async (req, res) => {
+app.post("/api/v1/integration/validate-token", validateTokenHandler);
+app.post("/api/v1/agent/validate-token", validateTokenHandler);
+app.post("/api/agent/validate-token", validateTokenHandler);
+
+const handleHeartbeat = async (req: express.Request, res: express.Response) => {
   try {
-    const { token, apiKey } = req.body;
+    const { token, apiKey, tenantId, tenant_id, machineId, machine_id, machine, hostname } = req.body || {};
     const headerApiKey = req.headers['x-api-key'] || req.headers['api-key'] || req.headers['apikey'];
-    const activeApiKey = apiKey || headerApiKey;
+    const activeApiKey = apiKey || tenantId || tenant_id || headerApiKey;
+    const headerMachineId = req.headers['x-machine-id'] || req.headers['machine-id'];
+    const mId = machineId || machine_id || machine || hostname || headerMachineId;
 
     if (!token && !activeApiKey) {
       return res.status(400).json({ error: "Token ou API Key não fornecido" });
     }
 
-    let updateQuery = supabaseAdmin
-      .from('agent_integrations')
-      .update({ last_seen: new Date().toISOString() });
+    let targetTenantId = activeApiKey ? String(activeApiKey) : null;
+    let actToken = token ? String(token) : null;
 
-    if (token) {
-      updateQuery = updateQuery.eq('activation_token', token);
+    // Se possui token mas não tenantId, busca tenantId em activation_tokens ou agent_integrations
+    if (!targetTenantId && actToken) {
+      const { data: tokenRow } = await supabaseAdmin
+        .from('activation_tokens')
+        .select('tenant_id')
+        .eq('token', actToken)
+        .maybeSingle();
+
+      if (tokenRow?.tenant_id) {
+        targetTenantId = tokenRow.tenant_id;
+      } else {
+        const { data: agentRow } = await supabaseAdmin
+          .from('agent_integrations')
+          .select('tenant_id')
+          .eq('activation_token', actToken)
+          .maybeSingle();
+        if (agentRow?.tenant_id) {
+          targetTenantId = agentRow.tenant_id;
+        }
+      }
+    }
+
+    const now = new Date().toISOString();
+
+    if (targetTenantId) {
+      const upsertPayload: any = {
+        tenant_id: targetTenantId,
+        last_seen: now,
+        is_active: true
+      };
+      if (actToken) {
+        upsertPayload.activation_token = actToken;
+      }
+      if (mId && mId !== 'unknown') {
+        upsertPayload.machine_id = mId;
+      }
+
+      const { error: upsertError } = await supabaseAdmin
+        .from('agent_integrations')
+        .upsert(upsertPayload, { onConflict: 'tenant_id' });
+
+      if (upsertError) {
+        console.error("[HEARTBEAT ERROR]", upsertError);
+        return res.status(500).json({ error: "Erro ao atualizar heartbeat.", details: upsertError.message });
+      }
+
+      console.log(`[HEARTBEAT SUCCESS] Heartbeat atualizado para o tenant: "${targetTenantId}" (Machine ID: ${mId || 'mantido'})`);
+      return res.json({ success: true, tenant_id: targetTenantId, last_seen: now });
     } else {
-      updateQuery = updateQuery.eq('tenant_id', activeApiKey);
-    }
+      // Fallback: Atualiza diretamente pelo activation_token
+      const updatePayload: any = {
+        last_seen: now,
+        is_active: true
+      };
+      if (mId && mId !== 'unknown') {
+        updatePayload.machine_id = mId;
+      }
 
-    const { data: updateData, error: updateError } = await updateQuery.eq('is_active', true).select();
+      const { data: updateData, error: updateError } = await supabaseAdmin
+        .from('agent_integrations')
+        .update(updatePayload)
+        .eq('activation_token', actToken)
+        .select();
 
-    if (updateError) {
-      console.error("[HEARTBEAT ERROR]", updateError);
-      return res.status(500).json({ error: "Erro ao atualizar heartbeat.", details: updateError.message });
-    }
-    
-    if (!updateData || updateData.length === 0) {
-       console.log("[HEARTBEAT WARNING] No rows updated for API key:", activeApiKey);
-    } else {
-       console.log("[HEARTBEAT SUCCESS] Updated for API key:", activeApiKey);
-    }
+      if (updateError) {
+        console.error("[HEARTBEAT ERROR]", updateError);
+        return res.status(500).json({ error: "Erro ao atualizar heartbeat.", details: updateError.message });
+      }
 
-    res.json({ success: true });
+      console.log(`[HEARTBEAT SUCCESS] Heartbeat atualizado para o token: "${actToken}"`);
+      return res.json({ success: true, last_seen: now });
+    }
   } catch (error: any) {
+    console.error("[HEARTBEAT EXCEPTION]", error);
     res.status(500).json({ error: "Erro interno no servidor", details: error.message });
   }
-});
+};
+
+app.post("/api/v1/integration/heartbeat", handleHeartbeat);
+app.post("/api/v1/agent/ping", handleHeartbeat);
+app.post("/api/agent/ping", handleHeartbeat);
+app.post("/api/v1/integration/ping", handleHeartbeat);
+app.post("/api/v1/agent/heartbeat", handleHeartbeat);
+app.post("/api/agent/heartbeat", handleHeartbeat);
 
 app.get("/api/v1/integration/status", async (req, res) => {
   try {
