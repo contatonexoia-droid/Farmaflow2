@@ -88,6 +88,10 @@ export const ActivationTokenManager: React.FC = () => {
   };
 
   const copyToClipboard = (text: string, setCopiedState: React.Dispatch<React.SetStateAction<boolean>>) => {
+    if (!selectedTenant) {
+      setError('Por favor, selecione uma farmácia (tenant) primeiro.');
+      return;
+    }
     navigator.clipboard.writeText(text);
     setCopiedState(true);
     setTimeout(() => setCopiedState(false), 2000);
@@ -122,19 +126,41 @@ Qualquer dúvida, estou à disposição!`;
         </div>
         
         <div className="flex items-center gap-2">
-          <a
-            href={INSTALLER_LINK}
-            download
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-sm transition-colors"
-          >
-            <Download className="w-4 h-4" />
-            Baixar Instalador
-          </a>
+          {selectedTenant ? (
+            <a
+              href={INSTALLER_LINK}
+              download
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-sm transition-colors shadow-sm"
+              title="Baixar Instalador"
+            >
+              <Download className="w-4 h-4" />
+              Baixar Instalador
+            </a>
+          ) : (
+            <button
+              type="button"
+              disabled
+              onClick={() => setError('Por favor, selecione uma farmácia (tenant) primeiro.')}
+              className="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-400 rounded-xl font-bold text-sm cursor-not-allowed opacity-60"
+              title="Selecione uma farmácia primeiro"
+            >
+              <Download className="w-4 h-4" />
+              Baixar Instalador
+            </button>
+          )}
+
           <button
+            type="button"
+            disabled={!selectedTenant}
             onClick={() => copyToClipboard(INSTALLER_LINK, setCopiedLink)}
-            className="flex items-center gap-2 px-4 py-2 bg-gray-50 hover:bg-gray-100 border border-gray-200 text-gray-700 rounded-xl font-bold text-sm transition-colors"
+            className={`flex items-center gap-2 px-4 py-2 border rounded-xl font-bold text-sm transition-colors ${
+              selectedTenant
+                ? 'bg-gray-50 hover:bg-gray-100 border-gray-200 text-gray-700 cursor-pointer'
+                : 'bg-gray-50 border-gray-200 text-gray-400 cursor-not-allowed opacity-60'
+            }`}
+            title={selectedTenant ? 'Copiar Link do Instalador' : 'Selecione uma farmácia primeiro'}
           >
             {copiedLink ? <CheckCircle className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
             Copiar Link

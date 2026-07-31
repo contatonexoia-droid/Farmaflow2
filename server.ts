@@ -3723,7 +3723,25 @@ app.post("/api/v1/agent/activate", async (req, res) => {
   }
 });
 
-// Dedicated and highly robust agent download route to bypass direct static file download issues in iframe/custom domains
+// Dedicated and highly robust agent download route to serve installer zip files directly with proper binary headers
+app.get(["/installers/:filename", "/public/installers/:filename"], (req, res) => {
+  try {
+    const filename = path.basename(req.params.filename);
+    const filePath = path.join(process.cwd(), "public", "installers", filename);
+
+    if (fs.existsSync(filePath)) {
+      res.setHeader("Content-Type", "application/zip");
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      return res.sendFile(filePath);
+    } else {
+      return res.status(404).send("Arquivo de instalador não encontrado");
+    }
+  } catch (err: any) {
+    console.error("[Installers Download Error]", err);
+    return res.status(500).send("Erro ao baixar o instalador");
+  }
+});
+
 app.get("/api/v1/agent/download/:erpType", (req, res) => {
   try {
     const { erpType } = req.params;
@@ -3734,8 +3752,14 @@ app.get("/api/v1/agent/download/:erpType", (req, res) => {
       fileName = "farmaflow-softpharma.zip";
     }
 
-    // Redirect to static file path for Vercel/CDN compatibility
-    return res.redirect(302, `/installers/${fileName}`);
+    const filePath = path.join(process.cwd(), "public", "installers", fileName);
+    if (fs.existsSync(filePath)) {
+      res.setHeader("Content-Type", "application/zip");
+      res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+      return res.sendFile(filePath);
+    } else {
+      return res.redirect(302, `/installers/${fileName}`);
+    }
   } catch (err: any) {
     console.error("[Agent Download] Erro interno no manipulador de download do agente:", err);
     return res.status(500).json({ error: "Erro interno ao processar o download do agente." });
