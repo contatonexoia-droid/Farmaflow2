@@ -4961,7 +4961,11 @@ app.delete("/api/v1/tenants/:tenantId/vouchers/:id", checkTenantAccess, async (r
     app.use(express.static(distPath, {
       maxAge: '1d',
       setHeaders: (res, filepath) => {
-        if (filepath.endsWith('.html')) {
+        if (
+          filepath.endsWith('.html') || 
+          filepath.endsWith('sw.js') || 
+          filepath.endsWith('manifest.json')
+        ) {
           res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
           res.setHeader('Pragma', 'no-cache');
           res.setHeader('Expires', '0');
