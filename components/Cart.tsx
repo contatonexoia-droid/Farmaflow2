@@ -1343,39 +1343,7 @@ export const Cart: React.FC<CartProps> = ({
             Finalizar Pedido
           </h3>
           <div className="space-y-8">
-            {tenant?.deliverySettings?.storePickupEnabled && (
-              <div className="space-y-4 animate-in fade-in">
-                <h4 className="font-black text-gray-900 text-lg">Opção de Recebimento</h4>
-                <div className="flex gap-4">
-                  <button
-                    type="button"
-                    onClick={() => setDeliveryMode("delivery")}
-                    className={`flex-1 py-4 px-4 rounded-2xl border-2 font-bold transition-all flex flex-col items-center gap-2 ${
-                      deliveryMode === "delivery"
-                        ? "border-emerald-600 bg-emerald-50 text-emerald-700"
-                        : "border-gray-100 bg-white text-gray-500 hover:border-emerald-200"
-                    }`}
-                  >
-                    <Truck size={24} />
-                    <span>Receber em Casa</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setDeliveryMode("pickup")}
-                    className={`flex-1 py-4 px-4 rounded-2xl border-2 font-bold transition-all flex flex-col items-center gap-2 ${
-                      deliveryMode === "pickup"
-                        ? "border-blue-600 bg-blue-50 text-blue-700"
-                        : "border-gray-100 bg-white text-gray-500 hover:border-blue-200"
-                    }`}
-                  >
-                    <MapPin size={24} />
-                    <span>Retirar na Loja</span>
-                  </button>
-                </div>
-              </div>
-            )}
-
-            <div className={`space-y-4 animate-in fade-in ${tenant?.deliverySettings?.storePickupEnabled ? "pt-4 border-t border-gray-50" : ""}`}>
+            <div className="space-y-4 animate-in fade-in">
               <h4 className="font-black text-gray-900 text-lg">Identificação do Cliente</h4>
               <div className="space-y-6">
                 <div className="space-y-2">
