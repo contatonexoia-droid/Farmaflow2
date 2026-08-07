@@ -13,8 +13,17 @@ import multer from "multer";
 import * as XLSX from "xlsx";
 
 import { checkTenantAccess } from "./checkTenantAccess.js";
-
 import { calculateDeliveryDistance } from "./lib/maps.js";
+
+import { dispatcher } from "./services/asyncDispatcher.js";
+import { whatsappHealthManager } from "./services/whatsappHealthManager.js";
+import { realtimeHub } from "./services/realtimeHub.js";
+import { botHandoffManager } from "./services/botHandoffManager.js";
+import { continuousUseRefillManager } from "./services/continuousUseRefillManager.js";
+import { csatManager } from "./services/csatManager.js";
+import { contactMergeManager } from "./services/contactMergeManager.js";
+import { inboxStore } from "./services/inboxStore.js";
+import { chatStore } from "./services/chatStore.js";
 
 
 const app = express();
@@ -331,6 +340,190 @@ app.post("/api/v1/auth/migrate-legacy", async (req, res) => {
 });
 
 // Admin Team Management Endpoints
+// =========================================
+// MÓDULO DE GESTÃO DE USUÁRIOS (RBAC) - FARMAFLOW
+// =========================================
+
+app.get("/api/v1/team/users", checkTenantAccess, async (req, res) => {
+  try {
+    const tenantId = req.headers["x-tenant-id"] || req.query.tenantId; // Assume passed via header or query
+    
+    let query = supabase.from("tenant_users").select("*");
+    
+    if (tenantId) {
+       query = query.eq("tenant_id", tenantId);
+    }
+    
+    const { data: users, error } = await query.order("created_at", { ascending: false });
+    
+    if (error) throw error;
+
+    const enrichedData = (users || []).map(u => ({
+        id: u.id,
+        supabase_user_id: u.supabase_user_id,
+        full_name: u.name,
+        email: u.email,
+        role: u.role,
+        store_id: u.tenant_id,
+        is_active: u.is_active !== undefined ? u.is_active : true
+    }));
+
+    res.json({ data: enrichedData });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/v1/team/users", checkTenantAccess, async (req, res) => {
+  try {
+    const { email, password, full_name, role, store_id } = req.body;
+    
+    if (!email || !password || !full_name || !role) {
+      return res.status(400).json({ error: "Nome, e-mail, função e senha são obrigatórios." });
+    }
+
+    const { data: user, error } = await supabaseAdmin.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true,
+      user_metadata: {
+        full_name,
+        role,
+        store_id
+      }
+    });
+
+    if (error) {
+      console.error("[Team API] Erro ao criar usuário auth:", error);
+      let errorMessage = error.message;
+      if (errorMessage.includes("already been registered")) {
+        errorMessage = "Este endereço de e-mail já está sendo utilizado.";
+      }
+      return res.status(400).json({ error: errorMessage });
+    }
+    
+    // Inserir no tenant_users
+    const { error: userError } = await supabase
+      .from("tenant_users")
+      .insert({
+        supabase_user_id: user.user.id,
+        tenant_id: store_id || req.headers["x-tenant-id"] || req.query.tenantId,
+        name: full_name,
+        email: email,
+        role: role,
+        is_active: true
+      });
+
+    if (userError) {
+       console.error("[Team API] Erro ao inserir no tenant_users:", userError);
+       return res.status(400).json({ error: "Erro de banco de dados ao salvar o funcionário." });
+    }
+
+    return res.status(201).json({ success: true, user });
+  } catch (error: any) {
+    console.error("[Team API] Erro interno:", error);
+    return res.status(500).json({ error: "Erro interno: " + error.message });
+  }
+});
+
+app.patch("/api/v1/team/users/:id", checkTenantAccess, async (req, res) => {
+  try {
+    const userId = req.params.id;
+    const { full_name, role, is_active } = req.body;
+
+    const { data, error } = await supabase
+      .from("tenant_users")
+      .update({ name: full_name, role, is_active })
+      .eq("id", userId)
+      .select()
+      .single();
+
+    if (error) throw error;
+    
+    if (data && data.supabase_user_id) {
+       await supabaseAdmin.auth.admin.updateUserById(data.supabase_user_id, {
+          user_metadata: { role: data.role, full_name: data.name },
+          ban_duration: data.is_active ? 'none' : '876000h'
+       });
+    }
+
+    return res.json({ data });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// =========================================
+// MÓDULO DE CAIXAS DE ENTRADA (INBOXES)
+// =========================================
+app.get("/api/v1/inboxes", async (req, res) => {
+  try {
+    const storeId = (req.query.storeId as string) || (req.headers["x-tenant-id"] as string) || "default";
+    const data = await inboxStore.getInboxes(storeId);
+    return res.json({ data });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/v1/inboxes", async (req, res) => {
+  try {
+    const { store_id, name, description, whatsapp_instance_id } = req.body;
+    const storeId = store_id || (req.headers["x-tenant-id"] as string) || "default";
+    if (!name) return res.status(400).json({ error: "Nome é obrigatório." });
+
+    const created = await inboxStore.createInbox(storeId, name, description, whatsapp_instance_id);
+    return res.status(201).json({ data: created });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.put("/api/v1/inboxes/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, description, whatsapp_instance_id } = req.body;
+    if (!name) return res.status(400).json({ error: "Nome é obrigatório." });
+
+    const updated = await inboxStore.updateInbox(id, name, description, whatsapp_instance_id);
+    return res.json({ data: updated });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/api/v1/inboxes/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    await inboxStore.deleteInbox(id);
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/v1/inboxes/:id/members", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const members = await inboxStore.getMembers(id);
+    return res.json({ data: members });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/v1/inboxes/:id/members/toggle", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId } = req.body;
+    if (!userId) return res.status(400).json({ error: "userId é obrigatório" });
+
+    const updatedMembers = await inboxStore.toggleMember(id, userId);
+    return res.json({ data: updatedMembers });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
 app.get("/api/v1/tenants/:tenantId/users", checkTenantAccess, async (req, res) => {
   try {
     const tenantId = req.params.tenantId;
@@ -1454,11 +1647,25 @@ if (!process.env.VERCEL) {
           } catch (e) {}
           
           console.log(`[Cron] Reconciling tenant ${tenant.id} with ERP ${sanitizedUrl}...`);
-          const response = await fetch(`${sanitizedUrl}/api/stock-dump`, {
-            headers: {
-              "x-api-key": tenant.integration_token || "",
-            },
-          });
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 8000);
+
+          let response: Response;
+          try {
+            response = await fetch(`${sanitizedUrl}/api/stock-dump`, {
+              headers: {
+                "x-api-key": tenant.integration_token || "",
+              },
+              signal: controller.signal,
+            });
+          } catch (fetchErr: any) {
+            clearTimeout(timeoutId);
+            const errorMsg = fetchErr.name === 'AbortError' 
+              ? `Tempo limite excedido (8s) ao conectar no ERP (${sanitizedUrl})`
+              : `ERP inacessível ou sem conexão (${sanitizedUrl}): ${fetchErr.message || 'fetch failed'}`;
+            throw new Error(errorMsg);
+          }
+          clearTimeout(timeoutId);
 
           if (!response.ok) {
             throw new Error(
@@ -3726,7 +3933,7 @@ app.post("/api/v1/agent/activate", async (req, res) => {
 // Dedicated and highly robust agent download route to serve installer zip files directly with proper binary headers
 app.get(["/installers/:filename", "/public/installers/:filename"], (req, res) => {
   try {
-    const filename = path.basename(req.params.filename);
+    const filename = path.basename(req.params.filename as string);
     const filePath = path.join(process.cwd(), "public", "installers", filename);
 
     if (fs.existsSync(filePath)) {
@@ -4194,6 +4401,401 @@ app.post("/api/v1/integration", async (req, res) => {
       console.error("Erro ao salvar log de erro de integração:", logErr);
     }
     res.status(500).json({ error: "Erro interno no servidor", details: error.message });
+  }
+});
+
+// =========================================
+// MÓDULO FARMAFLOW CHAT - ROTAS DE BACKEND
+// =========================================
+
+// Middleware para verificar se o chat está ativado
+const requireChatEnabled = async (req, res, next) => {
+  try {
+    let tenantId = req.headers['x-tenant-id'] || req.query.tenantId;
+    
+    // Se não tiver o header direto, tenta extrair da conversa ou instancia dependendo da rota
+    if (!tenantId && req.body.conversation_id) {
+       const { data: conv } = await supabaseAdmin.from('chat_conversations').select('store_id').eq('id', req.body.conversation_id).single();
+       if (conv) tenantId = conv.store_id;
+    }
+    
+    // Em caso de webhook de provedor externo (Evolution API), a instancia geralmente contém ou mapeia o tenantId
+    if (!tenantId && req.body?.data?.instance) {
+       const { data: inst } = await supabaseAdmin.from('whatsapp_instances').select('store_id').eq('instance_name', req.body.data.instance).single();
+       if (inst) tenantId = inst.store_id;
+    }
+
+    if (tenantId) {
+       const { data: tenant } = await supabaseAdmin.from('tenants').select('is_chat_enabled').eq('id', tenantId).single();
+       if (tenant && tenant.is_chat_enabled === false) {
+          return res.status(403).json({ error: "Módulo de Chat desativado para esta loja." });
+       }
+    }
+    
+    next();
+  } catch (error) {
+    console.error("[Chat Middleware] Erro ao validar licença:", error);
+    next(); // Falha aberta para não quebrar em caso de instabilidade
+  }
+};
+
+
+
+// --- EVOLUTION API WHATSAPP INSTANCE ENDPOINTS ---
+
+app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) => {
+  try {
+    const tenantId = (req as any).tenantId || req.body.tenantId;
+    if (!tenantId) return res.status(400).json({ error: "Tenant ID is required." });
+
+    const evolutionUrl = process.env.EVOLUTION_API_URL?.replace(/\/$/, '');
+    const evolutionKey = process.env.EVOLUTION_API_KEY;
+
+    if (!evolutionUrl || !evolutionKey) {
+      return res.status(500).json({ error: "A API do WhatsApp (Evolution API) não está configurada no servidor. Faltam credenciais (EVOLUTION_API_URL e EVOLUTION_API_KEY)." });
+    }
+
+    const instanceName = `store_${tenantId.replace(/-/g,"")}`;
+
+    // 1. Criar a instância
+    const createRes = await fetch(`${evolutionUrl}/instance/create`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "apikey": evolutionKey
+      },
+      body: JSON.stringify({
+        instanceName: instanceName,
+        qrcode: true,
+        integration: "WHATSAPP-BAILEYS"
+      })
+    });
+
+    const createData = await createRes.json();
+    
+    // Verifica se já existe ou retornou o base64
+    let base64 = createData?.qrcode?.base64 || createData?.base64;
+
+    if (!base64 && createRes.status === 403 && createData?.message?.includes("already exists")) {
+        // Se já existe, tenta buscar o QR code conectando
+        const connectRes = await fetch(`${evolutionUrl}/instance/connect/${instanceName}`, {
+            headers: { "apikey": evolutionKey }
+        });
+        const connectData = await connectRes.json();
+        base64 = connectData?.base64;
+    }
+
+    if (base64) {
+      // Salva ou atualiza no banco
+      await supabaseAdmin.from('whatsapp_instances').upsert({
+         store_id: tenantId,
+         instance_name: instanceName,
+         status: 'QRCODE',
+         updated_at: new Date().toISOString()
+      }, { onConflict: 'store_id' });
+
+      return res.json({ success: true, qrcodeBase64: base64 });
+    } else {
+      return res.status(500).json({ error: "Não foi possível gerar o QR Code. A instância pode já estar conectada." });
+    }
+
+  } catch (error: any) {
+    console.error("Erro ao criar instância Evolution API:", error);
+    res.status(500).json({ error: error.message || "Erro interno ao gerar QR Code" });
+  }
+});
+
+app.get("/api/v1/chat/instance/status", requireChatEnabled, async (req, res) => {
+    try {
+        const tenantId = (req as any).tenantId || req.query.tenantId;
+        if (!tenantId) return res.status(400).json({ error: "Tenant ID is required." });
+        const evolutionUrl = process.env.EVOLUTION_API_URL?.replace(/\/$/, '');
+        const evolutionKey = process.env.EVOLUTION_API_KEY;
+        if (!evolutionUrl || !evolutionKey) {
+            return res.status(500).json({ error: "A API do WhatsApp não está configurada." });
+        }
+        const instanceName = `store_${tenantId.replace(/-/g,"")}`;
+        const stateRes = await fetch(`${evolutionUrl}/instance/connectionState/${instanceName}`, {
+            headers: { "apikey": evolutionKey }
+        });
+        if (stateRes.status === 404) {
+            return res.json({ status: 'DISCONNECTED' });
+        }
+        const stateData = await stateRes.json();
+        const connectionState = stateData?.instance?.state || stateData?.state;
+        if (connectionState === "open") {
+            const phoneNumber = stateData?.instance?.owner?.split('@')[0] || stateData?.owner?.split('@')[0] || null;
+            await supabaseAdmin.from('whatsapp_instances').upsert({
+               store_id: tenantId,
+               instance_name: instanceName,
+               status: 'CONNECTED',
+               ...(phoneNumber ? { phone_number: phoneNumber } : {}),
+               updated_at: new Date().toISOString()
+            }, { onConflict: 'store_id' });
+            return res.json({ status: 'CONNECTED' });
+        } else if (connectionState === "connecting") {
+            // Fetch the latest QR code
+            try {
+                const connectRes = await fetch(`${evolutionUrl}/instance/connect/${instanceName}`, {
+                    headers: { "apikey": evolutionKey }
+                });
+                const connectData = await connectRes.json();
+                const base64 = connectData?.qrcode?.base64 || connectData?.base64;
+                if (base64) {
+                    return res.json({ status: 'QRCODE', qrcodeBase64: base64 });
+                }
+            } catch (e) {
+                console.error("Error fetching latest QR code", e);
+            }
+            return res.json({ status: 'QRCODE' });
+        }
+        return res.json({ status: 'DISCONNECTED' });
+    } catch(error) {
+        return res.status(500).json({ error: "Erro ao buscar status" });
+    }
+});
+
+app.get("/api/v1/whatsapp/instances", async (req, res) => {
+  try {
+    const tenantId = (req.query.tenantId as string) || (req.headers["x-tenant-id"] as string) || "default";
+    const { data, error } = await supabaseAdmin
+      .from("whatsapp_instances")
+      .select("*")
+      .eq("store_id", tenantId);
+
+    if (!error && data && data.length > 0) {
+      return res.json({ data });
+    }
+
+    const instanceName = `store_${tenantId.replace(/-/g,"")}`;
+    return res.json({
+      data: [
+        {
+          id: `inst_${tenantId}`,
+          store_id: tenantId,
+          instance_name: instanceName,
+          status: "CONNECTED",
+          phone_number: "WhatsApp Principal"
+        }
+      ]
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// 1. Webhook Ultra-Leve para Evolution API (Event-Driven Queue)
+app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
+  try {
+    const { event, data } = req.body;
+    
+    // Descola a requisição HTTP e joga o trabalho para a fila assíncrona
+    const jobId = dispatcher.dispatch("webhook_received", { event, data });
+    
+    // Responde instantaneamente HTTP 200 OK sem expor gargalos de timeout
+    return res.status(200).json({ received: true, jobId, queuedAt: Date.now() });
+  } catch (error: any) {
+    console.error("[Chat Webhook] Erro ao enfileirar evento:", error);
+    return res.status(200).json({ received: true, error: error.message }); // 200 para evitar retentativas excessivas do provedor
+  }
+});
+
+// Listener do Dispatcher de eventos de Webhook em background
+dispatcher.on("webhook_received", async ({ event, data }) => {
+  try {
+    if (event === "messages.upsert") {
+      const messages = data?.messages || [];
+      const instance = data?.instance;
+      
+      // Buscar storeId a partir da instancia
+      let storeId = "default";
+      try {
+        const { data: inst } = await supabaseAdmin.from("whatsapp_instances").select("store_id").eq("instance_name", instance).single();
+        if (inst?.store_id) storeId = inst.store_id;
+      } catch (_) {}
+
+      for (const msg of messages) {
+        // Persistir mensagem e atualizar conversa (mensagens enviadas e recebidas)
+        const processed = await chatStore.processWhatsAppMessage(storeId, msg);
+
+        if (!msg.key?.fromMe) {
+          const conversationId = msg.key?.remoteJid;
+          const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
+
+          // Processar Bot Handoff
+          const handoff = await botHandoffManager.processMessageState(conversationId, storeId, text, "open");
+
+          // Verificar se é uma resposta de CSAT (nota 1 a 5)
+          const ratingNum = parseInt(text.trim(), 10);
+          if (!isNaN(ratingNum) && ratingNum >= 1 && ratingNum <= 5) {
+            await csatManager.recordCsatResponse(storeId, conversationId, ratingNum);
+          }
+
+          // Transmitir evento em tempo real via SSE RealtimeHub
+          realtimeHub.broadcastToStore(storeId, "chat_message", {
+            conversationId: processed?.conversation.id || conversationId,
+            message: processed?.message,
+            conversation: processed?.conversation,
+            handoff
+          });
+        } else {
+          // Transmitir mensagem enviada pelo próprio número/whatsapp
+          realtimeHub.broadcastToStore(storeId, "chat_message", {
+            conversationId: processed?.conversation.id,
+            message: processed?.message,
+            conversation: processed?.conversation
+          });
+        }
+      }
+    } else if (event === "connection.update") {
+      const instance = data?.instance;
+      const state = data?.state;
+      console.log(`[Webhook Background] Connection update for ${instance}: ${state}`);
+    }
+  } catch (err) {
+    console.error("[Webhook Background Error]:", err);
+  }
+});
+
+// --- REALTIME SSE SERVER ENDPOINT ---
+app.get("/api/v1/realtime/events", (req, res) => {
+  const storeId = (req.query.storeId as string) || "all";
+  const clientId = `client_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  realtimeHub.addClient({ id: clientId, storeId, res });
+});
+
+// Listener do WhatsappHealthManager para retransmitir alterações de status das instâncias para o painel em tempo real
+whatsappHealthManager.on("instance_status_changed", (eventData) => {
+  realtimeHub.broadcastToStore(eventData.storeId, "instance_status", eventData);
+});
+
+// --- CRON JOB DE REMÉDIOS DE USO CONTÍNUO ---
+// Dispara todos os dias às 09:00 AM
+cron.schedule("0 9 * * *", async () => {
+  await continuousUseRefillManager.checkAndTriggerRefillReminders();
+});
+
+// Endpoint manual para disparar teste de recompra de uso contínuo
+app.post("/api/v1/refill/trigger", async (req, res) => {
+  try {
+    await continuousUseRefillManager.checkAndTriggerRefillReminders();
+    res.json({ success: true, message: "Verificação de recompra executada." });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- MÓDULO CSAT ENDPOINTS ---
+app.get("/api/v1/csat/metrics", async (req, res) => {
+  try {
+    const storeId = (req.query.storeId as string) || (req.headers["x-tenant-id"] as string);
+    if (!storeId) return res.status(400).json({ error: "storeId é obrigatório" });
+
+    const metrics = await csatManager.getStoreCsatMetrics(storeId);
+    res.json(metrics);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/v1/csat/schedule", async (req, res) => {
+  try {
+    const { orderId, delayMinutes } = req.body;
+    if (!orderId) return res.status(400).json({ error: "orderId é obrigatório" });
+
+    await csatManager.scheduleCsatSurvey(orderId, delayMinutes || 15);
+    res.json({ success: true, message: `Pesquisa CSAT agendada para o pedido ${orderId}` });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- MÓDULO CONTACT MERGE ENDPOINT ---
+app.post("/api/v1/contacts/merge", async (req, res) => {
+  try {
+    const { targetContactId, sourceContactId } = req.body;
+    if (!targetContactId || !sourceContactId) {
+      return res.status(400).json({ error: "targetContactId e sourceContactId são obrigatórios." });
+    }
+
+    const result = await contactMergeManager.mergeContacts(targetContactId, sourceContactId);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- ENDPOINTS DE CHAT ---
+app.get("/api/v1/chat/conversations", async (req, res) => {
+  try {
+    const storeId = (req.query.tenantId as string) || (req.headers["x-tenant-id"] as string) || "default";
+    const inboxId = req.query.inboxId as string | undefined;
+
+    const conversations = await chatStore.getConversations(storeId, inboxId);
+    return res.json({ data: conversations });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/v1/chat/messages", async (req, res) => {
+  try {
+    const conversationId = req.query.conversationId as string;
+    if (!conversationId) {
+      return res.status(400).json({ error: "conversationId é obrigatório" });
+    }
+
+    const messages = await chatStore.getMessages(conversationId);
+    return res.json({ data: messages });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Envio e persistência de mensagem pelo Balconista/Atendente
+app.post("/api/v1/chat/send", requireChatEnabled, async (req, res) => {
+  try {
+    const { conversation_id, content, is_private, media_url, media_type, sender_type } = req.body;
+    const storeId = (req.headers["x-tenant-id"] as string) || "default";
+
+    if (!conversation_id || (!content && !media_url)) {
+      return res.status(400).json({ error: "conversation_id e conteúdo são obrigatórios." });
+    }
+
+    // Persistir mensagem
+    const { message, conversation } = await chatStore.addMessage(
+      storeId,
+      conversation_id,
+      sender_type || "USER",
+      content || "",
+      Boolean(is_private),
+      media_url,
+      media_type
+    );
+
+    // Transmitir via SSE
+    realtimeHub.broadcastToStore(storeId, "chat_message", {
+      conversationId: conversation_id,
+      message,
+      conversation
+    });
+
+    if (is_private) {
+      console.log(`[Chat API] Nota interna salva para conversa ${conversation_id}.`);
+      return res.status(200).json({ success: true, data: message, is_private: true });
+    }
+
+    console.log(`[Chat API] Mensagem de chat salva e processada para conversa ${conversation_id}: ${content}`);
+    return res.status(200).json({ success: true, data: message, conversation });
+  } catch (error: any) {
+    console.error("[Chat API] Erro ao enviar mensagem:", error);
+    return res.status(500).json({ error: error.message || "Erro interno." });
   }
 });
 

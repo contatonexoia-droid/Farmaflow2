@@ -27,6 +27,7 @@ import { Navbar } from "./components/Navbar";
 import { Storefront } from "./components/Storefront";
 import { PWAInstallPrompt } from "./components/PWAInstallPrompt";
 import { OrderAlert } from "./components/OrderAlert";
+import { ChatCentral } from "./components/ChatCentral";
 import {
   getTenants,
   getTenantByHostname,
@@ -79,10 +80,11 @@ import {
   Calendar,
   Percent,
   Tag,
-  Users,
+  Users, Inbox,
   TrendingUp,
   Settings,
   Laptop,
+  MessageSquare,
 } from "lucide-react";
 
 import { Toaster, toast } from "sonner";
@@ -118,6 +120,8 @@ const AdminAnalytics = lazy(() =>
     default: m.AdminAnalytics,
   })),
 );
+const InboxManagement = lazy(() => import("./components/InboxManagement").then((m) => ({ default: m.InboxManagement })));
+
 const TeamManagement = lazy(() =>
   import("./components/TeamManagement").then((m) => ({
     default: m.TeamManagement,
@@ -473,17 +477,21 @@ const App: React.FC = () => {
     if ((parsed.type === "SUPER_ADMIN" || parsed.type === "PHARMACY_ADMIN") && (!parsed.access_token || !parsed.refresh_token)) {
         parsed = { type: "GUEST" };
         localStorage.removeItem("ff_session");
-    } else if (parsed.access_token && parsed.refresh_token) {
-        supabase.auth.setSession({ access_token: parsed.access_token, refresh_token: parsed.refresh_token }).then(({ error }) => {
-            if (error) {
-                console.error("Session restore failed, logging out", error);
-                localStorage.removeItem("ff_session");
-                window.location.reload();
-            }
-        }).catch(e => console.error("Failed to restore session", e));
     }
     return parsed;
   });
+
+  useEffect(() => {
+    if (session.type !== "GUEST") {
+      supabase.auth.getSession().then(({ data: { session: sbSession }, error }) => {
+        if (error || !sbSession) {
+          console.warn("Supabase session missing or error. Logging out.", error);
+          setSession({ type: "GUEST" });
+          localStorage.removeItem("ff_session");
+        }
+      });
+    }
+  }, []);
 
   const [view, setView] = useState<ViewMode>(() => {
     const savedView = localStorage.getItem("ff_view");
@@ -508,6 +516,8 @@ const App: React.FC = () => {
     | "team"
     | "analytics"
     | "desktop"
+    | "chat"
+    | "inboxes"
   >(() => {
     return (localStorage.getItem("ff_admin_tab") as any) || "dashboard";
   });
@@ -2879,6 +2889,18 @@ const App: React.FC = () => {
                         <Users size={20} />
                         Equipe
                       </button>
+                      {currentTenant?.isChatEnabled && (
+<button
+                        onClick={() => {
+                          setAdminTab("inboxes");
+                          setIsSidebarOpen(false);
+                        }}
+                        className={`w-full flex items-center gap-3 px-6 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "inboxes" ? "bg-brand text-brand-contrast" : "text-gray-500 hover:bg-gray-50"}`}
+                      >
+                        <Inbox size={20} />
+                        Departamentos
+                      </button>
+)}
                       <button
                         onClick={() => {
                           setAdminTab("analytics");
@@ -2918,6 +2940,23 @@ const App: React.FC = () => {
                         <Laptop size={20} />
                         Aplicativo PC
                       </button>
+                      {currentTenant?.isChatEnabled && (
+<button
+                        onClick={() => {
+                          setAdminTab("chat");
+                          setIsSidebarOpen(false);
+                        }}
+                        className={`w-full flex items-center gap-3 px-6 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "chat" ? "bg-brand text-brand-contrast" : "text-gray-500 hover:bg-gray-50"}`}
+                        style={
+                          adminTab === "chat"
+                            ? { backgroundColor: currentTenant.primaryColor }
+                            : {}
+                        }
+                      >
+                        <MessageSquare size={20} />
+                        Central de Chat
+                      </button>
+)}
                       <button
                         onClick={() => {
                           setAdminTab("manual");
@@ -3097,6 +3136,16 @@ const App: React.FC = () => {
                       <Users size={18} />
                       Equipe
                     </button>
+                    {currentTenant?.isChatEnabled && (
+<button
+                      onClick={() => setAdminTab("inboxes")}
+                      className={`flex items-center gap-3 px-4 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "inboxes" ? "bg-brand text-brand-contrast shadow-md" : "text-gray-500 hover:bg-gray-100"}`}
+                      style={adminTab === "inboxes" ? { backgroundColor: currentTenant.primaryColor } : {}}
+                    >
+                      <Inbox size={18} />
+                      Departamentos
+                    </button>
+)}
                     <button
                       onClick={() => setAdminTab("analytics")}
                       className={`flex items-center gap-3 px-4 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "analytics" ? "bg-brand text-brand-contrast shadow-md" : "text-gray-500 hover:bg-gray-100"}`}
@@ -3137,6 +3186,20 @@ const App: React.FC = () => {
                       <Laptop size={18} />
                       Baixar Aplicativo para PC
                     </button>
+                    {currentTenant?.isChatEnabled && (
+<button
+                      onClick={() => setAdminTab("chat")}
+                      className={`flex items-center gap-3 px-4 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "chat" ? "bg-brand text-brand-contrast shadow-md" : "text-gray-500 hover:bg-gray-100"}`}
+                      style={
+                        adminTab === "chat"
+                          ? { backgroundColor: currentTenant.primaryColor }
+                          : {}
+                      }
+                    >
+                      <MessageSquare size={18} />
+                      Central de Chat
+                    </button>
+)}
                     <button
                       onClick={() => setAdminTab("manual")}
                       className={`flex items-center gap-3 px-4 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "manual" ? "bg-brand text-brand-contrast shadow-md" : "text-gray-500 hover:bg-gray-100"}`}
@@ -3269,6 +3332,11 @@ const App: React.FC = () => {
                 {adminTab === "team" && (
                   <TeamManagement tenantId={currentTenant.id} />
                 )}
+                {adminTab === "inboxes" && currentTenant?.isChatEnabled && (
+                  <React.Suspense fallback={<div className="flex h-full items-center justify-center p-8"><Loader2 className="w-8 h-8 text-emerald-600 animate-spin" /></div>}>
+                    <InboxManagement tenantId={currentTenant.id} />
+                  </React.Suspense>
+                )}
                 {adminTab === "analytics" && (
                   <AdminAnalytics tenant={currentTenant} />
                 )}
@@ -3289,6 +3357,8 @@ const App: React.FC = () => {
                     <AdminDesktopApp tenant={currentTenant!} />
                   </React.Suspense>
                 )}
+                {adminTab === "chat" && currentTenant?.isChatEnabled && <ChatCentral currentUser={session?.user} tenantId={currentTenant?.id} />}
+
                 {adminTab === "manual" && <AdminManual />}
               </div>
             </>

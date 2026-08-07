@@ -151,6 +151,7 @@ export interface PharmacyConfig {
   bannerTitle?: string;
   bannerSubtitle?: string;
   isBlocked?: boolean;
+  isChatEnabled?: boolean;
   customCategories?: string[];
   customManufacturers?: string[];
   licenseExpiration?: string;

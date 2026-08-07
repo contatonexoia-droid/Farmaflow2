@@ -241,6 +241,7 @@ export const mapDbTenantToApp = (t: any): PharmacyConfig => {
     bannerTitle: t.banner_title || t.bannertitle || "",
     bannerSubtitle: t.banner_subtitle || t.bannersubtitle || "",
     isBlocked: t.is_blocked || t.isblocked === true,
+    isChatEnabled: t.is_chat_enabled === true || t.ischatenabled === true,
     customCategories: t.custom_categories || t.customcategories || [],
     departments: t.departments || undefined,
     customManufacturers: t.custom_manufacturers || t.custommanufacturers || [],
@@ -287,7 +288,7 @@ export const getTenants = async (): Promise<PharmacyConfig[]> => {
 
       // Fallback para acesso direto (precisa que SQL RLS libere o acesso)
       const support = await checkSchemaSupport();
-      let fields = "id, slug, custom_domain, name, whatsapp, logo, primary_color, secondary_color, accent_color, banner_title, banner_subtitle, is_blocked, license_expiration, cnpj, full_address, corporate_email, manufacturer_logos, enable_smart_banners, smart_banners, coupon_banner_color, minimum_order_value, admin_email, admin_password, notification_sound, notification_volume, departments";
+      let fields = "id, slug, custom_domain, name, whatsapp, logo, primary_color, secondary_color, accent_color, banner_title, banner_subtitle, is_blocked, is_chat_enabled, license_expiration, cnpj, full_address, corporate_email, manufacturer_logos, enable_smart_banners, smart_banners, coupon_banner_color, minimum_order_value, admin_email, admin_password, notification_sound, notification_volume, departments";
       if (support.hasNetworkTenants) {
         fields += ", is_network_master, network_id";
       }
@@ -449,6 +450,7 @@ export const saveTenant = async (
       banner_title: tenant.bannerTitle || "",
       banner_subtitle: tenant.bannerSubtitle || "",
       is_blocked: tenant.isBlocked || false,
+      is_chat_enabled: tenant.isChatEnabled || false,
       license_expiration: tenant.licenseExpiration || null,
       cnpj: tenant.cnpj || "",
       full_address: tenant.fullAddress || "",
