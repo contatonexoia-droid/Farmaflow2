@@ -66,6 +66,11 @@ app.get("/api/v1/tenants/admin", async (req, res) => {
   }
 });
 
+app.get("/api/v1/version", (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.json({ version: "3.0.5" });
+});
+
 app.get("/api/v1/resolve-tenant", async (req, res) => {
   try {
     const host = req.query.hostname || req.headers.host || "";

@@ -1815,6 +1815,33 @@ const App: React.FC = () => {
     const init = async () => {
       setIsLoading(true);
       try {
+        // Verificação de versão e limpeza de cache ativa para evitar travamentos de cache nos clientes
+        try {
+          const clientVersion = "3.0.5";
+          const res = await fetch("/api/v1/version");
+          if (res.ok) {
+            const data = await res.json();
+            if (data && data.version && data.version !== clientVersion) {
+              console.log("[FarmaFlow Auto-Update]: Nova versão detectada, limpando caches...");
+              if ("caches" in window) {
+                const keys = await caches.keys();
+                await Promise.all(keys.map(key => caches.delete(key)));
+              }
+              if ("serviceWorker" in navigator) {
+                const registrations = await navigator.serviceWorker.getRegistrations();
+                for (const registration of registrations) {
+                  await registration.unregister();
+                }
+              }
+              // Força o reload completo sem usar cache
+              window.location.reload();
+              return;
+            }
+          }
+        } catch (versionError) {
+          console.warn("Falha ao verificar versão:", versionError);
+        }
+
         const hostname = window.location.hostname;
         const isMainDomain =
           hostname === "farmaflow.online" ||

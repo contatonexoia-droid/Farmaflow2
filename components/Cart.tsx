@@ -578,20 +578,20 @@ export const Cart: React.FC<CartProps> = ({
       return;
     }
 
-    const minFree = tenant.deliverySettings.minOrderForFreeDelivery || 0;
+    const minFree = tenant?.deliverySettings?.minOrderForFreeDelivery || 0;
     if (minFree > 0 && subtotal >= minFree) {
       setDeliveryFee(0);
       setDeliveryError("");
       return;
     }
 
-    if (!tenant.deliverySettings.type || tenant.deliverySettings.type === "fixed") {
-      setDeliveryFee(tenant.deliverySettings.fee || 0);
+    if (!tenant?.deliverySettings?.type || tenant?.deliverySettings?.type === "fixed") {
+      setDeliveryFee(tenant?.deliverySettings?.fee || 0);
       setDeliveryError("");
       return;
     }
 
-    if (tenant.deliverySettings.type === "dynamic") {
+    if (tenant?.deliverySettings?.type === "dynamic") {
       const cleanAddress = getFinalSubmitValue("address");
       const cleanNeighborhood = getFinalSubmitValue("neighborhood");
       const cleanCity = getFinalSubmitValue("city");
@@ -1878,15 +1878,15 @@ export const Cart: React.FC<CartProps> = ({
               </div>
             )}
             {tenant?.deliverySettings?.enabled &&
-              tenant.deliverySettings.minOrderForFreeDelivery > 0 && (
+              (tenant?.deliverySettings?.minOrderForFreeDelivery || 0) > 0 && (
                 <div className="px-1">
-                  {subtotal >= tenant.deliverySettings.minOrderForFreeDelivery ? (
+                  {subtotal >= (tenant?.deliverySettings?.minOrderForFreeDelivery || 0) ? (
                     <div className="bg-emerald-50 border border-emerald-100/50 rounded-2xl p-4 flex items-start gap-3 animate-in fade-in">
                       <div className="text-emerald-600 mt-0.5 shrink-0">
                         <Truck size={18} />
                       </div>
                       <div className="text-xs text-emerald-800 font-bold leading-relaxed">
-                        Parabéns! Você atingiu o valor mínimo de <strong>R$ {tenant.deliverySettings.minOrderForFreeDelivery.toFixed(2)}</strong> e ganhou <strong>Frete Grátis</strong> nesta compra! 🎉
+                        Parabéns! Você atingiu o valor mínimo de <strong>R$ {(tenant?.deliverySettings?.minOrderForFreeDelivery || 0).toFixed(2)}</strong> e ganhou <strong>Frete Grátis</strong> nesta compra! 🎉
                       </div>
                     </div>
                   ) : (
@@ -1895,12 +1895,12 @@ export const Cart: React.FC<CartProps> = ({
                         <Truck size={18} />
                       </div>
                       <div className="text-xs text-blue-800 font-bold leading-relaxed flex-1">
-                        Falta apenas <strong className="text-blue-600 text-sm">R$ {(tenant.deliverySettings.minOrderForFreeDelivery - subtotal).toFixed(2)}</strong> em produtos para você ganhar <strong className="text-emerald-600">Frete Grátis</strong>!
+                        Falta apenas <strong className="text-blue-600 text-sm">R$ {((tenant?.deliverySettings?.minOrderForFreeDelivery || 0) - subtotal).toFixed(2)}</strong> em produtos para você ganhar <strong className="text-emerald-600">Frete Grátis</strong>!
                         <div className="mt-2 w-full bg-blue-200/50 rounded-full h-1.5 overflow-hidden">
-                          <div 
-                            className="bg-blue-500 h-full transition-all duration-500" 
-                            style={{ width: `${Math.min(100, (subtotal / tenant.deliverySettings.minOrderForFreeDelivery) * 100)}%` }}
-                          />
+                           <div 
+                             className="bg-blue-500 h-full transition-all duration-500" 
+                             style={{ width: `${Math.min(100, (subtotal / (tenant?.deliverySettings?.minOrderForFreeDelivery || 1)) * 100)}%` }}
+                           />
                         </div>
                       </div>
                     </div>
@@ -1929,7 +1929,7 @@ export const Cart: React.FC<CartProps> = ({
             </div>
 
             {tenant?.minimumOrderValue &&
-            subtotal < tenant.minimumOrderValue ? (
+            subtotal < (tenant?.minimumOrderValue || 0) ? (
               <div className="bg-red-50 border border-red-100 rounded-2xl p-4 flex items-start gap-3">
                 <AlertTriangle
                   className="text-red-500 shrink-0 mt-0.5"
@@ -1941,10 +1941,10 @@ export const Cart: React.FC<CartProps> = ({
                   </p>
                   <p className="text-red-600 text-xs mt-1">
                     O valor mínimo para entrega é de{" "}
-                    <strong>R$ {tenant.minimumOrderValue.toFixed(2)}</strong>.
+                    <strong>R$ {(tenant?.minimumOrderValue || 0).toFixed(2)}</strong>.
                     Adicione mais{" "}
                     <strong>
-                      R$ {(tenant.minimumOrderValue - subtotal).toFixed(2)}
+                      R$ {((tenant?.minimumOrderValue || 0) - subtotal).toFixed(2)}
                     </strong>{" "}
                     em produtos para continuar.
                   </p>
@@ -1959,14 +1959,14 @@ export const Cart: React.FC<CartProps> = ({
                 isCalculatingFee ||
                 !!deliveryError ||
                 (!!tenant?.minimumOrderValue &&
-                  subtotal < tenant.minimumOrderValue)
+                  subtotal < (tenant?.minimumOrderValue || 0))
               }
               className={`w-full py-6 rounded-[2.2rem] font-black text-xl flex items-center justify-center gap-4 shadow-2xl shadow-emerald-200 active:scale-95 transition-all ${
                 isSubmitting ||
                 isCalculatingFee ||
                 !!deliveryError ||
                 (!!tenant?.minimumOrderValue &&
-                  subtotal < tenant.minimumOrderValue)
+                  subtotal < (tenant?.minimumOrderValue || 0))
                   ? "bg-gray-300 text-gray-500 cursor-not-allowed shadow-none"
                   : "bg-emerald-600 text-white hover:bg-emerald-700"
               }`}
