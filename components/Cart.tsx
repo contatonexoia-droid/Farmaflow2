@@ -30,6 +30,7 @@ import {
   Sparkles,
   PlusCircle,
   ArrowRight,
+  Store,
 } from "lucide-react";
 import { toast } from "react-hot-toast";
 
@@ -335,6 +336,20 @@ export const Cart: React.FC<CartProps> = ({
   const [cepError, setCepError] = useState("");
   const [cepUnknown, setCepUnknown] = useState(false);
   const [deliveryMode, setDeliveryMode] = useState<"delivery" | "pickup">("delivery");
+
+  const isPickupEnabled = Boolean(
+    tenant?.deliverySettings?.storePickupEnabled ||
+    (tenant?.deliverySettings as any)?.isPickupEnabled ||
+    (tenant as any)?.isPickupEnabled ||
+    (tenant as any)?.pickupEnabled
+  );
+
+  useEffect(() => {
+    if (!isPickupEnabled && deliveryMode === "pickup") {
+      setDeliveryMode("delivery");
+    }
+  }, [isPickupEnabled, deliveryMode]);
+
   const inputRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
   const hasControlledItems = items.some((item) => isControlledProduct(item));
@@ -902,7 +917,7 @@ export const Cart: React.FC<CartProps> = ({
     }
 
     let finalLocationUrl = "";
-    if (cAddress && cCity) {
+    if (deliveryMode === "delivery" && cAddress && cCity) {
       const query = `${cAddress}, ${cNumber}, ${cNeighborhood}, ${cCity}`;
       finalLocationUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
     }
@@ -911,12 +926,12 @@ export const Cart: React.FC<CartProps> = ({
       ...customer,
       name: cName || "",
       phone: cPhone || "",
-      address: cAddress || "",
-      addressNumber: cNumber || "",
-      city: cCity || "",
-      cep: cCep || "Não informado",
-      neighborhood: cNeighborhood || "",
-      complement: cComplement || "",
+      address: deliveryMode === "pickup" ? "Retirada na Loja" : (cAddress || ""),
+      addressNumber: deliveryMode === "pickup" ? "" : (cNumber || ""),
+      city: deliveryMode === "pickup" ? (tenant?.name || "Nossa Loja") : (cCity || ""),
+      cep: deliveryMode === "pickup" ? "Retirada" : (cCep || "Não informado"),
+      neighborhood: deliveryMode === "pickup" ? "Retirada na Loja" : (cNeighborhood || ""),
+      complement: deliveryMode === "pickup" ? "" : (cComplement || ""),
       locationUrl: finalLocationUrl,
     };
 
@@ -1412,6 +1427,40 @@ export const Cart: React.FC<CartProps> = ({
               </div>
             </div>
 
+            {isPickupEnabled && (
+              <div className="space-y-4 pt-4 border-t border-gray-50 animate-in fade-in">
+                <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest px-1">
+                  Opção de Entrega / Retirada
+                </label>
+                <div className="grid grid-cols-2 gap-3 p-1.5 bg-gray-100/80 rounded-2xl border border-gray-200/50">
+                  <button
+                    type="button"
+                    onClick={() => setDeliveryMode("delivery")}
+                    className={`flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl text-xs font-black transition-all ${
+                      deliveryMode === "delivery"
+                        ? "bg-emerald-600 text-white shadow-md shadow-emerald-600/20"
+                        : "text-gray-600 hover:text-gray-900 hover:bg-white/60"
+                    }`}
+                  >
+                    <Truck size={16} />
+                    <span>Entrega em Domicílio</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDeliveryMode("pickup")}
+                    className={`flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl text-xs font-black transition-all ${
+                      deliveryMode === "pickup"
+                        ? "bg-emerald-600 text-white shadow-md shadow-emerald-600/20"
+                        : "text-gray-600 hover:text-gray-900 hover:bg-white/60"
+                    }`}
+                  >
+                    <Store size={16} />
+                    <span>Retirar na Loja</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
             {deliveryMode === "delivery" && (
               <div className="space-y-4 pt-4 border-t border-gray-50 animate-in slide-in-from-top-4">
               <div className="flex items-center justify-between">
@@ -1663,6 +1712,43 @@ export const Cart: React.FC<CartProps> = ({
             </div>
             )}
 
+            {deliveryMode === "pickup" && (
+              <div className="space-y-4 pt-4 border-t border-gray-50 animate-in slide-in-from-top-4">
+                <h4 className="font-black text-gray-900 text-lg">
+                  Local de Retirada
+                </h4>
+                <div className="bg-emerald-50/80 border border-emerald-100 rounded-3xl p-6 space-y-4">
+                  <div className="flex items-center gap-3">
+                    <div className="p-3 bg-emerald-600 text-white rounded-2xl shadow-sm shrink-0">
+                      <Store size={22} />
+                    </div>
+                    <div>
+                      <h5 className="font-black text-emerald-950 text-sm">
+                        Retirada no Balcão da Farmácia
+                      </h5>
+                      <p className="text-xs font-bold text-emerald-700">
+                        {tenant?.name || "Nossa Loja"}
+                      </p>
+                    </div>
+                  </div>
+
+                  {tenant?.fullAddress && (
+                    <div className="flex items-start gap-2.5 bg-white p-4 rounded-2xl border border-emerald-100/80 text-xs text-gray-800 font-bold shadow-sm">
+                      <MapPin size={18} className="text-emerald-600 shrink-0 mt-0.5" />
+                      <span>{tenant.fullAddress}</span>
+                    </div>
+                  )}
+
+                  <div className="flex items-center gap-2 text-xs text-emerald-800 font-semibold bg-emerald-100/50 p-3 rounded-xl">
+                    <CheckCircle size={16} className="text-emerald-600 shrink-0" />
+                    <span>
+                      Seu pedido estará pronto para retirada no balcão após a confirmação. Apresente seu nome e WhatsApp ao retirar.
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div className="space-y-4 pt-4 border-t border-gray-50">
               <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest px-1">
                 Pagamento
@@ -1860,8 +1946,10 @@ export const Cart: React.FC<CartProps> = ({
                      </span>
                   ) : (
                     <span className={!isDeliveryPending && deliveryFee === 0 && !deliveryError ? "text-emerald-600 font-extrabold uppercase text-xs" : "text-black"}>
-                      {deliveryError ? (
+                      {deliveryError && deliveryMode === "delivery" ? (
                         <span className="text-red-500 text-xs">-</span>
+                      ) : deliveryMode === "pickup" ? (
+                        "Grátis (Retirada na loja)"
                       ) : isDeliveryPending ? (
                         <span className="text-amber-600 font-bold text-xs uppercase">A calcular</span>
                       ) : deliveryFee === -1 ? (
@@ -1870,7 +1958,7 @@ export const Cart: React.FC<CartProps> = ({
                     </span>
                   )}
                 </div>
-                {deliveryError && !isCalculatingFee && (
+                {deliveryError && !isCalculatingFee && deliveryMode === "delivery" && (
                   <div className="text-red-500 text-xs flex items-center gap-1 font-medium mt-1">
                     <AlertTriangle size={12} /> {deliveryError}
                   </div>
@@ -1878,6 +1966,7 @@ export const Cart: React.FC<CartProps> = ({
               </div>
             )}
             {tenant?.deliverySettings?.enabled &&
+              deliveryMode === "delivery" &&
               (tenant?.deliverySettings?.minOrderForFreeDelivery || 0) > 0 && (
                 <div className="px-1">
                   {subtotal >= (tenant?.deliverySettings?.minOrderForFreeDelivery || 0) ? (
