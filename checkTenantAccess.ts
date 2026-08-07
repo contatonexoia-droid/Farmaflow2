@@ -9,7 +9,7 @@ const supabaseAuth = createClient(SUPABASE_URL, SUPABASE_KEY);
 export const checkTenantAccess = async (req: Request, res: Response, next: NextFunction): Promise<any> => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Token de autenticação não fornecido ou inválido.' });
+    return res.status(401).json({ error: 'Token de autenticação não fornecido. Verifique se o seu usuário existe no Supabase Auth e faça login novamente.' });
   }
 
   const token = authHeader.split(' ')[1];
@@ -21,8 +21,8 @@ export const checkTenantAccess = async (req: Request, res: Response, next: NextF
       return res.status(401).json({ error: 'Token expirado ou inválido.' });
     }
 
-    const routeTenantId = req.params.tenantId;
-    const userTenantId = user.user_metadata?.tenant_id;
+    const routeTenantId = req.params.tenantId || req.query.tenantId || req.headers['x-tenant-id'];
+    const userTenantId = user.user_metadata?.tenant_id || user.user_metadata?.store_id;
     const userRole = user.user_metadata?.role;
 
     let isAuthorized = false;

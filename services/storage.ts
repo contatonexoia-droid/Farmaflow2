@@ -6,6 +6,7 @@ import {
   PharmacyConfig,
   AppReview,
   PromotionRule,
+  CouponRule,
 } from "../types";
 
 /**
@@ -1157,33 +1158,35 @@ export const mapDbPromotionToApp = (p: any): PromotionRule => ({
   scope: p.scope || "SINGLE_STORE",
 });
 
+
+const getAuthHeaders = (tenantId: string) => {
+  let token = '';
+  try {
+    if (typeof window !== 'undefined') {
+        const saved = window.localStorage.getItem('ff_session');
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          token = parsed.access_token;
+        }
+    }
+  } catch (e) {}
+  return {
+    'Content-Type': 'application/json',
+    'x-tenant-id': tenantId,
+    ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+  };
+};
+
 export const getPromotionsByTenant = async (
   tenantId: string,
   networkId?: string,
 ): Promise<PromotionRule[]> => {
-  if (!isSupabaseConfigured()) return [];
   try {
-    return await retryRequest(async () => {
-      let { data, error } = await supabase.rpc("get_store_offers", {
-        p_tenant_id: tenantId,
-        p_network_id: networkId || null,
-      });
-
-      // Fallback to table if RPC fails (e.g., if schema is old)
-      if (error && error.message && error.message.includes("Could not find")) {
-        let query = supabase.from("promotions").select("*");
-        if (networkId) {
-          query = query.or(`tenant_id.eq.${tenantId},tenant_id.eq.${networkId}`);
-        } else {
-          query = query.eq("tenant_id", tenantId);
-        }
-        const fallbackResult = await query;
-        data = fallbackResult.data;
-        error = fallbackResult.error;
-      }
-      if (error) throw error;
-      return (data || []).map(mapDbPromotionToApp);
-    });
+    const query = networkId ? `?networkId=${networkId}` : '';
+    const res = await fetch(`/api/v1/tenants/${tenantId}/promos${query}`);
+    if (!res.ok) throw new Error("Failed to fetch promos");
+    const data = await res.json();
+    return (data || []).map(mapDbPromotionToApp);
   } catch (e: any) {
     handleNetworkError(e, "Promoções");
     return [];
@@ -1191,7 +1194,6 @@ export const getPromotionsByTenant = async (
 };
 
 export const savePromotion = async (promotion: PromotionRule) => {
-  if (!isSupabaseConfigured()) throw new Error("CONFIG_MISSING");
   try {
     const payload: any = {
       id: promotion.id,
@@ -1218,45 +1220,52 @@ export const savePromotion = async (promotion: PromotionRule) => {
       end_date: promotion.endDate,
       is_active: promotion.isActive,
     };
-    const support = await checkSchemaSupport();
-    if (support.hasNetworkPromotions) {
-      payload.scope = promotion.scope || "SINGLE_STORE";
-    }
-    await retryRequest(async () => {
-      const { error } = await supabase.from("promotions").upsert(payload);
-      if (error) throw error;
+    
+    // scope is required by the backend
+    payload.scope = promotion.scope || "SINGLE_STORE";
+    
+    const res = await fetch(`/api/v1/tenants/${promotion.tenantId}/promos`, {
+      method: 'POST',
+      headers: getAuthHeaders(promotion.tenantId),
+      body: JSON.stringify(payload)
     });
+    if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text);
+    }
   } catch (e: any) {
     throw new Error(handleNetworkError(e, "Salvar Promoção"));
   }
 };
 
-export const deletePromotion = async (id: string) => {
-  if (!isSupabaseConfigured()) throw new Error("CONFIG_MISSING");
+export const deletePromotion = async (id: string, tenantId: string) => {
   try {
-    await retryRequest(async () => {
-      const { error } = await supabase.from("promotions").delete().eq("id", id);
-      if (error) throw error;
+    const res = await fetch(`/api/v1/tenants/${tenantId}/promos/${id}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders(tenantId)
     });
+    if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text);
+    }
   } catch (e: any) {
     throw new Error(handleNetworkError(e, "Excluir Promoção"));
   }
 };
 
-import { CouponRule } from "../types";
-
-const mapCouponFromDB = (c: any): CouponRule => ({
+export const mapCouponFromDB = (c: any): CouponRule => ({
   id: c.id,
   tenantId: c.tenant_id || c.tenantid,
-  code: c.code,
-  discountType: c.discount_type || c.discounttype,
-  discountValue: c.discount_value || c.discountvalue,
-  couponScope: c.coupon_scope || c.couponscope,
-  minPurchaseValue: c.min_purchase_value || c.minpurchasevalue,
-  targetType: c.target_type || c.targettype,
-  targetValue: c.target_value || c.targetvalue,
-  specificProductIds: c.specific_product_ids || c.specificproductids,
-  filtersMetadata: c.filters_metadata || c.filtersmetadata,
+  code: c.code || "",
+  discountType: c.discount_type || c.discounttype || "PERCENTAGE",
+  discountValue: Number(c.discount_value ?? c.discountvalue ?? 0),
+  couponScope: c.coupon_scope || c.couponscope || "GLOBAL",
+  minPurchaseValue: Number(c.min_purchase_value ?? c.minpurchasevalue ?? 0),
+  targetType: c.target_type || c.targettype || "ALL",
+  targetValue: c.target_value || c.targetvalue || "",
+  specificProductIds: c.specific_product_ids || c.specificproductids || [],
+  maxUses: c.max_uses ?? c.maxuses,
+  currentUses: c.current_uses ?? c.currentuses,
   startDate: c.start_date || c.startdate,
   endDate: c.end_date || c.enddate,
   isActive: c.is_active !== false && c.isactive !== false,
@@ -1267,20 +1276,12 @@ export const getCouponsByTenant = async (
   tenantId: string,
   networkId?: string,
 ): Promise<CouponRule[]> => {
-  if (!isSupabaseConfigured()) return [];
   try {
-    return await retryRequest(async () => {
-      let query = supabase.from("coupons").select("*");
-      if (networkId) {
-        query = query.or(`tenant_id.eq.${tenantId},tenant_id.eq.${networkId}`);
-      } else {
-        query = query.eq("tenant_id", tenantId);
-      }
-      const { data, error } = await query;
-
-      if (error) throw error;
-      return (data || []).map(mapCouponFromDB);
-    });
+    const query = networkId ? `?networkId=${networkId}` : '';
+    const res = await fetch(`/api/v1/tenants/${tenantId}/vouchers${query}`);
+    if (!res.ok) throw new Error("Failed to fetch coupons");
+    const data = await res.json();
+    return (data || []).map(mapCouponFromDB);
   } catch (e: any) {
     console.error("Error fetching coupons:", e);
     return [];
@@ -1288,47 +1289,51 @@ export const getCouponsByTenant = async (
 };
 
 export const saveCoupon = async (coupon: CouponRule) => {
-  if (!isSupabaseConfigured()) throw new Error("CONFIG_MISSING");
   try {
-    await retryRequest(async () => {
-      const dbCoupon: any = {
-        id: coupon.id,
-        tenant_id: coupon.tenantId,
-        code: coupon.code,
-        discount_type: coupon.discountType,
-        discount_value: coupon.discountValue,
-        coupon_scope: coupon.couponScope,
-        min_purchase_value: coupon.minPurchaseValue,
-        target_type: coupon.targetType,
-        target_value: coupon.targetValue,
-        specific_product_ids: coupon.specificProductIds,
-        filters_metadata: coupon.filtersMetadata,
-        start_date: coupon.startDate,
-        end_date: coupon.endDate,
-        is_active: coupon.isActive,
-      };
-
-      const support = await checkSchemaSupport();
-      if (support.hasNetworkCoupons) {
-        dbCoupon.scope = coupon.scope || "SINGLE_STORE";
-      }
-
-      const { error } = await supabase.from("coupons").upsert(dbCoupon);
-
-      if (error) throw error;
+    const dbCoupon: any = {
+      id: coupon.id,
+      tenant_id: coupon.tenantId,
+      code: coupon.code,
+      discount_type: coupon.discountType,
+      discount_value: coupon.discountValue,
+      coupon_scope: coupon.couponScope,
+      min_purchase_value: coupon.minPurchaseValue,
+      usage_limit: coupon.usageLimit,
+      times_used: coupon.timesUsed,
+      first_purchase_only: coupon.firstPurchaseOnly,
+      applicable_products: coupon.applicableProducts,
+      applicable_categories: coupon.applicableCategories,
+      applicable_manufacturers: coupon.applicableManufacturers,
+      start_date: coupon.startDate,
+      end_date: coupon.endDate,
+      is_active: coupon.isActive,
+    };
+    dbCoupon.scope = coupon.scope || "SINGLE_STORE";
+    
+    const res = await fetch(`/api/v1/tenants/${coupon.tenantId}/vouchers`, {
+      method: 'POST',
+      headers: getAuthHeaders(coupon.tenantId),
+      body: JSON.stringify(dbCoupon)
     });
+    if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text);
+    }
   } catch (e: any) {
     throw new Error(handleNetworkError(e, "Salvar Cupom"));
   }
 };
 
-export const deleteCoupon = async (id: string) => {
-  if (!isSupabaseConfigured()) throw new Error("CONFIG_MISSING");
+export const deleteCoupon = async (id: string, tenantId: string) => {
   try {
-    await retryRequest(async () => {
-      const { error } = await supabase.from("coupons").delete().eq("id", id);
-      if (error) throw error;
+    const res = await fetch(`/api/v1/tenants/${tenantId}/vouchers/${id}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders(tenantId)
     });
+    if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text);
+    }
   } catch (e: any) {
     throw new Error(handleNetworkError(e, "Excluir Cupom"));
   }

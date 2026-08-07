@@ -190,6 +190,10 @@ app.get("/api/v1/store/:tenantId/init", async (req, res) => {
       };
     });
 
+
+
+
+
     res.setHeader(
       "Cache-Control",
       "public, s-maxage=60, stale-while-revalidate=300",
@@ -382,6 +386,8 @@ app.post("/api/v1/team/users", checkTenantAccess, async (req, res) => {
       return res.status(400).json({ error: "Nome, e-mail, função e senha são obrigatórios." });
     }
 
+    let authUserId = "";
+    
     const { data: user, error } = await supabaseAdmin.auth.admin.createUser({
       email,
       password,
@@ -394,19 +400,47 @@ app.post("/api/v1/team/users", checkTenantAccess, async (req, res) => {
     });
 
     if (error) {
-      console.error("[Team API] Erro ao criar usuário auth:", error);
-      let errorMessage = error.message;
-      if (errorMessage.includes("already been registered")) {
-        errorMessage = "Este endereço de e-mail já está sendo utilizado.";
+      if (error.message.includes("already been registered")) {
+         // Tentar encontrar o usuário existente
+         const { data: existingUsers } = await supabaseAdmin.auth.admin.listUsers();
+         const existingUser = existingUsers?.users?.find((u: any) => u.email === email);
+         
+         if (existingUser) {
+            authUserId = existingUser.id;
+            
+            // Verifica se já está no tenant_users
+            const { data: existingTenantUser } = await supabaseAdmin
+              .from("tenant_users")
+              .select("id")
+              .eq("supabase_user_id", authUserId)
+              .eq("tenant_id", store_id || req.headers["x-tenant-id"])
+              .single();
+              
+            if (existingTenantUser) {
+               return res.status(400).json({ error: "Este usuário já faz parte da sua equipe." });
+            }
+         } else {
+            return res.status(400).json({ error: "Este endereço de e-mail já está sendo utilizado por outro usuário no sistema." });
+         }
+      } else {
+        console.error("[Team API] Erro ao criar usuário auth:", error);
+        
+        // Verifica se o erro pode ser falta de permissão (Service Role Key ausente)
+        if (error.message.includes("not allowed") || error.status === 401 || error.status === 403) {
+            return res.status(400).json({ error: "Erro de permissão no Supabase. Verifique se a variável SUPABASE_SERVICE_ROLE_KEY está configurada no painel." });
+        }
+        
+        return res.status(400).json({ error: error.message });
       }
-      return res.status(400).json({ error: errorMessage });
+    } else {
+      authUserId = user.user.id;
     }
     
     // Inserir no tenant_users
-    const { error: userError } = await supabase
+    const { error: userError } = await supabaseAdmin
       .from("tenant_users")
       .insert({
-        supabase_user_id: user.user.id,
+        supabase_user_id: authUserId,
         tenant_id: store_id || req.headers["x-tenant-id"] || req.query.tenantId,
         name: full_name,
         email: email,
@@ -416,7 +450,7 @@ app.post("/api/v1/team/users", checkTenantAccess, async (req, res) => {
 
     if (userError) {
        console.error("[Team API] Erro ao inserir no tenant_users:", userError);
-       return res.status(400).json({ error: "Erro de banco de dados ao salvar o funcionário." });
+       return res.status(400).json({ error: "Erro de banco de dados ao salvar o funcionário. Detalhes: " + (userError.message || JSON.stringify(userError)) });
     }
 
     return res.status(201).json({ success: true, user });
@@ -431,7 +465,7 @@ app.patch("/api/v1/team/users/:id", checkTenantAccess, async (req, res) => {
     const userId = req.params.id;
     const { full_name, role, is_active } = req.body;
 
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from("tenant_users")
       .update({ name: full_name, role, is_active })
       .eq("id", userId)
@@ -4814,6 +4848,103 @@ async function startServer() {
   } catch (e) {
     __dirname = process.cwd();
   }
+
+
+// These endpoints will be added to server.ts
+
+app.get("/api/v1/tenants/:tenantId/promos", async (req, res) => {
+  try {
+    const tenantId = req.params.tenantId;
+    const networkId = req.query.networkId;
+    
+    let query = supabaseAdmin.from("promotions").select("*");
+    if (networkId) {
+      query = query.or(`tenant_id.eq.${tenantId},tenant_id.eq.${networkId}`);
+    } else {
+      query = query.eq("tenant_id", tenantId);
+    }
+    
+    const { data, error } = await query;
+    if (error) throw error;
+    res.json(data);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/v1/tenants/:tenantId/promos", checkTenantAccess, async (req, res) => {
+  try {
+    const tenantId = req.params.tenantId;
+    const payload = req.body;
+    // ensure tenant is matching
+    if (payload.tenant_id !== tenantId) {
+        return res.status(403).json({ error: "Tenant mismatch" });
+    }
+    const { data, error } = await supabaseAdmin.from("promotions").upsert(payload).select().single();
+    if (error) throw error;
+    res.json(data);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/v1/tenants/:tenantId/promos/:id", checkTenantAccess, async (req, res) => {
+  try {
+    const tenantId = req.params.tenantId;
+    const { error } = await supabaseAdmin.from("promotions").delete().eq("id", req.params.id).eq("tenant_id", tenantId);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Vouchers (Coupons)
+app.get("/api/v1/tenants/:tenantId/vouchers", async (req, res) => {
+  try {
+    const tenantId = req.params.tenantId;
+    const networkId = req.query.networkId;
+    
+    let query = supabaseAdmin.from("coupons").select("*");
+    if (networkId) {
+      query = query.or(`tenant_id.eq.${tenantId},tenant_id.eq.${networkId}`);
+    } else {
+      query = query.eq("tenant_id", tenantId);
+    }
+    
+    const { data, error } = await query;
+    if (error) throw error;
+    res.json(data);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/v1/tenants/:tenantId/vouchers", checkTenantAccess, async (req, res) => {
+  try {
+    const tenantId = req.params.tenantId;
+    const payload = req.body;
+    if (payload.tenant_id !== tenantId) {
+        return res.status(403).json({ error: "Tenant mismatch" });
+    }
+    const { data, error } = await supabaseAdmin.from("coupons").upsert(payload).select().single();
+    if (error) throw error;
+    res.json(data);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/v1/tenants/:tenantId/vouchers/:id", checkTenantAccess, async (req, res) => {
+  try {
+    const tenantId = req.params.tenantId;
+    const { error } = await supabaseAdmin.from("coupons").delete().eq("id", req.params.id).eq("tenant_id", tenantId);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
   if (process.env.NODE_ENV !== "production") {
     const { createServer: createViteServer } = await import("vite");

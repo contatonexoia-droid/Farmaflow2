@@ -3330,7 +3330,7 @@ const App: React.FC = () => {
                   <AdminImportHistory tenant={currentTenant} />
                 )}
                 {adminTab === "team" && (
-                  <TeamManagement tenantId={currentTenant.id} />
+                  <TeamManagement tenantId={currentTenant.id} session={session} />
                 )}
                 {adminTab === "inboxes" && currentTenant?.isChatEnabled && (
                   <React.Suspense fallback={<div className="flex h-full items-center justify-center p-8"><Loader2 className="w-8 h-8 text-emerald-600 animate-spin" /></div>}>

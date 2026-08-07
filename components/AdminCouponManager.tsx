@@ -630,7 +630,7 @@ const AdminCouponManager: React.FC<AdminCouponManagerProps> = ({ tenant, product
     if (!window.confirm('Tem certeza que deseja excluir este cupom?')) return;
 
     try {
-      await deleteCoupon(id);
+      await deleteCoupon(id, tenant.id);
       const updatedCoupons = await getCouponsByTenant(tenant.id);
       onCouponsUpdate(updatedCoupons);
       toast.success('Cupom excluído com sucesso!');

@@ -920,7 +920,7 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
       return;
 
     try {
-      await deletePromotion(id);
+      await deletePromotion(id, tenant.id);
       const updatedPromos = await getPromotionsByTenant(tenant.id);
       onPromotionsUpdate(updatedPromos);
       toast.success("Promoção excluída com sucesso!");

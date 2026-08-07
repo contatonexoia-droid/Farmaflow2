@@ -4,27 +4,29 @@ import { supabase } from '../services/supabase';
 
 interface TeamManagementProps {
   tenantId: string;
+  session?: any;
 }
 
 const ROLES = [
-  { id: 'ADMIN_MATRIZ', label: 'Admin Matriz', color: 'bg-purple-100 text-purple-800', border: 'border-purple-200', desc: 'Acesso total a todas as filiais' },
-  { id: 'GERENTE_LOJA', label: 'Gerente', color: 'bg-emerald-100 text-emerald-800', border: 'border-emerald-200', desc: 'Gestão da loja atual' },
-  { id: 'BALCONISTA', label: 'Balconista', color: 'bg-blue-100 text-blue-800', border: 'border-blue-200', desc: 'Atendimento e chat' }
+  { id: 'admin', label: 'Admin Matriz', color: 'bg-purple-100 text-purple-800', border: 'border-purple-200', desc: 'Acesso total a todas as filiais' },
+  { id: 'gerente', label: 'Gerente', color: 'bg-emerald-100 text-emerald-800', border: 'border-emerald-200', desc: 'Gestão da loja atual' },
+  { id: 'operador', label: 'Operador / Balconista', color: 'bg-blue-100 text-blue-800', border: 'border-blue-200', desc: 'Atendimento e chat' },
+  { id: 'entregador', label: 'Entregador', color: 'bg-orange-100 text-orange-800', border: 'border-orange-200', desc: 'Apenas entregas' }
 ];
 
-export const TeamManagement: React.FC<TeamManagementProps> = ({ tenantId }) => {
+export const TeamManagement: React.FC<TeamManagementProps> = ({ tenantId, session }) => {
   const [team, setTeam] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [formData, setFormData] = useState({ id: '', full_name: '', email: '', role: 'BALCONISTA', is_active: true, password: '', store_id: tenantId });
+  const [formData, setFormData] = useState({ id: '', full_name: '', email: '', role: 'operador', is_active: true, password: '', store_id: tenantId });
   const [formLoading, setFormLoading] = useState(false);
   const [error, setError] = useState('');
   
   const [loadingAuth, setLoadingAuth] = useState(true);
   const [user, setUser] = useState<any>(null);
-  const [currentUserRole, setCurrentUserRole] = useState('BALCONISTA');
+  const [currentUserRole, setCurrentUserRole] = useState('operador');
   
   // Mocking stores for Admin Matriz selection
   const [stores, setStores] = useState([
@@ -63,10 +65,20 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ tenantId }) => {
   }, [tenantId, loadingAuth, user]);
 
   const getAuthHeaders = async () => {
-    const { data: { session } } = await supabase.auth.getSession();
+    let token = session?.access_token;
+    if (!token) {
+        const saved = localStorage.getItem('ff_session');
+        if (saved) {
+            try {
+                const parsed = JSON.parse(saved);
+                token = parsed.access_token;
+            } catch (e) {}
+        }
+    }
     return {
       'Content-Type': 'application/json',
-      ...(session?.access_token ? { 'Authorization': `Bearer ${session.access_token}` } : {})
+      'x-tenant-id': tenantId,
+      ...(token ? { 'Authorization': `Bearer ${token}` } : {})
     };
   };
 
@@ -291,7 +303,7 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ tenantId }) => {
                   </div>
                </div>
 
-               {currentUserRole === 'ADMIN_MATRIZ' && (
+               {currentUserRole === 'admin' && (
                  <div className="space-y-1.5">
                     <label className="text-[11px] font-black text-gray-500 uppercase tracking-widest">Atribuir a qual Loja (Store ID)?</label>
                     <select 
