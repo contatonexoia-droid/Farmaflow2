@@ -88,10 +88,24 @@ app.get("/api/v1/resolve-tenant", async (req, res) => {
           .from("tenants")
           .select("*")
           .eq("slug", tenantSlug)
-          .single();
+          .maybeSingle();
           
         if (!error && data) {
           tenantData = data;
+        } else {
+          // Fallback: busca flexível comparando o slug limpo (sem acentos, espaços ou hífens)
+          const cleanReqSlug = tenantSlug.toLowerCase().replace(/[^a-z0-9]/g, "");
+          const { data: allTenants } = await supabase.from("tenants").select("*");
+          if (allTenants) {
+            tenantData = allTenants.find((t: any) => {
+              const rawSlug = (t.slug || t.subdomain || t.name || t.id || "")
+                .toLowerCase()
+                .normalize("NFD")
+                .replace(/[\u0300-\u036f]/g, "")
+                .replace(/[^a-z0-9]/g, "");
+              return rawSlug === cleanReqSlug;
+            }) || null;
+          }
         }
       }
     } 

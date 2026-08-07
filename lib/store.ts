@@ -23,11 +23,16 @@ export const getStoreUrl = (tenant?: Partial<PharmacyConfig> & { subdomain?: str
     return typeof window !== 'undefined' ? window.location.origin : '';
   }
 
-  // Normalize: lowercase, remove accents and invalid characters
+  // Normalize: lowercase, remove accents, convert spaces and invalid characters to single hyphens
   const cleanIdentifier = rawIdentifier
     .toLowerCase()
     .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s-]/g, "")
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
 
   // 3. If running on farmaflow.online domain
   if (typeof window !== 'undefined' && window.location.hostname.includes('farmaflow.online')) {
