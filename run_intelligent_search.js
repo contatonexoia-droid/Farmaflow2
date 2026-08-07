@@ -26,8 +26,8 @@ async function run() {
     console.log(`Lendo o arquivo SQL de: ${sqlPath}`);
     const sqlContent = fs.readFileSync(sqlPath, 'utf8');
 
-    console.log("Executando script SQL no banco de dados via RPC 'execute_sql'...");
-    const { data, error } = await supabase.rpc('execute_sql', { sql: sqlContent });
+    console.log("Executando script SQL no banco de dados via RPC 'exec_sql'...");
+    const { data, error } = await supabase.rpc('exec_sql', { sql: sqlContent });
 
     if (error) {
       console.error("Erro ao executar SQL:", error);

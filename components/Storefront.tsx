@@ -194,6 +194,10 @@ const TYPO_MAP: Record<string, string> = {
   dorfe: "dorflex",
   dorflx: "dorflex",
   tyleno: "tylenol",
+  shamp: "shampoo",
+  shampo: "shampoo",
+  xamp: "xampu",
+  xampo: "xampu",
 };
 
 const SYNONYM_MAP: Record<string, string[]> = {
@@ -263,9 +267,13 @@ const SYNONYM_MAP: Record<string, string[]> = {
         "pomada",
         "pomadinha",
       ],
-      shampoo: ["shampoo", "sh", "xampu", "champu"],
-      sh: ["shampoo", "sh", "xampu", "champu"],
-      xampu: ["shampoo", "sh", "xampu", "champu"],
+      shampoo: ["shampoo", "sh", "xampu", "champu", "shamp", "shampo", "xamp", "xampo"],
+      sh: ["shampoo", "sh", "xampu", "champu", "shamp", "shampo", "xamp", "xampo"],
+      xampu: ["shampoo", "sh", "xampu", "champu", "shamp", "shampo", "xamp", "xampo"],
+      shamp: ["shampoo", "sh", "xampu", "champu", "shamp", "shampo", "xamp", "xampo"],
+      shampo: ["shampoo", "sh", "xampu", "champu", "shamp", "shampo", "xamp", "xampo"],
+      xamp: ["shampoo", "sh", "xampu", "champu", "shamp", "shampo", "xamp", "xampo"],
+      xampo: ["shampoo", "sh", "xampu", "champu", "shamp", "shampo", "xamp", "xampo"],
   };
 
 
@@ -890,6 +898,8 @@ const SmartBanner: React.FC<{
     const isHygiene =
       term.includes("desodorante") ||
       term.includes("shampoo") ||
+      term.includes("sh") ||
+      term.includes("xampu") ||
       term.includes("sabonete") ||
       cat.includes("higiene") ||
       cat.includes("beleza") ||

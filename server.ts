@@ -950,7 +950,14 @@ const ENDPOINT_PHARMA_SYNONYMS: Record<string, string[]> = {
   dipirona: ["dipirona", "novalgina"],
   novalgina: ["dipirona", "novalgina"],
   ibuprofeno: ["ibuprofeno", "alivium"],
-  alivium: ["ibuprofeno", "alivium"]
+  alivium: ["ibuprofeno", "alivium"],
+  shampoo: ["shampoo", "sh", "xampu", "champu", "shamp", "shampo", "xamp", "xampo"],
+  sh: ["shampoo", "sh", "xampu", "champu", "shamp", "shampo", "xamp", "xampo"],
+  xampu: ["shampoo", "sh", "xampu", "champu", "shamp", "shampo", "xamp", "xampo"],
+  shamp: ["shampoo", "sh", "xampu", "champu", "shamp", "shampo", "xamp", "xampo"],
+  shampo: ["shampoo", "sh", "xampu", "champu", "shamp", "shampo", "xamp", "xampo"],
+  xamp: ["shampoo", "sh", "xampu", "champu", "shamp", "shampo", "xamp", "xampo"],
+  xampo: ["shampoo", "sh", "xampu", "champu", "shamp", "shampo", "xamp", "xampo"]
 };
 
 function normalizeText(text: string): string {
