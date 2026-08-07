@@ -1847,6 +1847,7 @@ const App: React.FC = () => {
           hostname === "farmaflow.online" ||
           hostname === "www.farmaflow.online" ||
           hostname === "nexoia.online" ||
+          hostname === "farmaflow.nexoia.online" ||
           hostname === "localhost" ||
           hostname.includes("run.app");
         const path = window.location.pathname;
@@ -1861,7 +1862,65 @@ const App: React.FC = () => {
           targetTenant = await getTenantByHostname(hostname);
         }
 
-        // Se encontrou tenant pelo hostname ou se é dev testing via ?p (Opcional, mas mantido pra testes admin)
+        // 2º: Se falhou e identificamos um subdomínio válido no hostname
+        const parts = hostname.split(".");
+        let extractedSubdomain = "";
+        if (parts.length >= 3) {
+          const firstPart = parts[0];
+          if (
+            firstPart !== "www" &&
+            firstPart !== "app" &&
+            firstPart !== "admin" &&
+            firstPart !== "api" &&
+            firstPart !== "portal" &&
+            firstPart !== "farmaflow" &&
+            firstPart !== "nexoia"
+          ) {
+            extractedSubdomain = firstPart;
+          } else if (parts.length > 3) {
+            const secondPart = parts[1];
+            if (
+              secondPart !== "www" &&
+              secondPart !== "app" &&
+              secondPart !== "admin" &&
+              secondPart !== "api" &&
+              secondPart !== "portal" &&
+              secondPart !== "farmaflow" &&
+              secondPart !== "nexoia"
+            ) {
+              extractedSubdomain = secondPart;
+            }
+          }
+        }
+
+        if (!targetTenant && extractedSubdomain) {
+          const tenants = await getTenants();
+          targetTenant =
+            tenants.find((t) => {
+              const cleanSlug = (t.slug || t.subdomain || t.id || "")
+                .toLowerCase()
+                .normalize("NFD")
+                .replace(/[\u0300-\u036f]/g, "")
+                .replace(/[^a-z0-9\s-]/g, "")
+                .trim()
+                .replace(/\s+/g, "-");
+              const cleanSubdomain = extractedSubdomain
+                .toLowerCase()
+                .normalize("NFD")
+                .replace(/[\u0300-\u036f]/g, "")
+                .replace(/[^a-z0-9\s-]/g, "")
+                .trim()
+                .replace(/\s+/g, "-");
+              return (
+                t.id === extractedSubdomain ||
+                t.slug === extractedSubdomain ||
+                t.subdomain === extractedSubdomain ||
+                cleanSlug === cleanSubdomain
+              );
+            }) || null;
+        }
+
+        // 3º: Como fallback, tenta obter pelo parâmetro de URL "?p"
         const params = new URLSearchParams(window.location.search);
         const pParam = params.get("p");
 
