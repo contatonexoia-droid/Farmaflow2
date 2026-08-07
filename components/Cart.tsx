@@ -72,7 +72,7 @@ const CROSS_SELL_RULES = [
   
   // 2. Linha Infantil / Bebês <-> Higiene e Acessórios
   {
-    triggerKeywords: ["fralda", "infantil", "bebê", "bebe", "mamãe", "chupeta", "mamadeira", "pampers", "huggies", "babysec"],
+    triggerKeywords: ["fralda", "infantil", "bebê", "bebe", "mamãe", "chupeta", "mamadeira"],
     suggestedCategory: "Higiene Infantil",
     searchQuery: "assadura",
     message: "Vai levar itens para o bebê? Não esqueça a pomada para assadura e os lencinhos!",
@@ -81,13 +81,13 @@ const CROSS_SELL_RULES = [
     exclusionKeywords: ["assadura", "lenço", "pomada", "toalhinha"]
   },
   {
-    triggerKeywords: ["assadura", "lenço umedecido", "lenco umedecido", "pomada infantil", "toalhinha", "babymed", "hipoglos", "dexpantenol", "bepantol", "nstatina"],
+    triggerKeywords: ["assadura", "lenço umedecido", "lenco umedecido", "pomada infantil", "toalhinha"],
     suggestedCategory: "Fraldas",
     searchQuery: "fralda",
     message: "Estoque garantido: Aproveite para levar mais fraldas para o bebê!",
     cta: "Ver Fraldas",
     icon: "Baby",
-    exclusionKeywords: ["fralda", "pampers", "huggies", "babysec"]
+    exclusionKeywords: ["fralda", "pampers", "huggies"]
   },
 
   // 3. Dores e Inflamações <-> Protetores Gástricos
@@ -187,14 +187,7 @@ function getCrossSellRecommendation(cartItems: any[]) {
   
   const normalize = (s: string) => (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   
-  const cartTexts = cartItems.map(item => normalize(
-    (item.name || "") + " " +
-    (item.category || "") + " " +
-    (item.description || "") + " " +
-    (item.indication || "") + " " +
-    (item.substance || "") + " " +
-    (item.internalCode || "")
-  ));
+  const cartTexts = cartItems.map(item => normalize(item.name + " " + (item.category || "")));
   
   for (const rule of CROSS_SELL_RULES) {
     const isTriggered = rule.triggerKeywords.some(kw => cartTexts.some(text => text.includes(normalize(kw))));
@@ -207,15 +200,7 @@ function getCrossSellRecommendation(cartItems: any[]) {
     }
   }
   
-  // Smart fallback recommendation if items exist but no rule matched
-  return {
-    suggestedCategory: "Farmacinha e Ofertas",
-    searchQuery: "oferta",
-    message: "Aproveite a sua compra: Que tal conferir nossas ofertas e itens essenciais para sua farmacinha?",
-    cta: "Ver Ofertas",
-    icon: "Sparkles",
-    exclusionKeywords: []
-  };
+  return null;
 }
 
 interface CartProps {
@@ -1463,43 +1448,21 @@ export const Cart: React.FC<CartProps> = ({
                   <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest">
                     CEP
                   </label>
-                  <div className="flex items-center gap-3">
-                    <a
-                      href="https://buscacepinter.correios.com.br/app/endereco/index.php"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-[11px] font-bold text-blue-600 hover:text-blue-700 underline"
-                    >
-                      Buscar no Correios
-                    </a>
-                    <button 
-                      type="button" 
-                      onClick={() => {
-                        setCepUnknown(!cepUnknown);
-                        if (!cepUnknown) {
-                           handleFieldChange("cep", "");
-                           setCepError("");
-                           setTimeout(() => inputRefs.current["address"]?.focus(), 100);
-                        }
-                      }}
-                      className="text-[11px] font-bold text-emerald-600 hover:text-emerald-700 underline underline-offset-2"
-                    >
-                      {cepUnknown ? "Voltar ao CEP" : "Não sei meu CEP"}
-                    </button>
-                  </div>
+                  <button 
+                    type="button" 
+                    onClick={() => {
+                      setCepUnknown(!cepUnknown);
+                      if (!cepUnknown) {
+                         handleFieldChange("cep", "");
+                         setCepError("");
+                         setTimeout(() => inputRefs.current["address"]?.focus(), 100);
+                      }
+                    }}
+                    className="text-[11px] font-bold text-emerald-600 hover:text-emerald-700 underline underline-offset-2"
+                  >
+                    {cepUnknown ? "Buscar pelo CEP" : "Não sei meu CEP"}
+                  </button>
                 </div>
-                {cepUnknown && (
-                  <div className="bg-emerald-50 border border-emerald-100 rounded-2xl p-3.5 flex items-center justify-between gap-2 text-xs font-bold text-emerald-800 animate-in fade-in slide-in-from-top-1">
-                    <span>📍 Preenchendo endereço sem CEP. Pode digitar o nome da rua e número abaixo!</span>
-                    <button
-                      type="button"
-                      onClick={() => setCepUnknown(false)}
-                      className="text-emerald-700 underline shrink-0 hover:text-emerald-900 font-extrabold"
-                    >
-                      Usar CEP
-                    </button>
-                  </div>
-                )}
                 {!cepUnknown && (
                   <div className="animate-in fade-in slide-in-from-top-2">
                     <div className="flex gap-2">

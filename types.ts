@@ -245,14 +245,6 @@ export interface CouponRule {
   endDate: string;
   isActive: boolean;
   scope?: "SINGLE_STORE" | "NETWORK";
-  usageLimit?: number;
-  timesUsed?: number;
-  firstPurchaseOnly?: boolean;
-  applicableProducts?: string[];
-  applicableCategories?: string[];
-  applicableManufacturers?: string[];
-  maxUses?: number;
-  currentUses?: number;
 }
 
 export interface FlashDealsScheduleConfig {

@@ -6,7 +6,6 @@ import {
   PharmacyConfig,
   AppReview,
   PromotionRule,
-  CouponRule,
 } from "../types";
 
 /**
@@ -1252,25 +1251,6 @@ export const deletePromotion = async (id: string, tenantId: string) => {
     throw new Error(handleNetworkError(e, "Excluir Promoção"));
   }
 };
-
-export const mapCouponFromDB = (c: any): CouponRule => ({
-  id: c.id,
-  tenantId: c.tenant_id || c.tenantid,
-  code: c.code || "",
-  discountType: c.discount_type || c.discounttype || "PERCENTAGE",
-  discountValue: Number(c.discount_value ?? c.discountvalue ?? 0),
-  couponScope: c.coupon_scope || c.couponscope || "GLOBAL",
-  minPurchaseValue: Number(c.min_purchase_value ?? c.minpurchasevalue ?? 0),
-  targetType: c.target_type || c.targettype || "ALL",
-  targetValue: c.target_value || c.targetvalue || "",
-  specificProductIds: c.specific_product_ids || c.specificproductids || [],
-  maxUses: c.max_uses ?? c.maxuses,
-  currentUses: c.current_uses ?? c.currentuses,
-  startDate: c.start_date || c.startdate,
-  endDate: c.end_date || c.enddate,
-  isActive: c.is_active !== false && c.isactive !== false,
-  scope: c.scope || "SINGLE_STORE",
-});
 
 export const getCouponsByTenant = async (
   tenantId: string,
