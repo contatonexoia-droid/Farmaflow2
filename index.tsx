@@ -4,6 +4,45 @@ import ReactDOM from 'react-dom/client';
 import './index.css';
 import App from './App';
 
+// Build version hash to force cache invalidation across all subdomains and main domain
+const APP_BUILD_VERSION = "ff_v2026_08_07_build4";
+
+// CACHE BUSTING & SW CLEANUP EXECUTION
+(async function purgeStaleCacheAndSW() {
+  try {
+    const savedVersion = localStorage.getItem('farmaflow_build_version');
+    if (savedVersion !== APP_BUILD_VERSION) {
+      console.log(`[Cache Busting] New build detected (${APP_BUILD_VERSION}). Purging stale caches and unregistering old Service Workers...`);
+
+      // 1. Unregister all existing Service Workers
+      if ('serviceWorker' in navigator) {
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        for (const registration of registrations) {
+          await registration.unregister();
+          console.log('[Cache Busting] Unregistered SW:', registration.scope);
+        }
+      }
+
+      // 2. Clear CacheStorage
+      if ('caches' in window) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map(key => caches.delete(key)));
+        console.log('[Cache Busting] Cleared CacheStorage keys:', keys);
+      }
+
+      // 3. Save new version tag
+      localStorage.setItem('farmaflow_build_version', APP_BUILD_VERSION);
+
+      // 4. Force hard reload if an old version was cached
+      if (savedVersion) {
+        window.location.reload();
+      }
+    }
+  } catch (err) {
+    console.warn('[Cache Busting] Non-blocking cache cleanup warning:', err);
+  }
+})();
+
 const rootElement = document.getElementById('root');
 if (!rootElement) {
   throw new Error("Could not find root element to mount to");
@@ -23,18 +62,18 @@ if ('serviceWorker' in navigator) {
 
     navigator.serviceWorker.register('/sw.js', { scope: swScope }).then((registration) => {
       console.log('SW registered with scope:', registration.scope);
+      // Force update check on every load
+      registration.update();
       
       registration.addEventListener('updatefound', () => {
         const newWorker = registration.installing;
         if (newWorker) {
           newWorker.addEventListener('statechange', async () => {
             if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
-              // Limpar todos os caches antigos ao detectar uma nova aba de tenant ou update
               if ('caches' in window) {
                 const keys = await caches.keys();
                 await Promise.all(keys.map(key => caches.delete(key)));
               }
-              // Força a recarga para aplicar as novas regras e flush de cache (impede bug de tela do Android sumir)
               window.location.reload();
             }
           });
@@ -44,7 +83,6 @@ if ('serviceWorker' in navigator) {
       console.log('SW registration failed: ', registrationError);
     });
     
-    // Assegura controle rápido em reloads
     let refreshing = false;
     navigator.serviceWorker.addEventListener('controllerchange', () => {
       if (!refreshing) {

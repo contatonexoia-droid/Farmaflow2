@@ -1944,6 +1944,18 @@ const App: React.FC = () => {
         }
 
         if (targetTenant) {
+          const isLicenseExpired =
+            targetTenant.licenseExpiration &&
+            new Date(targetTenant.licenseExpiration).getTime() <
+              new Date().setHours(0, 0, 0, 0);
+
+          if (targetTenant.isBlocked || isLicenseExpired) {
+            if (session.type === "GUEST") {
+              setIsLoading(false);
+              return;
+            }
+          }
+
           const cleanSlug = targetTenant.slug
             ? targetTenant.slug
                 .toLowerCase()
@@ -2081,6 +2093,12 @@ const App: React.FC = () => {
         if (
           hostParts.length >= 3 &&
           hostParts[0] !== "www" &&
+          hostParts[0] !== "app" &&
+          hostParts[0] !== "admin" &&
+          hostParts[0] !== "api" &&
+          hostParts[0] !== "portal" &&
+          hostParts[0] !== "farmaflow" &&
+          hostParts[0] !== "nexoia" &&
           !hostname.includes("run.app")
         ) {
           tenantIdentifier = hostParts[0];
