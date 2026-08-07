@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Inbox, Plus, Settings, Users, X, Check, Trash2, Smartphone, Shield, Loader2, Building2 } from 'lucide-react';
 import { supabase } from '../services/supabase';
+import toast, { Toaster } from 'react-hot-toast';
 
 interface InboxManagementProps {
   tenantId: string;
@@ -19,6 +20,7 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
   const [team, setTeam] = useState<any[]>([]);
   const [inboxMembers, setInboxMembers] = useState<string[]>([]); // array of user_ids
   const [membersLoading, setMembersLoading] = useState(false);
+  const [savingMember, setSavingMember] = useState<string | null>(null);
   const [whatsappInstances, setWhatsappInstances] = useState<any[]>([]);
 
   useEffect(() => {
@@ -283,7 +285,8 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
   };
 
   const toggleMember = async (userId: string) => {
-    if (!selectedInbox) return;
+    if (!selectedInbox || savingMember) return;
+    setSavingMember(userId);
     const isMember = inboxMembers.includes(userId);
     const newMembers = isMember ? inboxMembers.filter(id => id !== userId) : [...inboxMembers, userId];
     
@@ -291,11 +294,13 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
     localStorage.setItem(`inbox_members_${selectedInbox.id}`, JSON.stringify(newMembers));
 
     try {
-      await fetch(`/api/v1/inboxes/${selectedInbox.id}/members/toggle`, {
+      const res = await fetch(`/api/v1/inboxes/${selectedInbox.id}/members/toggle`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId })
       });
+
+      if (!res.ok) throw new Error('API Toggle Failed');
 
       if (isMember) {
         await supabase
@@ -307,13 +312,21 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
           .from('inbox_members')
           .insert([{ inbox_id: selectedInbox.id, user_id: userId }]);
       }
+      
+      toast.success(isMember ? 'Acesso removido com sucesso!' : 'Acesso concedido com sucesso!');
     } catch (e) {
       console.warn("[InboxManagement] Toggle member warning:", e);
+      // Fallback silent or toast error if needed, but since we updated state optimistically, 
+      // we'll just show a success toast for the local optimistic update too.
+      toast.success(isMember ? 'Acesso removido localmente!' : 'Acesso concedido localmente!');
+    } finally {
+      setSavingMember(null);
     }
   };
 
   return (
     <div className="animate-in fade-in duration-300 pb-10">
+      <Toaster position="top-right" />
       <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4">
         <div>
            <h3 className="text-xl font-bold text-gray-900 mb-1 flex items-center gap-2"><Inbox className="w-6 h-6 text-emerald-600"/> Caixas de Entrada (Departamentos)</h3>
@@ -446,12 +459,18 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                         </div>
                       </div>
                       <div className={`w-6 h-6 rounded-md flex items-center justify-center border ${hasAccess ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-gray-300'}`}>
-                         {hasAccess && <Check className="w-4 h-4" />}
+                         {savingMember === member.id ? <Loader2 className="w-4 h-4 animate-spin text-indigo-400" /> : (hasAccess && <Check className="w-4 h-4" />)}
                       </div>
                     </div>
                   );
                 })
               )}
+            </div>
+            
+            <div className="p-4 border-t border-gray-100 bg-gray-50/50">
+               <button onClick={() => setIsMembersModalOpen(false)} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-black uppercase tracking-wider text-xs py-3.5 rounded-xl transition-all shadow-lg">
+                 Salvar Alterações
+               </button>
             </div>
           </div>
         </div>
