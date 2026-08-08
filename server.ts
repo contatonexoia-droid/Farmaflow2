@@ -4649,124 +4649,127 @@ app.get("/api/v1/whatsapp/instances", async (req, res) => {
   }
 });
 
-// Listener/Processador de Webhook em Background (Serverless-friendly)
-const processWebhookInBackground = async (event: any, data: any, instance: any, tenantId: any) => {
-  try {
-    // Normalizar eventos (Evolution envia em snake_case ou similar dependendo da config)
-    const eventName = event === "MESSAGES_UPSERT" ? "messages.upsert" : event;
-
-    if (eventName === "messages.upsert") {
-      const messages = data?.messages || [];
-      const instanceName = instance;
-      
-      // Buscar storeId a partir da instancia, tenantId da URL, ou default
-      let storeId = tenantId || "default";
-      
-      if (!tenantId && instanceName) {
-        try {
-          const { data: inst, error: instError } = await supabaseAdmin
-            .from("whatsapp_instances")
-            .select("store_id")
-            .eq("instance_name", instanceName)
-            .single();
-            
-          if (instError) {
-             console.error(`[Webhook Resolve Tenant] Error fetching whatsapp_instances for ${instanceName}:`, instError);
-          } else if (inst?.store_id) {
-             storeId = inst.store_id;
-          } else {
-             console.warn(`[Webhook Resolve Tenant] No store_id found for instance ${instanceName}`);
-          }
-        } catch (resolveErr) {
-          console.error(`[Webhook Resolve Tenant] Exception while resolving store_id:`, resolveErr);
-        }
-      }
-
-      console.log(`[Webhook Background] Processando mensagens para loja (storeId): ${storeId}, Instância: ${instanceName}`);
-
-      for (const msg of messages) {
-        // Persistir mensagem e atualizar conversa (mensagens enviadas e recebidas)
-        const processed = await chatStore.processWhatsAppMessage(storeId, msg);
-
-        if (!msg.key?.fromMe) {
-          const conversationId = msg.key?.remoteJid;
-          const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
-
-          // Processar Bot Handoff
-          const handoff = await botHandoffManager.processMessageState(conversationId, storeId, text, "open");
-
-          // Verificar se é uma resposta de CSAT (nota 1 a 5)
-          const ratingNum = parseInt(text.trim(), 10);
-          if (!isNaN(ratingNum) && ratingNum >= 1 && ratingNum <= 5) {
-            await csatManager.recordCsatResponse(storeId, conversationId, ratingNum);
-          }
-
-          // Transmitir evento em tempo real via SSE RealtimeHub
-          realtimeHub.broadcastToStore(storeId, "chat_message", {
-            conversationId: processed?.conversation.id || conversationId,
-            message: processed?.message,
-            conversation: processed?.conversation,
-            handoff
-          });
-        } else {
-          // Transmitir mensagem enviada pelo próprio número/whatsapp
-          realtimeHub.broadcastToStore(storeId, "chat_message", {
-            conversationId: processed?.conversation.id,
-            message: processed?.message,
-            conversation: processed?.conversation
-          });
-        }
-      }
-    } else if (event === "connection.update") {
-      const instanceName = data?.instance;
-      const state = data?.state;
-      console.log(`[Webhook Background] Connection update for ${instanceName}: ${state}`);
-    }
-  } catch (err) {
-    console.error("[Webhook Background Error]:", err);
-  }
-};
-
-// 1. Webhook Ultra-Leve para Evolution API (Fire-and-Forget / Serverless)
+// 1. Webhook Ultra-Leve para Evolution API (Serverless-friendly)
 app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
   try {
-    console.log('\n[DEBUG] WEBHOOK RECEBIDO - BODY COMPLETO:', JSON.stringify(req.body, null, 2));
-    
-    // Evolution API geralmente envia 'event', 'instance' e 'data' no root
     const { event, data, instance: bodyInstance } = req.body;
     
     // Captura prioritária na query
     const tenantId = req.query.tenantId || req.query.storeId || req.body.tenantId || bodyInstance || data?.instance;
+    const instanceName = bodyInstance || data?.instance;
+    const eventName = event === "MESSAGES_UPSERT" ? "messages.upsert" : event;
     
-    console.log('[WEBHOOK] Processando para o tenant da query:', tenantId);
-    
-    // Responde instantaneamente HTTP 200 OK sem bloquear
-    res.status(200).json({ received: true, queuedAt: Date.now() });
+    if (eventName === "messages.upsert") {
+      const messages = data?.messages || [];
+      let storeId = tenantId || "default";
+      
+      if (!tenantId && instanceName) {
+        const { data: inst } = await supabaseAdmin
+          .from("whatsapp_instances")
+          .select("store_id")
+          .eq("instance_name", instanceName)
+          .single();
+        if (inst?.store_id) storeId = inst.store_id;
+      }
+      
+      const now = new Date().toISOString();
 
-    // Processa em background sem usar await (Fire-and-forget)
-    processWebhookInBackground(event, data, bodyInstance || data?.instance, tenantId).catch(err => {
-      console.error('[BACKGROUND WEBHOOK LAUNCH ERROR]:', err);
-    });
+      for (const msg of messages) {
+        if (!msg) continue;
+        
+        const fromMe = Boolean(msg.key?.fromMe ?? msg.fromMe ?? false);
+        const remoteJid = msg.key?.remoteJid || msg.remoteJid || msg.sender || msg.participant || "";
+        if (!remoteJid || remoteJid.includes("@g.us")) continue; // Ignora grupos
+        
+        const phone = remoteJid.replace("@s.whatsapp.net", "").replace("@g.us", "");
+        const pushName = msg.pushName || msg.verifiedName || phone || "Contato WhatsApp";
+        
+        const text = msg.message?.conversation || 
+                     msg.message?.extendedTextMessage?.text || 
+                     msg.message?.imageMessage?.caption || 
+                     msg.message?.videoMessage?.caption || 
+                     msg.text || 
+                     msg.body || 
+                     (msg.message?.imageMessage ? "[Imagem]" : 
+                     (msg.message?.videoMessage ? "[Vídeo]" : 
+                     (msg.message?.audioMessage ? "[Áudio]" : 
+                     (msg.message?.documentMessage ? "[Documento]" : 
+                     (msg.message?.stickerMessage ? "[Figurinha]" : "[Mensagem WhatsApp]")))));
 
+        const contactId = `contact_${phone}_${storeId}`;
+        const convId = `conv_${phone}_${storeId}`;
+        const msgId = `msg_${msg.key?.id || Date.now()}`;
+        const senderType = fromMe ? "USER" : "CUSTOMER";
+
+        // 1. Upsert Contato
+        await supabaseAdmin.from("chat_contacts").upsert([{
+          id: contactId,
+          store_id: storeId,
+          name: pushName,
+          phone_number: phone,
+          created_at: now
+        }], { onConflict: "id" });
+
+        // 2. Busca Unread Count & Inbox
+        const { data: convInfo } = await supabaseAdmin
+          .from("chat_conversations")
+          .select("unread_count, inbox_id")
+          .eq("id", convId)
+          .single();
+          
+        const newUnreadCount = fromMe ? 0 : (convInfo?.unread_count || 0) + 1;
+        let resolvedInboxId = convInfo?.inbox_id;
+
+        if (!resolvedInboxId) {
+           const { data: firstInbox } = await supabaseAdmin
+             .from("inboxes")
+             .select("id")
+             .eq("store_id", storeId)
+             .order("created_at", { ascending: true })
+             .limit(1)
+             .single();
+           if (firstInbox?.id) resolvedInboxId = firstInbox.id;
+        }
+
+        // 3. Upsert Conversa
+        await supabaseAdmin.from("chat_conversations").upsert([{
+          id: convId,
+          store_id: storeId,
+          contact_id: contactId,
+          inbox_id: resolvedInboxId,
+          status: "OPEN",
+          last_message_at: now,
+          last_message_content: text,
+          unread_count: newUnreadCount
+        }], { onConflict: "id" });
+
+        // 4. Insert Mensagem
+        await supabaseAdmin.from("chat_messages").insert([{
+          id: msgId,
+          conversation_id: convId,
+          sender_type: senderType,
+          content: text,
+          is_private: false,
+          created_at: now
+        }]);
+      }
+    } else if (event === "connection.update") {
+      console.log(`[Webhook Background] Connection update for ${instanceName}: ${data?.state}`);
+    }
+
+    return res.status(200).json({ success: true, message: "Webhook processado ultra-rápido" });
   } catch (error: any) {
     console.error("[Chat Webhook] Erro na requisição:", error);
     if (!res.headersSent) {
-      return res.status(200).json({ received: true, error: error.message }); // 200 para evitar retentativas
+      return res.status(200).json({ received: true, error: error.message }); 
     }
   }
 });
 
 // --- REALTIME SSE SERVER ENDPOINT ---
 app.get("/api/v1/realtime/events", (req, res) => {
-  const storeId = (req.query.storeId as string) || "all";
-  const clientId = `client_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders();
-
-  realtimeHub.addClient({ id: clientId, storeId, res });
+  // Desabilitado em ambiente Serverless para evitar Vercel Timeout (60s)
+  res.status(400).json({ error: "SSE Realtime desativado em ambiente Serverless. Utilize Supabase Realtime no client." });
 });
 
 // Listener do WhatsappHealthManager para retransmitir alterações de status das instâncias para o painel em tempo real
