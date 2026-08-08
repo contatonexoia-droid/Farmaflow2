@@ -4657,15 +4657,17 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
     // Evolution API geralmente envia 'event', 'instance' e 'data' no root
     const { event, data, instance: bodyInstance } = req.body;
     
-    // Fallback para pegar tenantId da URL se o usuário usar "?tenantId=123" no webhook
-    const tenantIdFromUrl = req.query.tenantId as string | undefined;
+    // Captura prioritária na query
+    const tenantId = req.query.tenantId || req.query.storeId || req.body.tenantId || bodyInstance || data?.instance;
+    
+    console.log('[WEBHOOK] Processando para o tenant da query:', tenantId);
     
     // Descola a requisição HTTP e joga o trabalho para a fila assíncrona
     const jobId = dispatcher.dispatch("webhook_received", { 
       event, 
       data, 
       instance: bodyInstance || data?.instance, 
-      tenantId: tenantIdFromUrl 
+      tenantId: tenantId
     });
     
     // Responde instantaneamente HTTP 200 OK sem expor gargalos de timeout
