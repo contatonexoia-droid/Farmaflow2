@@ -4649,37 +4649,8 @@ app.get("/api/v1/whatsapp/instances", async (req, res) => {
   }
 });
 
-// 1. Webhook Ultra-Leve para Evolution API (Event-Driven Queue)
-app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
-  try {
-    console.log('\n[DEBUG] WEBHOOK RECEBIDO - BODY COMPLETO:', JSON.stringify(req.body, null, 2));
-    
-    // Evolution API geralmente envia 'event', 'instance' e 'data' no root
-    const { event, data, instance: bodyInstance } = req.body;
-    
-    // Captura prioritária na query
-    const tenantId = req.query.tenantId || req.query.storeId || req.body.tenantId || bodyInstance || data?.instance;
-    
-    console.log('[WEBHOOK] Processando para o tenant da query:', tenantId);
-    
-    // Descola a requisição HTTP e joga o trabalho para a fila assíncrona
-    const jobId = dispatcher.dispatch("webhook_received", { 
-      event, 
-      data, 
-      instance: bodyInstance || data?.instance, 
-      tenantId: tenantId
-    });
-    
-    // Responde instantaneamente HTTP 200 OK sem expor gargalos de timeout
-    return res.status(200).json({ received: true, jobId, queuedAt: Date.now() });
-  } catch (error: any) {
-    console.error("[Chat Webhook] Erro ao enfileirar evento:", error);
-    return res.status(200).json({ received: true, error: error.message }); // 200 para evitar retentativas excessivas do provedor
-  }
-});
-
-// Listener do Dispatcher de eventos de Webhook em background
-dispatcher.on("webhook_received", async ({ event, data, instance, tenantId }) => {
+// Listener/Processador de Webhook em Background (Serverless-friendly)
+const processWebhookInBackground = async (event: any, data: any, instance: any, tenantId: any) => {
   try {
     // Normalizar eventos (Evolution envia em snake_case ou similar dependendo da config)
     const eventName = event === "MESSAGES_UPSERT" ? "messages.upsert" : event;
@@ -4747,12 +4718,41 @@ dispatcher.on("webhook_received", async ({ event, data, instance, tenantId }) =>
         }
       }
     } else if (event === "connection.update") {
-      const instance = data?.instance;
+      const instanceName = data?.instance;
       const state = data?.state;
-      console.log(`[Webhook Background] Connection update for ${instance}: ${state}`);
+      console.log(`[Webhook Background] Connection update for ${instanceName}: ${state}`);
     }
   } catch (err) {
     console.error("[Webhook Background Error]:", err);
+  }
+};
+
+// 1. Webhook Ultra-Leve para Evolution API (Fire-and-Forget / Serverless)
+app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
+  try {
+    console.log('\n[DEBUG] WEBHOOK RECEBIDO - BODY COMPLETO:', JSON.stringify(req.body, null, 2));
+    
+    // Evolution API geralmente envia 'event', 'instance' e 'data' no root
+    const { event, data, instance: bodyInstance } = req.body;
+    
+    // Captura prioritária na query
+    const tenantId = req.query.tenantId || req.query.storeId || req.body.tenantId || bodyInstance || data?.instance;
+    
+    console.log('[WEBHOOK] Processando para o tenant da query:', tenantId);
+    
+    // Responde instantaneamente HTTP 200 OK sem bloquear
+    res.status(200).json({ received: true, queuedAt: Date.now() });
+
+    // Processa em background sem usar await (Fire-and-forget)
+    processWebhookInBackground(event, data, bodyInstance || data?.instance, tenantId).catch(err => {
+      console.error('[BACKGROUND WEBHOOK LAUNCH ERROR]:', err);
+    });
+
+  } catch (error: any) {
+    console.error("[Chat Webhook] Erro na requisição:", error);
+    if (!res.headersSent) {
+      return res.status(200).json({ received: true, error: error.message }); // 200 para evitar retentativas
+    }
   }
 });
 

@@ -295,133 +295,119 @@ class ChatStore {
 
     const now = new Date().toISOString();
 
-    // 1. Find or create Contact
-    let contact = this.contacts.find(c => c.phone_number === phone && c.store_id === storeId);
-    if (!contact) {
-      contact = {
-        id: `contact_${phone}_${storeId}`,
-        store_id: storeId,
-        name: pushName,
-        phone_number: phone,
-        created_at: now
-      };
-      this.contacts.push(contact);
+    // Otimização: Identificadores determinísticos baseados na PK
+    const contactId = `contact_${phone}_${storeId}`;
+    const convId = `conv_${phone}_${storeId}`;
 
-      try {
-        const { error } = await supabaseAdmin.from("chat_contacts").upsert([contact]);
-        if (error) {
-          console.error('[WEBHOOK INSERT ERROR] Failed to upsert contact:', error);
-        }
-      } catch (err) {
-        console.error('[WEBHOOK INSERT EXCEPTION] Failed to upsert contact:', err);
-      }
-    }
+    const contact: ChatContact = {
+      id: contactId,
+      store_id: storeId,
+      name: pushName,
+      phone_number: phone,
+      created_at: now
+    };
 
-    // 2. Resolve inbox_id (buscar a primeira inbox da loja, se existir)
-    let resolvedInboxId: string | null = null;
+    // 1. Fire-and-forget upsert contact (não precisa esperar para continuar localmente)
+    supabaseAdmin.from("chat_contacts")
+      .upsert([contact], { onConflict: "id" })
+      .catch(err => console.error('[WEBHOOK CONTACT ERROR]:', err));
+
+    // 2. Fetch Conversation info to determine if exists and current unread_count
+    let convInfo: any = null;
     try {
-      const { data: firstInbox, error: inboxError } = await supabaseAdmin
-        .from("inboxes")
-        .select("id")
-        .eq("store_id", storeId)
-        .order("created_at", { ascending: true })
-        .limit(1)
+      const { data } = await supabaseAdmin
+        .from("chat_conversations")
+        .select("id, unread_count, inbox_id")
+        .eq("id", convId)
         .single();
-      
-      if (firstInbox?.id) {
-        resolvedInboxId = firstInbox.id;
-      }
-    } catch (err) {
-      console.warn("[WEBHOOK INBOX RESOLVE WARNING]", err);
+      convInfo = data;
+    } catch (e) {
+      // Not found or error
     }
 
-    // 3. Find or create Conversation
-    let conv = this.conversations.find(c => c.contact_id === contact!.id && c.store_id === storeId);
-    if (!conv) {
-      conv = {
-        id: `conv_${phone}_${storeId}`,
+    let resolvedInboxId = convInfo?.inbox_id;
+
+    // Se a conversa não existir e não temos inbox_id, busca a primeira inbox (apenas uma vez)
+    if (!convInfo && !resolvedInboxId) {
+       try {
+         const { data: firstInbox } = await supabaseAdmin
+           .from("inboxes")
+           .select("id")
+           .eq("store_id", storeId)
+           .order("created_at", { ascending: true })
+           .limit(1)
+           .single();
+         if (firstInbox?.id) resolvedInboxId = firstInbox.id;
+       } catch (err) {}
+    }
+
+    const currentUnreadCount = convInfo?.unread_count || 0;
+    const newUnreadCount = fromMe ? 0 : currentUnreadCount + 1;
+
+    const conv: ChatConversation = {
+      id: convId,
+      store_id: storeId,
+      contact_id: contactId,
+      inbox_id: resolvedInboxId,
+      status: "OPEN", // Força reabertura se enviar mensagem (ou pode manter o estado se existir)
+      last_message_at: now,
+      last_message_content: text,
+      unread_count: newUnreadCount,
+      contact: contact,
+      created_at: now
+    };
+
+    // 3. Upsert Conversation otimizado
+    try {
+      await supabaseAdmin.from("chat_conversations").upsert([{
+        id: convId,
         store_id: storeId,
-        contact_id: contact.id,
-        inbox_id: resolvedInboxId, // FK opcional ou válida
-        assigned_user_id: null,
+        contact_id: contactId,
+        inbox_id: resolvedInboxId,
         status: "OPEN",
         last_message_at: now,
         last_message_content: text,
-        unread_count: fromMe ? 0 : 1,
-        contact: contact,
-        created_at: now
-      };
-      this.conversations.push(conv);
-
-      try {
-        const { error } = await supabaseAdmin.from("chat_conversations").upsert([{
-          id: conv.id,
-          store_id: storeId,
-          contact_id: contact.id,
-          inbox_id: resolvedInboxId,
-          status: "OPEN",
-          last_message_at: now,
-          last_message_content: text
-        }]);
-        if (error) {
-          console.error('[WEBHOOK INSERT ERROR] Failed to upsert conversation:', error);
-        }
-      } catch (err) {
-        console.error('[WEBHOOK INSERT EXCEPTION] Failed to upsert conversation:', err);
-      }
-    } else {
-      conv.last_message_at = now;
-      conv.last_message_content = text;
-      if (!fromMe) {
-        conv.unread_count = (conv.unread_count || 0) + 1;
-      }
-      
-      try {
-        const { error } = await supabaseAdmin.from("chat_conversations")
-          .update({
-            last_message_at: now,
-            last_message_content: text,
-            unread_count: conv.unread_count
-          })
-          .eq("id", conv.id);
-        if (error) {
-           console.error('[WEBHOOK UPDATE ERROR] Failed to update conversation:', error);
-        }
-      } catch (err) {
-        console.error('[WEBHOOK UPDATE EXCEPTION] Failed to update conversation:', err);
-      }
+        unread_count: newUnreadCount
+      }], { onConflict: "id" });
+    } catch (err) {
+      console.error('[WEBHOOK CONV ERROR]:', err);
     }
 
-    // 4. Create Message
+    // 4. Insert Message otimizado
     const senderType = fromMe ? "USER" : "CUSTOMER";
     const newMsg: ChatMessage = {
       id: `msg_${msg.key?.id || Date.now()}`,
-      conversation_id: conv.id,
+      conversation_id: convId,
       sender_type: senderType,
       content: text,
       is_private: false,
       created_at: now
     };
 
-    this.messages.push(newMsg);
-
     try {
-      const { error } = await supabaseAdmin.from("chat_messages").insert([{
+      await supabaseAdmin.from("chat_messages").insert([{
         id: newMsg.id,
-        conversation_id: conv.id,
+        conversation_id: convId,
         sender_type: senderType,
         content: text,
         is_private: false,
         created_at: now
       }]);
-      if (error) {
-        console.error('[WEBHOOK INSERT ERROR] Failed to insert message:', error);
-      }
     } catch (err) {
-      console.error('[WEBHOOK INSERT EXCEPTION] Failed to insert message:', err);
+      console.error('[WEBHOOK MSG ERROR]:', err);
     }
+    
+    // Atualiza cache em memória local apenas para fallback / dev
+    if (!this.contacts.find(c => c.id === contactId)) this.contacts.push(contact);
+    
+    const existingConvIdx = this.conversations.findIndex(c => c.id === convId);
+    if (existingConvIdx >= 0) {
+      this.conversations[existingConvIdx] = conv;
+    } else {
+      this.conversations.push(conv);
+    }
+    this.messages.push(newMsg);
 
-    this.saveToFile();
     return { conversation: conv, message: newMsg };
   }
 }
