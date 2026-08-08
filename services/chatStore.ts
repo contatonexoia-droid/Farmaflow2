@@ -267,16 +267,31 @@ class ChatStore {
   public async processWhatsAppMessage(storeId: string, msg: any): Promise<{ conversation: ChatConversation; message: ChatMessage } | null> {
     if (!msg) return null;
 
-    const fromMe = Boolean(msg.key?.fromMe);
-    const remoteJid = msg.key?.remoteJid || "";
-    if (!remoteJid) return null;
+    // Robust extraction for Evolution API and other providers
+    const fromMe = Boolean(msg.key?.fromMe ?? msg.fromMe ?? false);
+    const remoteJid = msg.key?.remoteJid || msg.remoteJid || msg.sender || msg.participant || "";
+    
+    if (!remoteJid) {
+       console.error('[WEBHOOK EXTRACT ERROR] No remoteJid found in message:', JSON.stringify(msg, null, 2));
+       return null;
+    }
 
     const phone = remoteJid.replace("@s.whatsapp.net", "").replace("@g.us", "");
-    const pushName = msg.pushName || phone || "Contato WhatsApp";
+    const pushName = msg.pushName || msg.verifiedName || phone || "Contato WhatsApp";
+    
     const text = msg.message?.conversation || 
                  msg.message?.extendedTextMessage?.text || 
                  msg.message?.imageMessage?.caption || 
-                 (msg.message?.imageMessage ? "[Imagem]" : "[Mensagem WhatsApp]");
+                 msg.message?.videoMessage?.caption || 
+                 msg.text || 
+                 msg.body || 
+                 (msg.message?.imageMessage ? "[Imagem]" : 
+                 (msg.message?.videoMessage ? "[Vídeo]" : 
+                 (msg.message?.audioMessage ? "[Áudio]" : 
+                 (msg.message?.documentMessage ? "[Documento]" : 
+                 (msg.message?.stickerMessage ? "[Figurinha]" : "[Mensagem WhatsApp]")))));
+
+    console.log('[PAYLOAD EXTRAÍDO COM SUCESSO]:', { phone, text, fromMe });
 
     const now = new Date().toISOString();
 
