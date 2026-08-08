@@ -6,7 +6,10 @@ const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL ||
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_Y2lAqlvDUhdjSNtv80GkJA_SiOgynYy";
 const supabaseAdmin = createClient(supabaseUrl, supabaseKey);
 
-const DATA_FILE = path.join(process.cwd(), "chat_data.json");
+const isServerless = Boolean(process.env.VERCEL || process.env.NOW_REGION || process.env.AWS_LAMBDA_FUNCTION_NAME);
+const DATA_FILE = isServerless
+  ? path.join("/tmp", "chat_data.json")
+  : path.join(typeof __dirname !== "undefined" ? __dirname : process.cwd(), "chat_data.json");
 
 export interface ChatContact {
   id: string;
