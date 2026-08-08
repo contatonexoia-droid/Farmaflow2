@@ -293,18 +293,41 @@ class ChatStore {
       this.contacts.push(contact);
 
       try {
-        await supabaseAdmin.from("chat_contacts").upsert([contact]);
-      } catch (_) {}
+        const { error } = await supabaseAdmin.from("chat_contacts").upsert([contact]);
+        if (error) {
+          console.error('[WEBHOOK INSERT ERROR] Failed to upsert contact:', error);
+        }
+      } catch (err) {
+        console.error('[WEBHOOK INSERT EXCEPTION] Failed to upsert contact:', err);
+      }
     }
 
-    // 2. Find or create Conversation
+    // 2. Resolve inbox_id (buscar a primeira inbox da loja, se existir)
+    let resolvedInboxId: string | null = null;
+    try {
+      const { data: firstInbox, error: inboxError } = await supabaseAdmin
+        .from("inboxes")
+        .select("id")
+        .eq("store_id", storeId)
+        .order("created_at", { ascending: true })
+        .limit(1)
+        .single();
+      
+      if (firstInbox?.id) {
+        resolvedInboxId = firstInbox.id;
+      }
+    } catch (err) {
+      console.warn("[WEBHOOK INBOX RESOLVE WARNING]", err);
+    }
+
+    // 3. Find or create Conversation
     let conv = this.conversations.find(c => c.contact_id === contact!.id && c.store_id === storeId);
     if (!conv) {
       conv = {
         id: `conv_${phone}_${storeId}`,
         store_id: storeId,
         contact_id: contact.id,
-        inbox_id: `inbox_default_${storeId}`,
+        inbox_id: resolvedInboxId, // FK opcional ou válida
         assigned_user_id: null,
         status: "OPEN",
         last_message_at: now,
@@ -316,25 +339,45 @@ class ChatStore {
       this.conversations.push(conv);
 
       try {
-        await supabaseAdmin.from("chat_conversations").upsert([{
+        const { error } = await supabaseAdmin.from("chat_conversations").upsert([{
           id: conv.id,
           store_id: storeId,
           contact_id: contact.id,
-          inbox_id: conv.inbox_id,
+          inbox_id: resolvedInboxId,
           status: "OPEN",
           last_message_at: now,
           last_message_content: text
         }]);
-      } catch (_) {}
+        if (error) {
+          console.error('[WEBHOOK INSERT ERROR] Failed to upsert conversation:', error);
+        }
+      } catch (err) {
+        console.error('[WEBHOOK INSERT EXCEPTION] Failed to upsert conversation:', err);
+      }
     } else {
       conv.last_message_at = now;
       conv.last_message_content = text;
       if (!fromMe) {
         conv.unread_count = (conv.unread_count || 0) + 1;
       }
+      
+      try {
+        const { error } = await supabaseAdmin.from("chat_conversations")
+          .update({
+            last_message_at: now,
+            last_message_content: text,
+            unread_count: conv.unread_count
+          })
+          .eq("id", conv.id);
+        if (error) {
+           console.error('[WEBHOOK UPDATE ERROR] Failed to update conversation:', error);
+        }
+      } catch (err) {
+        console.error('[WEBHOOK UPDATE EXCEPTION] Failed to update conversation:', err);
+      }
     }
 
-    // 3. Create Message
+    // 4. Create Message
     const senderType = fromMe ? "USER" : "CUSTOMER";
     const newMsg: ChatMessage = {
       id: `msg_${msg.key?.id || Date.now()}`,
@@ -348,7 +391,7 @@ class ChatStore {
     this.messages.push(newMsg);
 
     try {
-      await supabaseAdmin.from("chat_messages").insert([{
+      const { error } = await supabaseAdmin.from("chat_messages").insert([{
         id: newMsg.id,
         conversation_id: conv.id,
         sender_type: senderType,
@@ -356,7 +399,12 @@ class ChatStore {
         is_private: false,
         created_at: now
       }]);
-    } catch (_) {}
+      if (error) {
+        console.error('[WEBHOOK INSERT ERROR] Failed to insert message:', error);
+      }
+    } catch (err) {
+      console.error('[WEBHOOK INSERT EXCEPTION] Failed to insert message:', err);
+    }
 
     this.saveToFile();
     return { conversation: conv, message: newMsg };

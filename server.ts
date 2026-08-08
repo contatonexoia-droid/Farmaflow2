@@ -4691,9 +4691,22 @@ dispatcher.on("webhook_received", async ({ event, data, instance, tenantId }) =>
       
       if (!tenantId && instanceName) {
         try {
-          const { data: inst } = await supabaseAdmin.from("whatsapp_instances").select("store_id").eq("instance_name", instanceName).single();
-          if (inst?.store_id) storeId = inst.store_id;
-        } catch (_) {}
+          const { data: inst, error: instError } = await supabaseAdmin
+            .from("whatsapp_instances")
+            .select("store_id")
+            .eq("instance_name", instanceName)
+            .single();
+            
+          if (instError) {
+             console.error(`[Webhook Resolve Tenant] Error fetching whatsapp_instances for ${instanceName}:`, instError);
+          } else if (inst?.store_id) {
+             storeId = inst.store_id;
+          } else {
+             console.warn(`[Webhook Resolve Tenant] No store_id found for instance ${instanceName}`);
+          }
+        } catch (resolveErr) {
+          console.error(`[Webhook Resolve Tenant] Exception while resolving store_id:`, resolveErr);
+        }
       }
 
       console.log(`[Webhook Background] Processando mensagens para loja (storeId): ${storeId}, Instância: ${instanceName}`);
