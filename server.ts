@@ -4652,10 +4652,21 @@ app.get("/api/v1/whatsapp/instances", async (req, res) => {
 // 1. Webhook Ultra-Leve para Evolution API (Event-Driven Queue)
 app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
   try {
-    const { event, data } = req.body;
+    console.log('\n[DEBUG] WEBHOOK RECEBIDO - BODY COMPLETO:', JSON.stringify(req.body, null, 2));
+    
+    // Evolution API geralmente envia 'event', 'instance' e 'data' no root
+    const { event, data, instance: bodyInstance } = req.body;
+    
+    // Fallback para pegar tenantId da URL se o usuário usar "?tenantId=123" no webhook
+    const tenantIdFromUrl = req.query.tenantId as string | undefined;
     
     // Descola a requisição HTTP e joga o trabalho para a fila assíncrona
-    const jobId = dispatcher.dispatch("webhook_received", { event, data });
+    const jobId = dispatcher.dispatch("webhook_received", { 
+      event, 
+      data, 
+      instance: bodyInstance || data?.instance, 
+      tenantId: tenantIdFromUrl 
+    });
     
     // Responde instantaneamente HTTP 200 OK sem expor gargalos de timeout
     return res.status(200).json({ received: true, jobId, queuedAt: Date.now() });
@@ -4666,18 +4677,26 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
 });
 
 // Listener do Dispatcher de eventos de Webhook em background
-dispatcher.on("webhook_received", async ({ event, data }) => {
+dispatcher.on("webhook_received", async ({ event, data, instance, tenantId }) => {
   try {
-    if (event === "messages.upsert") {
+    // Normalizar eventos (Evolution envia em snake_case ou similar dependendo da config)
+    const eventName = event === "MESSAGES_UPSERT" ? "messages.upsert" : event;
+
+    if (eventName === "messages.upsert") {
       const messages = data?.messages || [];
-      const instance = data?.instance;
+      const instanceName = instance;
       
-      // Buscar storeId a partir da instancia
-      let storeId = "default";
-      try {
-        const { data: inst } = await supabaseAdmin.from("whatsapp_instances").select("store_id").eq("instance_name", instance).single();
-        if (inst?.store_id) storeId = inst.store_id;
-      } catch (_) {}
+      // Buscar storeId a partir da instancia, tenantId da URL, ou default
+      let storeId = tenantId || "default";
+      
+      if (!tenantId && instanceName) {
+        try {
+          const { data: inst } = await supabaseAdmin.from("whatsapp_instances").select("store_id").eq("instance_name", instanceName).single();
+          if (inst?.store_id) storeId = inst.store_id;
+        } catch (_) {}
+      }
+
+      console.log(`[Webhook Background] Processando mensagens para loja (storeId): ${storeId}, Instância: ${instanceName}`);
 
       for (const msg of messages) {
         // Persistir mensagem e atualizar conversa (mensagens enviadas e recebidas)
