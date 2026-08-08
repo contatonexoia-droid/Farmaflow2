@@ -307,38 +307,72 @@ class ChatStore {
       created_at: now
     };
 
-    // 1. Fire-and-forget upsert contact (não precisa esperar para continuar localmente)
-    supabaseAdmin.from("chat_contacts")
-      .upsert([contact], { onConflict: "id" })
-      .catch(err => console.error('[WEBHOOK CONTACT ERROR]:', err));
+    // 1. Upsert contact
+    try {
+      const { error } = await supabaseAdmin.from("chat_contacts").upsert([contact], { onConflict: "id" });
+      if (error) {
+        console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao inserir contato', error.message, error);
+      }
+    } catch (error: any) {
+      console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao inserir contato', error.message, error.stack);
+    }
 
     // 2. Fetch Conversation info to determine if exists and current unread_count
     let convInfo: any = null;
     try {
-      const { data } = await supabaseAdmin
+      const { data, error } = await supabaseAdmin
         .from("chat_conversations")
         .select("id, unread_count, inbox_id")
         .eq("id", convId)
         .single();
-      convInfo = data;
-    } catch (e) {
-      // Not found or error
+      
+      if (error && error.code !== 'PGRST116') {
+        // PGRST116 is "No rows found"
+        console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao buscar conversa', error.message, error);
+      } else {
+        convInfo = data;
+      }
+    } catch (error: any) {
+      console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao buscar conversa', error.message, error.stack);
     }
 
     let resolvedInboxId = convInfo?.inbox_id;
 
-    // Se a conversa não existir e não temos inbox_id, busca a primeira inbox (apenas uma vez)
+    // Se a conversa não existir e não temos inbox_id, busca a primeira inbox ou cria uma padrão
     if (!convInfo && !resolvedInboxId) {
        try {
-         const { data: firstInbox } = await supabaseAdmin
+         const { data: firstInbox, error: fetchInboxError } = await supabaseAdmin
            .from("inboxes")
            .select("id")
            .eq("store_id", storeId)
            .order("created_at", { ascending: true })
            .limit(1)
            .single();
-         if (firstInbox?.id) resolvedInboxId = firstInbox.id;
-       } catch (err) {}
+           
+         if (fetchInboxError && fetchInboxError.code !== 'PGRST116') {
+           console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao buscar inbox', fetchInboxError.message, fetchInboxError);
+         }
+           
+         if (firstInbox?.id) {
+           resolvedInboxId = firstInbox.id;
+         } else {
+           // Create a default inbox if none exists
+           const defaultInboxId = `inbox_default_${storeId}`;
+           const { error: insertInboxError } = await supabaseAdmin.from("inboxes").insert([{
+             id: defaultInboxId,
+             store_id: storeId,
+             name: "Caixa de Entrada Principal"
+           }]);
+           
+           if (insertInboxError) {
+             console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao criar inbox padrão', insertInboxError.message, insertInboxError);
+           } else {
+             resolvedInboxId = defaultInboxId;
+           }
+         }
+       } catch (error: any) {
+         console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao gerenciar inbox', error.message, error.stack);
+       }
     }
 
     const currentUnreadCount = convInfo?.unread_count || 0;
@@ -359,7 +393,7 @@ class ChatStore {
 
     // 3. Upsert Conversation otimizado
     try {
-      await supabaseAdmin.from("chat_conversations").upsert([{
+      const { error } = await supabaseAdmin.from("chat_conversations").upsert([{
         id: convId,
         store_id: storeId,
         contact_id: contactId,
@@ -369,8 +403,12 @@ class ChatStore {
         last_message_content: text,
         unread_count: newUnreadCount
       }], { onConflict: "id" });
-    } catch (err) {
-      console.error('[WEBHOOK CONV ERROR]:', err);
+      
+      if (error) {
+        console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao inserir/atualizar conversa', error.message, error);
+      }
+    } catch (error: any) {
+      console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao inserir/atualizar conversa', error.message, error.stack);
     }
 
     // 4. Insert Message otimizado
@@ -385,7 +423,7 @@ class ChatStore {
     };
 
     try {
-      await supabaseAdmin.from("chat_messages").insert([{
+      const { error } = await supabaseAdmin.from("chat_messages").insert([{
         id: newMsg.id,
         conversation_id: convId,
         sender_type: senderType,
@@ -393,8 +431,12 @@ class ChatStore {
         is_private: false,
         created_at: now
       }]);
-    } catch (err) {
-      console.error('[WEBHOOK MSG ERROR]:', err);
+      
+      if (error) {
+        console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao inserir mensagem', error.message, error);
+      }
+    } catch (error: any) {
+      console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao inserir mensagem', error.message, error.stack);
     }
     
     // Atualiza cache em memória local apenas para fallback / dev
