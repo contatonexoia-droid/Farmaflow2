@@ -27,29 +27,50 @@ export const ChatCentral = ({ currentUser, tenantId = DEMO_TENANT_ID }: any) => 
   const [otherUserViewing, setOtherUserViewing] = useState<string | null>(null);
 
   useEffect(() => {
-    const eventSource = new EventSource(`/api/v1/realtime/events?storeId=${tenantId}`);
-
-    eventSource.addEventListener("chat_message", (e: MessageEvent) => {
-      try {
-        const payload = JSON.parse(e.data);
-        if (payload?.message) {
-          if (selectedConversation && (payload.conversationId === selectedConversation.id || payload.message.conversation_id === selectedConversation.id)) {
-            setMessages(prev => {
-              if (prev.some(m => m.id === payload.message.id)) return prev;
-              return [...prev, payload.message];
-            });
+    // 1. Inscrição no Supabase Realtime para mensagens do chat
+    const channel = supabase
+      .channel(`chat_messages_realtime_${tenantId}`)
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'chat_messages' },
+        (payload) => {
+          const newMsg = payload.new;
+          if (newMsg) {
+            if (
+              selectedConversation &&
+              newMsg.conversation_id === selectedConversation.id
+            ) {
+              setMessages((prev) => {
+                if (prev.some((m) => m.id === newMsg.id)) return prev;
+                return [...prev, newMsg];
+              });
+            }
+            fetchConversations();
           }
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'chat_conversations' },
+        () => {
           fetchConversations();
         }
-      } catch (err) {
-        console.warn("SSE event parse error", err);
+      )
+      .subscribe();
+
+    // 2. Short-polling fallback seguro para ambientes sem WebSocket ou sincronização garantida
+    const intervalId = setInterval(() => {
+      fetchConversations();
+      if (selectedConversation?.id) {
+        fetchMessages(selectedConversation.id);
       }
-    });
+    }, 5000);
 
     return () => {
-      eventSource.close();
+      supabase.removeChannel(channel);
+      clearInterval(intervalId);
     };
-  }, [tenantId, selectedConversation]);
+  }, [tenantId, selectedConversation?.id]);
 
   useEffect(() => {
     fetchInboxes();
