@@ -121,7 +121,7 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
         .eq('tenant_id', tenantId);
 
       if (!tuErr && tenantUsers && tenantUsers.length > 0) {
-        setTeam(tenantUsers.map(u => ({ id: u.id, full_name: u.name, role: u.role, is_active: u.is_active !== false })));
+        setTeam(tenantUsers.map(u => ({ id: u.id, supabase_user_id: u.supabase_user_id, full_name: u.name, role: u.role, is_active: u.is_active !== false })));
         return;
       }
 
@@ -288,10 +288,11 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
     if (!selectedInbox || savingMember) return;
     setSavingMember(userId);
     const isMember = inboxMembers.includes(userId);
+    const originalMembers = [...inboxMembers];
     const newMembers = isMember ? inboxMembers.filter(id => id !== userId) : [...inboxMembers, userId];
     
+    // Atualização otimista
     setInboxMembers(newMembers);
-    localStorage.setItem(`inbox_members_${selectedInbox.id}`, JSON.stringify(newMembers));
 
     try {
       const res = await fetch(`/api/v1/inboxes/${selectedInbox.id}/members/toggle`, {
@@ -300,25 +301,19 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
         body: JSON.stringify({ userId })
       });
 
-      if (!res.ok) throw new Error('API Toggle Failed');
+      const data = await res.json().catch(() => ({}));
 
-      if (isMember) {
-        await supabase
-          .from('inbox_members')
-          .delete()
-          .match({ inbox_id: selectedInbox.id, user_id: userId });
-      } else {
-        await supabase
-          .from('inbox_members')
-          .insert([{ inbox_id: selectedInbox.id, user_id: userId }]);
+      if (!res.ok) {
+        throw new Error(data.error || 'Erro na API ao atualizar membro');
       }
-      
+
+      localStorage.setItem(`inbox_members_${selectedInbox.id}`, JSON.stringify(newMembers));
       toast.success(isMember ? 'Acesso removido com sucesso!' : 'Acesso concedido com sucesso!');
-    } catch (e) {
-      console.warn("[InboxManagement] Toggle member warning:", e);
-      // Fallback silent or toast error if needed, but since we updated state optimistically, 
-      // we'll just show a success toast for the local optimistic update too.
-      toast.success(isMember ? 'Acesso removido localmente!' : 'Acesso concedido localmente!');
+    } catch (e: any) {
+      console.error("[InboxManagement] Toggle member error:", e);
+      // Reverte estado em caso de falha
+      setInboxMembers(originalMembers);
+      toast.error(e.message || 'Falha ao atualizar permissões');
     } finally {
       setSavingMember(null);
     }
@@ -442,12 +437,19 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                 <div className="py-8 flex justify-center text-gray-400"><Loader2 className="w-6 h-6 animate-spin" /></div>
               ) : (
                 team.map(member => {
-                  const hasAccess = inboxMembers.includes(member.id);
+                  const memberUserId = member.supabase_user_id;
+                  const hasAccess = memberUserId ? inboxMembers.includes(memberUserId) : false;
                   return (
                     <div 
                       key={member.id} 
-                      onClick={() => toggleMember(member.id)}
-                      className={`flex items-center justify-between p-3 rounded-xl border-2 cursor-pointer transition-all ${hasAccess ? 'border-indigo-500 bg-indigo-50' : 'border-gray-100 hover:border-gray-200'}`}
+                      onClick={() => {
+                        if (memberUserId) {
+                          toggleMember(memberUserId);
+                        } else {
+                          toast.error('Este usuário não possui vínculo com uma conta de autenticação (supabase_user_id).');
+                        }
+                      }}
+                      className={`flex items-center justify-between p-3 rounded-xl border-2 ${memberUserId ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'} transition-all ${hasAccess ? 'border-indigo-500 bg-indigo-50' : 'border-gray-100 hover:border-gray-200'}`}
                     >
                       <div className="flex items-center gap-3">
                         <div className={`w-10 h-10 rounded-full flex items-center justify-center ${hasAccess ? 'bg-indigo-200 text-indigo-700' : 'bg-gray-100 text-gray-500'}`}>
@@ -459,7 +461,7 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                         </div>
                       </div>
                       <div className={`w-6 h-6 rounded-md flex items-center justify-center border ${hasAccess ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-gray-300'}`}>
-                         {savingMember === member.id ? <Loader2 className="w-4 h-4 animate-spin text-indigo-400" /> : (hasAccess && <Check className="w-4 h-4" />)}
+                         {savingMember === memberUserId ? <Loader2 className="w-4 h-4 animate-spin text-indigo-400" /> : (hasAccess && <Check className="w-4 h-4" />)}
                       </div>
                     </div>
                   );

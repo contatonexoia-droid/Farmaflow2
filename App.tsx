@@ -1897,7 +1897,7 @@ const App: React.FC = () => {
           const tenants = await getTenants();
           targetTenant =
             tenants.find((t) => {
-              const cleanSlug = (t.slug || t.subdomain || t.id || "")
+              const cleanSlug = (t.slug || t.id || "")
                 .toLowerCase()
                 .normalize("NFD")
                 .replace(/[\u0300-\u036f]/g, "")
@@ -1914,7 +1914,7 @@ const App: React.FC = () => {
               return (
                 t.id === extractedSubdomain ||
                 t.slug === extractedSubdomain ||
-                t.subdomain === extractedSubdomain ||
+                
                 cleanSlug === cleanSubdomain
               );
             }) || null;

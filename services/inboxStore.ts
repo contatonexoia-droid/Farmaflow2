@@ -194,14 +194,12 @@ class InboxStore {
     const exists = current.includes(userId);
 
     if (exists) {
-      try {
-        await supabaseAdmin.from("inbox_members").delete().match({ inbox_id: inboxId, user_id: userId });
-      } catch (_) {}
+      const { error } = await supabaseAdmin.from("inbox_members").delete().match({ inbox_id: inboxId, user_id: userId });
+      if (error) throw new Error(error.message);
       this.members = this.members.filter(m => !(m.inbox_id === inboxId && m.user_id === userId));
     } else {
-      try {
-        await supabaseAdmin.from("inbox_members").insert([{ inbox_id: inboxId, user_id: userId }]);
-      } catch (_) {}
+      const { error } = await supabaseAdmin.from("inbox_members").insert([{ inbox_id: inboxId, user_id: userId }]);
+      if (error) throw new Error(error.message);
       this.members.push({ inbox_id: inboxId, user_id: userId });
     }
 
