@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Search, Send, FileText, Image as ImageIcon, Paperclip, User, Clock, ShoppingBag, CreditCard, MessageSquare, Lock, AlertCircle, RefreshCw, Smartphone, ChevronLeft, Info, BarChart2, CheckCircle2, UserPlus, Inbox } from 'lucide-react';
+import { Search, Send, FileText, Image as ImageIcon, Paperclip, User, Clock, ShoppingBag, CreditCard, MessageSquare, Lock, AlertCircle, RefreshCw, Smartphone, ChevronLeft, Info, BarChart2, CheckCircle2, UserPlus, Inbox, MoreVertical } from 'lucide-react';
 import { WhatsAppConnectModal } from './WhatsAppConnectModal';
 import { ChatTransferModal } from './ChatTransferModal';
 import { supabase } from '../services/supabase';
@@ -22,6 +22,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
 
   const [isConnectModalOpen, setIsConnectModalOpen] = useState(false);
   const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [activeView, setActiveView] = useState<'LIST' | 'CHAT' | 'SIDEBAR'>('LIST');
 
   const [localUser, setLocalUser] = useState<any>(currentUser || null);
@@ -564,31 +565,33 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
         {selectedConversation ? (
           <>
             {/* Header */}
-            <div className="h-16 px-4 bg-white border-b border-gray-200 flex items-center justify-between shadow-sm z-10">
-              <div className="flex items-center gap-3">
+            <div className="min-h-16 py-2 px-3 md:px-4 bg-white border-b border-gray-200 flex flex-wrap sm:flex-nowrap items-center justify-between gap-2 shadow-sm z-20 relative">
+              <div className="flex items-center gap-2 md:gap-3 min-w-0">
                 <button 
                   onClick={() => setActiveView('LIST')}
-                  className="md:hidden p-2 -ml-2 text-gray-500 hover:bg-gray-100 rounded-full"
+                  className="md:hidden p-1.5 -ml-1 text-gray-500 hover:bg-gray-100 rounded-full shrink-0"
                 >
                   <ChevronLeft className="w-6 h-6" />
                 </button>
-                <div className="w-10 h-10 bg-gray-200 rounded-full flex items-center justify-center">
-                  <User className="w-5 h-5 text-gray-500" />
+                <div className="w-8 h-8 md:w-10 md:h-10 bg-gray-200 rounded-full flex items-center justify-center shrink-0">
+                  <User className="w-4 h-4 md:w-5 md:h-5 text-gray-500" />
                 </div>
-                <div>
-                  <h3 className="font-bold text-gray-800 leading-tight">{selectedConversation.contact.name}</h3>
-                  <div className="flex items-center gap-2">
-                    <p className="text-[11px] text-gray-500">{selectedConversation.contact?.phone_number}</p>
-                    <span className="text-[9px] font-black uppercase tracking-wider text-indigo-700 bg-indigo-100 px-1.5 py-0.5 rounded">
+                <div className="min-w-0">
+                  <h3 className="font-bold text-gray-800 text-sm md:text-base leading-tight truncate">{selectedConversation.contact.name}</h3>
+                  <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                    <p className="text-[10px] md:text-[11px] text-gray-500 font-mono truncate">{selectedConversation.contact?.phone_number}</p>
+                    <span className="text-[9px] font-black uppercase tracking-wider text-indigo-700 bg-indigo-100 px-1.5 py-0.5 rounded shrink-0">
                       {inboxes.find(i => i.id === selectedConversation.inbox_id)?.name || 'Sem Caixa'}
                     </span>
                   </div>
                 </div>
               </div>
-              <div className="flex gap-2">
+
+              {/* Desktop Actions */}
+              <div className="hidden md:flex items-center gap-2">
                 <button 
                   onClick={() => setActiveView('SIDEBAR')}
-                  className="md:hidden p-2 text-indigo-600 bg-indigo-50 rounded-xl"
+                  className="p-2 text-indigo-600 bg-indigo-50 hover:bg-indigo-100 rounded-xl transition-colors"
                   title="Contexto Farmacêutico"
                 >
                   <Info className="w-5 h-5" />
@@ -598,13 +601,13 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                   <>
                     <button 
                       onClick={() => setIsTransferModalOpen(true)}
-                      className="hidden md:block px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-bold rounded-lg transition-colors"
+                      className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-bold rounded-lg transition-colors"
                     >
                       Transferir
                     </button>
                     <button 
                       onClick={handleCloseConversation}
-                      className="hidden md:flex items-center gap-1 px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 text-xs font-bold rounded-lg transition-colors"
+                      className="flex items-center gap-1 px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 text-xs font-bold rounded-lg transition-colors"
                     >
                       <CheckCircle2 className="w-3 h-3" /> Finalizar
                     </button>
@@ -616,6 +619,67 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                   >
                     <UserPlus className="w-3 h-3" /> Assumir
                   </button>
+                )}
+              </div>
+
+              {/* Mobile Actions */}
+              <div className="flex md:hidden items-center gap-1.5 relative">
+                <button 
+                  onClick={() => setActiveView('SIDEBAR')}
+                  className="p-2 text-indigo-600 bg-indigo-50 hover:bg-indigo-100 rounded-xl transition-colors"
+                  title="Contexto Farmacêutico"
+                >
+                  <Info className="w-5 h-5" />
+                </button>
+
+                {!selectedConversation.assigned_user_id ? (
+                  <button 
+                    onClick={handleAssumeConversation}
+                    className="flex items-center gap-1 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl transition-colors shadow-sm"
+                  >
+                    <UserPlus className="w-3.5 h-3.5" /> <span>Assumir</span>
+                  </button>
+                ) : (
+                  <div className="relative">
+                    <button 
+                      onClick={() => setIsMenuOpen(!isMenuOpen)}
+                      className="p-2 text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-xl transition-colors"
+                      title="Mais Ações"
+                    >
+                      <MoreVertical className="w-5 h-5" />
+                    </button>
+                    
+                    {isMenuOpen && (
+                      <>
+                        <div 
+                          className="fixed inset-0 z-40" 
+                          onClick={() => setIsMenuOpen(false)}
+                        />
+                        <div className="absolute right-0 mt-2 w-48 bg-white rounded-xl shadow-xl border border-gray-100 py-1.5 z-50 animate-in fade-in slide-in-from-top-1">
+                          <button 
+                            onClick={() => {
+                              setIsTransferModalOpen(true);
+                              setIsMenuOpen(false);
+                            }}
+                            className="w-full text-left px-4 py-2.5 text-xs font-bold text-gray-700 hover:bg-gray-50 flex items-center gap-2"
+                          >
+                            <UserPlus className="w-4 h-4 text-gray-500" />
+                            Transferir Atendimento
+                          </button>
+                          <button 
+                            onClick={() => {
+                              handleCloseConversation();
+                              setIsMenuOpen(false);
+                            }}
+                            className="w-full text-left px-4 py-2.5 text-xs font-bold text-red-600 hover:bg-red-50 flex items-center gap-2"
+                          >
+                            <CheckCircle2 className="w-4 h-4 text-red-500" />
+                            Finalizar Conversa
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
                 )}
               </div>
             </div>
