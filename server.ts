@@ -4474,12 +4474,17 @@ app.post("/api/v1/integration", async (req, res) => {
 // =========================================
 
 // Middleware para verificar se o chat está ativado
-const requireChatEnabled = async (req, res, next) => {
+const requireChatEnabled = async (req: any, res: any, next: any) => {
   try {
+    // Webhooks de provedores externos devem ser sempre permitidos para evitar perda de mensagens
+    if (req.path?.includes('/webhook') || req.url?.includes('/webhook')) {
+      return next();
+    }
+
     let tenantId = req.headers['x-tenant-id'] || req.query.tenantId;
     
     // Se não tiver o header direto, tenta extrair da conversa ou instancia dependendo da rota
-    if (!tenantId && req.body.conversation_id) {
+    if (!tenantId && req.body?.conversation_id) {
        const { data: conv } = await supabaseAdmin.from('chat_conversations').select('store_id').eq('id', req.body.conversation_id).single();
        if (conv) tenantId = conv.store_id;
     }
@@ -4654,7 +4659,7 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
   try {
     const { event, data, instance: bodyInstance } = req.body;
     
-    // Captura prioritária na query
+    // Captura prioritária na query ou no corpo
     const tenantId = req.query.tenantId || req.query.storeId || req.body.tenantId || bodyInstance || data?.instance;
     const instanceName = bodyInstance || data?.instance;
     const eventName = event === "MESSAGES_UPSERT" ? "messages.upsert" : event;
@@ -4664,26 +4669,25 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
       let storeId = tenantId || "default";
       
       if (!tenantId && instanceName) {
-        const { data: inst } = await supabaseAdmin
-          .from("whatsapp_instances")
-          .select("store_id")
-          .eq("instance_name", instanceName)
-          .maybeSingle();
-        if (inst?.store_id) storeId = inst.store_id;
+        try {
+          const { data: inst } = await supabaseAdmin
+            .from("whatsapp_instances")
+            .select("store_id")
+            .eq("instance_name", instanceName)
+            .maybeSingle();
+          if (inst?.store_id) storeId = inst.store_id;
+        } catch (instErr: any) {
+          console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao buscar whatsapp_instances', instErr.message, instErr.stack);
+        }
       }
-      
-      const now = new Date().toISOString();
 
       for (const msg of messages) {
         if (!msg) continue;
         
         const fromMe = Boolean(msg.key?.fromMe ?? msg.fromMe ?? false);
         const remoteJid = msg.key?.remoteJid || msg.remoteJid || msg.sender || msg.participant || "";
-        if (!remoteJid || remoteJid.includes("@g.us")) continue; // Ignora grupos
-        
-        const phone = remoteJid.replace("@s.whatsapp.net", "").replace("@g.us", "");
-        const pushName = msg.pushName || msg.verifiedName || phone || "Contato WhatsApp";
-        
+        if (!remoteJid || remoteJid.includes("@g.us")) continue; // Ignora mensagens de grupo
+
         const text = msg.message?.conversation || 
                      msg.message?.extendedTextMessage?.text || 
                      msg.message?.imageMessage?.caption || 
@@ -4696,81 +4700,23 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                      (msg.message?.documentMessage ? "[Documento]" : 
                      (msg.message?.stickerMessage ? "[Figurinha]" : "[Mensagem WhatsApp]")))));
 
-        const contactId = `contact_${phone}_${storeId}`;
-        const convId = `conv_${phone}_${storeId}`;
-        const msgId = `msg_${msg.key?.id || Date.now()}`;
-        const senderType = fromMe ? "USER" : "CUSTOMER";
+        try {
+          const result = await chatStore.processWhatsAppMessage(storeId, msg);
 
-        // 1. Upsert Contato
-        await supabaseAdmin.from("chat_contacts").upsert([{
-          id: contactId,
-          store_id: storeId,
-          name: pushName,
-          phone_number: phone,
-          created_at: now
-        }], { onConflict: "id" });
-
-        // 2. Busca Unread Count & Inbox
-        const { data: convInfo } = await supabaseAdmin
-          .from("chat_conversations")
-          .select("unread_count, inbox_id")
-          .eq("id", convId)
-          .maybeSingle();
-          
-        const newUnreadCount = fromMe ? 0 : (convInfo?.unread_count || 0) + 1;
-        let resolvedInboxId = convInfo?.inbox_id;
-
-        if (!resolvedInboxId) {
-           const { data: firstInbox } = await supabaseAdmin
-             .from("inboxes")
-             .select("id")
-             .eq("store_id", storeId)
-             .order("created_at", { ascending: true })
-             .limit(1)
-             .maybeSingle();
-           if (firstInbox?.id) {
-             resolvedInboxId = firstInbox.id;
-           } else {
-             const defaultInboxId = `inbox_default_${storeId}`;
-             await supabaseAdmin.from("inboxes").upsert([{
-               id: defaultInboxId,
-               store_id: storeId,
-               name: "Caixa de Entrada Principal"
-             }]);
-             resolvedInboxId = defaultInboxId;
-           }
-        }
-
-        // 3. Upsert Conversa
-        await supabaseAdmin.from("chat_conversations").upsert([{
-          id: convId,
-          store_id: storeId,
-          contact_id: contactId,
-          inbox_id: resolvedInboxId,
-          status: "OPEN",
-          last_message_at: now,
-          last_message_content: text,
-          unread_count: newUnreadCount
-        }], { onConflict: "id" });
-
-        // 4. Insert Mensagem
-        await supabaseAdmin.from("chat_messages").insert([{
-          id: msgId,
-          conversation_id: convId,
-          sender_type: senderType,
-          content: text,
-          is_private: false,
-          created_at: now
-        }]);
-
-        if (!fromMe) {
-          // Trigger bot response logic, this is crucial for the flow!
-          await botHandoffManager.processMessageState(convId, storeId, text, "OPEN");
-          
-          const ratingNum = parseInt(text.trim(), 10);
-          if (!isNaN(ratingNum) && ratingNum >= 1 && ratingNum <= 5) {
-            await csatManager.recordCsatResponse(storeId, convId, ratingNum);
+          if (result && result.conversation && !fromMe) {
+            try {
+              await botHandoffManager.processMessageState(result.conversation.id, storeId, text, "OPEN");
+              
+              const ratingNum = parseInt(String(text).trim(), 10);
+              if (!isNaN(ratingNum) && ratingNum >= 1 && ratingNum <= 5) {
+                await csatManager.recordCsatResponse(storeId, result.conversation.id, ratingNum);
+              }
+            } catch (botErr: any) {
+              console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao processar bot handoff / CSAT:', botErr.message, botErr.stack);
+            }
           }
+        } catch (procErr: any) {
+          console.error('[ERRO CRITICO NO BACKGROUND]: Exceção no processamento do webhook:', procErr.message, procErr.stack);
         }
       }
     } else if (event === "connection.update") {
@@ -4779,7 +4725,7 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
 
     return res.status(200).json({ success: true, message: "Webhook processado ultra-rápido" });
   } catch (error: any) {
-    console.error("[Chat Webhook] Erro na requisição:", error);
+    console.error("[ERRO CRITICO NO BACKGROUND]: Erro geral no webhook:", error.message, error.stack);
     if (!res.headersSent) {
       return res.status(200).json({ received: true, error: error.message }); 
     }

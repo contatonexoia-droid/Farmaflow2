@@ -1,6 +1,12 @@
 import { createClient } from "@supabase/supabase-js";
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
+
+function stringToUuid(str: string): string {
+  const hash = crypto.createHash('md5').update(str).digest('hex');
+  return `${hash.substring(0, 8)}-${hash.substring(8, 12)}-4${hash.substring(13, 16)}-${(parseInt(hash.substring(16, 18), 16) & 0x3f | 0x80).toString(16)}${hash.substring(18, 20)}-${hash.substring(20, 32)}`;
+}
 
 const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || "https://nalshjhoiecxooejpiaw.supabase.co";
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_Y2lAqlvDUhdjSNtv80GkJA_SiOgynYy";
@@ -186,8 +192,9 @@ class ChatStore {
     mediaType?: string
   ): Promise<{ message: ChatMessage; conversation: ChatConversation }> {
     const now = new Date().toISOString();
+    const msgUuid = crypto.randomUUID();
     const newMsg: ChatMessage = {
-      id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      id: msgUuid,
       conversation_id: conversationId,
       sender_type: senderType,
       content,
@@ -199,8 +206,8 @@ class ChatStore {
 
     // Try Supabase insert
     try {
-      await supabaseAdmin.from("chat_messages").insert([{
-        id: newMsg.id,
+      const { error } = await supabaseAdmin.from("chat_messages").insert([{
+        id: msgUuid,
         conversation_id: conversationId,
         sender_type: senderType,
         content,
@@ -210,12 +217,19 @@ class ChatStore {
         created_at: now
       }]);
 
-      await supabaseAdmin.from("chat_conversations").update({
-        last_message_at: now,
-        last_message_content: content
+      if (error) {
+        console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao inserir mensagem no addMessage', error.message, error);
+      }
+
+      const { error: convErr } = await supabaseAdmin.from("chat_conversations").update({
+        last_message_at: now
       }).eq("id", conversationId);
-    } catch (err) {
-      console.warn("[ChatStore] Supabase insert message failed, using fallback:", err);
+
+      if (convErr) {
+        console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao atualizar conversa no addMessage', convErr.message, convErr);
+      }
+    } catch (err: any) {
+      console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao adicionar mensagem', err.message, err.stack);
     }
 
     // Local fallback update
@@ -223,9 +237,10 @@ class ChatStore {
 
     let convIndex = this.conversations.findIndex(c => c.id === conversationId);
     if (convIndex < 0) {
-      // Create fallback conv
+      const defaultContactId = stringToUuid(`contact_${Date.now()}_${storeId}`);
+      const defaultInboxId = stringToUuid(`inbox_default_${storeId}`);
       const defaultContact: ChatContact = {
-        id: `contact_${Date.now()}`,
+        id: defaultContactId,
         store_id: storeId,
         name: "Contato WhatsApp",
         phone_number: "WhatsApp",
@@ -235,7 +250,7 @@ class ChatStore {
         id: conversationId,
         store_id: storeId,
         contact_id: defaultContact.id,
-        inbox_id: `inbox_default_${storeId}`,
+        inbox_id: defaultInboxId,
         status: "OPEN",
         last_message_at: now,
         last_message_content: content,
@@ -288,9 +303,11 @@ class ChatStore {
 
     const now = new Date().toISOString();
 
-    // Otimização: Identificadores determinísticos baseados na PK
-    const contactId = `contact_${phone}_${storeId}`;
-    const convId = `conv_${phone}_${storeId}`;
+    // Deterministic valid UUIDs for Supabase PK/FK compliance
+    const contactId = stringToUuid(`contact_${phone}_${storeId}`);
+    const convId = stringToUuid(`conv_${phone}_${storeId}`);
+    const rawMsgKey = msg.key?.id || `${Date.now()}`;
+    const msgId = /^[0-9a-f-]{36}$/i.test(rawMsgKey) ? rawMsgKey : stringToUuid(`msg_${rawMsgKey}_${convId}`);
 
     const contact: ChatContact = {
       id: contactId,
@@ -300,39 +317,45 @@ class ChatStore {
       created_at: now
     };
 
-    // 1. Upsert contact
+    // 1. Busca ou criação do contato (chat_contacts)
     try {
-      const { error } = await supabaseAdmin.from("chat_contacts").upsert([contact], { onConflict: "id" });
+      const { error } = await supabaseAdmin.from("chat_contacts").upsert([{
+        id: contactId,
+        phone_number: phone,
+        name: pushName,
+        created_at: now
+      }], { onConflict: "id" });
       if (error) {
-        console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao inserir contato', error.message, error);
+        console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao buscar ou criar contato (chat_contacts)', error.message, error);
       }
     } catch (error: any) {
-      console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao inserir contato', error.message, error.stack);
+      console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao buscar ou criar contato (chat_contacts)', error.message, error.stack);
     }
 
-    // 2. Fetch Conversation info to determine if exists and current unread_count
+    // 2. Obtenção do inbox_id
+    let resolvedInboxId: string | null = null;
     let convInfo: any = null;
+
     try {
       const { data, error } = await supabaseAdmin
         .from("chat_conversations")
         .select("id, unread_count, inbox_id")
         .eq("id", convId)
-        .single();
+        .maybeSingle();
       
       if (error && error.code !== 'PGRST116') {
-        // PGRST116 is "No rows found"
-        console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao buscar conversa', error.message, error);
+        console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao consultar conversa existente', error.message, error);
       } else {
         convInfo = data;
+        if (convInfo?.inbox_id) {
+          resolvedInboxId = convInfo.inbox_id;
+        }
       }
     } catch (error: any) {
-      console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao buscar conversa', error.message, error.stack);
+      console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao buscar dados da conversa', error.message, error.stack);
     }
 
-    let resolvedInboxId = convInfo?.inbox_id;
-
-    // Se a conversa não existir e não temos inbox_id, busca a primeira inbox ou cria uma padrão
-    if (!convInfo && !resolvedInboxId) {
+    if (!resolvedInboxId) {
        try {
          const { data: firstInbox, error: fetchInboxError } = await supabaseAdmin
            .from("inboxes")
@@ -340,31 +363,31 @@ class ChatStore {
            .eq("store_id", storeId)
            .order("created_at", { ascending: true })
            .limit(1)
-           .single();
+           .maybeSingle();
            
          if (fetchInboxError && fetchInboxError.code !== 'PGRST116') {
-           console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao buscar inbox', fetchInboxError.message, fetchInboxError);
+           console.error('[ERRO CRITICO NO BACKGROUND]: Erro na obtenção do inbox_id da loja', fetchInboxError.message, fetchInboxError);
          }
            
          if (firstInbox?.id) {
            resolvedInboxId = firstInbox.id;
          } else {
-           // Create a default inbox if none exists
-           const defaultInboxId = `inbox_default_${storeId}`;
-           const { error: insertInboxError } = await supabaseAdmin.from("inboxes").insert([{
+           // Cria caixa de entrada padrão se nenhuma existir
+           const defaultInboxId = stringToUuid(`inbox_default_${storeId}`);
+           const { error: insertInboxError } = await supabaseAdmin.from("inboxes").upsert([{
              id: defaultInboxId,
              store_id: storeId,
              name: "Caixa de Entrada Principal"
-           }]);
+           }], { onConflict: "id" });
            
            if (insertInboxError) {
-             console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao criar inbox padrão', insertInboxError.message, insertInboxError);
+             console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao criar caixa de entrada padrão (inbox_id)', insertInboxError.message, insertInboxError);
            } else {
              resolvedInboxId = defaultInboxId;
            }
          }
        } catch (error: any) {
-         console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao gerenciar inbox', error.message, error.stack);
+         console.error('[ERRO CRITICO NO BACKGROUND]: Exceção na obtenção do inbox_id', error.message, error.stack);
        }
     }
 
@@ -376,7 +399,7 @@ class ChatStore {
       store_id: storeId,
       contact_id: contactId,
       inbox_id: resolvedInboxId,
-      status: "OPEN", // Força reabertura se enviar mensagem (ou pode manter o estado se existir)
+      status: "OPEN",
       last_message_at: now,
       last_message_content: text,
       unread_count: newUnreadCount,
@@ -384,7 +407,7 @@ class ChatStore {
       created_at: now
     };
 
-    // 3. Upsert Conversation otimizado
+    // 3. Busca ou criação da conversa (chat_conversations)
     try {
       const { error } = await supabaseAdmin.from("chat_conversations").upsert([{
         id: convId,
@@ -393,21 +416,20 @@ class ChatStore {
         inbox_id: resolvedInboxId,
         status: "OPEN",
         last_message_at: now,
-        last_message_content: text,
         unread_count: newUnreadCount
       }], { onConflict: "id" });
       
       if (error) {
-        console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao inserir/atualizar conversa', error.message, error);
+        console.error('[ERRO CRITICO NO BACKGROUND]: Erro na busca ou criação da conversa (chat_conversations)', error.message, error);
       }
     } catch (error: any) {
-      console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao inserir/atualizar conversa', error.message, error.stack);
+      console.error('[ERRO CRITICO NO BACKGROUND]: Exceção na busca ou criação da conversa (chat_conversations)', error.message, error.stack);
     }
 
-    // 4. Insert Message otimizado
+    // 4. Inserção da mensagem (chat_messages)
     const senderType = fromMe ? "USER" : "CUSTOMER";
     const newMsg: ChatMessage = {
-      id: `msg_${msg.key?.id || Date.now()}`,
+      id: msgId,
       conversation_id: convId,
       sender_type: senderType,
       content: text,
@@ -417,7 +439,7 @@ class ChatStore {
 
     try {
       const { error } = await supabaseAdmin.from("chat_messages").insert([{
-        id: newMsg.id,
+        id: msgId,
         conversation_id: convId,
         sender_type: senderType,
         content: text,
@@ -426,10 +448,10 @@ class ChatStore {
       }]);
       
       if (error) {
-        console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao inserir mensagem', error.message, error);
+        console.error('[ERRO CRITICO NO BACKGROUND]: Erro na inserção da mensagem (chat_messages)', error.message, error);
       }
     } catch (error: any) {
-      console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao inserir mensagem', error.message, error.stack);
+      console.error('[ERRO CRITICO NO BACKGROUND]: Exceção na inserção da mensagem (chat_messages)', error.message, error.stack);
     }
     
     // Atualiza cache em memória local apenas para fallback / dev

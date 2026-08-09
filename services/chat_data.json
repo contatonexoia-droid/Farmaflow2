@@ -1,0 +1,50 @@
+{
+  "contacts": [
+    {
+      "id": "contact_demo_1",
+      "store_id": "default",
+      "name": "Cliente Demonstração",
+      "phone_number": "5511999998888",
+      "created_at": "2026-08-09T10:25:01.794Z"
+    }
+  ],
+  "conversations": [
+    {
+      "id": "conv_demo_1",
+      "store_id": "default",
+      "contact_id": "contact_demo_1",
+      "inbox_id": "inbox_default_default",
+      "assigned_user_id": null,
+      "status": "OPEN",
+      "last_message_at": "2026-08-09T10:25:01.794Z",
+      "last_message_content": "Olá, gostaria de consultar a disponibilidade de medicamentos.",
+      "unread_count": 1,
+      "contact": {
+        "id": "contact_demo_1",
+        "store_id": "default",
+        "name": "Cliente Demonstração",
+        "phone_number": "5511999998888",
+        "created_at": "2026-08-09T10:25:01.794Z"
+      },
+      "created_at": "2026-08-09T10:25:01.794Z"
+    }
+  ],
+  "messages": [
+    {
+      "id": "msg_demo_1",
+      "conversation_id": "conv_demo_1",
+      "sender_type": "CUSTOMER",
+      "content": "Olá, gostaria de consultar a disponibilidade de medicamentos.",
+      "is_private": false,
+      "created_at": "2026-08-09T09:25:01.794Z"
+    },
+    {
+      "id": "msg_demo_2",
+      "conversation_id": "conv_demo_1",
+      "sender_type": "BOT",
+      "content": "Olá! Sou o assistente da farmácia. Em que posso ajudar hoje?",
+      "is_private": false,
+      "created_at": "2026-08-09T09:26:41.794Z"
+    }
+  ]
+}
