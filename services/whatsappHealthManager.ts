@@ -47,7 +47,15 @@ export class WhatsappHealthManager extends EventEmitter {
     const evolutionUrl = process.env.EVOLUTION_API_URL?.replace(/\/$/, "");
     const evolutionKey = process.env.EVOLUTION_API_KEY;
 
-    if (!evolutionUrl || !evolutionKey) return;
+    if (
+      !evolutionUrl ||
+      !evolutionKey ||
+      evolutionUrl.includes("seudominio.com") ||
+      evolutionUrl.includes("yourdomain.com") ||
+      evolutionKey.includes("sua-global-api-key")
+    ) {
+      return;
+    }
 
     // Buscar todas as instâncias cadastradas
     const { data: instances, error } = await supabaseAdmin

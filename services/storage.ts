@@ -1181,16 +1181,27 @@ export const getPromotionsByTenant = async (
   tenantId: string,
   networkId?: string,
 ): Promise<PromotionRule[]> => {
-  try {
-    const query = networkId ? `?networkId=${networkId}` : '';
-    const res = await fetch(`/api/v1/tenants/${tenantId}/promos${query}`);
-    if (!res.ok) throw new Error("Failed to fetch promos");
-    const data = await res.json();
-    return (data || []).map(mapDbPromotionToApp);
-  } catch (e: any) {
-    handleNetworkError(e, "Promoções");
-    return [];
+  const maxRetries = 3;
+  let delayMs = 1000;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const query = networkId ? `?networkId=${networkId}` : '';
+      const res = await fetch(`/api/v1/tenants/${tenantId}/promos${query}`);
+      if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+      const data = await res.json();
+      return (data || []).map(mapDbPromotionToApp);
+    } catch (e: any) {
+      if (attempt === maxRetries) {
+        handleNetworkError(e, "Promoções");
+        return [];
+      }
+      console.warn(`[getPromotionsByTenant] Retrying promo fetch (attempt ${attempt}/${maxRetries}) due to: ${e?.message || e}`);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      delayMs *= 2;
+    }
   }
+  return [];
 };
 
 export const savePromotion = async (promotion: PromotionRule) => {

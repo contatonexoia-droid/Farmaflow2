@@ -345,11 +345,11 @@ class ChatStore {
     return { message: newMsg, conversation: this.conversations[convIndex] };
   }
 
-  public async processWhatsAppMessage(storeId: string, msg: any): Promise<{ conversation: ChatConversation; message: ChatMessage } | null> {
+  public async processWhatsAppMessage(storeId: string, msg: any, instanceName?: string): Promise<{ conversation: ChatConversation; message: ChatMessage } | null> {
     if (!msg) return null;
 
     // Robust extraction for Evolution API and other providers
-    const fromMe = Boolean(msg.key?.fromMe ?? msg.fromMe ?? false);
+    let fromMe = Boolean(msg.key?.fromMe ?? msg.fromMe ?? false);
     const remoteJid = msg.key?.remoteJid || msg.remoteJid || msg.sender || msg.participant || "";
     
     if (!remoteJid || remoteJid.includes("@g.us") || remoteJid === "status@broadcast") {
@@ -362,7 +362,7 @@ class ChatStore {
     if (phone.includes(":")) {
       phone = phone.split(":")[0];
     }
-    // Garante que a string do telefone só contenha números (limpa hifens ou outros caracteres caso venham)
+    // Garante que a string do telefone só contenha números
     phone = phone.replace(/\D/g, "");
 
     const pushName = msg.pushName || msg.verifiedName || phone || "Contato WhatsApp";
@@ -379,7 +379,36 @@ class ChatStore {
                  (msg.message?.documentMessage ? "[Documento]" : 
                  (msg.message?.stickerMessage ? "[Figurinha]" : "[Mensagem WhatsApp]")))));
 
-    console.log('[PAYLOAD EXTRAÍDO COM SUCESSO]:', { phone, text, fromMe });
+    // Robust self-message / owner-message check to avoid contact name pollution
+    let instancePhoneNumber = "";
+    let instanceNameFromDb = "";
+    try {
+      // Find instance to get its phone number and check if message was sent by the owner/instance
+      const query = supabaseAdmin.from("whatsapp_instances").select("phone_number, instance_name");
+      if (instanceName) {
+        query.eq("instance_name", instanceName);
+      } else {
+        query.eq("store_id", storeId);
+      }
+      const { data: inst } = await query.limit(1).maybeSingle();
+      if (inst) {
+        instancePhoneNumber = inst.phone_number ? inst.phone_number.replace(/\D/g, "") : "";
+        instanceNameFromDb = inst.instance_name || "";
+      }
+    } catch (e: any) {
+      console.warn("Error fetching whatsapp_instance for fromMe check:", e.message);
+    }
+
+    // If pushName is "Evandro" (or matches instance name) and the remote phone is different,
+    // this message is actually sent from our side (or represents the instance owner), so we must treat it as fromMe = true
+    const isOwnerName = pushName.toLowerCase() === "evandro" || 
+                        (instanceNameFromDb && pushName.toLowerCase().includes(instanceNameFromDb.toLowerCase()));
+                        
+    if (isOwnerName && phone !== instancePhoneNumber) {
+      fromMe = true;
+    }
+
+    console.log('[PAYLOAD EXTRAÍDO COM SUCESSO]:', { phone, text, fromMe, instanceName });
 
     const now = new Date().toISOString();
 
@@ -399,8 +428,8 @@ class ChatStore {
         .maybeSingle();
 
       if (existingContact) {
-        // Se for uma mensagem enviada por mim ou não tiver pushName novo útil, mantenha o nome existente.
-        if (fromMe || !msg.pushName) {
+        // Se for uma mensagem enviada por mim ou não tiver pushName novo útil, ou se for o nome do dono, mantenha o nome existente.
+        if (fromMe || !msg.pushName || isOwnerName) {
           finalContactName = existingContact.name;
         } else {
           finalContactName = pushName;
@@ -409,7 +438,9 @@ class ChatStore {
           }).eq("id", contactId);
         }
       } else {
-        if (fromMe) finalContactName = phone; // Fallback se o próprio usuário iniciou a conversa
+        if (fromMe || isOwnerName) {
+          finalContactName = phone; // Fallback se o próprio usuário iniciou a conversa
+        }
         await supabaseAdmin.from("chat_contacts").insert([{
           id: contactId,
           store_id: storeId,
@@ -451,6 +482,32 @@ class ChatStore {
       }
     } catch (error: any) {
       console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao buscar dados da conversa', error.message, error.stack);
+    }
+
+    // Try routing message to specific inbox based on the instanceName we received
+    if (!resolvedInboxId && instanceName) {
+      try {
+        const { data: inst } = await supabaseAdmin
+          .from("whatsapp_instances")
+          .select("id")
+          .eq("instance_name", instanceName)
+          .maybeSingle();
+          
+        if (inst?.id) {
+          const { data: inbox } = await supabaseAdmin
+            .from("inboxes")
+            .select("id")
+            .eq("whatsapp_instance_id", inst.id)
+            .maybeSingle();
+            
+          if (inbox?.id) {
+            resolvedInboxId = inbox.id;
+            console.log(`[ChatStore] Routed conversation ${convId} to inbox ${resolvedInboxId} because of instance ${instanceName}`);
+          }
+        }
+      } catch (routingErr: any) {
+        console.warn("[ChatStore] Error routing message by instanceName:", routingErr.message);
+      }
     }
 
     if (!resolvedInboxId) {

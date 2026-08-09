@@ -239,7 +239,17 @@ app.get("/sw.js", (req, res) => {
   res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
   res.setHeader("Pragma", "no-cache");
   res.setHeader("Expires", "0");
-  res.sendFile(path.join(process.cwd(), "public", "sw.js"));
+  
+  let swPath = path.join(process.cwd(), "public", "sw.js");
+  if (!fs.existsSync(swPath)) {
+    swPath = path.join(process.cwd(), "dist", "sw.js");
+  }
+  
+  if (fs.existsSync(swPath)) {
+    res.sendFile(swPath);
+  } else {
+    res.status(404).send("Service worker file not found");
+  }
 });
 
 // Dynamic PWA manifest route to prevent collisions of multiple shops on the same domain
@@ -4714,7 +4724,7 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                      (msg.message?.stickerMessage ? "[Figurinha]" : "[Mensagem WhatsApp]")))));
 
         try {
-          const result = await chatStore.processWhatsAppMessage(storeId, msg);
+          const result = await chatStore.processWhatsAppMessage(storeId, msg, instanceName);
 
           if (result && result.conversation && !fromMe) {
             try {
@@ -4877,7 +4887,38 @@ app.post("/api/v1/chat/send", requireChatEnabled, async (req, res) => {
       const evolutionUrl = process.env.EVOLUTION_API_URL?.replace(/\/$/, '');
       const evolutionKey = process.env.EVOLUTION_API_KEY;
       if (evolutionUrl && evolutionKey) {
-        const instanceName = `store_${storeId.replace(/-/g,"")}`;
+        // Resolve instanceName from conversation's inbox
+        let instanceName = `store_${storeId.replace(/-/g,"")}`; // Fallback default
+        try {
+          const { data: conv } = await supabaseAdmin
+            .from("chat_conversations")
+            .select("inbox_id")
+            .eq("id", conversation_id)
+            .maybeSingle();
+
+          if (conv?.inbox_id) {
+            const { data: inbox } = await supabaseAdmin
+              .from("inboxes")
+              .select("whatsapp_instance_id")
+              .eq("id", conv.inbox_id)
+              .maybeSingle();
+
+            if (inbox?.whatsapp_instance_id) {
+              const { data: inst } = await supabaseAdmin
+                .from("whatsapp_instances")
+                .select("instance_name")
+                .eq("id", inbox.whatsapp_instance_id)
+                .maybeSingle();
+
+              if (inst?.instance_name) {
+                instanceName = inst.instance_name;
+                console.log(`[Chat API] Using specific instance ${instanceName} for inbox ${conv.inbox_id}`);
+              }
+            }
+          }
+        } catch (resolveErr: any) {
+          console.warn("[Chat API] Warning resolving instance name for conversation, using fallback:", resolveErr.message);
+        }
         // Extrai apenas os numeros de telefone de `contact_<phone>_...` ou `conv_<phone>_...`
         const phoneMatch = conversation_id.match(/_(.+?)_/);
         const number = phoneMatch ? phoneMatch[1] : null;
