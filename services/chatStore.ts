@@ -321,6 +321,7 @@ class ChatStore {
     try {
       const { error } = await supabaseAdmin.from("chat_contacts").upsert([{
         id: contactId,
+        store_id: storeId,
         phone_number: phone,
         name: pushName,
         created_at: now
@@ -416,6 +417,7 @@ class ChatStore {
         inbox_id: resolvedInboxId,
         status: "OPEN",
         last_message_at: now,
+        last_message_content: text,
         unread_count: newUnreadCount
       }], { onConflict: "id" });
       
