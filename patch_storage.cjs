@@ -101,6 +101,9 @@ export const getCouponsByTenant = async (
   tenantId: string,
   networkId?: string,
 ): Promise<CouponRule[]> => {
+  if (!tenantId || tenantId === 'undefined' || tenantId === 'null') {
+    return [];
+  }
   try {
     const query = networkId ? \`?networkId=\${networkId}\` : '';
     const res = await fetch(\`/api/v1/tenants/\${tenantId}/vouchers\${query}\`);

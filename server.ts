@@ -240,12 +240,44 @@ app.get("/sw.js", (req, res) => {
   res.setHeader("Pragma", "no-cache");
   res.setHeader("Expires", "0");
   
-  let swPath = path.join(process.cwd(), "public", "sw.js");
-  if (!fs.existsSync(swPath)) {
-    swPath = path.join(process.cwd(), "dist", "sw.js");
+  let swPath = "";
+  const paths = [
+    path.join(process.cwd(), "public", "sw.js"),
+    path.join(process.cwd(), "dist", "sw.js"),
+  ];
+
+  try {
+    // @ts-ignore
+    if (typeof __dirname !== "undefined") {
+      // @ts-ignore
+      paths.push(path.join(__dirname, "public", "sw.js"));
+      // @ts-ignore
+      paths.push(path.join(__dirname, "dist", "sw.js"));
+      // @ts-ignore
+      paths.push(path.join(__dirname, "sw.js"));
+      // @ts-ignore
+      paths.push(path.join(__dirname, "..", "public", "sw.js"));
+      // @ts-ignore
+      paths.push(path.join(__dirname, "..", "dist", "sw.js"));
+    }
+    if (typeof import.meta !== "undefined" && import.meta.url) {
+      const dir = path.dirname(fileURLToPath(import.meta.url));
+      paths.push(path.join(dir, "public", "sw.js"));
+      paths.push(path.join(dir, "dist", "sw.js"));
+      paths.push(path.join(dir, "sw.js"));
+      paths.push(path.join(dir, "..", "public", "sw.js"));
+      paths.push(path.join(dir, "..", "dist", "sw.js"));
+    }
+  } catch (err) {}
+
+  for (const p of paths) {
+    if (fs.existsSync(p)) {
+      swPath = p;
+      break;
+    }
   }
   
-  if (fs.existsSync(swPath)) {
+  if (swPath) {
     res.sendFile(swPath);
   } else {
     res.status(404).send("Service worker file not found");
@@ -4885,6 +4917,29 @@ app.get("/api/v1/chat/messages", async (req, res) => {
       return res.status(400).json({ error: "conversationId é obrigatório" });
     }
 
+    const userId = req.query.userId as string | undefined;
+    const userRole = req.query.role as string | undefined;
+
+    if (userId && userRole?.toLowerCase() === "operador") {
+      const { data: convData } = await supabaseAdmin
+        .from("chat_conversations")
+        .select("inbox_id")
+        .eq("id", conversationId)
+        .maybeSingle();
+
+      if (convData && convData.inbox_id) {
+        const { data: memberRows } = await supabaseAdmin
+          .from("inbox_members")
+          .select("inbox_id")
+          .eq("user_id", userId);
+        const allowedInboxIds = memberRows ? memberRows.map(r => r.inbox_id) : [];
+
+        if (!allowedInboxIds.includes(convData.inbox_id)) {
+          return res.status(403).json({ error: "Permissão negada para acessar mensagens desta conversa." });
+        }
+      }
+    }
+
     const messages = await chatStore.getMessages(conversationId);
     return res.json({ data: messages });
   } catch (err: any) {
@@ -4895,11 +4950,31 @@ app.get("/api/v1/chat/messages", async (req, res) => {
 // Envio e persistência de mensagem pelo Balconista/Atendente
 app.post("/api/v1/chat/send", requireChatEnabled, async (req, res) => {
   try {
-    const { conversation_id, content, is_private, media_url, media_type, sender_type } = req.body;
+    const { conversation_id, content, is_private, media_url, media_type, sender_type, userId, role } = req.body;
     const storeId = (req.headers["x-tenant-id"] as string) || "default";
 
     if (!conversation_id || (!content && !media_url)) {
       return res.status(400).json({ error: "conversation_id e conteúdo são obrigatórios." });
+    }
+
+    if (userId && role?.toLowerCase() === "operador") {
+      const { data: convData } = await supabaseAdmin
+        .from("chat_conversations")
+        .select("inbox_id")
+        .eq("id", conversation_id)
+        .maybeSingle();
+
+      if (convData && convData.inbox_id) {
+        const { data: memberRows } = await supabaseAdmin
+          .from("inbox_members")
+          .select("inbox_id")
+          .eq("user_id", userId);
+        const allowedInboxIds = memberRows ? memberRows.map(r => r.inbox_id) : [];
+
+        if (!allowedInboxIds.includes(convData.inbox_id)) {
+          return res.status(403).json({ error: "Permissão negada para enviar mensagens nesta conversa." });
+        }
+      }
     }
 
     // Persistir mensagem

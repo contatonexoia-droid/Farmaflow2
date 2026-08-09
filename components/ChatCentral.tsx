@@ -129,11 +129,11 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
 
   useEffect(() => {
     if (isOperador && inboxes.length > 0) {
-      if (inboxes.length === 1) {
+      if (selectedInboxId === 'all' || !inboxes.some(i => i.id === selectedInboxId)) {
         setSelectedInboxId(inboxes[0].id);
       }
     }
-  }, [inboxes, isOperador]);
+  }, [inboxes, isOperador, selectedInboxId]);
 
   useEffect(() => {
     if (selectedConversation && isOperador && selectedConversation.inbox_id && allowedInboxIds.length > 0) {
@@ -270,7 +270,8 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
 
   const fetchMessages = async (conversationId: string) => {
     try {
-      const res = await fetch(`/api/v1/chat/messages?conversationId=${conversationId}`);
+      const queryParams = userId ? `&userId=${userId}&role=${cleanRole}` : '';
+      const res = await fetch(`/api/v1/chat/messages?conversationId=${conversationId}${queryParams}`);
       if (res.ok) {
         const json = await res.json();
         if (json.data) {
@@ -286,6 +287,13 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
         .order('created_at', { ascending: true });
 
       if (!error && data) {
+        if (isOperador && allowedInboxIds.length > 0) {
+          const conv = conversations.find(c => c.id === conversationId);
+          if (conv && conv.inbox_id && !allowedInboxIds.includes(conv.inbox_id)) {
+            setMessages([]);
+            return;
+          }
+        }
         setMessages(data);
       }
     } catch (e) {
@@ -320,7 +328,9 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
           conversation_id: selectedConversation.id,
           content: textToSend,
           is_private: isPrivateNote,
-          sender_type: 'USER'
+          sender_type: 'USER',
+          userId: userId,
+          role: cleanRole
         })
       });
 
@@ -446,7 +456,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                 onChange={(e) => setSelectedInboxId(e.target.value)}
                 className="w-full bg-gray-50 border border-gray-200 text-gray-700 text-xs rounded-xl pl-9 pr-3 py-2 outline-none focus:ring-2 focus:ring-emerald-500 font-bold appearance-none"
               >
-                {!isOperador || inboxes.length > 1 ? (
+                {!isOperador ? (
                   <option value="all">Todas as Caixas (Inboxes)</option>
                 ) : null}
                 {inboxes.map(inbox => (
