@@ -279,12 +279,19 @@ class ChatStore {
     const fromMe = Boolean(msg.key?.fromMe ?? msg.fromMe ?? false);
     const remoteJid = msg.key?.remoteJid || msg.remoteJid || msg.sender || msg.participant || "";
     
-    if (!remoteJid) {
-       console.error('[WEBHOOK EXTRACT ERROR] No remoteJid found in message:', JSON.stringify(msg, null, 2));
+    if (!remoteJid || remoteJid.includes("@g.us") || remoteJid === "status@broadcast") {
+       if (!remoteJid) console.error('[WEBHOOK EXTRACT ERROR] No remoteJid found in message:', JSON.stringify(msg, null, 2));
        return null;
     }
 
-    const phone = remoteJid.replace("@s.whatsapp.net", "").replace("@g.us", "");
+    // Evolution API multi-device format often includes a colon, e.g., 5511988887777:2@s.whatsapp.net
+    let phone = remoteJid.replace("@s.whatsapp.net", "").replace("@g.us", "");
+    if (phone.includes(":")) {
+      phone = phone.split(":")[0];
+    }
+    // Garante que a string do telefone só contenha números (limpa hifens ou outros caracteres caso venham)
+    phone = phone.replace(/\D/g, "");
+
     const pushName = msg.pushName || msg.verifiedName || phone || "Contato WhatsApp";
     
     const text = msg.message?.conversation || 

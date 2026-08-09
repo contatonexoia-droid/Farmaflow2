@@ -4659,13 +4659,26 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
   try {
     const { event, data, instance: bodyInstance } = req.body;
     
+    // Log para diagnóstico de payload bruto (solicitado)
+    console.log(`[Webhook RAW Payload] Evento: ${event}`, JSON.stringify(req.body, null, 2));
+    
     // Captura prioritária na query ou no corpo
     const tenantId = req.query.tenantId || req.query.storeId || req.body.tenantId || bodyInstance || data?.instance;
     const instanceName = bodyInstance || data?.instance;
     const eventName = event === "MESSAGES_UPSERT" ? "messages.upsert" : event;
     
     if (eventName === "messages.upsert") {
-      const messages = data?.messages || [];
+      let messages = [];
+      if (Array.isArray(data?.messages)) {
+        messages = data.messages;
+      } else if (data?.message && data.message.key) {
+        messages = [data.message];
+      } else if (data?.key) {
+        messages = [data]; // data is the message itself
+      } else if (Array.isArray(data)) {
+        messages = data;
+      }
+      
       let storeId = tenantId || "default";
       
       if (!tenantId && instanceName) {
@@ -4686,7 +4699,7 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
         
         const fromMe = Boolean(msg.key?.fromMe ?? msg.fromMe ?? false);
         const remoteJid = msg.key?.remoteJid || msg.remoteJid || msg.sender || msg.participant || "";
-        if (!remoteJid || remoteJid.includes("@g.us")) continue; // Ignora mensagens de grupo
+        if (!remoteJid || remoteJid.includes("@g.us") || remoteJid === "status@broadcast") continue; // Ignora mensagens de grupo e status
 
         const text = msg.message?.conversation || 
                      msg.message?.extendedTextMessage?.text || 
