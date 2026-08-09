@@ -5071,6 +5071,102 @@ app.post("/api/v1/chat/send", requireChatEnabled, async (req, res) => {
   }
 });
 
+// --- LABELS ENDPOINTS ---
+app.get("/api/v1/chat/labels", async (req, res) => {
+  try {
+    const storeId = (req.query.tenantId as string) || (req.headers["x-tenant-id"] as string) || "default";
+    const labels = await chatStore.getLabels(storeId);
+    return res.json({ data: labels });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/v1/chat/labels", async (req, res) => {
+  try {
+    const storeId = (req.body.tenantId as string) || (req.headers["x-tenant-id"] as string) || "default";
+    const { id, name, color } = req.body;
+    if (!name || !color) {
+      return res.status(400).json({ error: "name e color são obrigatórios" });
+    }
+    const label = await chatStore.saveLabel({ id, store_id: storeId, name, color });
+    return res.json({ data: label });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/api/v1/chat/labels/:id", async (req, res) => {
+  try {
+    const storeId = (req.query.tenantId as string) || (req.headers["x-tenant-id"] as string) || "default";
+    const id = req.params.id;
+    await chatStore.deleteLabel(id, storeId);
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/v1/chat/conversations/:id/labels", async (req, res) => {
+  try {
+    const conversationId = req.params.id;
+    const labels = await chatStore.getConversationLabels(conversationId);
+    return res.json({ data: labels });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/v1/chat/conversations/:id/labels", async (req, res) => {
+  try {
+    const conversationId = req.params.id;
+    const { labelIds } = req.body;
+    if (!Array.isArray(labelIds)) {
+      return res.status(400).json({ error: "labelIds deve ser um array" });
+    }
+    await chatStore.setConversationLabels(conversationId, labelIds);
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// --- CANNED RESPONSES ENDPOINTS ---
+app.get("/api/v1/chat/canned-responses", async (req, res) => {
+  try {
+    const storeId = (req.query.tenantId as string) || (req.headers["x-tenant-id"] as string) || "default";
+    const responses = await chatStore.getCannedResponses(storeId);
+    return res.json({ data: responses });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/v1/chat/canned-responses", async (req, res) => {
+  try {
+    const storeId = (req.body.tenantId as string) || (req.headers["x-tenant-id"] as string) || "default";
+    const { id, shortcut, text } = req.body;
+    if (!shortcut || !text) {
+      return res.status(400).json({ error: "shortcut e text são obrigatórios" });
+    }
+    const response = await chatStore.saveCannedResponse({ id, store_id: storeId, shortcut, text });
+    return res.json({ data: response });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/api/v1/chat/canned-responses/:id", async (req, res) => {
+  try {
+    const storeId = (req.query.tenantId as string) || (req.headers["x-tenant-id"] as string) || "default";
+    const id = req.params.id;
+    await chatStore.deleteCannedResponse(id, storeId);
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 async function startServer() {
   let __filename = "";
   let __dirname = "";

@@ -121,7 +121,7 @@ interface AdminSettingsProps {
 }
 
 export const AdminSettings: React.FC<AdminSettingsProps> = ({ config, onConfigUpdate }) => {
-  const [activeTab, setActiveTab] = useState<'geral' | 'pagamentos' | 'entrega'>('geral');
+  const [activeTab, setActiveTab] = useState<'geral' | 'pagamentos' | 'entrega' | 'atendimento'>('geral');
   const [formData, setFormData] = useState<PharmacyConfig>({ ...config });
   const [showSaved, setShowSaved] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -335,6 +335,12 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ config, onConfigUp
               className={`flex items-center gap-2 px-6 py-3 rounded-2xl font-bold transition-all shrink-0 ${activeTab === 'entrega' ? 'bg-emerald-50 text-emerald-700' : 'text-gray-500 hover:bg-gray-50'}`}
             >
               <Truck size={18} /> Configurações de Entrega
+            </button>
+            <button 
+              onClick={() => setActiveTab('atendimento')}
+              className={`flex items-center gap-2 px-6 py-3 rounded-2xl font-bold transition-all shrink-0 ${activeTab === 'atendimento' ? 'bg-emerald-50 text-emerald-700' : 'text-gray-500 hover:bg-gray-50'}`}
+            >
+              <MessageSquare size={18} /> Atendimento (Etiquetas e Atalhos)
             </button>
           </div>
         </div>
@@ -916,6 +922,12 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ config, onConfigUp
             </div>
           </form>
         )}
+
+        {activeTab === 'atendimento' && (
+          <div className="animate-in fade-in duration-300">
+            <AtendimentoSettings tenantId={config.id} />
+          </div>
+        )}
       </div>
       
       {activeTab === 'geral' && (
@@ -924,6 +936,337 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ config, onConfigUp
           <ControlledProductsMigrationTool tenantId={config.id} />
         </div>
       )}
+    </div>
+  );
+};
+
+// ============================================================================
+// ATENDIMENTO SETTINGS COMPONENT (LABELS & CANNED RESPONSES CRUD)
+// ============================================================================
+const AtendimentoSettings: React.FC<{ tenantId: string }> = ({ tenantId }) => {
+  const [labels, setLabels] = useState<any[]>([]);
+  const [canned, setCanned] = useState<any[]>([]);
+  
+  // States for label creation/edit
+  const [newLabelName, setNewLabelName] = useState('');
+  const [newLabelColor, setNewLabelColor] = useState('#3B82F6');
+  const [editingLabelId, setEditingLabelId] = useState<string | null>(null);
+
+  // States for canned response creation/edit
+  const [newCannedShortcut, setNewCannedShortcut] = useState('');
+  const [newCannedText, setNewCannedText] = useState('');
+  const [editingCannedId, setEditingCannedId] = useState<string | null>(null);
+
+  const [loading, setLoading] = useState(false);
+
+  const loadData = async () => {
+    try {
+      const resL = await fetch(`/api/v1/chat/labels?tenantId=${tenantId}`);
+      if (resL.ok) {
+        const jL = await resL.json();
+        if (jL?.data) setLabels(jL.data);
+      }
+      const resC = await fetch(`/api/v1/chat/canned-responses?tenantId=${tenantId}`);
+      if (resC.ok) {
+        const jC = await resC.json();
+        if (jC?.data) setCanned(jC.data);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  useEffect(() => {
+    loadData();
+  }, [tenantId]);
+
+  // Label actions
+  const handleSaveLabel = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newLabelName.trim()) return;
+    setLoading(true);
+    try {
+      const res = await fetch('/api/v1/chat/labels', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: editingLabelId || undefined,
+          tenantId,
+          name: newLabelName.trim(),
+          color: newLabelColor
+        })
+      });
+      if (res.ok) {
+        setNewLabelName('');
+        setNewLabelColor('#3B82F6');
+        setEditingLabelId(null);
+        await loadData();
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDeleteLabel = async (id: string) => {
+    if (!confirm("Deseja realmente excluir esta etiqueta? Ela será removida de todas as conversas.")) return;
+    try {
+      const res = await fetch(`/api/v1/chat/labels/${id}?tenantId=${tenantId}`, {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        await loadData();
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleEditLabel = (lbl: any) => {
+    setEditingLabelId(lbl.id);
+    setNewLabelName(lbl.name);
+    setNewLabelColor(lbl.color);
+  };
+
+  // Canned response actions
+  const handleSaveCanned = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newCannedShortcut.trim() || !newCannedText.trim()) return;
+    setLoading(true);
+    try {
+      const res = await fetch('/api/v1/chat/canned-responses', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: editingCannedId || undefined,
+          tenantId,
+          shortcut: newCannedShortcut.trim().replace(/^\//, ''),
+          text: newCannedText.trim()
+        })
+      });
+      if (res.ok) {
+        setNewCannedShortcut('');
+        setNewCannedText('');
+        setEditingCannedId(null);
+        await loadData();
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDeleteCanned = async (id: string) => {
+    if (!confirm("Deseja realmente excluir esta mensagem rápida?")) return;
+    try {
+      const res = await fetch(`/api/v1/chat/canned-responses/${id}?tenantId=${tenantId}`, {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        await loadData();
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleEditCanned = (cr: any) => {
+    setEditingCannedId(cr.id);
+    setNewCannedShortcut(cr.shortcut);
+    setNewCannedText(cr.text);
+  };
+
+  const presetColors = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#6B7280', '#14B8A6'];
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-10">
+      
+      {/* SEÇÃO 1: GERENCIAMENTO DE ETIQUETAS */}
+      <div className="bg-white p-6 rounded-[2rem] border border-gray-100 shadow-sm space-y-6">
+        <div>
+          <h3 className="font-black text-gray-800 text-lg">Sistema de Etiquetas (Labels / Tags)</h3>
+          <p className="text-xs text-gray-400 mt-1">Crie e gerencie as etiquetas coloridas que os atendentes aplicam nas conversas.</p>
+        </div>
+
+        <form onSubmit={handleSaveLabel} className="space-y-4 bg-gray-50 p-4 rounded-2xl">
+          <p className="text-xs font-bold text-gray-600 uppercase tracking-wide text-gray-700">
+            {editingLabelId ? 'Editar Etiqueta' : 'Nova Etiqueta'}
+          </p>
+          <div className="flex flex-col sm:flex-row gap-3">
+            <input
+              type="text"
+              placeholder="Ex: Urgente, Financeiro, Orçamento..."
+              className="flex-1 bg-white border border-gray-300 rounded-xl py-2 px-4 text-sm outline-none focus:border-emerald-500 font-medium text-black"
+              value={newLabelName}
+              onChange={(e) => setNewLabelName(e.target.value)}
+              required
+            />
+            <div className="flex items-center gap-2">
+              <input
+                type="color"
+                className="w-10 h-10 border border-gray-300 rounded-xl p-1 bg-white cursor-pointer"
+                value={newLabelColor}
+                onChange={(e) => setNewLabelColor(e.target.value)}
+              />
+              <button
+                type="submit"
+                disabled={loading}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm py-2 px-6 rounded-xl shadow-md transition-all shrink-0"
+              >
+                {editingLabelId ? 'Atualizar' : 'Criar'}
+              </button>
+              {editingLabelId && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingLabelId(null);
+                    setNewLabelName('');
+                    setNewLabelColor('#3B82F6');
+                  }}
+                  className="bg-gray-200 text-gray-700 font-bold text-xs py-2 px-3 rounded-xl hover:bg-gray-300 shrink-0"
+                >
+                  Cancelar
+                </button>
+              )}
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2 pt-1">
+            {presetColors.map(c => (
+              <button
+                key={c}
+                type="button"
+                onClick={() => setNewLabelColor(c)}
+                className={`w-6 h-6 rounded-full border-2 transition-all ${newLabelColor === c ? 'border-gray-800 scale-110' : 'border-transparent'}`}
+                style={{ backgroundColor: c }}
+              />
+            ))}
+          </div>
+        </form>
+
+        <div className="space-y-2">
+          <p className="text-xs font-bold text-gray-600 uppercase tracking-wide px-1 text-gray-700">Etiquetas Cadastradas</p>
+          <div className="divide-y divide-gray-100 max-h-80 overflow-y-auto">
+            {labels.length === 0 ? (
+              <p className="text-gray-400 text-xs py-6 text-center">Nenhuma etiqueta cadastrada.</p>
+            ) : (
+              labels.map((lbl) => (
+                <div key={lbl.id} className="flex items-center justify-between py-2.5 px-1 hover:bg-gray-50 rounded-xl transition-colors">
+                  <div className="flex items-center gap-3">
+                    <span className="w-3.5 h-3.5 rounded-full shadow-sm" style={{ backgroundColor: lbl.color }} />
+                    <span className="text-sm font-bold text-gray-800">{lbl.name}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => handleEditLabel(lbl)}
+                      className="text-xs text-indigo-600 hover:underline font-bold px-2 py-1"
+                    >
+                      Editar
+                    </button>
+                    <button
+                      onClick={() => handleDeleteLabel(lbl.id)}
+                      className="text-xs text-red-600 hover:underline font-bold px-2 py-1"
+                    >
+                      Excluir
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* SEÇÃO 2: GERENCIAMENTO DE ATALHOS / RESPOSTAS RÁPIDAS */}
+      <div className="bg-white p-6 rounded-[2rem] border border-gray-100 shadow-sm space-y-6">
+        <div>
+          <h3 className="font-black text-gray-800 text-lg">Respostas Rápidas (Canned Responses)</h3>
+          <p className="text-xs text-gray-400 mt-1">Crie atalhos para textos longos que seus atendentes usam com frequência digitando '/' no chat.</p>
+        </div>
+
+        <form onSubmit={handleSaveCanned} className="space-y-4 bg-gray-50 p-4 rounded-2xl">
+          <p className="text-xs font-bold text-gray-600 uppercase tracking-wide text-gray-700">
+            {editingCannedId ? 'Editar Resposta Rápida' : 'Nova Resposta Rápida'}
+          </p>
+          <div className="space-y-3">
+            <div className="flex gap-2 items-center">
+              <span className="bg-gray-200 border border-gray-300 text-gray-500 rounded-xl py-2 px-3 text-sm font-mono font-bold">/</span>
+              <input
+                type="text"
+                placeholder="atalho (ex: pix, entrega, bomdia)"
+                className="flex-1 bg-white border border-gray-300 rounded-xl py-2 px-4 text-sm outline-none focus:border-emerald-500 font-mono font-bold text-black"
+                value={newCannedShortcut}
+                onChange={(e) => setNewCannedShortcut(e.target.value)}
+                required
+              />
+            </div>
+            <textarea
+              placeholder="Digite o texto de resposta completo que será colado no chat..."
+              rows={3}
+              className="w-full bg-white border border-gray-300 rounded-xl py-2.5 px-4 text-sm outline-none focus:border-emerald-500 font-medium text-black"
+              value={newCannedText}
+              onChange={(e) => setNewCannedText(e.target.value)}
+              required
+            />
+            <div className="flex justify-end gap-2">
+              {editingCannedId && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingCannedId(null);
+                    setNewCannedShortcut('');
+                    setNewCannedText('');
+                  }}
+                  className="bg-gray-200 text-gray-700 font-bold text-xs py-2 px-4 rounded-xl hover:bg-gray-300 transition-all"
+                >
+                  Cancelar
+                </button>
+              )}
+              <button
+                type="submit"
+                disabled={loading}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-2 px-6 rounded-xl shadow-md transition-all"
+              >
+                {editingCannedId ? 'Atualizar' : 'Criar Resposta'}
+              </button>
+            </div>
+          </div>
+        </form>
+
+        <div className="space-y-2">
+          <p className="text-xs font-bold text-gray-600 uppercase tracking-wide px-1 text-gray-700">Respostas Cadastradas</p>
+          <div className="divide-y divide-gray-100 max-h-72 overflow-y-auto">
+            {canned.length === 0 ? (
+              <p className="text-gray-400 text-xs py-6 text-center">Nenhuma resposta cadastrada.</p>
+            ) : (
+              canned.map((cr) => (
+                <div key={cr.id} className="py-3 px-1 hover:bg-gray-50 rounded-xl transition-colors space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold font-mono text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded">/{cr.shortcut}</span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => handleEditCanned(cr)}
+                        className="text-xs text-indigo-600 hover:underline font-bold px-1"
+                      >
+                        Editar
+                      </button>
+                      <button
+                        onClick={() => handleDeleteCanned(cr.id)}
+                        className="text-xs text-red-600 hover:underline font-bold px-1"
+                      >
+                        Excluir
+                      </button>
+                    </div>
+                  </div>
+                  <p className="text-xs text-gray-600 line-clamp-2 pl-1 leading-relaxed">{cr.text}</p>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+
     </div>
   );
 };

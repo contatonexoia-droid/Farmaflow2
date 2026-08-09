@@ -37,6 +37,7 @@ export interface ChatConversation {
   last_message_content: string;
   unread_count?: number;
   contact?: ChatContact;
+  labels?: ChatLabel[];
   created_at: string;
 }
 
@@ -51,10 +52,34 @@ export interface ChatMessage {
   created_at: string;
 }
 
+export interface ChatLabel {
+  id: string;
+  store_id: string;
+  name: string;
+  color: string;
+  created_at: string;
+}
+
+export interface ChatConversationLabel {
+  conversation_id: string;
+  label_id: string;
+}
+
+export interface CannedResponse {
+  id: string;
+  store_id: string;
+  shortcut: string;
+  text: string;
+  created_at: string;
+}
+
 class ChatStore {
   private contacts: ChatContact[] = [];
   private conversations: ChatConversation[] = [];
   private messages: ChatMessage[] = [];
+  private labels: ChatLabel[] = [];
+  private conversation_labels: ChatConversationLabel[] = [];
+  private canned_responses: CannedResponse[] = [];
 
   constructor() {
     this.loadFromFile();
@@ -69,6 +94,9 @@ class ChatStore {
         this.contacts = parsed.contacts || [];
         this.conversations = parsed.conversations || [];
         this.messages = parsed.messages || [];
+        this.labels = parsed.labels || [];
+        this.conversation_labels = parsed.conversation_labels || [];
+        this.canned_responses = parsed.canned_responses || [];
       }
     } catch (err) {
       console.warn("[ChatStore] Could not load local chat_data.json:", err);
@@ -84,6 +112,9 @@ class ChatStore {
             contacts: this.contacts,
             conversations: this.conversations,
             messages: this.messages,
+            labels: this.labels,
+            conversation_labels: this.conversation_labels,
+            canned_responses: this.canned_responses,
           },
           null,
           2
@@ -96,6 +127,43 @@ class ChatStore {
   }
 
   private ensureDefaultData() {
+    // Add default labels if empty
+    if (this.labels.length === 0) {
+      this.labels = [
+        { id: "lbl_demo_1", store_id: "default", name: "Dúvida", color: "#3B82F6", created_at: new Date().toISOString() },
+        { id: "lbl_demo_2", store_id: "default", name: "Orçamento", color: "#F59E0B", created_at: new Date().toISOString() },
+        { id: "lbl_demo_3", store_id: "default", name: "Urgente", color: "#EF4444", created_at: new Date().toISOString() },
+        { id: "lbl_demo_4", store_id: "default", name: "Finalizado", color: "#10B981", created_at: new Date().toISOString() },
+      ];
+    }
+
+    // Add default canned responses if empty
+    if (this.canned_responses.length === 0) {
+      this.canned_responses = [
+        {
+          id: "canned_demo_1",
+          store_id: "default",
+          shortcut: "pix",
+          text: "Olá! Segue nossa chave PIX para pagamento: CNPJ 12.345.678/0001-90 (FarmaFlow S.A.). Por favor, envie o comprovante por aqui.",
+          created_at: new Date().toISOString()
+        },
+        {
+          id: "canned_demo_2",
+          store_id: "default",
+          shortcut: "entrega",
+          text: "Olá! Nossas entregas saem em três períodos: manhã (9h às 11h), tarde (14h às 16h) e noite (18h às 20h). O prazo médio de entrega na sua região é de até 2 horas.",
+          created_at: new Date().toISOString()
+        },
+        {
+          id: "canned_demo_3",
+          store_id: "default",
+          shortcut: "cadastro",
+          text: "Para realizar o seu cadastro e agilizar o seu atendimento, por favor envie: Nome Completo, CPF, Endereço de Entrega com CEP e Convênio (se houver).",
+          created_at: new Date().toISOString()
+        }
+      ];
+    }
+
     if (this.conversations.length === 0) {
       const defaultContact: ChatContact = {
         id: "contact_demo_1",
@@ -137,8 +205,14 @@ class ChatStore {
       this.contacts.push(defaultContact);
       this.conversations.push(defaultConv);
       this.messages.push(defaultMsg1, defaultMsg2);
-      this.saveToFile();
+      
+      // Associate demo label with demo conversation
+      this.conversation_labels.push({
+        conversation_id: "conv_demo_1",
+        label_id: "lbl_demo_2" // Orçamento
+      });
     }
+    this.saveToFile();
   }
 
   public async getConversations(storeId: string, inboxId?: string, allowedInboxIds?: string[]): Promise<ChatConversation[]> {
@@ -163,13 +237,33 @@ class ChatStore {
 
       const { data, error } = await query;
       if (!error && data) {
-        return data as any[];
+        const conversations = data as any[];
+        for (const conv of conversations) {
+          conv.labels = await this.getConversationLabels(conv.id);
+        }
+        return conversations;
       }
     } catch (err) {
       console.warn("[ChatStore] Supabase conversations query fallback:", err);
     }
 
-    return [];
+    // Memory Fallback
+    const filtered = this.conversations.filter(c => {
+      const matchStore = c.store_id === storeId;
+      if (!matchStore) return false;
+      if (inboxId && inboxId !== "all" && c.inbox_id !== inboxId) return false;
+      if (allowedInboxIds !== undefined && c.inbox_id && !allowedInboxIds.includes(c.inbox_id)) return false;
+      return true;
+    });
+
+    for (const conv of filtered) {
+      // populate contact from this.contacts if missing
+      if (!conv.contact && conv.contact_id) {
+        conv.contact = this.contacts.find(c => c.id === conv.contact_id);
+      }
+      conv.labels = await this.getConversationLabels(conv.id);
+    }
+    return filtered;
   }
 
   public async getMessages(conversationId: string): Promise<ChatMessage[]> {
@@ -630,6 +724,199 @@ class ChatStore {
     this.messages.push(newMsg);
 
     return { conversation: conv, message: newMsg };
+  }
+
+  // --- LABELS SYSTEM ---
+  public async getLabels(storeId: string): Promise<ChatLabel[]> {
+    try {
+      const { data, error } = await supabaseAdmin
+        .from("chat_labels")
+        .select("*")
+        .eq("store_id", storeId)
+        .order("name", { ascending: true });
+      if (!error && data) {
+        return data as ChatLabel[];
+      }
+    } catch (err) {
+      console.warn("[ChatStore] Supabase labels query fallback:", err);
+    }
+    return this.labels.filter(l => l.store_id === storeId || l.store_id === "default");
+  }
+
+  public async saveLabel(label: { id?: string; store_id: string; name: string; color: string }): Promise<ChatLabel> {
+    const id = label.id || crypto.randomUUID();
+    const newLabel: ChatLabel = {
+      id,
+      store_id: label.store_id,
+      name: label.name,
+      color: label.color,
+      created_at: new Date().toISOString()
+    };
+
+    try {
+      const { error } = await supabaseAdmin
+        .from("chat_labels")
+        .upsert([newLabel]);
+      if (error) {
+        console.warn("[ChatStore] Supabase saveLabel error:", error.message);
+      }
+    } catch (err) {
+      console.warn("[ChatStore] Supabase saveLabel fallback:", err);
+    }
+
+    const idx = this.labels.findIndex(l => l.id === id);
+    if (idx >= 0) {
+      this.labels[idx] = newLabel;
+    } else {
+      this.labels.push(newLabel);
+    }
+    this.saveToFile();
+    return newLabel;
+  }
+
+  public async deleteLabel(id: string, storeId: string): Promise<boolean> {
+    try {
+      const { error } = await supabaseAdmin
+        .from("chat_labels")
+        .delete()
+        .eq("id", id)
+        .eq("store_id", storeId);
+      if (error) {
+        console.warn("[ChatStore] Supabase deleteLabel error:", error.message);
+      }
+    } catch (err) {
+      console.warn("[ChatStore] Supabase deleteLabel fallback:", err);
+    }
+
+    this.labels = this.labels.filter(l => !(l.id === id && l.store_id === storeId));
+    this.conversation_labels = this.conversation_labels.filter(cl => cl.label_id !== id);
+    this.saveToFile();
+    return true;
+  }
+
+  public async getConversationLabels(conversationId: string): Promise<ChatLabel[]> {
+    try {
+      const { data, error } = await supabaseAdmin
+        .from("chat_conversation_labels")
+        .select("label_id")
+        .eq("conversation_id", conversationId);
+      
+      if (!error && data) {
+        const labelIds = data.map((r: any) => r.label_id);
+        const { data: labelsData, error: labelsError } = await supabaseAdmin
+          .from("chat_labels")
+          .select("*")
+          .in("id", labelIds);
+        if (!labelsError && labelsData) {
+          return labelsData as ChatLabel[];
+        }
+      }
+    } catch (err) {
+      console.warn("[ChatStore] Supabase conversation labels fallback:", err);
+    }
+
+    const labelIds = this.conversation_labels
+      .filter(cl => cl.conversation_id === conversationId)
+      .map(cl => cl.label_id);
+    return this.labels.filter(l => labelIds.includes(l.id));
+  }
+
+  public async setConversationLabels(conversationId: string, labelIds: string[]): Promise<boolean> {
+    try {
+      await supabaseAdmin
+        .from("chat_conversation_labels")
+        .delete()
+        .eq("conversation_id", conversationId);
+      
+      if (labelIds.length > 0) {
+        const rows = labelIds.map(labelId => ({
+          conversation_id: conversationId,
+          label_id: labelId
+        }));
+        await supabaseAdmin
+          .from("chat_conversation_labels")
+          .insert(rows);
+      }
+    } catch (err) {
+      console.warn("[ChatStore] Supabase setConversationLabels fallback:", err);
+    }
+
+    this.conversation_labels = this.conversation_labels.filter(cl => cl.conversation_id !== conversationId);
+    labelIds.forEach(labelId => {
+      this.conversation_labels.push({
+        conversation_id: conversationId,
+        label_id: labelId
+      });
+    });
+    this.saveToFile();
+    return true;
+  }
+
+  // --- CANNED RESPONSES SYSTEM ---
+  public async getCannedResponses(storeId: string): Promise<CannedResponse[]> {
+    try {
+      const { data, error } = await supabaseAdmin
+        .from("canned_responses")
+        .select("*")
+        .eq("store_id", storeId)
+        .order("shortcut", { ascending: true });
+      if (!error && data) {
+        return data as CannedResponse[];
+      }
+    } catch (err) {
+      console.warn("[ChatStore] Supabase canned responses fallback:", err);
+    }
+    return this.canned_responses.filter(cr => cr.store_id === storeId || cr.store_id === "default");
+  }
+
+  public async saveCannedResponse(response: { id?: string; store_id: string; shortcut: string; text: string }): Promise<CannedResponse> {
+    const id = response.id || crypto.randomUUID();
+    const newResponse: CannedResponse = {
+      id,
+      store_id: response.store_id,
+      shortcut: response.shortcut.replace(/^\//, ""),
+      text: response.text,
+      created_at: new Date().toISOString()
+    };
+
+    try {
+      const { error } = await supabaseAdmin
+        .from("canned_responses")
+        .upsert([newResponse]);
+      if (error) {
+        console.warn("[ChatStore] Supabase saveCannedResponse error:", error.message);
+      }
+    } catch (err) {
+      console.warn("[ChatStore] Supabase saveCannedResponse fallback:", err);
+    }
+
+    const idx = this.canned_responses.findIndex(cr => cr.id === id);
+    if (idx >= 0) {
+      this.canned_responses[idx] = newResponse;
+    } else {
+      this.canned_responses.push(newResponse);
+    }
+    this.saveToFile();
+    return newResponse;
+  }
+
+  public async deleteCannedResponse(id: string, storeId: string): Promise<boolean> {
+    try {
+      const { error } = await supabaseAdmin
+        .from("canned_responses")
+        .delete()
+        .eq("id", id)
+        .eq("store_id", storeId);
+      if (error) {
+        console.warn("[ChatStore] Supabase deleteCannedResponse error:", error.message);
+      }
+    } catch (err) {
+      console.warn("[ChatStore] Supabase deleteCannedResponse fallback:", err);
+    }
+
+    this.canned_responses = this.canned_responses.filter(cr => !(cr.id === id && cr.store_id === storeId));
+    this.saveToFile();
+    return true;
   }
 }
 

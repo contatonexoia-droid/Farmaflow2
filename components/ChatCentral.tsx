@@ -25,6 +25,112 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [activeView, setActiveView] = useState<'LIST' | 'CHAT' | 'SIDEBAR'>('LIST');
 
+  // --- STATES & HANDLERS FOR LABELS & CANNED RESPONSES ---
+  const [availableLabels, setAvailableLabels] = useState<any[]>([]);
+  const [cannedResponses, setCannedResponses] = useState<any[]>([]);
+  const [isLabelPopoverOpen, setIsLabelPopoverOpen] = useState(false);
+  const [isCannedDropdownOpen, setIsCannedDropdownOpen] = useState(false);
+  const [filteredCanned, setFilteredCanned] = useState<any[]>([]);
+  const [cannedSearch, setCannedSearch] = useState('');
+  const [activeCannedIndex, setActiveCannedIndex] = useState(0);
+
+  const fetchLabelsAndCanned = async () => {
+    try {
+      const resLabels = await fetch(`/api/v1/chat/labels?tenantId=${tenantId}`);
+      if (resLabels.ok) {
+        const jsonLabels = await resLabels.json();
+        if (jsonLabels?.data) setAvailableLabels(jsonLabels.data);
+      }
+      const resCanned = await fetch(`/api/v1/chat/canned-responses?tenantId=${tenantId}`);
+      if (resCanned.ok) {
+        const jsonCanned = await resCanned.json();
+        if (jsonCanned?.data) setCannedResponses(jsonCanned.data);
+      }
+    } catch (e) {
+      console.warn("Error loading labels or canned responses:", e);
+    }
+  };
+
+  useEffect(() => {
+    fetchLabelsAndCanned();
+  }, [tenantId]);
+
+  const toggleLabelOnConversation = async (labelId: string) => {
+    if (!selectedConversation) return;
+    const currentLabels = selectedConversation.labels || [];
+    const hasLabel = currentLabels.some((l: any) => l.id === labelId);
+    let newLabels;
+    if (hasLabel) {
+      newLabels = currentLabels.filter((l: any) => l.id !== labelId);
+    } else {
+      const labelToAdd = availableLabels.find((l: any) => l.id === labelId);
+      newLabels = [...currentLabels, labelToAdd].filter(Boolean);
+    }
+
+    const updatedConv = { ...selectedConversation, labels: newLabels };
+    setSelectedConversation(updatedConv);
+    setConversations(prev => prev.map(c => c.id === selectedConversation.id ? updatedConv : c));
+
+    try {
+      await fetch(`/api/v1/chat/conversations/${selectedConversation.id}/labels`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ labelIds: newLabels.map((l: any) => l.id) })
+      });
+    } catch (e) {
+      console.error("Error setting labels:", e);
+    }
+  };
+
+  const handleMessageInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const val = e.target.value;
+    setMessageInput(val);
+
+    const lastSlashIdx = val.lastIndexOf('/');
+    if (lastSlashIdx >= 0 && (lastSlashIdx === 0 || val[lastSlashIdx - 1] === ' ')) {
+      const query = val.slice(lastSlashIdx + 1).toLowerCase();
+      if (!query.includes(' ')) {
+        const filtered = cannedResponses.filter(cr => 
+          cr.shortcut.toLowerCase().includes(query) || 
+          cr.text.toLowerCase().includes(query)
+        );
+        setFilteredCanned(filtered);
+        setCannedSearch(query);
+        setIsCannedDropdownOpen(filtered.length > 0);
+        setActiveCannedIndex(0);
+        return;
+      }
+    }
+    setIsCannedDropdownOpen(false);
+  };
+
+  const handleCannedKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (isCannedDropdownOpen && filteredCanned.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setActiveCannedIndex(prev => (prev + 1) % filteredCanned.length);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setActiveCannedIndex(prev => (prev - 1 + filteredCanned.length) % filteredCanned.length);
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        selectCannedResponse(filteredCanned[activeCannedIndex]);
+      } else if (e.key === 'Escape') {
+        setIsCannedDropdownOpen(false);
+      }
+    } else if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSendMessage();
+    }
+  };
+
+  const selectCannedResponse = (cr: any) => {
+    const lastSlashIdx = messageInput.lastIndexOf('/');
+    const prefix = messageInput.slice(0, lastSlashIdx);
+    setMessageInput(prefix + cr.text);
+    setIsCannedDropdownOpen(false);
+  };
+
   const [localUser, setLocalUser] = useState<any>(currentUser || null);
   const [localRole, setLocalRole] = useState<string>(userRole || '');
 
@@ -544,7 +650,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                     </span>
                   )}
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
                   <span className="text-[9px] font-black uppercase tracking-wider text-indigo-700 bg-indigo-100 px-1.5 py-0.5 rounded flex items-center gap-1">
                     <Inbox className="w-2 h-2"/> {inboxName}
                   </span>
@@ -553,6 +659,15 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                       Fila
                     </span>
                   )}
+                  {conv.labels && conv.labels.map((lbl: any) => (
+                    <span
+                      key={lbl.id}
+                      className="text-[9px] font-bold px-1.5 py-0.5 rounded text-white shadow-xs"
+                      style={{ backgroundColor: lbl.color }}
+                    >
+                      {lbl.name}
+                    </span>
+                  ))}
                 </div>
               </div>
             );
@@ -576,13 +691,73 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                 <div className="w-8 h-8 md:w-10 md:h-10 bg-gray-200 rounded-full flex items-center justify-center shrink-0">
                   <User className="w-4 h-4 md:w-5 md:h-5 text-gray-500" />
                 </div>
-                <div className="min-w-0">
-                  <h3 className="font-bold text-gray-800 text-sm md:text-base leading-tight truncate">{selectedConversation.contact.name}</h3>
-                  <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                <div className="min-w-0 flex-1 sm:flex-initial">
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-bold text-gray-800 text-sm md:text-base leading-tight truncate">{selectedConversation.contact.name}</h3>
+                    
+                    {/* Label Manager Popover Trigger */}
+                    <div className="relative shrink-0">
+                      <button
+                        onClick={() => setIsLabelPopoverOpen(!isLabelPopoverOpen)}
+                        className="p-1 text-gray-400 hover:text-emerald-600 hover:bg-gray-100 rounded-lg transition-colors flex items-center justify-center"
+                        title="Gerenciar Etiquetas"
+                      >
+                        <span className="text-[10px] font-bold text-gray-500 bg-gray-100 hover:bg-gray-200 px-1.5 py-0.5 rounded transition-all flex items-center gap-1 border border-gray-200">
+                          Etiquetas +
+                        </span>
+                      </button>
+
+                      {isLabelPopoverOpen && (
+                        <div className="absolute left-0 mt-2 w-56 bg-white border border-gray-200 rounded-xl shadow-xl z-50 p-2 text-xs">
+                          <p className="font-semibold text-gray-700 mb-2 px-1">Gerenciar Etiquetas</p>
+                          <div className="space-y-1 max-h-40 overflow-y-auto">
+                            {availableLabels.length === 0 ? (
+                              <p className="text-gray-400 text-[10px] p-2 text-center">Nenhuma etiqueta cadastrada</p>
+                            ) : (
+                              availableLabels.map((lbl) => {
+                                const isChecked = (selectedConversation.labels || []).some((l: any) => l.id === lbl.id);
+                                return (
+                                  <button
+                                    key={lbl.id}
+                                    onClick={() => toggleLabelOnConversation(lbl.id)}
+                                    className="w-full flex items-center justify-between p-1.5 hover:bg-gray-50 rounded-lg transition-colors text-left"
+                                  >
+                                    <div className="flex items-center gap-2">
+                                      <span className="w-3 h-3 rounded-full" style={{ backgroundColor: lbl.color }} />
+                                      <span className="text-gray-700 font-medium">{lbl.name}</span>
+                                    </div>
+                                    <input
+                                      type="checkbox"
+                                      checked={isChecked}
+                                      onChange={() => {}} // handled by click
+                                      className="rounded text-emerald-600 focus:ring-emerald-500 h-3.5 w-3.5"
+                                    />
+                                  </button>
+                                );
+                              })
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5 mt-1">
                     <p className="text-[10px] md:text-[11px] text-gray-500 font-mono truncate">{selectedConversation.contact?.phone_number}</p>
                     <span className="text-[9px] font-black uppercase tracking-wider text-indigo-700 bg-indigo-100 px-1.5 py-0.5 rounded shrink-0">
                       {inboxes.find(i => i.id === selectedConversation.inbox_id)?.name || 'Sem Caixa'}
                     </span>
+                    
+                    {/* Visual labels in active chat header */}
+                    {selectedConversation.labels && selectedConversation.labels.map((lbl: any) => (
+                      <span
+                        key={lbl.id}
+                        className="text-[9px] font-bold px-1.5 py-0.5 rounded text-white shadow-xs"
+                        style={{ backgroundColor: lbl.color }}
+                      >
+                        {lbl.name}
+                      </span>
+                    ))}
                   </div>
                 </div>
               </div>
@@ -737,26 +912,43 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                 </div>
                 <div className="flex items-end gap-2">
                   <div className="flex-1 bg-white rounded-xl border border-gray-300 shadow-sm flex items-end p-1 relative">
+                    {/* Canned Responses Autocomplete Overlay */}
+                    {isCannedDropdownOpen && filteredCanned.length > 0 && (
+                      <div className="absolute bottom-full left-0 right-0 mb-2 bg-white border border-gray-200 rounded-xl shadow-xl z-50 max-h-48 overflow-y-auto divide-y divide-gray-100">
+                        <div className="px-3 py-1.5 bg-gray-50 text-[10px] font-bold text-gray-500 uppercase tracking-wider flex justify-between">
+                          <span>Respostas Rápidas</span>
+                          <span>Navegue com ↑↓ e pressione Enter</span>
+                        </div>
+                        {filteredCanned.map((cr, idx) => (
+                          <div
+                            key={cr.id}
+                            onClick={() => selectCannedResponse(cr)}
+                            className={`px-3 py-2 text-sm cursor-pointer transition-colors flex flex-col ${
+                              idx === activeCannedIndex ? 'bg-emerald-50 text-emerald-900 font-medium' : 'hover:bg-gray-50 text-gray-700'
+                            }`}
+                          >
+                            <span className="text-xs font-bold font-mono text-emerald-600">/{cr.shortcut}</span>
+                            <span className="text-xs text-gray-500 truncate">{cr.text}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
                     <button className="p-2 text-gray-400 hover:text-emerald-600 transition-colors">
                       <Paperclip className="w-5 h-5" />
                     </button>
                     <textarea 
                       value={messageInput}
-                      onChange={(e) => setMessageInput(e.target.value)}
+                      onChange={handleMessageInputChange}
                       placeholder={
                         otherUserViewing 
                         ? `Aguarde, ${otherUserViewing} está digitando...` 
-                        : isPrivateNote ? "Nota interna..." : "Mensagem..."
+                        : isPrivateNote ? "Nota interna..." : "Digite '/' para respostas rápidas..."
                       }
                       disabled={!!otherUserViewing}
                       className={`flex-1 max-h-32 p-2 outline-none resize-none text-sm ${isPrivateNote ? 'bg-[#fffde7]' : 'bg-transparent'} ${otherUserViewing ? 'cursor-not-allowed opacity-50' : ''}`}
                       rows={1}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                          e.preventDefault();
-                          handleSendMessage();
-                        }
-                      }}
+                      onKeyDown={handleCannedKeyDown}
                     />
                   </div>
                   <button 
