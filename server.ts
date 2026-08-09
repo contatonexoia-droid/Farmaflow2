@@ -532,7 +532,20 @@ app.patch("/api/v1/team/users/:id", checkTenantAccess, async (req, res) => {
 app.get("/api/v1/inboxes", async (req, res) => {
   try {
     const storeId = (req.query.storeId as string) || (req.headers["x-tenant-id"] as string) || "default";
-    const data = await inboxStore.getInboxes(storeId);
+    const userId = req.query.userId as string | undefined;
+    const userRole = req.query.role as string | undefined;
+
+    let data = await inboxStore.getInboxes(storeId);
+
+    if (userId && userRole?.toLowerCase() === "operador") {
+      const { data: memberRows } = await supabaseAdmin
+        .from("inbox_members")
+        .select("inbox_id")
+        .eq("user_id", userId);
+      const allowedIds = memberRows ? memberRows.map(r => r.inbox_id) : [];
+      data = data.filter(inbox => allowedIds.includes(inbox.id));
+    }
+
     return res.json({ data });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
@@ -4836,8 +4849,29 @@ app.get("/api/v1/chat/conversations", async (req, res) => {
   try {
     const storeId = (req.query.tenantId as string) || (req.headers["x-tenant-id"] as string) || "default";
     const inboxId = req.query.inboxId as string | undefined;
+    const userId = req.query.userId as string | undefined;
+    const userRole = req.query.role as string | undefined;
 
-    const conversations = await chatStore.getConversations(storeId, inboxId);
+    let conversations = await chatStore.getConversations(storeId, inboxId);
+
+    if (userId && userRole?.toLowerCase() === "operador") {
+      const { data: memberRows } = await supabaseAdmin
+        .from("inbox_members")
+        .select("inbox_id")
+        .eq("user_id", userId);
+      const allowedInboxIds = memberRows ? memberRows.map(r => r.inbox_id) : [];
+
+      // Requirement 3: Protection of Route/Action
+      if (inboxId && inboxId !== "all") {
+        if (!allowedInboxIds.includes(inboxId)) {
+          return res.status(403).json({ error: "Permissão negada para esta caixa de entrada." });
+        }
+      }
+
+      // Filter conversations
+      conversations = conversations.filter(conv => conv.inbox_id && allowedInboxIds.includes(conv.inbox_id));
+    }
+
     return res.json({ data: conversations });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });

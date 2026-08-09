@@ -7,7 +7,7 @@ import { supabase } from '../services/supabase';
 // Helper to determine active tenant logic for demo
 const DEMO_TENANT_ID = 'tenant-id'; // Assume this for now if not passed
 
-export const ChatCentral = ({ currentUser, tenantId = DEMO_TENANT_ID }: any) => {
+export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }: any) => {
   const [conversations, setConversations] = useState<any[]>([]);
   const [selectedConversation, setSelectedConversation] = useState<any>(null);
   const [messages, setMessages] = useState<any[]>([]);
@@ -17,11 +17,43 @@ export const ChatCentral = ({ currentUser, tenantId = DEMO_TENANT_ID }: any) => 
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedInboxId, setSelectedInboxId] = useState('all');
   const [inboxes, setInboxes] = useState<any[]>([]);
+  const [allowedInboxIds, setAllowedInboxIds] = useState<string[]>([]);
   const messagesEndRef = useRef<any>(null);
 
   const [isConnectModalOpen, setIsConnectModalOpen] = useState(false);
   const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
   const [activeView, setActiveView] = useState<'LIST' | 'CHAT' | 'SIDEBAR'>('LIST');
+
+  const [localUser, setLocalUser] = useState<any>(currentUser || null);
+  const [localRole, setLocalRole] = useState<string>(userRole || '');
+
+  useEffect(() => {
+    if (currentUser) {
+      setLocalUser(currentUser);
+    }
+    if (userRole) {
+      setLocalRole(userRole);
+    }
+  }, [currentUser, userRole]);
+
+  useEffect(() => {
+    const fetchUser = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        setLocalUser(user);
+        if (!localRole) {
+          setLocalRole((user.user_metadata?.role || '').toLowerCase());
+        }
+      }
+    };
+    if (!localUser) {
+      fetchUser();
+    }
+  }, []);
+
+  const cleanRole = (localRole || '').toLowerCase();
+  const isOperador = cleanRole === 'operador';
+  const userId = localUser?.id;
 
   // Anti-collision state
   const [otherUserViewing, setOtherUserViewing] = useState<string | null>(null);
@@ -95,13 +127,47 @@ export const ChatCentral = ({ currentUser, tenantId = DEMO_TENANT_ID }: any) => 
     }
   }, [selectedConversation]);
 
+  useEffect(() => {
+    if (isOperador && inboxes.length > 0) {
+      if (inboxes.length === 1) {
+        setSelectedInboxId(inboxes[0].id);
+      }
+    }
+  }, [inboxes, isOperador]);
+
+  useEffect(() => {
+    if (selectedConversation && isOperador && selectedConversation.inbox_id && allowedInboxIds.length > 0) {
+      if (!allowedInboxIds.includes(selectedConversation.inbox_id)) {
+        setSelectedConversation(null);
+        alert("Acesso negado: Você não tem permissão para visualizar conversas desta caixa de entrada.");
+      }
+    }
+  }, [selectedConversation, allowedInboxIds, isOperador]);
+
   const fetchInboxes = async () => {
     try {
-      const res = await fetch(`/api/v1/inboxes?storeId=${tenantId}`);
+      let allowedIds: string[] = [];
+      if (isOperador && userId) {
+        const { data: memberRows } = await supabase
+          .from('inbox_members')
+          .select('inbox_id')
+          .eq('user_id', userId);
+        if (memberRows) {
+          allowedIds = memberRows.map((r: any) => r.inbox_id);
+          setAllowedInboxIds(allowedIds);
+        }
+      }
+
+      const queryParams = userId ? `&userId=${userId}&role=${cleanRole}` : '';
+      const res = await fetch(`/api/v1/inboxes?storeId=${tenantId}${queryParams}`);
       if (res.ok) {
         const json = await res.json();
         if (json.data && json.data.length > 0) {
-          setInboxes(json.data);
+          let list = json.data;
+          if (isOperador && userId && allowedIds.length > 0) {
+            list = list.filter((i: any) => allowedIds.includes(i.id));
+          }
+          setInboxes(list);
           return;
         }
       }
@@ -112,11 +178,21 @@ export const ChatCentral = ({ currentUser, tenantId = DEMO_TENANT_ID }: any) => 
         .eq('store_id', tenantId);
         
       if (!error && data && data.length > 0) {
-        setInboxes(data);
+        let list = data;
+        if (isOperador && userId && allowedIds.length > 0) {
+          list = list.filter((i: any) => allowedIds.includes(i.id));
+        }
+        setInboxes(list);
       } else {
         const saved = localStorage.getItem(`inboxes_${tenantId}`);
         if (saved) {
-          try { setInboxes(JSON.parse(saved)); } catch (_) {}
+          try {
+            let list = JSON.parse(saved);
+            if (isOperador && userId && allowedIds.length > 0) {
+              list = list.filter((i: any) => allowedIds.includes(i.id));
+            }
+            setInboxes(list);
+          } catch (_) {}
         } else {
           setInboxes([{ id: `inbox_default_${tenantId}`, name: 'Geral / Atendimento', store_id: tenantId }]);
         }
@@ -132,11 +208,28 @@ export const ChatCentral = ({ currentUser, tenantId = DEMO_TENANT_ID }: any) => 
 
   const fetchConversations = async () => {
     try {
-      const res = await fetch(`/api/v1/chat/conversations?tenantId=${tenantId}&inboxId=${selectedInboxId}`);
+      let allowedIds = allowedInboxIds;
+      if (isOperador && userId && allowedIds.length === 0) {
+        const { data: memberRows } = await supabase
+          .from('inbox_members')
+          .select('inbox_id')
+          .eq('user_id', userId);
+        if (memberRows) {
+          allowedIds = memberRows.map((r: any) => r.inbox_id);
+          setAllowedInboxIds(allowedIds);
+        }
+      }
+
+      const queryParams = userId ? `&userId=${userId}&role=${cleanRole}` : '';
+      const res = await fetch(`/api/v1/chat/conversations?tenantId=${tenantId}&inboxId=${selectedInboxId}${queryParams}`);
       if (res.ok) {
         const json = await res.json();
-        if (json.data && json.data.length > 0) {
-          setConversations(json.data);
+        if (json.data) {
+          let list = json.data;
+          if (isOperador && userId) {
+            list = list.filter((c: any) => c.inbox_id && allowedIds.includes(c.inbox_id));
+          }
+          setConversations(list);
           return;
         }
       }
@@ -153,11 +246,21 @@ export const ChatCentral = ({ currentUser, tenantId = DEMO_TENANT_ID }: any) => 
 
       const { data, error } = await query;
       if (!error && data && data.length > 0) {
-        setConversations(data);
+        let list = data;
+        if (isOperador && userId) {
+          list = list.filter((c: any) => c.inbox_id && allowedIds.includes(c.inbox_id));
+        }
+        setConversations(list);
       } else {
         const saved = localStorage.getItem(`chat_conversations_${tenantId}`);
         if (saved) {
-          try { setConversations(JSON.parse(saved)); } catch (_) {}
+          try {
+            let list = JSON.parse(saved);
+            if (isOperador && userId) {
+              list = list.filter((c: any) => c.inbox_id && allowedIds.includes(c.inbox_id));
+            }
+            setConversations(list);
+          } catch (_) {}
         }
       }
     } catch (e) {
@@ -264,6 +367,16 @@ export const ChatCentral = ({ currentUser, tenantId = DEMO_TENANT_ID }: any) => 
     setConversations(conversations.map(c => c.id === updated.id ? updated : c));
   };
 
+  const handleSelectConversation = (conv: any) => {
+    if (isOperador && conv.inbox_id && allowedInboxIds.length > 0) {
+      if (!allowedInboxIds.includes(conv.inbox_id)) {
+        alert("Acesso negado: Você não tem permissão para visualizar conversas desta caixa de entrada.");
+        return;
+      }
+    }
+    setSelectedConversation(conv);
+  };
+
   const handleTransfer = (transferData: { userId?: string, inboxId?: string }) => {
     if (!selectedConversation) return;
     
@@ -333,7 +446,9 @@ export const ChatCentral = ({ currentUser, tenantId = DEMO_TENANT_ID }: any) => 
                 onChange={(e) => setSelectedInboxId(e.target.value)}
                 className="w-full bg-gray-50 border border-gray-200 text-gray-700 text-xs rounded-xl pl-9 pr-3 py-2 outline-none focus:ring-2 focus:ring-emerald-500 font-bold appearance-none"
               >
-                <option value="all">Todas as Caixas (Inboxes)</option>
+                {!isOperador || inboxes.length > 1 ? (
+                  <option value="all">Todas as Caixas (Inboxes)</option>
+                ) : null}
                 {inboxes.map(inbox => (
                   <option key={inbox.id} value={inbox.id}>{inbox.name}</option>
                 ))}
@@ -382,7 +497,7 @@ export const ChatCentral = ({ currentUser, tenantId = DEMO_TENANT_ID }: any) => 
             return (
               <div 
                 key={conv.id}
-                onClick={() => setSelectedConversation(conv)}
+                onClick={() => handleSelectConversation(conv)}
                 className={`p-3 rounded-xl cursor-pointer transition-colors ${
                   selectedConversation?.id === conv.id ? 'bg-emerald-50 border border-emerald-200' : 'bg-white hover:bg-gray-100 border border-transparent'
                 }`}

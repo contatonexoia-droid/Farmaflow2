@@ -3461,7 +3461,7 @@ const App: React.FC = () => {
                     <AdminDesktopApp tenant={currentTenant!} />
                   </React.Suspense>
                 )}
-                {adminTab === "chat" && currentTenant?.isChatEnabled && <ChatCentral currentUser={session?.user} tenantId={currentTenant?.id} />}
+                {adminTab === "chat" && currentTenant?.isChatEnabled && <ChatCentral currentUser={session?.user} userRole={session?.role} tenantId={currentTenant?.id} />}
 
                 {adminTab === "manual" && <AdminManual />}
               </div>
