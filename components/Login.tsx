@@ -50,7 +50,7 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
 
         if (!authError && authData.user) {
             authUserId = authData.user.id;
-            let tenantIdToCheck = authData.user.user_metadata?.tenant_id || authUserId;
+            let tenantIdToCheck = authData.user.user_metadata?.tenant_id || authData.user.user_metadata?.store_id || authUserId;
 
             // 2. Buscar os dados da farmácia (Como o RLS está ativo, ele só achará a dele)
             const { data: rawTenant } = await supabase
@@ -62,7 +62,7 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
             if (rawTenant) {
                validTenant = rawTenant;
                // Obter role do funcionário se houver, ou assumir owner
-               const userRole = authData.user.user_metadata?.role || "owner";
+               const userRole = (authData.user.user_metadata?.role || "owner").toLowerCase();
                
                // Se der ok, já repassa
                onLogin({ 

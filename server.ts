@@ -420,24 +420,29 @@ app.post("/api/v1/team/users", checkTenantAccess, async (req, res) => {
       return res.status(400).json({ error: "Nome, e-mail, função e senha são obrigatórios." });
     }
 
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanRole = role.trim().toLowerCase();
+    const cleanStoreId = store_id || req.headers["x-tenant-id"] || req.query.tenantId;
+
     let authUserId = "";
     
     const { data: user, error } = await supabaseAdmin.auth.admin.createUser({
-      email,
+      email: cleanEmail,
       password,
       email_confirm: true,
       user_metadata: {
         full_name,
-        role,
-        store_id
+        role: cleanRole,
+        store_id: cleanStoreId,
+        tenant_id: cleanStoreId
       }
     });
 
     if (error) {
-      if (error.message.includes("already been registered")) {
+      if (error.message.includes("already been registered") || error.message.includes("already registered") || error.status === 422) {
          // Tentar encontrar o usuário existente
          const { data: existingUsers } = await supabaseAdmin.auth.admin.listUsers();
-         const existingUser = existingUsers?.users?.find((u: any) => u.email === email);
+         const existingUser = existingUsers?.users?.find((u: any) => u.email?.toLowerCase() === cleanEmail);
          
          if (existingUser) {
             authUserId = existingUser.id;
@@ -447,7 +452,7 @@ app.post("/api/v1/team/users", checkTenantAccess, async (req, res) => {
               .from("tenant_users")
               .select("id")
               .eq("supabase_user_id", authUserId)
-              .eq("tenant_id", store_id || req.headers["x-tenant-id"])
+              .eq("tenant_id", cleanStoreId)
               .single();
               
             if (existingTenantUser) {
@@ -475,10 +480,10 @@ app.post("/api/v1/team/users", checkTenantAccess, async (req, res) => {
       .from("tenant_users")
       .insert({
         supabase_user_id: authUserId,
-        tenant_id: store_id || req.headers["x-tenant-id"] || req.query.tenantId,
+        tenant_id: cleanStoreId,
         name: full_name,
-        email: email,
-        role: role,
+        email: cleanEmail,
+        role: cleanRole,
         is_active: true
       });
 
@@ -673,7 +678,9 @@ app.post("/api/v1/tenants/:tenantId/users", checkTenantAccess, async (req, res) 
         email_confirm: true,
         user_metadata: {
           tenant_id: tenantId,
-          role: role
+          store_id: tenantId,
+          role: role.toLowerCase(),
+          full_name: name
         }
       });
       authData = resAuth.data;
@@ -699,7 +706,9 @@ app.post("/api/v1/tenants/:tenantId/users", checkTenantAccess, async (req, res) 
           options: {
             data: {
               tenant_id: tenantId,
-              role: role
+              store_id: tenantId,
+              role: role.toLowerCase(),
+              full_name: name
             }
           }
         });

@@ -102,7 +102,7 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ tenantId, sessio
   };
 
   const openAddModal = () => {
-    setFormData({ id: '', full_name: '', email: '', role: 'BALCONISTA', is_active: true, password: '', store_id: tenantId });
+    setFormData({ id: '', full_name: '', email: '', role: 'operador', is_active: true, password: '', store_id: tenantId });
     setError('');
     setIsModalOpen(true);
   };
