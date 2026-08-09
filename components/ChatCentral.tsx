@@ -389,10 +389,14 @@ export const ChatCentral = ({ currentUser, tenantId = DEMO_TENANT_ID }: any) => 
               >
                 <div className="flex justify-between items-start mb-1">
                   <span className="font-bold text-gray-800 text-sm truncate">{conv.contact.name}</span>
-                  <span className="text-[10px] text-gray-400">10:45</span>
+                  <span className="text-[10px] text-gray-400">
+                    {conv.last_message_at 
+                      ? new Date(conv.last_message_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' }) 
+                      : ''}
+                  </span>
                 </div>
                 <div className="flex justify-between items-center mb-1">
-                  <span className="text-xs text-gray-500 truncate w-3/4">Última mensagem enviada...</span>
+                  <span className="text-xs text-gray-500 truncate w-3/4">{conv.last_message_content || 'Nova conversa'}</span>
                   {conv.unread_count > 0 && (
                     <span className="bg-emerald-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">
                       {conv.unread_count}
@@ -501,7 +505,9 @@ export const ChatCentral = ({ currentUser, tenantId = DEMO_TENANT_ID }: any) => 
                       </div>
                     )}
                     <p className="text-sm">{msg.content}</p>
-                    <span className="text-[10px] text-gray-500 block text-right mt-1">10:50</span>
+                    <span className="text-[10px] text-gray-500 block text-right mt-1">
+                      {msg.created_at ? new Date(msg.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' }) : ''}
+                    </span>
                   </div>
                 </div>
               ))}

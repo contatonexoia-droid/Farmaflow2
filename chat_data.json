@@ -6,6 +6,13 @@
       "name": "Cliente Demonstração",
       "phone_number": "5511999998888",
       "created_at": "2026-08-08T20:50:04.088Z"
+    },
+    {
+      "id": "a95e4ca7-d8d1-4d16-afd5-120be1121f9f",
+      "store_id": "nosso-catalogo",
+      "name": "Contato WhatsApp",
+      "phone_number": "WhatsApp",
+      "created_at": "2026-08-09T13:20:55.219Z"
     }
   ],
   "conversations": [
@@ -27,6 +34,23 @@
         "created_at": "2026-08-08T20:50:04.088Z"
       },
       "created_at": "2026-08-08T20:50:04.088Z"
+    },
+    {
+      "id": "629d0f3e-a72a-455a-bcbe-c370f0554949",
+      "store_id": "nosso-catalogo",
+      "contact_id": "a95e4ca7-d8d1-4d16-afd5-120be1121f9f",
+      "inbox_id": "c67b743a-6a2e-4203-97a1-d3e4f38eeaa4",
+      "status": "OPEN",
+      "last_message_at": "2026-08-09T13:48:15.954Z",
+      "last_message_content": "Teste backend evolution api send",
+      "contact": {
+        "id": "a95e4ca7-d8d1-4d16-afd5-120be1121f9f",
+        "store_id": "nosso-catalogo",
+        "name": "Contato WhatsApp",
+        "phone_number": "WhatsApp",
+        "created_at": "2026-08-09T13:20:55.219Z"
+      },
+      "created_at": "2026-08-09T13:20:55.219Z"
     }
   ],
   "messages": [
@@ -45,6 +69,30 @@
       "content": "Olá! Sou o assistente da farmácia. Em que posso ajudar hoje?",
       "is_private": false,
       "created_at": "2026-08-08T19:51:44.088Z"
+    },
+    {
+      "id": "c5b60128-2df3-40ec-a96f-4730c291c51e",
+      "conversation_id": "629d0f3e-a72a-455a-bcbe-c370f0554949",
+      "sender_type": "USER",
+      "content": "Teste backend para chat envio evolution API",
+      "is_private": false,
+      "created_at": "2026-08-09T13:20:55.219Z"
+    },
+    {
+      "id": "0cad49e6-7f25-4b33-b4b2-5984df9f3fd7",
+      "conversation_id": "629d0f3e-a72a-455a-bcbe-c370f0554949",
+      "sender_type": "USER",
+      "content": "Teste backend await evolution",
+      "is_private": false,
+      "created_at": "2026-08-09T13:42:21.797Z"
+    },
+    {
+      "id": "0fa1b7a9-40f0-4a4d-8285-c687d988ee6d",
+      "conversation_id": "629d0f3e-a72a-455a-bcbe-c370f0554949",
+      "sender_type": "USER",
+      "content": "Teste backend evolution api send",
+      "is_private": false,
+      "created_at": "2026-08-09T13:48:15.954Z"
     }
   ]
 }

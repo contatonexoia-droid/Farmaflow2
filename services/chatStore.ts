@@ -204,6 +204,79 @@ class ChatStore {
       created_at: now
     };
 
+    // Evolution API Dispatch (for USER/BOT messages, if not private)
+    if ((senderType === "USER" || senderType === "BOT") && !isPrivate) {
+      try {
+        // 1. Get instance name
+        const { data: instData } = await supabaseAdmin
+          .from("whatsapp_instances")
+          .select("instance_name")
+          .eq("store_id", storeId)
+          .maybeSingle();
+
+        // 2. Get customer phone
+        const { data: convData } = await supabaseAdmin
+          .from("chat_conversations")
+          .select("contact_id")
+          .eq("id", conversationId)
+          .maybeSingle();
+        
+        let phoneToSend = null;
+        if (convData?.contact_id) {
+          const { data: contactData } = await supabaseAdmin
+            .from("chat_contacts")
+            .select("phone_number")
+            .eq("id", convData.contact_id)
+            .maybeSingle();
+          if (contactData?.phone_number) phoneToSend = contactData.phone_number;
+        }
+
+        if (instData?.instance_name && phoneToSend) {
+          const evoUrl = process.env.EVOLUTION_API_URL?.replace(/\/$/, "");
+          const evoKey = process.env.EVOLUTION_API_KEY;
+          
+          if (evoUrl && evoKey) {
+            const sendUrl = `${evoUrl}/message/sendText/${instData.instance_name}`;
+            // Add suffix if missing
+            const remoteJid = phoneToSend.includes("@s.whatsapp.net") ? phoneToSend : `${phoneToSend}@s.whatsapp.net`;
+            
+            const payload = {
+              number: remoteJid,
+              text: content
+            };
+
+            // Using await to ensure it dispatches reliably, but wrapping in a self-executing async block to not block DB insert
+            (async () => {
+              try {
+                const res = await fetch(sendUrl, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'apikey': evoKey
+                  },
+                  body: JSON.stringify(payload)
+                });
+                if (!res.ok) {
+                  const errText = await res.text();
+                  console.error('[EVOLUTION API ERROR] Failed to send message:', errText);
+                } else {
+                  console.log('[EVOLUTION API] Message sent successfully to', remoteJid);
+                }
+              } catch (e) {
+                console.error('[EVOLUTION API ERROR] Network error:', e);
+              }
+            })();
+          } else {
+             console.error('[EVOLUTION API] Missing URL or Key in environment variables');
+          }
+        } else {
+          console.error('[EVOLUTION API] Missing instance_name or phone_number to send message. instance:', instData?.instance_name, 'phone:', phoneToSend);
+        }
+      } catch (evoErr) {
+        console.error('[EVOLUTION API] Exception preparing to send message:', evoErr);
+      }
+    }
+
     // Try Supabase insert
     try {
       const { error } = await supabaseAdmin.from("chat_messages").insert([{
@@ -316,29 +389,46 @@ class ChatStore {
     const rawMsgKey = msg.key?.id || `${Date.now()}`;
     const msgId = /^[0-9a-f-]{36}$/i.test(rawMsgKey) ? rawMsgKey : stringToUuid(`msg_${rawMsgKey}_${convId}`);
 
-    const contact: ChatContact = {
-      id: contactId,
-      store_id: storeId,
-      name: pushName,
-      phone_number: phone,
-      created_at: now
-    };
-
     // 1. Busca ou criação do contato (chat_contacts)
+    let finalContactName = pushName;
     try {
-      const { error } = await supabaseAdmin.from("chat_contacts").upsert([{
-        id: contactId,
-        store_id: storeId,
-        phone_number: phone,
-        name: pushName,
-        created_at: now
-      }], { onConflict: "id" });
-      if (error) {
-        console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao buscar ou criar contato (chat_contacts)', error.message, error);
+      const { data: existingContact } = await supabaseAdmin
+        .from("chat_contacts")
+        .select("name")
+        .eq("id", contactId)
+        .maybeSingle();
+
+      if (existingContact) {
+        // Se for uma mensagem enviada por mim ou não tiver pushName novo útil, mantenha o nome existente.
+        if (fromMe || !msg.pushName) {
+          finalContactName = existingContact.name;
+        } else {
+          finalContactName = pushName;
+          await supabaseAdmin.from("chat_contacts").update({
+            name: finalContactName,
+          }).eq("id", contactId);
+        }
+      } else {
+        if (fromMe) finalContactName = phone; // Fallback se o próprio usuário iniciou a conversa
+        await supabaseAdmin.from("chat_contacts").insert([{
+          id: contactId,
+          store_id: storeId,
+          phone_number: phone,
+          name: finalContactName,
+          created_at: now
+        }]);
       }
     } catch (error: any) {
       console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao buscar ou criar contato (chat_contacts)', error.message, error.stack);
     }
+    
+    const contact: ChatContact = {
+      id: contactId,
+      store_id: storeId,
+      name: finalContactName,
+      phone_number: phone,
+      created_at: now
+    };
 
     // 2. Obtenção do inbox_id
     let resolvedInboxId: string | null = null;
