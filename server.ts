@@ -4668,7 +4668,7 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
           .from("whatsapp_instances")
           .select("store_id")
           .eq("instance_name", instanceName)
-          .single();
+          .maybeSingle();
         if (inst?.store_id) storeId = inst.store_id;
       }
       
@@ -4715,7 +4715,7 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
           .from("chat_conversations")
           .select("unread_count, inbox_id")
           .eq("id", convId)
-          .single();
+          .maybeSingle();
           
         const newUnreadCount = fromMe ? 0 : (convInfo?.unread_count || 0) + 1;
         let resolvedInboxId = convInfo?.inbox_id;
@@ -4727,8 +4727,18 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
              .eq("store_id", storeId)
              .order("created_at", { ascending: true })
              .limit(1)
-             .single();
-           if (firstInbox?.id) resolvedInboxId = firstInbox.id;
+             .maybeSingle();
+           if (firstInbox?.id) {
+             resolvedInboxId = firstInbox.id;
+           } else {
+             const defaultInboxId = `inbox_default_${storeId}`;
+             await supabaseAdmin.from("inboxes").upsert([{
+               id: defaultInboxId,
+               store_id: storeId,
+               name: "Caixa de Entrada Principal"
+             }]);
+             resolvedInboxId = defaultInboxId;
+           }
         }
 
         // 3. Upsert Conversa
@@ -4752,6 +4762,16 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
           is_private: false,
           created_at: now
         }]);
+
+        if (!fromMe) {
+          // Trigger bot response logic, this is crucial for the flow!
+          await botHandoffManager.processMessageState(convId, storeId, text, "OPEN");
+          
+          const ratingNum = parseInt(text.trim(), 10);
+          if (!isNaN(ratingNum) && ratingNum >= 1 && ratingNum <= 5) {
+            await csatManager.recordCsatResponse(storeId, convId, ratingNum);
+          }
+        }
       }
     } else if (event === "connection.update") {
       console.log(`[Webhook Background] Connection update for ${instanceName}: ${data?.state}`);
@@ -4891,6 +4911,36 @@ app.post("/api/v1/chat/send", requireChatEnabled, async (req, res) => {
     if (is_private) {
       console.log(`[Chat API] Nota interna salva para conversa ${conversation_id}.`);
       return res.status(200).json({ success: true, data: message, is_private: true });
+    }
+
+    // Call Evolution API to actually send the message to WhatsApp
+    try {
+      const evolutionUrl = process.env.EVOLUTION_API_URL?.replace(/\/$/, '');
+      const evolutionKey = process.env.EVOLUTION_API_KEY;
+      if (evolutionUrl && evolutionKey) {
+        const instanceName = `store_${storeId.replace(/-/g,"")}`;
+        // Extrai apenas os numeros de telefone de `contact_<phone>_...` ou `conv_<phone>_...`
+        const phoneMatch = conversation_id.match(/_(.+?)_/);
+        const number = phoneMatch ? phoneMatch[1] : null;
+
+        if (number) {
+          await fetch(`${evolutionUrl}/message/sendText/${instanceName}`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "apikey": evolutionKey
+            },
+            body: JSON.stringify({
+              number: number,
+              text: content
+            })
+          });
+          console.log(`[Chat API] Mensagem enviada via Evolution para ${number}`);
+        }
+      }
+    } catch (evoErr) {
+      console.error("[Chat API] Falha ao enviar para a Evolution API:", evoErr);
+      // We don't block the return because it was saved locally at least.
     }
 
     console.log(`[Chat API] Mensagem de chat salva e processada para conversa ${conversation_id}: ${content}`);

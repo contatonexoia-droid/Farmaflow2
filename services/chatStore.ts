@@ -148,24 +148,14 @@ class ChatStore {
       }
 
       const { data, error } = await query;
-      if (!error && data && data.length > 0) {
-        return data;
+      if (!error && data) {
+        return data as any[];
       }
     } catch (err) {
       console.warn("[ChatStore] Supabase conversations query fallback:", err);
     }
 
-    // Memory / Local JSON Fallback
-    let list = this.conversations.filter(c => c.store_id === storeId || c.store_id === "default");
-    if (inboxId && inboxId !== "all") {
-      list = list.filter(c => c.inbox_id === inboxId);
-    }
-
-    // Attach contacts
-    return list.map(conv => {
-      const contact = this.contacts.find(ct => ct.id === conv.contact_id);
-      return { ...conv, contact: contact || conv.contact };
-    }).sort((a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime());
+    return [];
   }
 
   public async getMessages(conversationId: string): Promise<ChatMessage[]> {
@@ -176,16 +166,14 @@ class ChatStore {
         .eq("conversation_id", conversationId)
         .order("created_at", { ascending: true });
 
-      if (!error && data && data.length > 0) {
+      if (!error && data) {
         return data;
       }
     } catch (err) {
       console.warn("[ChatStore] Supabase messages query fallback:", err);
     }
 
-    return this.messages
-      .filter(m => m.conversation_id === conversationId)
-      .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+    return [];
   }
 
   public async addMessage(
@@ -212,12 +200,14 @@ class ChatStore {
     // Try Supabase insert
     try {
       await supabaseAdmin.from("chat_messages").insert([{
+        id: newMsg.id,
         conversation_id: conversationId,
         sender_type: senderType,
         content,
         is_private: isPrivate,
         media_url: mediaUrl,
-        media_type: mediaType
+        media_type: mediaType,
+        created_at: now
       }]);
 
       await supabaseAdmin.from("chat_conversations").update({
