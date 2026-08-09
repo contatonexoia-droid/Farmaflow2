@@ -569,7 +569,8 @@ app.get("/api/v1/inboxes", async (req, res) => {
 
     let data = await inboxStore.getInboxes(storeId);
 
-    if (userId && userRole?.toLowerCase() === "operador") {
+    const isOperator = userId && (userRole?.toLowerCase() === "operador" || userRole?.toLowerCase() === "operator");
+    if (isOperator) {
       const { data: memberRows } = await supabaseAdmin
         .from("inbox_members")
         .select("inbox_id")
@@ -4884,14 +4885,15 @@ app.get("/api/v1/chat/conversations", async (req, res) => {
     const userId = req.query.userId as string | undefined;
     const userRole = req.query.role as string | undefined;
 
-    let conversations = await chatStore.getConversations(storeId, inboxId);
+    const isOperator = userId && (userRole?.toLowerCase() === "operador" || userRole?.toLowerCase() === "operator");
+    let allowedInboxIds: string[] | undefined = undefined;
 
-    if (userId && userRole?.toLowerCase() === "operador") {
+    if (isOperator) {
       const { data: memberRows } = await supabaseAdmin
         .from("inbox_members")
         .select("inbox_id")
         .eq("user_id", userId);
-      const allowedInboxIds = memberRows ? memberRows.map(r => r.inbox_id) : [];
+      allowedInboxIds = memberRows ? memberRows.map(r => r.inbox_id) : [];
 
       // Requirement 3: Protection of Route/Action
       if (inboxId && inboxId !== "all") {
@@ -4899,11 +4901,9 @@ app.get("/api/v1/chat/conversations", async (req, res) => {
           return res.status(403).json({ error: "Permissão negada para esta caixa de entrada." });
         }
       }
-
-      // Filter conversations
-      conversations = conversations.filter(conv => conv.inbox_id && allowedInboxIds.includes(conv.inbox_id));
     }
 
+    const conversations = await chatStore.getConversations(storeId, inboxId, allowedInboxIds);
     return res.json({ data: conversations });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
@@ -4920,7 +4920,8 @@ app.get("/api/v1/chat/messages", async (req, res) => {
     const userId = req.query.userId as string | undefined;
     const userRole = req.query.role as string | undefined;
 
-    if (userId && userRole?.toLowerCase() === "operador") {
+    const isOperator = userId && (userRole?.toLowerCase() === "operador" || userRole?.toLowerCase() === "operator");
+    if (isOperator) {
       const { data: convData } = await supabaseAdmin
         .from("chat_conversations")
         .select("inbox_id")
@@ -4957,7 +4958,8 @@ app.post("/api/v1/chat/send", requireChatEnabled, async (req, res) => {
       return res.status(400).json({ error: "conversation_id e conteúdo são obrigatórios." });
     }
 
-    if (userId && role?.toLowerCase() === "operador") {
+    const isOperator = userId && (role?.toLowerCase() === "operador" || role?.toLowerCase() === "operator");
+    if (isOperator) {
       const { data: convData } = await supabaseAdmin
         .from("chat_conversations")
         .select("inbox_id")

@@ -141,7 +141,7 @@ class ChatStore {
     }
   }
 
-  public async getConversations(storeId: string, inboxId?: string): Promise<ChatConversation[]> {
+  public async getConversations(storeId: string, inboxId?: string, allowedInboxIds?: string[]): Promise<ChatConversation[]> {
     try {
       let query = supabaseAdmin
         .from("chat_conversations")
@@ -151,6 +151,14 @@ class ChatStore {
 
       if (inboxId && inboxId !== "all") {
         query = query.eq("inbox_id", inboxId);
+      }
+
+      if (allowedInboxIds !== undefined) {
+        if (allowedInboxIds.length > 0) {
+          query = query.in("inbox_id", allowedInboxIds);
+        } else {
+          return [];
+        }
       }
 
       const { data, error } = await query;

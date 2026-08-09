@@ -109,8 +109,11 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   }, [tenantId]);
 
   useEffect(() => {
+    if (isOperador && selectedInboxId === 'all') {
+      return;
+    }
     fetchConversations();
-  }, [filter, searchQuery, selectedInboxId, tenantId]);
+  }, [filter, searchQuery, selectedInboxId, tenantId, isOperador]);
 
   useEffect(() => {
     if (selectedConversation) {
@@ -207,6 +210,9 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   };
 
   const fetchConversations = async () => {
+    if (isOperador && selectedInboxId === 'all') {
+      return;
+    }
     try {
       let allowedIds = allowedInboxIds;
       if (isOperador && userId && allowedIds.length === 0) {
@@ -448,23 +454,32 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
             </div>
           </div>
           
-          <div className="flex gap-2 mb-3">
-            <div className="relative flex-1">
-              <Inbox className="w-4 h-4 absolute left-3 top-3 text-gray-400" />
-              <select 
-                value={selectedInboxId}
-                onChange={(e) => setSelectedInboxId(e.target.value)}
-                className="w-full bg-gray-50 border border-gray-200 text-gray-700 text-xs rounded-xl pl-9 pr-3 py-2 outline-none focus:ring-2 focus:ring-emerald-500 font-bold appearance-none"
-              >
-                {!isOperador ? (
-                  <option value="all">Todas as Caixas (Inboxes)</option>
-                ) : null}
-                {inboxes.map(inbox => (
-                  <option key={inbox.id} value={inbox.id}>{inbox.name}</option>
-                ))}
-              </select>
+          {(!isOperador || inboxes.length > 1) ? (
+            <div className="flex gap-2 mb-3">
+              <div className="relative flex-1">
+                <Inbox className="w-4 h-4 absolute left-3 top-3 text-gray-400" />
+                <select 
+                  value={selectedInboxId}
+                  onChange={(e) => setSelectedInboxId(e.target.value)}
+                  className="w-full bg-gray-50 border border-gray-200 text-gray-700 text-xs rounded-xl pl-9 pr-3 py-2 outline-none focus:ring-2 focus:ring-emerald-500 font-bold appearance-none"
+                >
+                  {!isOperador ? (
+                    <option value="all">Todas as Caixas (Inboxes)</option>
+                  ) : null}
+                  {inboxes.map(inbox => (
+                    <option key={inbox.id} value={inbox.id}>{inbox.name}</option>
+                  ))}
+                </select>
+              </div>
             </div>
-          </div>
+          ) : inboxes.length === 1 ? (
+            <div className="flex gap-2 mb-3">
+              <div className="w-full bg-emerald-50 border border-emerald-100 text-emerald-800 text-xs rounded-xl px-3 py-2 font-bold flex items-center gap-2">
+                <Inbox className="w-4 h-4 text-emerald-600" />
+                <span>Setor: {inboxes[0].name}</span>
+              </div>
+            </div>
+          ) : null}
 
           <div className="relative">
             <Search className="w-4 h-4 absolute left-3 top-3 text-gray-400" />
