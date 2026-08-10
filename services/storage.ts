@@ -1196,7 +1196,18 @@ export const getPromotionsByTenant = async (
     try {
       const query = networkId ? `?networkId=${encodeURIComponent(networkId)}` : '';
       const res = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/promos${query}`);
-      if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+      if (!res.ok) {
+        if (res.status === 503) {
+          try {
+            const errJson = await res.clone().json();
+            if (errJson?.error === 'offline') {
+              console.warn("[getPromotionsByTenant] Cliente offline. Retornando array vazio de promoções.");
+              return [];
+            }
+          } catch (_) {}
+        }
+        throw new Error(`HTTP error ${res.status}`);
+      }
       const data = await res.json();
       return (data || []).map(mapDbPromotionToApp);
     } catch (e: any) {
@@ -1302,6 +1313,15 @@ export const getCouponsByTenant = async (
     const query = networkId ? `?networkId=${encodeURIComponent(networkId)}` : '';
     const res = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/vouchers${query}`);
     if (!res.ok) {
+      if (res.status === 503) {
+        try {
+          const errJson = await res.clone().json();
+          if (errJson?.error === 'offline') {
+            console.warn("[getCouponsByTenant] Cliente offline. Retornando array vazio de cupons.");
+            return [];
+          }
+        } catch (_) {}
+      }
       const errText = await res.text();
       throw new Error(`Failed to fetch coupons: ${res.status} ${res.statusText} - ${errText}`);
     }
