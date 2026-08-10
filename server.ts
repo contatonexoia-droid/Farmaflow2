@@ -4720,7 +4720,7 @@ app.get("/api/v1/whatsapp/instances", async (req, res) => {
 });
 
 // Helper function to handle daily welcome messages for first message of the day
-async function handleDailyWelcomeMessage(storeId: string, conversation: any, instanceName?: string) {
+async function handleDailyWelcomeMessage(storeId: string, conversation: any, instanceName?: string, incomingText?: string) {
   try {
     const { data: tenant } = await supabaseAdmin
       .from("tenants")
@@ -4742,7 +4742,9 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
 
     const lastWelcomeDate = convData?.last_welcome_sent_at ? new Date(convData.last_welcome_sent_at).toISOString().split('T')[0] : null;
 
-    if (lastWelcomeDate === todayStr) {
+    const isTest = incomingText?.trim().toLowerCase() === '#teste' || incomingText?.trim().toLowerCase() === '#teste-boas-vindas';
+
+    if (lastWelcomeDate === todayStr && !isTest) {
       return; // Already sent today
     }
 
@@ -4789,31 +4791,38 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
 
     if (evolutionUrl && evolutionKey) {
       if (format === 'button') {
-        const buttonPayload = {
+        // Formato para enviar Template Buttons (suporta Botão de URL no Evolution API)
+        const templatePayload = {
           number: phone,
-          title: `👋 ${storeName}`,
-          description: customText,
+          options: {
+            delay: 1200,
+            presence: "composing"
+          },
+          text: `👋 *${storeName}*\n\n${customText}`,
           footer: storeName,
-          buttons: [
+          templateButtons: [
             {
-              type: "url",
-              displayText: "🛒 Acessar Loja Online",
-              url: storeLink
+              index: 1,
+              urlButton: {
+                displayText: "🛒 Acessar Loja Online",
+                url: storeLink
+              }
             }
           ]
         };
 
         try {
-          const btnRes = await fetch(`${evolutionUrl}/message/sendButtons/${targetInstanceName}`, {
+          const btnRes = await fetch(`${evolutionUrl}/message/sendTemplate/${targetInstanceName}`, {
             method: "POST",
             headers: { "Content-Type": "application/json", "apikey": evolutionKey },
-            body: JSON.stringify(buttonPayload)
+            body: JSON.stringify(templatePayload)
           });
 
           if (!btnRes.ok) {
             const textPayload = {
               number: phone,
-              text: `👋 *${storeName}*\n\n${customText}\n\n🛍️ *Acesse nossa Loja Online:*\n👉 ${storeLink}`
+              text: `👋 *${storeName}*\n\n${customText}\n\n🛍️ *Acesse nossa Loja Online:*\n👉 ${storeLink}`,
+              options: { linkPreview: true }
             };
             await fetch(`${evolutionUrl}/message/sendText/${targetInstanceName}`, {
               method: "POST",
@@ -4825,7 +4834,8 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
           console.warn("[WelcomeMessage] Fallback texto no envio de botão:", btnErr.message);
           const textPayload = {
             number: phone,
-            text: `👋 *${storeName}*\n\n${customText}\n\n🛍️ *Acesse nossa Loja Online:*\n👉 ${storeLink}`
+            text: `👋 *${storeName}*\n\n${customText}\n\n🛍️ *Acesse nossa Loja Online:*\n👉 ${storeLink}`,
+            options: { linkPreview: true }
           };
           await fetch(`${evolutionUrl}/message/sendText/${targetInstanceName}`, {
             method: "POST",
@@ -4836,7 +4846,8 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
       } else {
         const textPayload = {
           number: phone,
-          text: `👋 *${storeName}*\n\n${customText}\n\n🛍️ *Acesse nossa Loja Online:*\n👉 ${storeLink}`
+          text: `👋 *${storeName}*\n\n${customText}\n\n🛍️ *Acesse nossa Loja Online:*\n👉 ${storeLink}`,
+          options: { linkPreview: true }
         };
         await fetch(`${evolutionUrl}/message/sendText/${targetInstanceName}`, {
           method: "POST",
@@ -4947,7 +4958,7 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
               }
 
               // Disparo da Mensagem Automática de Boas-Vindas da Primeira Mensagem do Dia
-              await handleDailyWelcomeMessage(storeId, result.conversation, instanceName);
+              await handleDailyWelcomeMessage(storeId, result.conversation, instanceName, text);
             } catch (botErr: any) {
               console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao processar bot handoff / CSAT / Boas-Vindas:', botErr.message, botErr.stack);
             }
