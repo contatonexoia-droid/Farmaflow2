@@ -4719,6 +4719,162 @@ app.get("/api/v1/whatsapp/instances", async (req, res) => {
   }
 });
 
+// Helper function to handle daily welcome messages for first message of the day
+async function handleDailyWelcomeMessage(storeId: string, conversation: any, instanceName?: string) {
+  try {
+    const { data: tenant } = await supabaseAdmin
+      .from("tenants")
+      .select("id, name, slug, custom_domain, welcome_message_enabled, welcomemessageenabled, welcome_message_text, welcomemessagetext, welcome_message_format, welcomemessageformat, welcome_message_link, welcomemessagelink")
+      .eq("id", storeId)
+      .maybeSingle();
+
+    if (!tenant) return;
+
+    const isEnabled = tenant.welcome_message_enabled === true || tenant.welcomemessageenabled === true;
+    if (!isEnabled) return;
+
+    const todayStr = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+    const { data: convData } = await supabaseAdmin
+      .from("chat_conversations")
+      .select("last_welcome_sent_at")
+      .eq("id", conversation.id)
+      .maybeSingle();
+
+    const lastWelcomeDate = convData?.last_welcome_sent_at ? new Date(convData.last_welcome_sent_at).toISOString().split('T')[0] : null;
+
+    if (lastWelcomeDate === todayStr) {
+      return; // Already sent today
+    }
+
+    const nowIso = new Date().toISOString();
+    await supabaseAdmin
+      .from("chat_conversations")
+      .update({ last_welcome_sent_at: nowIso })
+      .eq("id", conversation.id);
+
+    let phone = conversation.contact?.phone_number;
+    if (!phone) {
+      const { data: contactData } = await supabaseAdmin
+        .from("chat_contacts")
+        .select("phone_number")
+        .eq("id", conversation.contact_id)
+        .maybeSingle();
+      phone = contactData?.phone_number;
+    }
+
+    if (!phone) {
+      console.warn("[WelcomeMessage] Telefone do contato não encontrado para conversa:", conversation.id);
+      return;
+    }
+
+    const storeName = tenant.name || "Nossa Farmácia";
+    const customText = tenant.welcome_message_text || tenant.welcomemessagetext || "Olá! Seja muito bem-vindo(a) à nossa farmácia! Como podemos te ajudar hoje?";
+    let storeLink = tenant.welcome_message_link || tenant.welcomemessagelink;
+    if (!storeLink) {
+      if (tenant.custom_domain) {
+        storeLink = `https://${tenant.custom_domain}`;
+      } else if (tenant.slug) {
+        storeLink = `https://${tenant.slug}.farmaflow.online`;
+      } else {
+        storeLink = `https://farmaflow.online`;
+      }
+    }
+
+    const format = tenant.welcome_message_format || tenant.welcomemessageformat || "button";
+    const evolutionUrl = process.env.EVOLUTION_API_URL?.replace(/\/$/, '');
+    const evolutionKey = process.env.EVOLUTION_API_KEY;
+    let targetInstanceName = instanceName || `store_${storeId.replace(/-/g, "")}`;
+
+    let displayContent = `${customText}\n\n🛒 Loja Online: ${storeLink}`;
+
+    if (evolutionUrl && evolutionKey) {
+      if (format === 'button') {
+        const buttonPayload = {
+          number: phone,
+          title: `👋 ${storeName}`,
+          description: customText,
+          footer: storeName,
+          buttons: [
+            {
+              type: "url",
+              displayText: "🛒 Acessar Loja Online",
+              url: storeLink
+            }
+          ]
+        };
+
+        try {
+          const btnRes = await fetch(`${evolutionUrl}/message/sendButtons/${targetInstanceName}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "apikey": evolutionKey },
+            body: JSON.stringify(buttonPayload)
+          });
+
+          if (!btnRes.ok) {
+            const textPayload = {
+              number: phone,
+              text: `👋 *${storeName}*\n\n${customText}\n\n🛍️ *Acesse nossa Loja Online:*\n👉 ${storeLink}`
+            };
+            await fetch(`${evolutionUrl}/message/sendText/${targetInstanceName}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "apikey": evolutionKey },
+              body: JSON.stringify(textPayload)
+            });
+          }
+        } catch (btnErr: any) {
+          console.warn("[WelcomeMessage] Fallback texto no envio de botão:", btnErr.message);
+          const textPayload = {
+            number: phone,
+            text: `👋 *${storeName}*\n\n${customText}\n\n🛍️ *Acesse nossa Loja Online:*\n👉 ${storeLink}`
+          };
+          await fetch(`${evolutionUrl}/message/sendText/${targetInstanceName}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "apikey": evolutionKey },
+            body: JSON.stringify(textPayload)
+          });
+        }
+      } else {
+        const textPayload = {
+          number: phone,
+          text: `👋 *${storeName}*\n\n${customText}\n\n🛍️ *Acesse nossa Loja Online:*\n👉 ${storeLink}`
+        };
+        await fetch(`${evolutionUrl}/message/sendText/${targetInstanceName}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "apikey": evolutionKey },
+          body: JSON.stringify(textPayload)
+        });
+      }
+    }
+
+    const welcomeMsgId = crypto.randomUUID();
+    const welcomeMsg = {
+      id: welcomeMsgId,
+      conversation_id: conversation.id,
+      sender_type: "BOT",
+      content: displayContent,
+      is_private: false,
+      created_at: nowIso
+    };
+
+    await supabaseAdmin.from("chat_messages").insert([welcomeMsg]);
+
+    await supabaseAdmin.from("chat_conversations").update({
+      last_message_at: nowIso,
+      last_message_content: displayContent
+    }).eq("id", conversation.id);
+
+    realtimeHub.broadcastToStore(storeId, "chat_message", {
+      conversationId: conversation.id,
+      message: welcomeMsg,
+      conversation
+    });
+
+    console.log(`[WelcomeMessage] Mensagem de boas-vindas enviada para ${phone} (${storeId})`);
+  } catch (err: any) {
+    console.error("[WelcomeMessage] Erro ao processar mensagem de boas-vindas:", err.message);
+  }
+}
+
 // 1. Webhook Ultra-Leve para Evolution API (Serverless-friendly)
 app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
   try {
@@ -4789,8 +4945,11 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
               if (!isNaN(ratingNum) && ratingNum >= 1 && ratingNum <= 5) {
                 await csatManager.recordCsatResponse(storeId, result.conversation.id, ratingNum);
               }
+
+              // Disparo da Mensagem Automática de Boas-Vindas da Primeira Mensagem do Dia
+              await handleDailyWelcomeMessage(storeId, result.conversation, instanceName);
             } catch (botErr: any) {
-              console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao processar bot handoff / CSAT:', botErr.message, botErr.stack);
+              console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao processar bot handoff / CSAT / Boas-Vindas:', botErr.message, botErr.stack);
             }
           }
         } catch (procErr: any) {

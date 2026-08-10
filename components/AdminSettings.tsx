@@ -925,7 +925,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ config, onConfigUp
 
         {activeTab === 'atendimento' && (
           <div className="animate-in fade-in duration-300">
-            <AtendimentoSettings tenantId={config.id} />
+            <AtendimentoSettings config={formData} onConfigUpdate={onConfigUpdate} />
           </div>
         )}
       </div>
@@ -943,9 +943,47 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ config, onConfigUp
 // ============================================================================
 // ATENDIMENTO SETTINGS COMPONENT (LABELS & CANNED RESPONSES CRUD)
 // ============================================================================
-const AtendimentoSettings: React.FC<{ tenantId: string }> = ({ tenantId }) => {
+const AtendimentoSettings: React.FC<{ config: PharmacyConfig; onConfigUpdate: (updated: PharmacyConfig) => void | Promise<void> }> = ({ config, onConfigUpdate }) => {
+  const tenantId = config.id;
   const [labels, setLabels] = useState<any[]>([]);
   const [canned, setCanned] = useState<any[]>([]);
+
+  // States for Welcome Message
+  const [welcomeEnabled, setWelcomeEnabled] = useState(config.welcomeMessageEnabled ?? false);
+  const [welcomeText, setWelcomeText] = useState(config.welcomeMessageText || "Olá! Seja muito bem-vindo(a) à nossa farmácia! Como podemos te ajudar hoje?");
+  const [welcomeFormat, setWelcomeFormat] = useState<'button' | 'text'>(config.welcomeMessageFormat || 'button');
+  const [welcomeLink, setWelcomeLink] = useState(config.welcomeMessageLink || "");
+  const [welcomeSaving, setWelcomeSaving] = useState(false);
+  const [welcomeSavedSuccess, setWelcomeSavedSuccess] = useState(false);
+
+  // Sync state if config prop updates
+  useEffect(() => {
+    setWelcomeEnabled(config.welcomeMessageEnabled ?? false);
+    setWelcomeText(config.welcomeMessageText || "Olá! Seja muito bem-vindo(a) à nossa farmácia! Como podemos te ajudar hoje?");
+    setWelcomeFormat(config.welcomeMessageFormat || 'button');
+    setWelcomeLink(config.welcomeMessageLink || "");
+  }, [config]);
+
+  const handleSaveWelcomeConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setWelcomeSaving(true);
+    try {
+      await onConfigUpdate({
+        ...config,
+        welcomeMessageEnabled: welcomeEnabled,
+        welcomeMessageText: welcomeText,
+        welcomeMessageFormat: welcomeFormat,
+        welcomeMessageLink: welcomeLink,
+      });
+      setWelcomeSavedSuccess(true);
+      setTimeout(() => setWelcomeSavedSuccess(false), 3000);
+    } catch (err) {
+      console.error("Erro ao salvar mensagens de boas-vindas:", err);
+      alert("Erro ao salvar configurações de boas-vindas.");
+    } finally {
+      setWelcomeSaving(false);
+    }
+  };
   
   // States for label creation/edit
   const [newLabelName, setNewLabelName] = useState('');
@@ -1083,6 +1121,158 @@ const AtendimentoSettings: React.FC<{ tenantId: string }> = ({ tenantId }) => {
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-10">
       
+      {/* SEÇÃO 0: MENSAGEM AUTOMÁTICA DE BOAS-VINDAS DIÁRIA */}
+      <div className="lg:col-span-2 bg-gradient-to-br from-emerald-50/70 via-white to-white p-6 sm:p-8 rounded-[2.5rem] border border-emerald-100 shadow-sm space-y-6">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-emerald-100/60 pb-6">
+          <div className="flex items-center gap-3">
+            <div className="w-12 h-12 rounded-2xl bg-emerald-600 text-white flex items-center justify-center shadow-lg shadow-emerald-600/20 shrink-0">
+              <MessageSquare size={24} />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="font-black text-gray-900 text-xl tracking-tight">Mensagem Automática de Boas-Vindas</h3>
+                <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wider bg-emerald-100 text-emerald-800">
+                  1ª Mensagem do Dia
+                </span>
+              </div>
+              <p className="text-sm text-gray-500 mt-1">
+                Envie automaticamente uma saudação personalizada e o link da sua loja online quando o cliente enviar a primeira mensagem do dia no WhatsApp.
+              </p>
+            </div>
+          </div>
+
+          {/* Toggle Switch */}
+          <label className="relative inline-flex items-center cursor-pointer shrink-0">
+            <input 
+              type="checkbox" 
+              checked={welcomeEnabled} 
+              onChange={(e) => setWelcomeEnabled(e.target.checked)}
+              className="sr-only peer"
+            />
+            <div className="w-14 h-8 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[4px] after:left-[4px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-6 after:w-6 after:transition-all peer-checked:bg-emerald-600"></div>
+            <span className="ml-3 text-sm font-bold text-gray-800">
+              {welcomeEnabled ? 'Ativado' : 'Desativado'}
+            </span>
+          </label>
+        </div>
+
+        {welcomeEnabled && (
+          <form onSubmit={handleSaveWelcomeConfig} className="space-y-6 animate-in fade-in duration-300">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              
+              {/* Left Col: Inputs */}
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-2">
+                    Texto da Saudação Personalizado
+                  </label>
+                  <textarea
+                    rows={4}
+                    value={welcomeText}
+                    onChange={(e) => setWelcomeText(e.target.value)}
+                    placeholder="Digite a mensagem de boas-vindas..."
+                    className="w-full px-4 py-3 rounded-2xl border border-gray-200 focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 text-sm font-medium transition-all"
+                  />
+                  <p className="text-[11px] text-gray-400 mt-1">
+                    Personalize o texto inicial enviado ao cliente.
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-2">
+                    Escolha do Formato do Botão/Link
+                  </label>
+                  <select
+                    value={welcomeFormat}
+                    onChange={(e) => setWelcomeFormat(e.target.value as 'button' | 'text')}
+                    className="w-full px-4 py-3 rounded-2xl border border-gray-200 focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 text-sm font-bold text-gray-800 bg-white transition-all cursor-pointer"
+                  >
+                    <option value="button">🔘 Botão Interativo de Link (Evolution API)</option>
+                    <option value="text">📝 Texto com Link Encurtado e Destacado</option>
+                  </select>
+                  <p className="text-[11px] text-gray-400 mt-1">
+                    {welcomeFormat === 'button'
+                      ? 'Dispara um botão de link clicável via Evolution API.'
+                      : 'Dispara uma mensagem formatada com emojis e link direto em texto.'}
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-2">
+                    Link da Loja Online (Opcional)
+                  </label>
+                  <input
+                    type="text"
+                    value={welcomeLink}
+                    onChange={(e) => setWelcomeLink(e.target.value)}
+                    placeholder={`Ex: https://${config.slug || 'suafarmacia'}.farmaflow.online`}
+                    className="w-full px-4 py-3 rounded-2xl border border-gray-200 focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 text-sm font-medium transition-all"
+                  />
+                  <p className="text-[11px] text-gray-400 mt-1">
+                    Deixe em branco para usar o link automático do catálogo virtual da farmácia.
+                  </p>
+                </div>
+              </div>
+
+              {/* Right Col: Live WhatsApp Preview */}
+              <div className="bg-emerald-950/5 border border-emerald-200/50 rounded-2xl p-5 flex flex-col justify-between">
+                <div>
+                  <div className="flex items-center justify-between border-b border-gray-200/60 pb-3 mb-4">
+                    <span className="text-xs font-black text-emerald-900 uppercase tracking-wider flex items-center gap-2">
+                      <Phone size={14} className="text-emerald-600" /> Pré-visualização do Cliente (WhatsApp)
+                    </span>
+                    <span className="text-[10px] font-bold text-gray-400 bg-white px-2 py-0.5 rounded-full border border-gray-200">
+                      Simulação
+                    </span>
+                  </div>
+
+                  {/* Bubble preview */}
+                  <div className="bg-emerald-50 border border-emerald-200/60 rounded-2xl p-4 shadow-xs text-gray-800 text-xs leading-relaxed space-y-3 font-sans">
+                    <p className="font-bold text-emerald-900">👋 {config.name || 'Sua Farmácia'}</p>
+                    <p className="whitespace-pre-wrap">{welcomeText || 'Olá! Seja muito bem-vindo(a)!'}</p>
+
+                    {welcomeFormat === 'button' ? (
+                      <div className="pt-2">
+                        <div className="w-full py-2.5 px-4 bg-white hover:bg-emerald-100/50 border border-emerald-300/80 rounded-xl font-bold text-emerald-700 text-center flex items-center justify-center gap-2 shadow-xs transition-all">
+                          <span>🛒 Acessar Loja Online</span>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="pt-2 border-t border-emerald-200/50 text-emerald-800">
+                        <p className="font-bold mb-1">🛍️ Acesse nossa Loja Online:</p>
+                        <p className="text-blue-600 underline font-mono break-all">
+                          {welcomeLink || (config.custom_domain ? `https://${config.custom_domain}` : `https://${config.slug || 'suafarmacia'}.farmaflow.online`)}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <p className="text-[10px] text-gray-400 mt-4 text-center italic">
+                  * Disparado unicamente na primeira mensagem recebida do cliente no dia.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              {welcomeSavedSuccess && (
+                <span className="text-xs font-bold text-emerald-600 flex items-center gap-1.5 animate-in fade-in">
+                  <CheckCircle size={16} /> Configurações de boas-vindas salvas!
+                </span>
+              )}
+              <button
+                type="submit"
+                disabled={welcomeSaving}
+                className="px-6 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl font-bold text-sm shadow-lg shadow-emerald-600/20 transition-all flex items-center gap-2 disabled:opacity-50 cursor-pointer"
+              >
+                {welcomeSaving ? <Loader2 className="animate-spin" size={18} /> : <Save size={18} />}
+                Salvar Configuração de Boas-Vindas
+              </button>
+            </div>
+          </form>
+        )}
+      </div>
+
       {/* SEÇÃO 1: GERENCIAMENTO DE ETIQUETAS */}
       <div className="bg-white p-6 rounded-[2rem] border border-gray-100 shadow-sm space-y-6">
         <div>

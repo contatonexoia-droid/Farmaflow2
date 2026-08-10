@@ -265,6 +265,10 @@ export const mapDbTenantToApp = (t: any): PharmacyConfig => {
     networkId: t.network_id || t.networkid || "",
     deliverySettings: t.delivery_settings || t.deliverysettings || fallbackSettings,
     ignore_erp_prices: t.ignore_erp_prices !== undefined ? t.ignore_erp_prices : (t.delivery_settings?.ignore_erp_prices || false),
+    welcomeMessageEnabled: t.welcome_message_enabled ?? t.welcomemessageenabled ?? false,
+    welcomeMessageText: t.welcome_message_text || t.welcomemessagetext || "Olá! Seja muito bem-vindo(a) à nossa farmácia! Como podemos te ajudar hoje?",
+    welcomeMessageFormat: t.welcome_message_format || t.welcomemessageformat || "button",
+    welcomeMessageLink: t.welcome_message_link || t.welcomemessagelink || "",
   };
 };
 
@@ -470,6 +474,10 @@ export const saveTenant = async (
       minimum_order_value: tenant.minimumOrderValue || 0,
       notification_sound: tenant.notificationSound || "",
       notification_volume: tenant.notificationVolume ?? 0.5,
+      welcome_message_enabled: tenant.welcomeMessageEnabled ?? false,
+      welcome_message_text: tenant.welcomeMessageText || "",
+      welcome_message_format: tenant.welcomeMessageFormat || "button",
+      welcome_message_link: tenant.welcomeMessageLink || "",
     };
 
     const support = await checkSchemaSupport();

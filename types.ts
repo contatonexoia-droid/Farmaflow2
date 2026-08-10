@@ -179,6 +179,10 @@ export interface PharmacyConfig {
   networkId?: string;
   deliverySettings?: DeliverySettingsConfig;
   ignore_erp_prices?: boolean;
+  welcomeMessageEnabled?: boolean;
+  welcomeMessageText?: string;
+  welcomeMessageFormat?: 'button' | 'text';
+  welcomeMessageLink?: string;
 }
 
 export interface BackupLog {
