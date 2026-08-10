@@ -1132,12 +1132,6 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                   <p className="text-xs text-gray-400 text-center py-2">Nenhum pedido encontrado.</p>
                 )}
               </div>
-
-              <div className="pt-4 border-t border-gray-100">
-                <button className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl shadow-md transition-all flex items-center justify-center gap-2">
-                  <CreditCard className="w-4 h-4" /> Gerar Cobrança (Pix/Cartão)
-                </button>
-              </div>
             </div>
           ) : (
             <div className="flex h-full items-center justify-center text-center p-4">

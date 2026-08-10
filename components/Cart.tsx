@@ -211,7 +211,7 @@ function getCrossSellRecommendation(cartItems: any[]) {
   // Smart fallback recommendation if items exist but no rule matched
   return {
     suggestedCategory: "Farmacinha e Ofertas",
-    searchQuery: "oferta",
+    searchQuery: "farmacinha",
     message: "Aproveite a sua compra: Que tal conferir nossas ofertas e itens essenciais para sua farmacinha?",
     cta: "Ver Ofertas",
     icon: "Sparkles",

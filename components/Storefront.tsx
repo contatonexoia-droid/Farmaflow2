@@ -1981,6 +1981,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
       processedTerm.includes("antiacido") ||
       processedTerm.includes("antiácido");
 
+    const isFarmacinha = processedTerm === "farmacinha";
 
     let searchTokens_raw = processedTerm.split(" ").filter((t) => t.length > 0);
     let searchTokens = searchTokens_raw
@@ -2115,6 +2116,46 @@ export const Storefront: React.FC<StorefrontProps> = ({
             matchScore = 1000;
           } else {
             return null;
+          }
+        }
+        else if (isFarmacinha) {
+          const pName = normalizeStr(p.name);
+          const pActive = normalizeStr(p.activePrinciple || "");
+          const pCat = normalizeStr(p.category || "");
+          
+          const isEssential = 
+            pName.includes("paracetamol") ||
+            pName.includes("dipirona") ||
+            pName.includes("ibuprofeno") ||
+            pName.includes("band-aid") ||
+            pName.includes("band aid") ||
+            pName.includes("curativo") ||
+            pName.includes("fio dental") ||
+            pName.includes("absorvente") ||
+            pName.includes("dorflex") ||
+            pName.includes("neosaldina") ||
+            pName.includes("advil") ||
+            pName.includes("tilenol") ||
+            pName.includes("tylenol") ||
+            pName.includes("soro fisiologico") ||
+            pActive.includes("paracetamol") ||
+            pActive.includes("dipirona") ||
+            pActive.includes("ibuprofeno") ||
+            pCat.includes("analgesico") ||
+            pCat.includes("curativo") ||
+            pCat.includes("absorvente") ||
+            pCat.includes("higiene bucal");
+
+          const promoPriority = getPriority(p);
+          const isOferta = promoPriority > 1 || (p as any).suggestionBadge === "OFERTA";
+
+          // If it is either essential OR has an offer badge/discount
+          if (isEssential || isOferta) {
+             matchScore = 500;
+             if (isEssential) matchScore += 100;
+             if (isOferta) matchScore += 500; // Prioritize offers above all
+          } else {
+             return null;
           }
         }
         // Fallback Logic overrides normal search
