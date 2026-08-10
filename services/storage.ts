@@ -541,7 +541,7 @@ export const deleteTenant = async (id: string) => {
   if (!isSupabaseConfigured()) throw new Error("CONFIG_MISSING");
   try {
     try {
-      const res = await fetch(`/api/v1/tenants/admin/${id}`, {
+      const res = await fetch(`/api/v1/tenants/admin/${encodeURIComponent(id)}`, {
         method: "DELETE",
       });
       const data = await res.json();
@@ -630,7 +630,7 @@ export const getProductsByTenant = async (
       try {
         // CORREÇÃO CRÍTICA: Bypassa o cache de borda (Edge CDN) do Vercel usando um parâmetro de timestamp (?t=...)
         // para garantir que as atualizações de preços de planilhas importadas apareçam imediatamente.
-        const response = await fetch(`/api/v1/tenants/${tenantId}/products?t=${Date.now()}`, {
+        const response = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/products?t=${Date.now()}`, {
           signal: abortSignal,
         });
         if (!response.ok) throw new Error("API Fetch failed");
@@ -705,7 +705,7 @@ export const getProductsByTenant = async (
     // Performance Optimization: TTFB/FCP Fast Path
     // If there is no cache, fetch a small optimized payload from the init endpoint instantly
     try {
-      const initResponse = await fetch(`/api/v1/store/${tenantId}/init`, { signal: abortSignal });
+      const initResponse = await fetch(`/api/v1/store/${encodeURIComponent(tenantId)}/init`, { signal: abortSignal });
       if (initResponse.ok) {
         const initJson = await initResponse.json();
         if (initJson.products) {
@@ -1194,8 +1194,8 @@ export const getPromotionsByTenant = async (
   
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const query = networkId ? `?networkId=${networkId}` : '';
-      const res = await fetch(`/api/v1/tenants/${tenantId}/promos${query}`);
+      const query = networkId ? `?networkId=${encodeURIComponent(networkId)}` : '';
+      const res = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/promos${query}`);
       if (!res.ok) throw new Error(`HTTP error ${res.status}`);
       const data = await res.json();
       return (data || []).map(mapDbPromotionToApp);
@@ -1243,7 +1243,7 @@ export const savePromotion = async (promotion: PromotionRule) => {
     // scope is required by the backend
     payload.scope = promotion.scope || "SINGLE_STORE";
     
-    const res = await fetch(`/api/v1/tenants/${promotion.tenantId}/promos`, {
+    const res = await fetch(`/api/v1/tenants/${encodeURIComponent(promotion.tenantId)}/promos`, {
       method: 'POST',
       headers: getAuthHeaders(promotion.tenantId),
       body: JSON.stringify(payload)
@@ -1259,7 +1259,7 @@ export const savePromotion = async (promotion: PromotionRule) => {
 
 export const deletePromotion = async (id: string, tenantId: string) => {
   try {
-    const res = await fetch(`/api/v1/tenants/${tenantId}/promos/${id}`, {
+    const res = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/promos/${encodeURIComponent(id)}`, {
         method: 'DELETE',
         headers: getAuthHeaders(tenantId)
     });
@@ -1299,9 +1299,12 @@ export const getCouponsByTenant = async (
     return [];
   }
   try {
-    const query = networkId ? `?networkId=${networkId}` : '';
-    const res = await fetch(`/api/v1/tenants/${tenantId}/vouchers${query}`);
-    if (!res.ok) throw new Error("Failed to fetch coupons");
+    const query = networkId ? `?networkId=${encodeURIComponent(networkId)}` : '';
+    const res = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/vouchers${query}`);
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Failed to fetch coupons: ${res.status} ${res.statusText} - ${errText}`);
+    }
     const data = await res.json();
     return (data || []).map(mapCouponFromDB);
   } catch (e: any) {
@@ -1332,7 +1335,7 @@ export const saveCoupon = async (coupon: CouponRule) => {
     };
     dbCoupon.scope = coupon.scope || "SINGLE_STORE";
     
-    const res = await fetch(`/api/v1/tenants/${coupon.tenantId}/vouchers`, {
+    const res = await fetch(`/api/v1/tenants/${encodeURIComponent(coupon.tenantId)}/vouchers`, {
       method: 'POST',
       headers: getAuthHeaders(coupon.tenantId),
       body: JSON.stringify(dbCoupon)
@@ -1348,7 +1351,7 @@ export const saveCoupon = async (coupon: CouponRule) => {
 
 export const deleteCoupon = async (id: string, tenantId: string) => {
   try {
-    const res = await fetch(`/api/v1/tenants/${tenantId}/vouchers/${id}`, {
+    const res = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/vouchers/${encodeURIComponent(id)}`, {
         method: 'DELETE',
         headers: getAuthHeaders(tenantId)
     });
