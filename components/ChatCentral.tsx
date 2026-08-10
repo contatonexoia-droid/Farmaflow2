@@ -25,6 +25,12 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [activeView, setActiveView] = useState<'LIST' | 'CHAT' | 'SIDEBAR'>('LIST');
 
+  // Customer Context Data
+  const [customerOrders, setCustomerOrders] = useState<any[]>([]);
+  const [continuousUseData, setContinuousUseData] = useState<any>(null);
+  const [isFetchingContext, setIsFetchingContext] = useState(false);
+
+
   // --- STATES & HANDLERS FOR LABELS & CANNED RESPONSES ---
   const [availableLabels, setAvailableLabels] = useState<any[]>([]);
   const [cannedResponses, setCannedResponses] = useState<any[]>([]);
@@ -483,6 +489,74 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
     }
   };
 
+  const fetchCustomerContext = async () => {
+    if (!selectedConversation || !selectedConversation.contact) {
+      setCustomerOrders([]);
+      setContinuousUseData(null);
+      return;
+    }
+
+    setIsFetchingContext(true);
+    try {
+      let phone = selectedConversation.contact.phone_number;
+      if (!phone) {
+        setIsFetchingContext(false);
+        return;
+      }
+      
+      phone = String(phone).replace(/\D/g, ""); // clean non-digits
+
+      // Fetch continuous use from contacts
+      const { data: contactsData, error: contactsErr } = await supabase
+        .from('contacts')
+        .select('*')
+        .eq('store_id', tenantId)
+        .like('phone', `%${phone}%`)
+        .maybeSingle();
+
+      if (!contactsErr && contactsData && contactsData.custom_attributes) {
+        const attrs = contactsData.custom_attributes;
+        if (attrs.uso_continuo) {
+          setContinuousUseData(attrs);
+        } else {
+          setContinuousUseData(null);
+        }
+      } else {
+        setContinuousUseData(null);
+      }
+
+      // Fetch orders using the jsonb customer->phone matching
+      // Since it's a bit tricky to query jsonb without exact path if the format varies,
+      // we fetch the last 10 orders of the store and filter locally if there's no dedicated column.
+      // A better way is using jsonb arrow operator in Supabase:
+      const { data: ordersData, error: ordersErr } = await supabase
+        .from('orders')
+        .select('*')
+        .eq('tenant_id', tenantId)
+        .order('created_at', { ascending: false })
+        .limit(100);
+
+      if (!ordersErr && ordersData) {
+        const matchedOrders = ordersData.filter((o: any) => {
+          if (!o.customer || !o.customer.phone) return false;
+          const oPhone = String(o.customer.phone).replace(/\D/g, "");
+          return oPhone === phone || oPhone.includes(phone) || phone.includes(oPhone);
+        }).slice(0, 3); // top 3
+        setCustomerOrders(matchedOrders);
+      } else {
+        setCustomerOrders([]);
+      }
+    } catch (err) {
+      console.warn("Failed to fetch customer context:", err);
+    } finally {
+      setIsFetchingContext(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchCustomerContext();
+  }, [selectedConversation?.contact?.phone_number]);
+
   const handleAssumeConversation = () => {
     if (!selectedConversation) return;
     const updated = { ...selectedConversation, assigned_user_id: 'my-user-id', status: 'OPEN' };
@@ -830,7 +904,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                           className="fixed inset-0 z-40" 
                           onClick={() => setIsMenuOpen(false)}
                         />
-                        <div className="absolute right-0 mt-2 w-48 bg-white rounded-xl shadow-xl border border-gray-100 py-1.5 z-50 animate-in fade-in slide-in-from-top-1">
+                        <div className="absolute right-0 top-full mt-2 w-56 max-w-[calc(100vw-2rem)] bg-white rounded-xl shadow-2xl border border-gray-100 py-1.5 z-[100] origin-top-right animate-in fade-in zoom-in-95">
                           <button 
                             onClick={() => {
                               setIsTransferModalOpen(true);
@@ -1007,38 +1081,56 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                 </div>
                 <h2 className="text-lg font-bold text-gray-800">{selectedConversation.contact.name}</h2>
                 <p className="text-sm text-gray-500">{selectedConversation.contact?.phone_number}</p>
-                <div className="mt-2 inline-block px-2 py-1 bg-blue-50 text-blue-600 text-xs font-bold rounded-lg border border-blue-100">
-                  Cliente VIP
-                </div>
+                {customerOrders.length > 0 && (
+                  <div className="mt-2 inline-block px-2 py-1 bg-emerald-50 text-emerald-600 text-xs font-bold rounded-lg border border-emerald-100">
+                    Já comprou na loja
+                  </div>
+                )}
               </div>
 
-              <div className="space-y-3">
-                <h3 className="font-black text-xs uppercase tracking-widest text-gray-400 flex items-center gap-2">
-                  <AlertCircle className="w-4 h-4" /> Uso Contínuo
-                </h3>
-                <div className="bg-red-50 p-3 rounded-xl border border-red-100">
-                  <p className="font-bold text-gray-800 text-sm">Losartana Potássica 50mg</p>
-                  <p className="text-xs text-gray-600 mt-1">Última compra: há 28 dias</p>
-                  <p className="text-xs font-bold text-red-600 mt-1">Previsão de término: Hoje!</p>
-                  <button className="mt-2 w-full py-1.5 bg-white border border-red-200 text-red-600 text-xs font-bold rounded-lg hover:bg-red-50 transition-colors">
-                    Oferecer Reposição
-                  </button>
+              {continuousUseData && (
+                <div className="space-y-3">
+                  <h3 className="font-black text-xs uppercase tracking-widest text-gray-400 flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4" /> Uso Contínuo
+                  </h3>
+                  <div className="bg-red-50 p-3 rounded-xl border border-red-100">
+                    <p className="font-bold text-gray-800 text-sm">{continuousUseData.medicamento_nome || 'Medicamento'}</p>
+                    <p className="text-xs text-gray-600 mt-1">
+                      Última compra: {continuousUseData.ultimo_pedido_at ? new Date(continuousUseData.ultimo_pedido_at).toLocaleDateString() : 'N/A'}
+                    </p>
+                    <p className="text-xs font-bold text-red-600 mt-1">
+                      Intervalo configurado: {continuousUseData.dias_intervalo || 30} dias
+                    </p>
+                    <button className="mt-2 w-full py-1.5 bg-white border border-red-200 text-red-600 text-xs font-bold rounded-lg hover:bg-red-50 transition-colors">
+                      Oferecer Reposição
+                    </button>
+                  </div>
                 </div>
-              </div>
+              )}
 
               <div className="space-y-3">
                 <h3 className="font-black text-xs uppercase tracking-widest text-gray-400 flex items-center gap-2">
                   <ShoppingBag className="w-4 h-4" /> Últimos Pedidos
                 </h3>
-                {[1, 2, 3].map((i) => (
-                  <div key={i} className="flex justify-between items-center p-2 hover:bg-gray-50 rounded-lg border border-transparent hover:border-gray-100 cursor-pointer transition-colors">
-                    <div>
-                      <p className="text-sm font-bold text-gray-700">Pedido #{1000 + i}</p>
-                      <p className="text-[10px] text-gray-400">15/07/2026 - Finalizado</p>
+                {isFetchingContext ? (
+                  <p className="text-xs text-gray-400 text-center py-2">Buscando histórico...</p>
+                ) : customerOrders.length > 0 ? (
+                  customerOrders.map((order: any, idx) => (
+                    <div key={order.id || idx} className="flex justify-between items-center p-2 hover:bg-gray-50 rounded-lg border border-transparent hover:border-gray-100 cursor-pointer transition-colors">
+                      <div>
+                        <p className="text-sm font-bold text-gray-700">Pedido #{order.id?.substring(0,6).toUpperCase()}</p>
+                        <p className="text-[10px] text-gray-400">
+                          {new Date(order.created_at).toLocaleDateString()} - {order.status || 'Finalizado'}
+                        </p>
+                      </div>
+                      <span className="text-sm font-bold text-emerald-600">
+                        R$ {Number(order.total || 0).toFixed(2).replace('.', ',')}
+                      </span>
                     </div>
-                    <span className="text-sm font-bold text-emerald-600">R$ {45.50 * i}</span>
-                  </div>
-                ))}
+                  ))
+                ) : (
+                  <p className="text-xs text-gray-400 text-center py-2">Nenhum pedido encontrado.</p>
+                )}
               </div>
 
               <div className="pt-4 border-t border-gray-100">
