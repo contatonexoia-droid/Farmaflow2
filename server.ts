@@ -218,7 +218,7 @@ app.get("/api/v1/store/:tenantId/init", async (req, res) => {
       couponsQuery,
       supabase
         .from("products")
-        .select("*")
+        .select("id, tenant_id, tenantid, internal_code, internalcode, barcode, name, active_principle, activeprinciple, drug_type, drugtype, manufacturer, presentation, price, original_price, stock, category, grouping_slug, groupingslug, variant_attribute, variantattribute, image, image_url_2, image_url_3, video_uri, videouri, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage, requires_prescription, is_ai_enriched, is_featured")
         .eq("tenant_id", tenantId)
         .order("is_featured", { ascending: false })
         .limit(50),
@@ -1287,7 +1287,7 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
     // 2. Server-side intelligent search fallback
     let query = supabase
       .from("products")
-      .select("*", { count: "exact" })
+      .select("id, tenant_id, tenantid, internal_code, internalcode, barcode, name, active_principle, activeprinciple, drug_type, drugtype, manufacturer, presentation, price, original_price, stock, category, grouping_slug, groupingslug, variant_attribute, variantattribute, image, image_url_2, image_url_3, video_uri, videouri, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage, requires_prescription, is_ai_enriched, is_featured", { count: "exact" })
       .eq("tenant_id", tenantId);
 
     if (category && category !== "Todos") {
@@ -1657,7 +1657,7 @@ app.get("/api/v1/tenants/:tenantId/products", async (req, res) => {
     while (hasMore) {
       const { data, error } = await supabase
         .from("products")
-        .select("*")
+        .select("id, tenant_id, tenantid, internal_code, internalcode, barcode, name, active_principle, activeprinciple, drug_type, drugtype, manufacturer, presentation, price, original_price, stock, category, grouping_slug, groupingslug, variant_attribute, variantattribute, image, image_url_2, image_url_3, video_uri, videouri, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage, requires_prescription, is_ai_enriched, is_featured")
         .eq("tenant_id", tenantId)
         .range(from, from + step - 1);
 
@@ -1682,6 +1682,20 @@ app.get("/api/v1/tenants/:tenantId/products", async (req, res) => {
       "public, s-maxage=60, stale-while-revalidate=300",
     );
     res.json({ data: allData });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/v1/products/:id", async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("products")
+      .select("*")
+      .eq("id", req.params.id)
+      .single();
+    if (error) throw error;
+    res.json(data);
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }

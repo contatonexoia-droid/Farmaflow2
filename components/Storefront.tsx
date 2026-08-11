@@ -1163,6 +1163,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
   const [isLoading, setIsLoading] = useState(true);
   const [isTransitioning, setIsTransitioning] = useState(false);
   const [matrizProducts, setMatrizProducts] = useState<Product[]>([]);
+  const [visibleCount, setVisibleCount] = useState(42);
 
   useEffect(() => {
     if (tenant?.networkId && tenant.networkId !== tenant.id) {
@@ -1203,6 +1204,11 @@ export const Storefront: React.FC<StorefrontProps> = ({
     cupom_id: null,
     termo_busca: "",
   });
+
+  // Reset pagination when search or filters change to keep initial results fast
+  useEffect(() => {
+    setVisibleCount(42);
+  }, [filters.termo_busca, filters.categoria, filters.departamento, filters.promocao_id, filters.cupom_id]);
 
   const selectedDepartment = filters.departamento || "Todos";
   const selectedCategory = filters.categoria || "Todos";
@@ -2393,8 +2399,12 @@ export const Storefront: React.FC<StorefrontProps> = ({
     isProductInRule,
   ]);
 
+  const paginatedProducts = useMemo(() => {
+    return filteredProducts.slice(0, visibleCount);
+  }, [filteredProducts, visibleCount]);
+
   const rowVirtualizer = useWindowVirtualizer({
-    count: Math.ceil(filteredProducts.length / columns),
+    count: Math.ceil(paginatedProducts.length / columns),
     estimateSize: () => 380, // Estimated height of ProductCard + gap
     overscan: 3,
   });
@@ -3425,61 +3435,84 @@ export const Storefront: React.FC<StorefrontProps> = ({
             </button>
           </div>
         ) : (
-          <div
-            style={{
-              height: `${rowVirtualizer.getTotalSize()}px`,
-              width: "100%",
-              position: "relative",
-            }}
-          >
-            {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-              const startIndex = virtualRow.index * columns;
-              const rowProducts = filteredProducts.slice(
-                startIndex,
-                startIndex + columns,
-              );
+          <>
+            <div
+              style={{
+                height: `${rowVirtualizer.getTotalSize()}px`,
+                width: "100%",
+                position: "relative",
+              }}
+            >
+              {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+                const startIndex = virtualRow.index * columns;
+                const rowProducts = paginatedProducts.slice(
+                  startIndex,
+                  startIndex + columns,
+                );
 
-              return (
-                <div
-                  key={virtualRow.index}
-                  ref={rowVirtualizer.measureElement}
-                  data-index={virtualRow.index}
-                  style={{
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                    width: "100%",
-                    transform: `translateY(${virtualRow.start}px)`,
-                  }}
-                  className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7 gap-5 md:gap-8 pb-5 md:pb-8"
-                >
-                  {rowProducts.map((p, colIndex) => {
-                    const globalIndex = startIndex + colIndex;
-                    return (
-                      <ProductCard
-                        key={p.id}
-                        product={p}
-                        tenant={tenant}
-                        promotions={activePromotions}
-                        cartItems={cartItems}
-                        onProductClick={onProductClick}
-                        isProductInRule={isProductInRule}
-                        onAddToCart={(e, p) => {
-                          e.stopPropagation();
-                          handleAddToCartWrapper(p);
-                        }}
-                        onNotify={(e, p) => {
-                          e.stopPropagation();
-                          handleNotifyMe(p);
-                        }}
-                        priority={globalIndex < 6}
-                      />
-                    );
-                  })}
+                return (
+                  <div
+                    key={virtualRow.index}
+                    ref={rowVirtualizer.measureElement}
+                    data-index={virtualRow.index}
+                    style={{
+                      position: "absolute",
+                      top: 0,
+                      left: 0,
+                      width: "100%",
+                      transform: `translateY(${virtualRow.start}px)`,
+                    }}
+                    className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7 gap-5 md:gap-8 pb-5 md:pb-8"
+                  >
+                    {rowProducts.map((p, colIndex) => {
+                      const globalIndex = startIndex + colIndex;
+                      return (
+                        <ProductCard
+                          key={p.id}
+                          product={p}
+                          tenant={tenant}
+                          promotions={activePromotions}
+                          cartItems={cartItems}
+                          onProductClick={onProductClick}
+                          isProductInRule={isProductInRule}
+                          onAddToCart={(e, p) => {
+                            e.stopPropagation();
+                            handleAddToCartWrapper(p);
+                          }}
+                          onNotify={(e, p) => {
+                            e.stopPropagation();
+                            handleNotifyMe(p);
+                          }}
+                          priority={globalIndex < 6}
+                        />
+                      );
+                    })}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Controle de Paginação/Carregamento em Lotes por Demanda */}
+            {filteredProducts.length > visibleCount && (
+              <div className="flex flex-col items-center justify-center mt-12 mb-6 gap-4 animate-in fade-in duration-300">
+                <p className="text-sm font-semibold text-gray-500">
+                  Exibindo <span className="font-extrabold text-gray-800">{Math.min(visibleCount, filteredProducts.length)}</span> de <span className="font-extrabold text-gray-800">{filteredProducts.length}</span> produtos
+                </p>
+                <div className="w-full max-w-xs bg-gray-100 h-1.5 rounded-full overflow-hidden">
+                  <div 
+                    className="bg-emerald-600 h-full rounded-full transition-all duration-500" 
+                    style={{ width: `${(Math.min(visibleCount, filteredProducts.length) / filteredProducts.length) * 100}%` }}
+                  />
                 </div>
-              );
-            })}
-          </div>
+                <button
+                  onClick={() => setVisibleCount(prev => Math.min(filteredProducts.length, prev + 42))}
+                  className="px-8 py-3.5 bg-emerald-600 text-white hover:bg-emerald-700 active:scale-95 transition-all rounded-full font-black uppercase tracking-widest text-xs shadow-lg cursor-pointer flex items-center gap-2 border border-transparent"
+                >
+                  Carregar Mais Produtos
+                </button>
+              </div>
+            )}
+          </>
         )}
 
         {crossSellSuggestions.length > 0 && (

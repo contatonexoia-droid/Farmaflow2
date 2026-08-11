@@ -590,6 +590,35 @@ const App: React.FC = () => {
   const handleProductClick = useCallback((product: Product) => {
     setSelectedProduct(product);
     
+    // On-demand fetch of detailed product properties (payload reduction pattern)
+    fetch(`/api/v1/products/${encodeURIComponent(product.id)}`)
+      .then(res => {
+        if (!res.ok) throw new Error("Failed to fetch product details");
+        return res.json();
+      })
+      .then(dbProduct => {
+        if (dbProduct) {
+          const fullProduct = mapDbProductToApp(dbProduct);
+          setSelectedProduct(prev => {
+            if (prev && prev.id === product.id) {
+              return {
+                ...prev,
+                description: fullProduct.description || prev.description,
+                indications: fullProduct.indications || prev.indications,
+                usage: fullProduct.usage || prev.usage,
+                sideEffects: fullProduct.sideEffects || prev.sideEffects,
+                contraindications: fullProduct.contraindications || prev.contraindications,
+                image_url_2: fullProduct.image_url_2 || (prev as any).image_url_2,
+                image_url_3: fullProduct.image_url_3 || (prev as any).image_url_3,
+                videoUri: fullProduct.videoUri || prev.videoUri,
+              };
+            }
+            return prev;
+          });
+        }
+      })
+      .catch(err => console.warn("Could not load full product details:", err));
+    
     if (currentTenant?.id) {
       const source = sessionStorage.getItem("traffic_source") || "direct";
       fetch(`/api/v1/analytics/${currentTenant.id}/track-event`, {
