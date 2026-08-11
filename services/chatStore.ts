@@ -31,6 +31,7 @@ export interface ChatConversation {
   store_id: string;
   contact_id: string;
   inbox_id?: string | null;
+  team_id?: string | null;
   assigned_user_id?: string | null;
   status: "OPEN" | "PENDING" | "CLOSED" | "BOT";
   last_message_at: string;

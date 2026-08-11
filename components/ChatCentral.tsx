@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Search, Send, FileText, Image as ImageIcon, Paperclip, User, Clock, ShoppingBag, CreditCard, MessageSquare, Lock, AlertCircle, RefreshCw, Smartphone, ChevronLeft, Info, BarChart2, CheckCircle2, UserPlus, Inbox, MoreVertical } from 'lucide-react';
-import { WhatsAppConnectModal } from './WhatsAppConnectModal';
+import { Search, Send, FileText, Image as ImageIcon, Paperclip, User, Users, Clock, ShoppingBag, CreditCard, MessageSquare, Lock, AlertCircle, RefreshCw, Smartphone, ChevronLeft, Info, BarChart2, CheckCircle2, UserPlus, Inbox, MoreVertical } from 'lucide-react';
 import { ChatTransferModal } from './ChatTransferModal';
 import { supabase } from '../services/supabase';
 
@@ -34,6 +33,9 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   // --- STATES & HANDLERS FOR LABELS & CANNED RESPONSES ---
   const [availableLabels, setAvailableLabels] = useState<any[]>([]);
   const [cannedResponses, setCannedResponses] = useState<any[]>([]);
+  const [teams, setTeams] = useState<any[]>([]);
+  const [selectedTeamId, setSelectedTeamId] = useState('all');
+  const [selectedTagId, setSelectedTagId] = useState('all');
   const [isLabelPopoverOpen, setIsLabelPopoverOpen] = useState(false);
   const [isCannedDropdownOpen, setIsCannedDropdownOpen] = useState(false);
   const [filteredCanned, setFilteredCanned] = useState<any[]>([]);
@@ -52,8 +54,13 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
         const jsonCanned = await resCanned.json();
         if (jsonCanned?.data) setCannedResponses(jsonCanned.data);
       }
+      const resTeams = await fetch(`/api/v1/teams?storeId=${tenantId}`);
+      if (resTeams.ok) {
+        const jsonTeams = await resTeams.json();
+        if (jsonTeams?.data) setTeams(jsonTeams.data);
+      }
     } catch (e) {
-      console.warn("Error loading labels or canned responses:", e);
+      console.warn("Error loading labels, canned responses, or teams:", e);
     }
   };
 
@@ -226,7 +233,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       return;
     }
     fetchConversations();
-  }, [filter, searchQuery, selectedInboxId, tenantId, isOperador]);
+  }, [filter, searchQuery, selectedInboxId, selectedTeamId, selectedTagId, tenantId, isOperador]);
 
   useEffect(() => {
     if (selectedConversation) {
@@ -348,6 +355,23 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
           if (isOperador && userId) {
             list = list.filter((c: any) => c.inbox_id && allowedIds.includes(c.inbox_id));
           }
+          if (selectedTeamId !== 'all') {
+            list = list.filter((c: any) => c.team_id === selectedTeamId);
+          }
+          if (selectedTagId !== 'all') {
+            list = list.filter((c: any) => c.labels?.some((l: any) => l.id === selectedTagId));
+          }
+          if (searchQuery) {
+            list = list.filter((c: any) => c.contact?.name?.toLowerCase().includes(searchQuery.toLowerCase()) || c.last_message_content?.toLowerCase().includes(searchQuery.toLowerCase()));
+          }
+          if (filter !== 'todas') {
+             // simplified logic
+             if (filter === 'minhas') list = list.filter((c: any) => c.assigned_user_id === userId);
+             else if (filter === 'não atribuídas') list = list.filter((c: any) => !c.assigned_user_id);
+             else if (filter === 'finalizadas') list = list.filter((c: any) => c.status === 'CLOSED');
+          } else {
+             list = list.filter((c: any) => c.status !== 'CLOSED'); // default non-closed
+          }
           setConversations(list);
           return;
         }
@@ -362,12 +386,30 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       if (selectedInboxId !== 'all') {
         query = query.eq('inbox_id', selectedInboxId);
       }
+      if (selectedTeamId !== 'all') {
+        query = query.eq('team_id', selectedTeamId);
+      }
+      if (filter === 'finalizadas') {
+         query = query.eq('status', 'CLOSED');
+      } else if (filter !== 'todas') {
+         query = query.neq('status', 'CLOSED');
+         if (filter === 'minhas') query = query.eq('assigned_user_id', userId);
+         if (filter === 'não atribuídas') query = query.is('assigned_user_id', null);
+      } else {
+         query = query.neq('status', 'CLOSED');
+      }
 
       const { data, error } = await query;
       if (!error && data && data.length > 0) {
         let list = data;
         if (isOperador && userId) {
           list = list.filter((c: any) => c.inbox_id && allowedIds.includes(c.inbox_id));
+        }
+        if (selectedTagId !== 'all') {
+          list = list.filter((c: any) => c.labels?.some((l: any) => l.id === selectedTagId));
+        }
+        if (searchQuery) {
+            list = list.filter((c: any) => c.contact?.name?.toLowerCase().includes(searchQuery.toLowerCase()) || c.last_message_content?.toLowerCase().includes(searchQuery.toLowerCase()));
         }
         setConversations(list);
       } else {
@@ -377,6 +419,12 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
             let list = JSON.parse(saved);
             if (isOperador && userId) {
               list = list.filter((c: any) => c.inbox_id && allowedIds.includes(c.inbox_id));
+            }
+            if (selectedTeamId !== 'all') {
+              list = list.filter((c: any) => c.team_id === selectedTeamId);
+            }
+            if (selectedTagId !== 'all') {
+              list = list.filter((c: any) => c.labels?.some((l: any) => l.id === selectedTagId));
             }
             setConversations(list);
           } catch (_) {}
@@ -547,7 +595,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
         setCustomerOrders([]);
       }
     } catch (err) {
-      console.warn("Failed to fetch customer context:", err);
+      console.log("Failed to fetch customer context:", err);
     } finally {
       setIsFetchingContext(false);
     }
@@ -614,13 +662,6 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
             <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
               <MessageSquare className="w-5 h-5 text-emerald-600" /> Chat
             </h2>
-            <button 
-              onClick={() => setIsConnectModalOpen(true)}
-              className="p-2 bg-emerald-100 text-emerald-700 rounded-xl hover:bg-emerald-200 transition-colors"
-              title="Gerenciar Conexão WhatsApp"
-            >
-              <Smartphone className="w-5 h-5" />
-            </button>
           </div>
 
           {/* Manager Dashboard Widget */}
@@ -642,7 +683,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                 <select 
                   value={selectedInboxId}
                   onChange={(e) => setSelectedInboxId(e.target.value)}
-                  className="w-full bg-gray-50 border border-gray-200 text-gray-700 text-xs rounded-xl pl-9 pr-3 py-2 outline-none focus:ring-2 focus:ring-emerald-500 font-bold appearance-none"
+                  className="w-full bg-gray-50 border border-gray-200 text-gray-700 text-xs rounded-xl pl-9 pr-3 py-2 outline-none focus:ring-2 focus:ring-emerald-500 font-bold appearance-none truncate"
                 >
                   {!isOperador ? (
                     <option value="all">Todas as Caixas (Inboxes)</option>
@@ -661,6 +702,36 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
               </div>
             </div>
           ) : null}
+
+          <div className="flex gap-2 mb-3">
+            <div className="relative flex-1">
+              <Users className="w-4 h-4 absolute left-3 top-3 text-gray-400" />
+              <select 
+                value={selectedTeamId}
+                onChange={(e) => setSelectedTeamId(e.target.value)}
+                className="w-full bg-gray-50 border border-gray-200 text-gray-700 text-xs rounded-xl pl-9 pr-3 py-2 outline-none focus:ring-2 focus:ring-emerald-500 font-bold appearance-none truncate"
+              >
+                <option value="all">Todos os Times</option>
+                {teams.map(t => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
+                ))}
+              </select>
+            </div>
+            
+            <div className="relative flex-1">
+              <span className="w-4 h-4 absolute left-3 top-2.5 text-gray-400">🏷️</span>
+              <select 
+                value={selectedTagId}
+                onChange={(e) => setSelectedTagId(e.target.value)}
+                className="w-full bg-gray-50 border border-gray-200 text-gray-700 text-xs rounded-xl pl-9 pr-3 py-2 outline-none focus:ring-2 focus:ring-emerald-500 font-bold appearance-none truncate"
+              >
+                <option value="all">Todas as Tags</option>
+                {availableLabels.map(l => (
+                  <option key={l.id} value={l.id}>{l.name}</option>
+                ))}
+              </select>
+            </div>
+          </div>
 
           <div className="relative">
             <Search className="w-4 h-4 absolute left-3 top-3 text-gray-400" />
@@ -1140,12 +1211,6 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
           )}
         </div>
       </div>
-
-      <WhatsAppConnectModal 
-        isOpen={isConnectModalOpen}
-        onClose={() => setIsConnectModalOpen(false)}
-        tenantId={tenantId}
-      />
 
       <ChatTransferModal 
         isOpen={isTransferModalOpen}

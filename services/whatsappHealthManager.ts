@@ -38,7 +38,7 @@ export class WhatsappHealthManager extends EventEmitter {
     // Heartbeat a cada 30 segundos
     this.checkInterval = setInterval(() => {
       this.runHealthChecks().catch((err) => {
-        console.error("[WhatsappHealthManager] Heartbeat check failed:", err);
+        // Silent catch
       });
     }, 30000);
   }
@@ -112,9 +112,8 @@ export class WhatsappHealthManager extends EventEmitter {
 
         if (failures <= 5) {
           const backoffDelay = Math.pow(2, failures) * 1000;
-          console.warn(`[WhatsappHealthManager] Instance ${instanceName} offline. Triggering auto-reconnect attempt #${failures} in ${backoffDelay}ms`);
           setTimeout(() => {
-            this.attemptReconnection(instanceName, evolutionUrl, evolutionKey).catch(console.error);
+            this.attemptReconnection(instanceName, evolutionUrl, evolutionKey).catch(() => {});
           }, backoffDelay);
         }
       } else {
@@ -128,8 +127,6 @@ export class WhatsappHealthManager extends EventEmitter {
         });
       }
     } catch (err: any) {
-      console.error(`[WhatsappHealthManager] Error checking ${instanceName}:`, err.message);
-      
       const health = this.healthMap.get(storeId);
       const failures = (health?.consecutiveFailures || 0) + 1;
       
@@ -144,19 +141,17 @@ export class WhatsappHealthManager extends EventEmitter {
           lastCheckAt: new Date().toISOString(),
           consecutiveFailures: failures,
         });
-        console.warn(`[WhatsappHealthManager] Transient fetch error for ${instanceName}. Failure ${failures}/3`);
       }
     }
   }
 
   private async attemptReconnection(instanceName: string, evolutionUrl: string, evolutionKey: string) {
     try {
-      console.log(`[WhatsappHealthManager] Requesting connect for instance ${instanceName}...`);
       await fetch(`${evolutionUrl}/instance/connect/${instanceName}`, {
         headers: { apikey: evolutionKey },
       });
     } catch (err: any) {
-      console.error(`[WhatsappHealthManager] Failed to send connect request for ${instanceName}:`, err.message);
+      // Ignored
     }
   }
 

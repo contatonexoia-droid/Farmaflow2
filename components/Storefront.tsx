@@ -68,6 +68,7 @@ import {
   FALLBACK_DEPARTMENT,
   DEPARTMENT_MAPPING,
 } from "../lib/departments";
+import { CookieBanner } from "./CookieBanner";
 
 const GENERIC_PLACEHOLDER = "https://i.imgur.com/fLz8F3X.png";
 
@@ -3727,6 +3728,8 @@ export const Storefront: React.FC<StorefrontProps> = ({
           <span className="font-bold text-sm">{toastMessage}</span>
         </div>
       )}
+
+      <CookieBanner />
     </div>
   );
 };

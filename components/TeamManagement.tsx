@@ -14,7 +14,10 @@ const ROLES = [
   { id: 'entregador', label: 'Entregador', color: 'bg-orange-100 text-orange-800', border: 'border-orange-200', desc: 'Apenas entregas' }
 ];
 
+import { TeamsSettings } from './TeamsSettings';
+
 export const TeamManagement: React.FC<TeamManagementProps> = ({ tenantId, session }) => {
+  const [activeTab, setActiveTab] = useState<'users' | 'teams'>('users');
   const [team, setTeam] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
@@ -170,33 +173,50 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ tenantId, sessio
 
   return (
     <div className="animate-in fade-in duration-300 pb-10">
-      <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4">
-        <div>
-           <h3 className="text-xl font-bold text-gray-900 mb-1">Equipe e Permissões (RBAC)</h3>
-           <p className="text-sm text-gray-500">Gerencie perfis, acesso a filiais e funções do sistema.</p>
-        </div>
-        <button 
-          onClick={openAddModal}
-          className="bg-emerald-600 text-white font-bold px-6 py-3 rounded-2xl flex items-center justify-center gap-2 hover:bg-emerald-700 transition-colors shrink-0 shadow-lg shadow-emerald-600/20"
+      <div className="flex border-b border-gray-100 mb-8 overflow-x-auto hide-scrollbar">
+        <button
+          onClick={() => setActiveTab('users')}
+          className={`px-6 py-4 font-bold text-sm border-b-2 whitespace-nowrap transition-colors ${activeTab === 'users' ? 'border-emerald-500 text-emerald-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
         >
-          <UserPlus size={18} /> Novo Colaborador
+          Usuários e Permissões
+        </button>
+        <button
+          onClick={() => setActiveTab('teams')}
+          className={`px-6 py-4 font-bold text-sm border-b-2 whitespace-nowrap transition-colors ${activeTab === 'teams' ? 'border-emerald-500 text-emerald-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+        >
+          Equipes e Times
         </button>
       </div>
 
-      <div className="relative mb-6">
-        <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-          <Search size={18} className="text-gray-400" />
-        </div>
-        <input 
-          type="text" 
-          placeholder="Buscar por nome..." 
-          className="w-full bg-gray-50 border border-gray-100 placeholder-gray-400 text-gray-900 rounded-2xl py-3 pl-11 pr-4 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition-all font-medium text-sm"
-          value={searchTerm}
-          onChange={e => setSearchTerm(e.target.value)}
-        />
-      </div>
+      {activeTab === 'users' ? (
+        <>
+          <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4">
+            <div>
+               <h3 className="text-xl font-bold text-gray-900 mb-1">Colaboradores da Loja</h3>
+               <p className="text-sm text-gray-500">Gerencie perfis, acesso a filiais e funções do sistema.</p>
+            </div>
+            <button 
+              onClick={openAddModal}
+              className="bg-emerald-600 text-white font-bold px-6 py-3 rounded-2xl flex items-center justify-center gap-2 hover:bg-emerald-700 transition-colors shrink-0 shadow-lg shadow-emerald-600/20"
+            >
+              <UserPlus size={18} /> Novo Colaborador
+            </button>
+          </div>
 
-      <div className="bg-white border border-gray-100 rounded-[2rem] overflow-hidden shadow-sm">
+          <div className="relative mb-6">
+            <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+              <Search size={18} className="text-gray-400" />
+            </div>
+            <input 
+              type="text" 
+              placeholder="Buscar por nome..." 
+              className="w-full bg-gray-50 border border-gray-100 placeholder-gray-400 text-gray-900 rounded-2xl py-3 pl-11 pr-4 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition-all font-medium text-sm"
+              value={searchTerm}
+              onChange={e => setSearchTerm(e.target.value)}
+            />
+          </div>
+
+          <div className="bg-white border border-gray-100 rounded-[2rem] overflow-hidden shadow-sm">
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
             <thead>
@@ -330,6 +350,10 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ tenantId, sessio
             </div>
           </div>
         </div>
+      )}
+        </>
+      ) : (
+        <TeamsSettings tenantId={tenantId} />
       )}
     </div>
   );

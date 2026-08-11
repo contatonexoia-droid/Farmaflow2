@@ -1035,6 +1035,16 @@ export const deleteProducts = async (productIds: string[]) => {
 
 export const getOrdersByTenant = async (tenantId: string): Promise<Order[]> => {
   try {
+    const res = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/orders`);
+    if (res.ok) {
+      const json = await res.json();
+      return (json || []).map(mapDbOrderToApp);
+    }
+  } catch (apiError) {
+    console.warn("API fallback failed for orders:", apiError);
+  }
+
+  try {
     return await retryRequest(async () => {
       const { data, error } = await supabase
         .from("orders")
@@ -1109,6 +1119,16 @@ export const saveOrdersByTenant = async (tenantId: string, orders: Order[]) => {
     applied_coupon: o.appliedCoupon,
   }));
   try {
+    const res = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/orders`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(dbOrders),
+    });
+    if (res.ok) return;
+  } catch (apiError) {
+    console.warn("API fallback failed for saveOrdersByTenant:", apiError);
+  }
+  try {
     await retryRequest(async () => {
       const { error } = await supabase.from("orders").upsert(dbOrders);
       if (error) throw error;
@@ -1120,6 +1140,14 @@ export const saveOrdersByTenant = async (tenantId: string, orders: Order[]) => {
 
 export const deleteOrder = async (orderId: string) => {
   if (!isSupabaseConfigured()) return;
+  try {
+    const res = await fetch(`/api/v1/orders/admin/${encodeURIComponent(orderId)}`, {
+      method: "DELETE",
+    });
+    if (res.ok) return;
+  } catch (apiError) {
+    console.warn("API fallback failed for deleteOrder:", apiError);
+  }
   try {
     await retryRequest(async () => {
       const { error } = await supabase

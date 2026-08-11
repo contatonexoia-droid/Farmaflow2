@@ -25,6 +25,7 @@ import { csatManager } from "./services/csatManager.js";
 import { contactMergeManager } from "./services/contactMergeManager.js";
 import { inboxStore } from "./services/inboxStore.js";
 import { chatStore } from "./services/chatStore.js";
+import { teamStore } from "./services/teamStore.js";
 
 
 const app = express();
@@ -58,6 +59,51 @@ app.get("/api/v1/queue/stats", async (req, res) => {
 });
 
 // Admin endpoints for bypassing RLS
+app.get("/api/v1/tenants/:id/orders", async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { data, error } = await supabaseAdmin
+      .from("orders")
+      .select("*")
+      .eq("tenant_id", id)
+      .order("created_at", { ascending: false });
+    
+    if (error) throw error;
+    res.json(data || []);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.put("/api/v1/tenants/:id/orders", async (req, res) => {
+  try {
+    const dbOrders = req.body;
+    const { error } = await supabaseAdmin
+      .from("orders")
+      .upsert(dbOrders);
+    
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/v1/orders/admin/:orderId", async (req, res) => {
+  try {
+    const orderId = req.params.orderId;
+    const { error } = await supabaseAdmin
+      .from("orders")
+      .delete()
+      .eq("id", orderId);
+    
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get("/api/v1/tenants/admin", async (req, res) => {
   try {
     const { data, error } = await supabase.from("tenants").select("*");
@@ -559,6 +605,78 @@ app.patch("/api/v1/team/users/:id", checkTenantAccess, async (req, res) => {
 });
 
 // =========================================
+// MÓDULO DE EQUIPES (TEAMS)
+// =========================================
+app.get("/api/v1/teams", async (req, res) => {
+  try {
+    const storeId = (req.query.storeId as string) || (req.headers["x-tenant-id"] as string) || "default";
+    const data = await teamStore.getTeams(storeId);
+    return res.json({ data });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/v1/teams", async (req, res) => {
+  try {
+    const { store_id, name, description } = req.body;
+    const storeId = store_id || (req.headers["x-tenant-id"] as string) || "default";
+    if (!name) return res.status(400).json({ error: "Nome é obrigatório." });
+    
+    const data = await teamStore.createTeam(storeId, name, description);
+    return res.status(201).json({ data });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.put("/api/v1/teams/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, description } = req.body;
+    if (!name) return res.status(400).json({ error: "Nome é obrigatório." });
+    
+    const data = await teamStore.updateTeam(id, name, description);
+    return res.json({ data });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/api/v1/teams/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    await teamStore.deleteTeam(id);
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/v1/teams/:id/members", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const data = await teamStore.getMembers(id);
+    return res.json({ data });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/v1/teams/:id/members/toggle", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId } = req.body;
+    if (!userId) return res.status(400).json({ error: "userId é obrigatório" });
+    
+    const data = await teamStore.toggleMember(id, userId);
+    return res.json({ data });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// =========================================
 // MÓDULO DE CAIXAS DE ENTRADA (INBOXES)
 // =========================================
 app.get("/api/v1/inboxes", async (req, res) => {
@@ -587,11 +705,11 @@ app.get("/api/v1/inboxes", async (req, res) => {
 
 app.post("/api/v1/inboxes", async (req, res) => {
   try {
-    const { store_id, name, description, whatsapp_instance_id } = req.body;
+    const { store_id, name, description, whatsapp_instance_id, channel_type } = req.body;
     const storeId = store_id || (req.headers["x-tenant-id"] as string) || "default";
     if (!name) return res.status(400).json({ error: "Nome é obrigatório." });
 
-    const created = await inboxStore.createInbox(storeId, name, description, whatsapp_instance_id);
+    const created = await inboxStore.createInbox(storeId, name, description, whatsapp_instance_id, channel_type);
     return res.status(201).json({ data: created });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
@@ -601,10 +719,10 @@ app.post("/api/v1/inboxes", async (req, res) => {
 app.put("/api/v1/inboxes/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, description, whatsapp_instance_id } = req.body;
+    const { name, description, whatsapp_instance_id, channel_type } = req.body;
     if (!name) return res.status(400).json({ error: "Nome é obrigatório." });
 
-    const updated = await inboxStore.updateInbox(id, name, description, whatsapp_instance_id);
+    const updated = await inboxStore.updateInbox(id, name, description, whatsapp_instance_id, channel_type);
     return res.json({ data: updated });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
@@ -639,6 +757,28 @@ app.post("/api/v1/inboxes/:id/members/toggle", async (req, res) => {
 
     const updatedMembers = await inboxStore.toggleMember(id, userId);
     return res.json({ data: updatedMembers });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/v1/inboxes/:id/teams", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const teams = await teamStore.getInboxTeams(id);
+    return res.json({ data: teams });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/v1/inboxes/:id/teams", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { teamIds } = req.body;
+    if (!Array.isArray(teamIds)) return res.status(400).json({ error: "teamIds deve ser um array." });
+    const saved = await teamStore.setInboxTeams(id, teamIds);
+    return res.json({ data: saved });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
@@ -4581,6 +4721,7 @@ const requireChatEnabled = async (req: any, res: any, next: any) => {
 app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) => {
   try {
     const tenantId = (req as any).tenantId || req.body.tenantId;
+    const inboxId = req.body.inboxId;
     if (!tenantId) return res.status(400).json({ error: "Tenant ID is required." });
 
     const evolutionUrl = process.env.EVOLUTION_API_URL?.replace(/\/$/, '');
@@ -4590,7 +4731,7 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
       return res.status(500).json({ error: "A API do WhatsApp (Evolution API) não está configurada no servidor. Faltam credenciais (EVOLUTION_API_URL e EVOLUTION_API_KEY)." });
     }
 
-    const instanceName = `store_${tenantId.replace(/-/g,"")}`;
+    const instanceName = inboxId ? `inbox_${inboxId.replace(/-/g,"")}` : `store_${tenantId.replace(/-/g,"")}`;
 
     // 1. Criar a instância
     const createRes = await fetch(`${evolutionUrl}/instance/create`, {
@@ -4621,13 +4762,29 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
     }
 
     if (base64) {
-      // Salva ou atualiza no banco
-      await supabaseAdmin.from('whatsapp_instances').upsert({
-         store_id: tenantId,
-         instance_name: instanceName,
-         status: 'QRCODE',
-         updated_at: new Date().toISOString()
-      }, { onConflict: 'store_id' });
+      // Salva ou atualiza no banco de forma segura
+      const { data: existing } = await supabaseAdmin.from('whatsapp_instances').select('id').eq('instance_name', instanceName).single();
+      if (existing) {
+        await supabaseAdmin.from('whatsapp_instances').update({
+           status: 'QRCODE',
+           updated_at: new Date().toISOString()
+        }).eq('id', existing.id);
+      } else {
+        await supabaseAdmin.from('whatsapp_instances').insert({
+           store_id: tenantId,
+           instance_name: instanceName,
+           status: 'QRCODE',
+           updated_at: new Date().toISOString()
+        });
+      }
+
+      if (inboxId) {
+        // Link instance to inbox
+        const { data: inst } = await supabaseAdmin.from('whatsapp_instances').select('id').eq('instance_name', instanceName).single();
+        if (inst) {
+           await supabaseAdmin.from('inboxes').update({ whatsapp_instance_id: inst.id }).eq('id', inboxId);
+        }
+      }
 
       return res.json({ success: true, qrcodeBase64: base64 });
     } else {
@@ -4635,7 +4792,7 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
     }
 
   } catch (error: any) {
-    console.error("Erro ao criar instância Evolution API:", error);
+    console.log("Erro ao criar instância Evolution API:", error.message || error);
     res.status(500).json({ error: error.message || "Erro interno ao gerar QR Code" });
   }
 });
@@ -4643,13 +4800,14 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
 app.get("/api/v1/chat/instance/status", requireChatEnabled, async (req, res) => {
     try {
         const tenantId = (req as any).tenantId || req.query.tenantId;
+        const inboxId = req.query.inboxId as string;
         if (!tenantId) return res.status(400).json({ error: "Tenant ID is required." });
         const evolutionUrl = process.env.EVOLUTION_API_URL?.replace(/\/$/, '');
         const evolutionKey = process.env.EVOLUTION_API_KEY;
         if (!evolutionUrl || !evolutionKey) {
             return res.status(500).json({ error: "A API do WhatsApp não está configurada." });
         }
-        const instanceName = `store_${tenantId.replace(/-/g,"")}`;
+        const instanceName = inboxId ? `inbox_${inboxId.replace(/-/g,"")}` : `store_${tenantId.replace(/-/g,"")}`;
         const stateRes = await fetch(`${evolutionUrl}/instance/connectionState/${instanceName}`, {
             headers: { "apikey": evolutionKey }
         });
@@ -4660,13 +4818,24 @@ app.get("/api/v1/chat/instance/status", requireChatEnabled, async (req, res) => 
         const connectionState = stateData?.instance?.state || stateData?.state;
         if (connectionState === "open") {
             const phoneNumber = stateData?.instance?.owner?.split('@')[0] || stateData?.owner?.split('@')[0] || null;
-            await supabaseAdmin.from('whatsapp_instances').upsert({
-               store_id: tenantId,
-               instance_name: instanceName,
-               status: 'CONNECTED',
-               ...(phoneNumber ? { phone_number: phoneNumber } : {}),
-               updated_at: new Date().toISOString()
-            }, { onConflict: 'store_id' });
+            
+            const { data: existing } = await supabaseAdmin.from('whatsapp_instances').select('id').eq('instance_name', instanceName).single();
+            if (existing) {
+                await supabaseAdmin.from('whatsapp_instances').update({
+                   status: 'CONNECTED',
+                   ...(phoneNumber ? { phone_number: phoneNumber } : {}),
+                   updated_at: new Date().toISOString()
+                }).eq('id', existing.id);
+            } else {
+                await supabaseAdmin.from('whatsapp_instances').insert({
+                   store_id: tenantId,
+                   instance_name: instanceName,
+                   status: 'CONNECTED',
+                   ...(phoneNumber ? { phone_number: phoneNumber } : {}),
+                   updated_at: new Date().toISOString()
+                });
+            }
+
             return res.json({ status: 'CONNECTED' });
         } else if (connectionState === "connecting") {
             // Fetch the latest QR code
@@ -4839,10 +5008,10 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
             buttonSuccess = true;
           } else {
             const errText = await btnRes.text().catch(() => "Sem detalhes do corpo da resposta");
-            console.error(`[WelcomeMessage] Evolution API rejeitou o envio de botão (Status ${btnRes.status} ${btnRes.statusText}):`, errText);
+            console.log(`[WelcomeMessage] Evolution API rejeitou o envio de botão (Status ${btnRes.status} ${btnRes.statusText}):`, errText);
           }
         } catch (btnErr: any) {
-          console.error(`[WelcomeMessage] Exceção na chamada de envio de botão:`, btnErr.message || btnErr);
+          console.log(`[WelcomeMessage] Exceção na chamada de envio de botão:`, btnErr.message || btnErr);
         }
 
         // Se o botão falhou por qualquer motivo (rejeição da API ou exceção/erro de rede), faz o Fallback de texto obrigatoriamente
@@ -5106,7 +5275,26 @@ app.get("/api/v1/chat/conversations", async (req, res) => {
       }
     }
 
-    const conversations = await chatStore.getConversations(storeId, inboxId, allowedInboxIds);
+    let conversations = await chatStore.getConversations(storeId, inboxId, allowedInboxIds);
+
+    if (isOperator) {
+      const { data: teamRows } = await supabaseAdmin
+        .from("chat_team_members")
+        .select("team_id")
+        .eq("user_id", userId);
+      const allowedTeamIds = teamRows ? teamRows.map(r => r.team_id) : [];
+
+      conversations = conversations.filter(c => {
+        if (c.inbox_id && !allowedInboxIds!.includes(c.inbox_id)) {
+          return false;
+        }
+        if (c.team_id) {
+          return allowedTeamIds.includes(c.team_id);
+        }
+        return true;
+      });
+    }
+
     return res.json({ data: conversations });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
@@ -5127,19 +5315,32 @@ app.get("/api/v1/chat/messages", async (req, res) => {
     if (isOperator) {
       const { data: convData } = await supabaseAdmin
         .from("chat_conversations")
-        .select("inbox_id")
+        .select("inbox_id, team_id")
         .eq("id", conversationId)
         .maybeSingle();
 
-      if (convData && convData.inbox_id) {
-        const { data: memberRows } = await supabaseAdmin
-          .from("inbox_members")
-          .select("inbox_id")
-          .eq("user_id", userId);
-        const allowedInboxIds = memberRows ? memberRows.map(r => r.inbox_id) : [];
+      if (convData) {
+        if (convData.inbox_id) {
+          const { data: memberRows } = await supabaseAdmin
+            .from("inbox_members")
+            .select("inbox_id")
+            .eq("user_id", userId);
+          const allowedInboxIds = memberRows ? memberRows.map(r => r.inbox_id) : [];
 
-        if (!allowedInboxIds.includes(convData.inbox_id)) {
-          return res.status(403).json({ error: "Permissão negada para acessar mensagens desta conversa." });
+          if (!allowedInboxIds.includes(convData.inbox_id)) {
+            return res.status(403).json({ error: "Permissão negada para acessar mensagens desta conversa." });
+          }
+        }
+        if (convData.team_id) {
+          const { data: teamRows } = await supabaseAdmin
+            .from("chat_team_members")
+            .select("team_id")
+            .eq("user_id", userId);
+          const allowedTeamIds = teamRows ? teamRows.map(r => r.team_id) : [];
+
+          if (!allowedTeamIds.includes(convData.team_id)) {
+            return res.status(403).json({ error: "Permissão negada para acessar mensagens desta conversa por restrição de time." });
+          }
         }
       }
     }
@@ -5262,7 +5463,7 @@ app.post("/api/v1/chat/send", requireChatEnabled, async (req, res) => {
         }
       }
     } catch (evoErr) {
-      console.error("[Chat API] Falha ao enviar para a Evolution API:", evoErr);
+      console.log("[Chat API] Falha ao enviar para a Evolution API:", evoErr);
       // We don't block the return because it was saved locally at least.
     }
 

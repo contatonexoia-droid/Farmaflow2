@@ -14,6 +14,7 @@ interface InboxItem {
   name: string;
   description?: string;
   whatsapp_instance_id?: string | null;
+  channel_type?: string | null;
   created_at: string;
 }
 
@@ -79,6 +80,7 @@ class InboxStore {
         name: "Geral / Atendimento",
         description: "Caixa de entrada principal da loja",
         whatsapp_instance_id: null,
+        channel_type: "whatsapp",
         created_at: new Date().toISOString()
       };
       this.inboxes.push(defaultInbox);
@@ -88,13 +90,14 @@ class InboxStore {
     return storeInboxes;
   }
 
-  public async createInbox(storeId: string, name: string, description?: string, whatsappInstanceId?: string | null): Promise<InboxItem> {
+  public async createInbox(storeId: string, name: string, description?: string, whatsappInstanceId?: string | null, channelType?: string | null): Promise<InboxItem> {
     const newInbox: InboxItem = {
       id: `inbox_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       store_id: storeId,
       name,
       description: description || "",
       whatsapp_instance_id: whatsappInstanceId || null,
+      channel_type: channelType || "whatsapp",
       created_at: new Date().toISOString()
     };
 
@@ -105,7 +108,8 @@ class InboxStore {
           store_id: storeId,
           name,
           description: description || null,
-          whatsapp_instance_id: whatsappInstanceId || null
+          whatsapp_instance_id: whatsappInstanceId || null,
+          channel_type: channelType || "whatsapp"
         }])
         .select()
         .single();
@@ -124,11 +128,12 @@ class InboxStore {
     return newInbox;
   }
 
-  public async updateInbox(id: string, name: string, description?: string, whatsappInstanceId?: string | null): Promise<InboxItem> {
+  public async updateInbox(id: string, name: string, description?: string, whatsappInstanceId?: string | null, channelType?: string | null): Promise<InboxItem> {
     const payload = {
       name,
       description: description || "",
-      whatsapp_instance_id: whatsappInstanceId || null
+      whatsapp_instance_id: whatsappInstanceId || null,
+      channel_type: channelType || "whatsapp"
     };
 
     try {

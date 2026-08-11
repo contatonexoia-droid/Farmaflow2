@@ -5,9 +5,10 @@ interface WhatsAppConnectModalProps {
   isOpen: boolean;
   onClose: () => void;
   tenantId: string;
+  inboxId?: string;
 }
 
-export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({ isOpen, onClose, tenantId }) => {
+export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({ isOpen, onClose, tenantId, inboxId }) => {
   const [status, setStatus] = useState<'CONNECTED' | 'DISCONNECTED' | 'QRCODE'>('DISCONNECTED');
   const [qrCodeBase64, setQrCodeBase64] = useState<string | null>(null);
   const [phoneNumber, setPhoneNumber] = useState<string | null>(null);
@@ -37,7 +38,9 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({ isOp
   
   const fetchInstanceStatus = async () => {
     try {
-      const res = await fetch(`/api/v1/chat/instance/status?tenantId=${tenantId}`, {
+      let url = `/api/v1/chat/instance/status?tenantId=${tenantId}`;
+      if (inboxId) url += `&inboxId=${inboxId}`;
+      const res = await fetch(url, {
           headers: {
               'Authorization': `Bearer ${localStorage.getItem('farmaflow_admin_token')}`
           }
@@ -54,7 +57,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({ isOp
           }
       }
     } catch (e) {
-        console.error("Erro ao checar status", e);
+        console.log("Erro ao checar status", e);
     }
   };
 
@@ -74,7 +77,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({ isOp
               'Content-Type': 'application/json',
               'Authorization': `Bearer ${localStorage.getItem('farmaflow_admin_token')}`
           },
-          body: JSON.stringify({ tenantId })
+          body: JSON.stringify({ tenantId, inboxId })
       });
       const data = await res.json();
       if (res.ok && data.qrcodeBase64) {
@@ -90,7 +93,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({ isOp
           alert(data.error || "Erro ao gerar QR Code. Verifique as configurações da API.");
       }
     } catch (e) {
-        console.error("Erro ao gerar QR Code", e);
+        console.log("Erro ao gerar QR Code", e);
         alert("Erro de conexão ao gerar QR Code.");
     } finally {
         setIsLoading(false);
