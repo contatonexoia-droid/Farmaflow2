@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
+import { PrescriptionUpload } from "./PrescriptionUpload";
 import {
   CartItem,
   CustomerInfo,
@@ -31,6 +32,7 @@ import {
   PlusCircle,
   ArrowRight,
   Store,
+  FileText,
 } from "lucide-react";
 import { toast } from "react-hot-toast";
 
@@ -234,6 +236,7 @@ interface CartProps {
     couponDiscount?: number,
     calculatedDeliveryFee?: number,
     deliveryMode?: "delivery" | "pickup",
+    uploadedPrescriptionUrl?: string | null,
   ) => Promise<void> | void;
   onBackToStore: () => void;
 }
@@ -311,7 +314,12 @@ export const Cart: React.FC<CartProps> = ({
   const [isCalculatingFee, setIsCalculatingFee] = useState(false);
   const [deliveryError, setDeliveryError] = useState("");
   const [prescriptionConfirmed, setPrescriptionConfirmed] = useState(false);
+  const [uploadedPrescriptionUrl, setUploadedPrescriptionUrl] = useState<string | null>(null);
   const [couponCode, setCouponCode] = useState("");
+
+  const hasControlledProduct = useMemo(() => {
+    return items.some((item) => isControlledProduct(item));
+  }, [items]);
   const [activeProductCoupon, setActiveProductCoupon] =
     useState<CouponRule | null>(null);
 
@@ -878,10 +886,22 @@ export const Cart: React.FC<CartProps> = ({
   const handleFinish = async () => {
     if (!validateFields()) return;
 
-    if (hasControlledItems && !prescriptionConfirmed) {
-      alert(
-        "Por favor, confirme que você possui a receita médica para os medicamentos controlados.",
+    if (hasControlledItems && !uploadedPrescriptionUrl) {
+      toast.error(
+        "Receita médica obrigatória! Por favor, anexe a foto ou PDF da sua receita para continuar.",
+        {
+          duration: 6000,
+          id: "prescription-missing-toast"
+        }
       );
+      const el = document.getElementById("prescription-upload-section");
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.classList.add("ring-4", "ring-amber-500", "ring-offset-2", "scale-[1.01]");
+        setTimeout(() => {
+          el.classList.remove("ring-4", "ring-amber-500", "ring-offset-2", "scale-[1.01]");
+        }, 3000);
+      }
       return;
     }
 
@@ -1005,7 +1025,8 @@ export const Cart: React.FC<CartProps> = ({
         activeProductCoupon || activeGlobalCoupon || undefined,
         discount,
         deliveryFee,
-        deliveryMode
+        deliveryMode,
+        uploadedPrescriptionUrl
       );
       localStorage.removeItem("farmaflow_coupon_code");
       setActiveProductCoupon(null);
@@ -1805,55 +1826,19 @@ export const Cart: React.FC<CartProps> = ({
           </div>
 
           {hasControlledItems && (
-            <div className="pt-6 border-t border-gray-50">
-              <div className="bg-amber-50 border-l-4 border-amber-500 p-5 rounded-r-3xl flex flex-col gap-4">
-                <div className="flex items-start gap-3">
-                  <AlertTriangle
-                    className="text-amber-500 shrink-0 mt-0.5"
-                    size={24}
-                  />
-                  <div>
-                    <h4 className="text-sm font-black text-amber-900 uppercase tracking-tight mb-1">
-                      Atenção: Retenção de Receita
-                    </h4>
-                    <p className="text-xs font-medium text-amber-800 leading-relaxed">
-                      Seu carrinho contém medicamentos que exigem retenção de
-                      receita médica. A entrega só poderá ser concluída mediante
-                      apresentação do documento original.
-                    </p>
-                  </div>
-                </div>
-                <label className="flex items-start gap-3 cursor-pointer group">
-                  <div className="relative flex items-center justify-center mt-0.5">
-                    <input
-                      type="checkbox"
-                      className="peer appearance-none w-5 h-5 border-2 border-amber-300 rounded bg-white checked:bg-amber-500 checked:border-amber-500 transition-colors cursor-pointer"
-                      checked={prescriptionConfirmed}
-                      onChange={(e) =>
-                        setPrescriptionConfirmed(e.target.checked)
-                      }
-                    />
-                    <svg
-                      className="absolute w-3 h-3 text-white opacity-0 peer-checked:opacity-100 pointer-events-none"
-                      viewBox="0 0 14 10"
-                      fill="none"
-                      xmlns="http://www.w3.org/2000/svg"
-                    >
-                      <path
-                        d="M1 5L4.5 8.5L13 1"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    </svg>
-                  </div>
-                  <span className="text-xs font-bold text-amber-900 group-hover:text-amber-700 transition-colors">
-                    Estou ciente de que preciso apresentar a receita física no
-                    ato da entrega/retirada.
-                  </span>
-                </label>
-              </div>
+            <div id="prescription-upload-section" className="pt-6 border-t border-gray-50 transition-all duration-500 rounded-2xl p-2">
+              <PrescriptionUpload 
+                tenantId={tenant?.id || ""} 
+                uploadedUrl={uploadedPrescriptionUrl}
+                onUploadSuccess={(url) => {
+                  setUploadedPrescriptionUrl(url);
+                  setPrescriptionConfirmed(true);
+                }}
+                onUploadRemove={() => {
+                  setUploadedPrescriptionUrl(null);
+                  setPrescriptionConfirmed(false);
+                }}
+              />
             </div>
           )}
 
@@ -2016,6 +2001,36 @@ export const Cart: React.FC<CartProps> = ({
                 R$ {total.toFixed(2)}
               </span>
             </div>
+
+            {hasControlledItems && !uploadedPrescriptionUrl && (
+              <div className="bg-amber-50 border-2 border-amber-200 rounded-[2rem] p-6 flex gap-4 animate-pulse shadow-sm">
+                <FileText className="text-amber-600 shrink-0 mt-0.5" size={24} />
+                <div className="flex-1">
+                  <p className="text-amber-900 font-black text-sm">
+                    Falta anexar a Receita Médica!
+                  </p>
+                  <p className="text-amber-700 text-xs mt-1.5 leading-relaxed font-bold">
+                    Seu carrinho contém medicamento(s) controlado(s). É obrigatório o envio da foto ou PDF da receita para prosseguir com a compra.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const el = document.getElementById("prescription-upload-section");
+                      if (el) {
+                        el.scrollIntoView({ behavior: "smooth", block: "center" });
+                        el.classList.add("ring-4", "ring-amber-500", "ring-offset-2", "scale-[1.01]");
+                        setTimeout(() => {
+                          el.classList.remove("ring-4", "ring-amber-500", "ring-offset-2", "scale-[1.01]");
+                        }, 3000);
+                      }
+                    }}
+                    className="mt-3 bg-amber-600 hover:bg-amber-700 active:scale-95 text-white font-black text-[11px] uppercase tracking-wider px-4 py-2 rounded-xl transition-all shadow-md shadow-amber-200 flex items-center gap-1.5"
+                  >
+                    Anexar Receita Agora →
+                  </button>
+                </div>
+              </div>
+            )}
 
             {tenant?.minimumOrderValue &&
             subtotal < (tenant?.minimumOrderValue || 0) ? (

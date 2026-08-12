@@ -1337,8 +1337,10 @@ export const getCouponsByTenant = async (
   if (!tenantId || tenantId === 'undefined' || tenantId === 'null') {
     return [];
   }
+  const cacheKey = `coupons_${tenantId}`;
+  const validNetworkId = (networkId && networkId !== 'undefined' && networkId !== 'null') ? networkId : undefined;
   try {
-    const query = networkId ? `?networkId=${encodeURIComponent(networkId)}` : '';
+    const query = validNetworkId ? `?networkId=${encodeURIComponent(validNetworkId)}` : '';
     const res = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/vouchers${query}`);
     if (!res.ok) {
       if (res.status === 503) {
@@ -1354,9 +1356,23 @@ export const getCouponsByTenant = async (
       throw new Error(`Failed to fetch coupons: ${res.status} ${res.statusText} - ${errText}`);
     }
     const data = await res.json();
-    return (data || []).map(mapCouponFromDB);
+    const mapped = (data || []).map(mapCouponFromDB);
+    
+    // Save to localforage cache
+    await localforage.setItem(cacheKey, mapped).catch(() => {});
+    
+    return mapped;
   } catch (e: any) {
-    console.error("Error fetching coupons:", e);
+    console.warn("[getCouponsByTenant] Falha na rede ou servidor. Tentando recuperar cupons offline do cache local:", e.message || e);
+    try {
+      const cached = await localforage.getItem<CouponRule[]>(cacheKey);
+      if (cached) {
+        console.log("[getCouponsByTenant] Recuperados cupons offline com sucesso.");
+        return cached;
+      }
+    } catch (cacheErr) {
+      console.error("Error reading cached coupons:", cacheErr);
+    }
     return [];
   }
 };

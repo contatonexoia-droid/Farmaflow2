@@ -91,6 +91,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   useEffect(() => {
+    if (orders && orders.length > 0) {
+      const uniqueMap = new Map<string, Order>();
+      orders.forEach(o => {
+        if (o && o.id) uniqueMap.set(o.id, o);
+      });
+      setAllOrders(Array.from(uniqueMap.values()));
+    }
+  }, [orders]);
+
+  useEffect(() => {
     loadNetworkData();
   }, [tenant]);
 
@@ -205,10 +215,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const filteredOrders = useMemo(() => {
     let baseOrders = allOrders;
+    
+    // Deduplicate to prevent key collisions
+    const uniqueMap = new Map<string, Order>();
+    (baseOrders || []).forEach((o) => {
+      if (o && o.id) {
+        uniqueMap.set(o.id, o);
+      }
+    });
+    const uniqueBaseOrders = Array.from(uniqueMap.values());
+
     if (selectedBranchId === 'ALL_NETWORK') {
-        baseOrders = allOrders;
+        baseOrders = uniqueBaseOrders;
     } else {
-        baseOrders = allOrders.filter(o => o.tenantId === selectedBranchId);
+        baseOrders = uniqueBaseOrders.filter(o => o.tenantId === selectedBranchId);
     }
 
     return baseOrders.filter(o => {

@@ -1762,8 +1762,9 @@ async function initStorage() {
   if (process.env.VERCEL) return; // Skip on Vercel to avoid cold start issues
   try {
     const { data: buckets } = await supabase.storage.listBuckets();
-    const exists = buckets?.some((b) => b.id === "backups_empresas");
-    if (!exists) {
+    
+    const backupsExists = buckets?.some((b) => b.id === "backups_empresas");
+    if (!backupsExists) {
       console.log("[Storage] Creating bucket 'backups_empresas'...");
       await supabase.storage.createBucket("backups_empresas", {
         public: false,
@@ -1771,8 +1772,18 @@ async function initStorage() {
         allowedMimeTypes: ["text/plain", "application/sql", "text/csv"],
       });
     }
+
+    const prescriptionsExists = buckets?.some((b) => b.id === "medical-prescriptions");
+    if (!prescriptionsExists) {
+      console.log("[Storage] Creating bucket 'medical-prescriptions'...");
+      await supabase.storage.createBucket("medical-prescriptions", {
+        public: true,
+        fileSizeLimit: 10485760, // 10MB
+        allowedMimeTypes: ["image/jpeg", "image/png", "application/pdf", "image/webp"],
+      });
+    }
   } catch (err) {
-    console.error("[Storage] Error initializing bucket:", err);
+    console.error("[Storage] Error initializing buckets:", err);
   }
 }
 initStorage();
@@ -5697,6 +5708,138 @@ app.delete("/api/v1/tenants/:tenantId/vouchers/:id", checkTenantAccess, async (r
     res.status(500).json({ error: e.message });
   }
 });
+
+  // ==========================================
+  // MEDICAL PRESCRIPTIONS API
+  // ==========================================
+  
+  // Public upload endpoint for customers
+  app.post("/api/v1/store/:tenantId/prescriptions/upload", upload.single("file"), async (req, res) => {
+    try {
+      const { tenantId } = req.params;
+      if (!req.file) {
+        return res.status(400).json({ error: "No file provided" });
+      }
+
+      const fileExt = req.file.originalname.split(".").pop();
+      const fileName = `${tenantId}/${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
+
+      const { data, error } = await supabaseAdmin.storage
+        .from("medical-prescriptions")
+        .upload(fileName, req.file.buffer, {
+          contentType: req.file.mimetype,
+          upsert: false,
+        });
+
+      if (error) {
+        console.error("Storage upload error:", error);
+        return res.status(500).json({ error: "Failed to upload file to storage" });
+      }
+
+      const { data: urlData } = supabaseAdmin.storage
+        .from("medical-prescriptions")
+        .getPublicUrl(fileName);
+
+      const fileUrl = urlData.publicUrl;
+
+      // Create the pending prescription record
+      const { data: recordData, error: dbError } = await supabaseAdmin
+        .from("medical_prescriptions")
+        .insert([{
+          store_id: tenantId,
+          customer_id: "00000000-0000-0000-0000-000000000000", // Will be updated or linked via order
+          file_url: fileUrl,
+          status: "PENDING"
+        }])
+        .select()
+        .single();
+
+      if (dbError) {
+        // If the table doesn't exist, we fallback to just returning the URL
+        console.warn("Could not insert into medical_prescriptions (maybe table does not exist yet):", dbError);
+        return res.json({ success: true, fileUrl, id: null });
+      }
+
+      res.json({ success: true, fileUrl, id: recordData.id });
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ error: "Internal server error during upload" });
+    }
+  });
+
+  // Attach Order ID to a prescription (called from frontend when finalizing checkout)
+  app.post("/api/v1/store/:tenantId/prescriptions/link", async (req, res) => {
+    try {
+      const { tenantId } = req.params;
+      const { fileUrl, orderId, customerId } = req.body;
+      
+      const { error } = await supabaseAdmin
+        .from("medical_prescriptions")
+        .update({ order_id: orderId, customer_id: customerId || "00000000-0000-0000-0000-000000000000" })
+        .eq("file_url", fileUrl)
+        .eq("store_id", tenantId);
+        
+      if (error) {
+        console.error("Link prescription error:", error);
+      }
+      res.json({ success: true });
+    } catch (e) {
+      res.status(500).json({ success: false });
+    }
+  });
+
+  // Admin: List Prescriptions
+  app.get("/api/v1/tenants/:tenantId/prescriptions", checkTenantAccess, async (req: any, res) => {
+    try {
+      const { tenantId } = req.params;
+      const { status } = req.query;
+
+      let query = supabaseAdmin
+        .from("medical_prescriptions")
+        .select("*")
+        .eq("store_id", tenantId)
+        .order("created_at", { ascending: false });
+
+      if (status) {
+        query = query.eq("status", status);
+      }
+
+      const { data, error } = await query;
+      if (error) throw error;
+      
+      res.json({ success: true, data });
+    } catch (error) {
+      console.error(error);
+      res.json({ success: false, data: [] }); // Graceful fallback if table doesn't exist
+    }
+  });
+
+  // Admin: Update Prescription Status
+  app.patch("/api/v1/tenants/:tenantId/prescriptions/:id/status", checkTenantAccess, async (req: any, res) => {
+    try {
+      const { tenantId, id } = req.params;
+      const { status, notes } = req.body;
+
+      const { data, error } = await supabaseAdmin
+        .from("medical_prescriptions")
+        .update({ 
+          status, 
+          notes, 
+          validated_by: req.user?.id, 
+          updated_at: new Date().toISOString() 
+        })
+        .eq("id", id)
+        .eq("store_id", tenantId)
+        .select()
+        .single();
+
+      if (error) throw error;
+      res.json({ success: true, data });
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({ error: "Failed to update prescription status" });
+    }
+  });
 
   if (process.env.NODE_ENV !== "production") {
     const { createServer: createViteServer } = await import("vite");

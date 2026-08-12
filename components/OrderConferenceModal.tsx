@@ -99,11 +99,24 @@ export const OrderConferenceModal: React.FC<OrderConferenceModalProps> = ({
           scannerRef.current = null;
           try {
               if (scanner.getState && scanner.getState() === 2) {
-                  scanner.stop().catch(err => console.error("Failed to stop scanner", err));
+                  scanner.stop().then(() => {
+                      try {
+                          scanner.clear();
+                      } catch (e) {
+                          console.error("Error clearing scanner after stop", e);
+                      }
+                  }).catch(err => console.error("Failed to stop scanner", err));
               } else if (scanner.isScanning) {
-                  scanner.stop().catch(err => console.error("Failed to stop scanner", err));
+                  scanner.stop().then(() => {
+                      try {
+                          scanner.clear();
+                      } catch (e) {
+                          console.error("Error clearing scanner after stop", e);
+                      }
+                  }).catch(err => console.error("Failed to stop scanner", err));
+              } else {
+                  scanner.clear();
               }
-              scanner.clear();
           } catch(err) {
               console.error("Error during cleanup", err);
           }

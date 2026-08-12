@@ -7,6 +7,8 @@ import React, {
   lazy,
 } from "react";
 import {
+
+
   ViewMode,
   Product,
   Order,
@@ -23,11 +25,18 @@ import {
   isPromotionActive,
   checkProductMatchesRule,
 } from "./types";
+
 import { Navbar } from "./components/Navbar";
+
 import { Storefront } from "./components/Storefront";
+
 import { PWAInstallPrompt } from "./components/PWAInstallPrompt";
+
 import { OrderAlert } from "./components/OrderAlert";
+
 import { ChatCentral } from "./components/ChatCentral";
+
+
 import {
   getTenants,
   getTenantByHostname,
@@ -48,9 +57,12 @@ import {
   getPromotionsByTenant,
   getCouponsByTenant,
 } from "./services/storage";
+
 import { supabase } from "./services/supabase";
 // Added Calendar to lucide-react imports to fix missing component error
+
 import {
+
   X,
   Package,
   ShoppingBag,
@@ -85,9 +97,17 @@ import {
   Settings,
   Laptop,
   MessageSquare,
+  FileText,
 } from "lucide-react";
 
+
 import { Toaster, toast } from "sonner";
+
+const AdminPrescriptions = lazy(() =>
+  import("./components/AdminPrescriptions").then((m) => ({
+    default: m.AdminPrescriptions,
+  })),
+);
 
 const AdminDesktopApp = lazy(() =>
   import("./components/AdminDesktopApp").then((m) => ({
@@ -482,14 +502,20 @@ const App: React.FC = () => {
   });
 
   useEffect(() => {
-    if (session.type !== "GUEST") {
-      supabase.auth.getSession().then(({ data: { session: sbSession }, error }) => {
-        if (error || !sbSession) {
+    if (session.type !== "GUEST" && session.access_token && session.refresh_token) {
+      supabase.auth.setSession({ 
+        access_token: session.access_token, 
+        refresh_token: session.refresh_token 
+      }).then(({ data, error }) => {
+        if (error || !data.session) {
           console.warn("Supabase session missing or error. Logging out.", error);
           setSession({ type: "GUEST" });
           localStorage.removeItem("ff_session");
         }
       });
+    } else if (session.type !== "GUEST") {
+        setSession({ type: "GUEST" });
+        localStorage.removeItem("ff_session");
     }
   }, []);
 
@@ -507,6 +533,7 @@ const App: React.FC = () => {
   const [adminTab, setAdminTab] = useState<
     | "dashboard"
     | "orders"
+    | "prescriptions"
     | "products"
     | "promotions"
     | "coupons"
@@ -537,6 +564,15 @@ const App: React.FC = () => {
   const [promotions, setPromotions] = useState<PromotionRule[]>([]);
   const [coupons, setCoupons] = useState<CouponRule[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
+  const uniqueOrders = useMemo(() => {
+    const uniqueMap = new Map<string, Order>();
+    (orders || []).forEach((o) => {
+      if (o && o.id) {
+        uniqueMap.set(o.id, o);
+      }
+    });
+    return Array.from(uniqueMap.values());
+  }, [orders]);
   const [recentAlerts, setRecentAlerts] = useState<any[]>([]);
   const [unacknowledgedOrders, setUnacknowledgedOrders] = useState<Order[]>([]);
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -2584,6 +2620,7 @@ const App: React.FC = () => {
     couponDiscount: number = 0,
     calculatedDeliveryFee: number = 0,
     deliveryMode: "delivery" | "pickup" = "delivery",
+    uploadedPrescriptionUrl?: string | null,
   ) => {
     if (!currentTenant) return;
     try {
@@ -2634,16 +2671,32 @@ const App: React.FC = () => {
           finalCouponDiscount > 0 ? appliedCoupon?.code : undefined,
         couponDiscount: finalCouponDiscount,
         deliveryMode,
+        receiptFile: uploadedPrescriptionUrl || undefined,
       };
 
       await saveOrderByTenant(currentTenant.id, newOrder);
       setOrders((prev) => [newOrder, ...prev]);
+
+      if (uploadedPrescriptionUrl) {
+        fetch(`/api/v1/store/${currentTenant.id}/prescriptions/link`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            fileUrl: uploadedPrescriptionUrl,
+            orderId: newId,
+          })
+        }).catch(err => console.error("Could not link prescription to order:", err));
+      }
 
       const pharmacyNumber = `55${currentTenant.whatsapp.replace(/\D/g, "")}`;
 
       let msg = `*🆕 PEDIDO #${newId}*\n`;
       msg += `🏪 *${currentTenant.name}*\n`;
       msg += `📅 ${new Date().toLocaleString("pt-BR")}\n\n`;
+      if (uploadedPrescriptionUrl) {
+        msg += `⚠️ *ATENÇÃO: CONTÉM RECEITA MÉDICA*\n`;
+        msg += `Verifique a receita no painel administrativo.\n\n`;
+      }
       msg += `────────────────\n`;
       msg += `*👤 DADOS DO CLIENTE*\n`;
       msg += `*Nome:* ${customer.name}\n`;
@@ -2652,6 +2705,9 @@ const App: React.FC = () => {
       if (deliveryMode === 'pickup') {
         msg += `*📍 RETIRADA NA LOJA*\n`;
         msg += `O cliente irá retirar o pedido no balcão.\n`;
+        if (currentTenant.fullAddress) {
+          msg += `*Endereço de Retirada:* ${currentTenant.fullAddress}\n`;
+        }
         msg += `\n────────────────\n`;
       } else if (customer.address) {
         msg += `*📍 ENTREGA*\n`;
@@ -2968,6 +3024,16 @@ const App: React.FC = () => {
                     <ShoppingCart size={20} />
                     Pedidos
                   </button>
+                  <button
+                    onClick={() => {
+                      setAdminTab("prescriptions");
+                      setIsSidebarOpen(false);
+                    }}
+                    className={`w-full flex items-center gap-3 px-6 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "prescriptions" ? "bg-brand text-brand-contrast" : "text-gray-500 hover:bg-gray-50"}`}
+                  >
+                    <FileText size={20} />
+                    Validação de Receitas
+                  </button>
                   {!isDeliverer && (
                     <button
                       onClick={() => {
@@ -3205,6 +3271,18 @@ const App: React.FC = () => {
                   <ShoppingCart size={18} />
                   Pedidos
                 </button>
+                <button
+                  onClick={() => setAdminTab("prescriptions")}
+                  className={`flex items-center gap-3 px-4 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "prescriptions" ? "bg-brand text-brand-contrast shadow-md" : "text-gray-500 hover:bg-gray-100"}`}
+                  style={
+                    adminTab === "prescriptions"
+                      ? { backgroundColor: currentTenant.primaryColor }
+                      : {}
+                  }
+                >
+                  <FileText size={18} />
+                  Validação de Receitas
+                </button>
                 {!isDeliverer && (
                   <button
                     onClick={() => setAdminTab("products")}
@@ -3388,7 +3466,7 @@ const App: React.FC = () => {
                 )}
                 {adminTab === "dashboard" && (
                   <AdminDashboard
-                    orders={orders}
+                    orders={uniqueOrders}
                     tenantId={currentTenant.id}
                     tenant={currentTenant}
                     onNavigateToStore={() => handleViewChange(ViewMode.CATALOG)}
@@ -3401,7 +3479,7 @@ const App: React.FC = () => {
                 )}
                 {adminTab === "orders" && (
                   <AdminOrderManager
-                    orders={orders}
+                    orders={uniqueOrders}
                     products={products}
                     onUpdateOrderStatus={handleUpdateOrderStatus}
                     onDeleteOrder={handleDeleteOrder}
@@ -3414,6 +3492,17 @@ const App: React.FC = () => {
                     matrizProducts={matrizProducts}
                     isDelivererMode={isDeliverer}
                   />
+                )}
+                {adminTab === "prescriptions" && (
+                  <React.Suspense
+                    fallback={
+                      <div className="p-8 text-center text-gray-400">
+                        Carregando Validador de Receitas...
+                      </div>
+                    }
+                  >
+                    <AdminPrescriptions tenantId={currentTenant.id} session={session} />
+                  </React.Suspense>
                 )}
                 {adminTab === "products" && (
                   <AdminProductManager

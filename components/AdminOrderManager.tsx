@@ -81,6 +81,40 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
   const [editingOrder, setEditingOrder] = useState<Order | null>(null);
   const [conferenceOrder, setConferenceOrder] = useState<Order | null>(null);
   const [sendingToPDV, setSendingToPDV] = useState<string | null>(null);
+  const [prescriptionsMap, setPrescriptionsMap] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (!tenant?.id) return;
+    const fetchPrescriptions = async () => {
+      try {
+        const headers: Record<string, string> = {};
+        const localToken = localStorage.getItem('farmaflow_admin_token');
+        if (localToken) {
+          headers["Authorization"] = `Bearer ${localToken}`;
+        } else {
+          const { supabase } = await import("../services/supabase");
+          const { data: { session } } = await supabase.auth.getSession();
+          if (session) headers["Authorization"] = `Bearer ${session.access_token}`;
+        }
+
+        const res = await fetch(`/api/v1/tenants/${tenant.id}/prescriptions`, { headers });
+        const data = await res.json();
+        if (data.success && data.data) {
+          const map: Record<string, string> = {};
+          data.data.forEach((p: any) => {
+            if (p.order_id && p.file_url) {
+              map[p.order_id] = p.file_url;
+            }
+          });
+          setPrescriptionsMap(map);
+        }
+      } catch (err) {
+        console.error("Error fetching prescriptions in AdminOrderManager:", err);
+      }
+    };
+
+    fetchPrescriptions();
+  }, [tenant?.id]);
 
   const handleSendToPDV = async (order: Order) => {
     try {
@@ -225,7 +259,17 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
 
   const filteredOrders = useMemo(() => {
     const term = debouncedSearchTerm.toLowerCase();
-    return (orders || [])
+    
+    // Deduplicate orders by ID to prevent key collisions
+    const uniqueMap = new Map<string, Order>();
+    (orders || []).forEach((order) => {
+      if (order && order.id) {
+        uniqueMap.set(order.id, order);
+      }
+    });
+    const uniqueOrders = Array.from(uniqueMap.values());
+
+    return uniqueOrders
       .filter((order) => {
         if (!order) return false;
         if (!order.date) return false;
@@ -782,6 +826,11 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                           <AlertTriangle size={12} /> Pendente há muito tempo
                         </span>
                       )}
+                      {(order.receiptFile || prescriptionsMap[order.id]) && (
+                        <span className="text-[10px] font-black text-blue-600 bg-blue-50 px-2 py-1 rounded-md flex items-center gap-1 border border-blue-100">
+                          <FileText size={12} /> Receita Anexada
+                        </span>
+                      )}
                     </div>
 
                     <div>
@@ -953,30 +1002,34 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                       )}
 
                       <div className="flex flex-wrap gap-2 justify-between sm:justify-end w-full sm:w-auto mt-4 sm:mt-0">
-                        {order.receiptFile ? (
-                          <a
-                            href={order.receiptFile}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="flex-1 sm:flex-none p-4 bg-blue-50 border border-blue-200 text-blue-600 rounded-2xl hover:bg-blue-100 transition-all shadow-sm active:scale-90 flex justify-center"
-                            title="Ver Comprovante"
-                          >
-                            <FileText size={20} />
-                          </a>
-                        ) : (
-                          <label
-                            className="flex-1 sm:flex-none p-4 bg-white border border-gray-200 text-gray-600 rounded-2xl hover:bg-gray-50 hover:text-gray-900 transition-all shadow-sm active:scale-90 cursor-pointer flex justify-center"
-                            title="Anexar Comprovante"
-                          >
-                            <Upload size={20} />
-                            <input
-                              type="file"
-                              className="hidden"
-                              accept="image/*,.pdf"
-                              onChange={(e) => handleReceiptUpload(e, order)}
-                            />
-                          </label>
-                        )}
+                        {(() => {
+                          const activeReceiptFile = order.receiptFile || prescriptionsMap[order.id];
+                          return activeReceiptFile ? (
+                            <a
+                              href={activeReceiptFile}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="flex-1 sm:flex-none p-4 bg-blue-50 border border-blue-200 text-blue-600 rounded-2xl hover:bg-blue-100 transition-all shadow-sm active:scale-90 flex justify-center items-center gap-2 font-bold text-xs"
+                              title="Ver Receita / Comprovante"
+                            >
+                              <FileText size={20} />
+                              <span className="sm:hidden">Ver Receita</span>
+                            </a>
+                          ) : (
+                            <label
+                              className="flex-1 sm:flex-none p-4 bg-white border border-gray-200 text-gray-600 rounded-2xl hover:bg-gray-50 hover:text-gray-900 transition-all shadow-sm active:scale-90 cursor-pointer flex justify-center"
+                              title="Anexar Comprovante"
+                            >
+                              <Upload size={20} />
+                              <input
+                                type="file"
+                                className="hidden"
+                                accept="image/*,.pdf"
+                                onChange={(e) => handleReceiptUpload(e, order)}
+                              />
+                            </label>
+                          );
+                        })()}
                         <button
                           type="button"
                           onClick={() =>

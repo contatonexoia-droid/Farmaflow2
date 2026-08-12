@@ -81,6 +81,22 @@ export interface CustomerInfo {
 
 export type OrderStatus = "pending" | "confirmed" | "dispatched" | "cancelled" | "enviado_ao_pdv" | "impresso_no_pdv" | "concluido_no_pdv" | "erro_integracao_pdv";
 
+export type PrescriptionStatus = "PENDING" | "APPROVED" | "REJECTED";
+
+export interface MedicalPrescription {
+  id: string;
+  store_id: string;
+  customer_id: string;
+  cart_id?: string;
+  order_id?: string;
+  file_url: string;
+  status: PrescriptionStatus;
+  notes?: string;
+  validated_by?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
 export interface Order {
   id: string;
   tenantId: string;
