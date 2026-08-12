@@ -844,7 +844,7 @@ const App: React.FC = () => {
   }, [currentTenant?.id]);
 
   useEffect(() => {
-    if (currentTenant && products.length === 0 && !isLoading) {
+    if (currentTenant && !isLoading) {
       getProductsByTenant(currentTenant.id, setProducts).then(setProducts);
       getOrdersByTenant(currentTenant.id).then(setOrders);
       getPromotionsByTenant(currentTenant.id, currentTenant.networkId).then(setPromotions);
