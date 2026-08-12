@@ -4358,8 +4358,30 @@ const handleHeartbeat = async (req: express.Request, res: express.Response) => {
       return res.status(400).json({ error: "Token ou API Key não fornecido" });
     }
 
-    let targetTenantId = activeApiKey ? String(activeApiKey) : null;
+    let targetTenantId: string | null = null;
     let actToken = token ? String(token) : null;
+
+    if (activeApiKey) {
+      const apiKeyStr = String(activeApiKey).trim();
+      const { data: tenantByToken } = await supabaseAdmin
+        .from('tenants')
+        .select('id')
+        .eq('integration_token', apiKeyStr)
+        .maybeSingle();
+
+      if (tenantByToken) {
+        targetTenantId = tenantByToken.id;
+      } else {
+        const { data: tenantById } = await supabaseAdmin
+          .from('tenants')
+          .select('id')
+          .eq('id', apiKeyStr)
+          .maybeSingle();
+        if (tenantById) {
+          targetTenantId = tenantById.id;
+        }
+      }
+    }
 
     // Se possui token mas não tenantId, busca tenantId em activation_tokens ou agent_integrations
     if (!targetTenantId && actToken) {
@@ -4471,11 +4493,23 @@ app.post("/api/v1/integration", async (req, res) => {
       return res.status(401).json({ error: "API Key não fornecida" });
     }
 
-    const { data: tenant, error: fetchError } = await supabaseAdmin
+    // Tenta buscar o tenant primeiro pela integration_token, depois pelo id (slug)
+    const apiKeyStr = String(apiKey).trim();
+    let { data: tenant, error: fetchError } = await supabaseAdmin
       .from('tenants')
       .select('*')
-      .eq('id', apiKey)
-      .single();
+      .eq('integration_token', apiKeyStr)
+      .maybeSingle();
+
+    if (!tenant) {
+      const { data: tenantById, error: fetchByIdError } = await supabaseAdmin
+        .from('tenants')
+        .select('*')
+        .eq('id', apiKeyStr)
+        .maybeSingle();
+      tenant = tenantById;
+      fetchError = fetchByIdError;
+    }
 
     if (fetchError || !tenant) {
       return res.status(403).json({ error: "API Key inválida ou tenant não encontrado" });
