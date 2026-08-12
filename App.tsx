@@ -1,3 +1,4 @@
+import useSWR from "swr";
 import React, {
   useState,
   useEffect,
@@ -564,6 +565,16 @@ const App: React.FC = () => {
   const [promotions, setPromotions] = useState<PromotionRule[]>([]);
   const [coupons, setCoupons] = useState<CouponRule[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
+  useSWR(currentTenant ? `orders-trigger-${currentTenant.id}` : null, async () => {
+    const ords = await getOrdersByTenant(currentTenant.id);
+    setOrders(ords);
+    return true;
+  });
+  useSWR(currentTenant ? `orders-trigger-${currentTenant.id}` : null, async () => {
+    const ords = await getOrdersByTenant(currentTenant.id);
+    setOrders(ords);
+    return true;
+  });
   const uniqueOrders = useMemo(() => {
     const uniqueMap = new Map<string, Order>();
     (orders || []).forEach((o) => {

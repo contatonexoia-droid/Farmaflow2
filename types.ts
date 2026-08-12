@@ -111,6 +111,7 @@ export interface Order {
   couponDiscount?: number;
   networkId?: string;
   deliveryMode?: "delivery" | "pickup";
+  prescriptionStatus?: string;
 }
 
 export interface AppReview {

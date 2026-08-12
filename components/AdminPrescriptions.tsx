@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Eye, Check, X, FileText, CheckCircle, AlertTriangle, Loader2, Download } from 'lucide-react';
 import { toast } from 'react-hot-toast';
+import { mutate } from "swr";
 import { MedicalPrescription, AuthSession } from '../types';
 
 interface Props {
@@ -78,6 +79,8 @@ export const AdminPrescriptions: React.FC<Props> = ({ tenantId, session }) => {
         setSelectedPrescription(null);
         setRejectionNotes("");
         fetchPrescriptions();
+        // Invalidate global orders state using SWR
+        mutate(`orders-trigger-${tenantId}`);
       } else {
         throw new Error(data.error);
       }

@@ -613,6 +613,7 @@ export const mapDbOrderToApp = (o: any): Order => ({
         o.coupondiscount ||
         (o.customer as any)?.couponDiscount,
     ) || 0,
+  prescriptionStatus: o.prescription_status,
 });
 
 import localforage from "localforage";

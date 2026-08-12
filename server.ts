@@ -69,7 +69,32 @@ app.get("/api/v1/tenants/:id/orders", async (req, res) => {
       .order("created_at", { ascending: false });
     
     if (error) throw error;
-    res.json(data || []);
+
+    // Fetch medical prescriptions for these orders
+    const orderIds = (data || []).map(o => o.id);
+    let prescriptionsMap = {};
+    
+    if (orderIds.length > 0) {
+      const { data: prescriptions, error: rxError } = await supabaseAdmin
+        .from("medical_prescriptions")
+        .select("order_id, status")
+        .eq("store_id", id)
+        .in("order_id", orderIds);
+        
+      if (!rxError && prescriptions) {
+        prescriptionsMap = prescriptions.reduce((acc, rx) => {
+          if (rx.order_id) acc[rx.order_id] = rx.status;
+          return acc;
+        }, {});
+      }
+    }
+
+    const enhancedData = (data || []).map(order => ({
+      ...order,
+      prescription_status: prescriptionsMap[order.id] || null
+    }));
+
+    res.json(enhancedData);
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }

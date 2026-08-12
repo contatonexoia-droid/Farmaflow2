@@ -809,7 +809,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
             return (
               <div
                 key={order.id}
-                className={`bg-white p-6 rounded-[2.5rem] shadow-sm border ${isPendingLongTime ? "border-red-300 bg-red-50/20" : "border-gray-100"} hover:shadow-xl transition-all group overflow-hidden`}
+                className={`bg-white p-6 rounded-[2.5rem] shadow-sm border ${order.prescriptionStatus === "REJECTED" ? "border-red-500 bg-red-50 opacity-80" : isPendingLongTime ? "border-red-300 bg-red-50/20" : "border-gray-100"} hover:shadow-xl transition-all group overflow-hidden`}
               >
                 <div className="flex flex-col lg:flex-row justify-between gap-6">
                   <div className="flex-1 space-y-4">
@@ -824,6 +824,22 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                       {isPendingLongTime && (
                         <span className="text-[10px] font-black text-red-600 bg-red-100 px-2 py-1 rounded-md flex items-center gap-1">
                           <AlertTriangle size={12} /> Pendente há muito tempo
+                        </span>
+                      )}
+                      
+                      {order.prescriptionStatus === "PENDING" && (
+                        <span className="text-[10px] font-black text-amber-700 bg-amber-100 px-2 py-1 rounded-md flex items-center gap-1 border border-amber-200">
+                          Receita em análise
+                        </span>
+                      )}
+                      {order.prescriptionStatus === "APPROVED" && (
+                        <span className="text-[10px] font-black text-emerald-700 bg-emerald-100 px-2 py-1 rounded-md flex items-center gap-1 border border-emerald-200">
+                          Receita Aprovada
+                        </span>
+                      )}
+                      {order.prescriptionStatus === "REJECTED" && (
+                        <span className="text-[10px] font-black text-red-700 bg-red-100 px-2 py-1 rounded-md flex items-center gap-1 border border-red-200">
+                          Receita Reprovada
                         </span>
                       )}
                       {(order.receiptFile || prescriptionsMap[order.id]) && (
