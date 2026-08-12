@@ -38,15 +38,28 @@ export const PrescriptionUpload: React.FC<Props> = ({ tenantId, onUploadSuccess,
       });
 
       if (!response.ok) {
-        throw new Error('Falha no upload');
+        let errMsg = 'Falha no upload';
+        try {
+          const errData = await response.json();
+          if (errData && errData.error) errMsg = errData.error;
+        } catch (_) {
+          try {
+            const errText = await response.text();
+            if (errText) errMsg = errText.substring(0, 100);
+          } catch (_) {}
+        }
+        throw new Error(errMsg);
       }
 
       const data = await response.json();
+      if (!data || !data.fileUrl) {
+        throw new Error('Servidor não retornou a URL do arquivo.');
+      }
       onUploadSuccess(data.fileUrl);
       toast.success('Receita anexada com sucesso!');
-    } catch (error) {
-      console.error(error);
-      toast.error('Erro ao enviar a receita. Tente novamente.');
+    } catch (error: any) {
+      console.error("Erro no upload da receita:", error);
+      toast.error(`Erro ao enviar a receita: ${error.message || 'Por favor, tente novamente.'}`);
     } finally {
       setIsUploading(false);
     }

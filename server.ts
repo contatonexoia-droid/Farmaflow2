@@ -5718,22 +5718,34 @@ app.delete("/api/v1/tenants/:tenantId/vouchers/:id", checkTenantAccess, async (r
     try {
       const { tenantId } = req.params;
       if (!req.file) {
-        return res.status(400).json({ error: "No file provided" });
+        return res.status(400).json({ error: "Nenhum arquivo enviado ou campo de arquivo incorreto." });
       }
 
-      const fileExt = req.file.originalname.split(".").pop();
+      const fileExt = (req.file.originalname.split(".").pop() || "jpg").toLowerCase();
       const fileName = `${tenantId}/${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
+
+      // Normalize MIME type based on extension and common device headers
+      let contentType = req.file.mimetype;
+      if (contentType === "image/jpg" || fileExt === "jpg" || fileExt === "jpeg") {
+        contentType = "image/jpeg";
+      } else if (fileExt === "png") {
+        contentType = "image/png";
+      } else if (fileExt === "pdf") {
+        contentType = "application/pdf";
+      } else if (fileExt === "webp") {
+        contentType = "image/webp";
+      }
 
       const { data, error } = await supabaseAdmin.storage
         .from("medical-prescriptions")
         .upload(fileName, req.file.buffer, {
-          contentType: req.file.mimetype,
+          contentType: contentType,
           upsert: false,
         });
 
       if (error) {
-        console.error("Storage upload error:", error);
-        return res.status(500).json({ error: "Failed to upload file to storage" });
+        console.error("Storage upload error details:", error);
+        return res.status(500).json({ error: `Erro no Supabase Storage: ${error.message || 'Falha no upload'}` });
       }
 
       const { data: urlData } = supabaseAdmin.storage
@@ -5760,10 +5772,10 @@ app.delete("/api/v1/tenants/:tenantId/vouchers/:id", checkTenantAccess, async (r
         return res.json({ success: true, fileUrl, id: null });
       }
 
-      res.json({ success: true, fileUrl, id: recordData.id });
-    } catch (error) {
-      console.error(error);
-      res.status(500).json({ error: "Internal server error during upload" });
+      res.json({ success: true, fileUrl, id: recordData ? recordData.id : null });
+    } catch (error: any) {
+      console.error("Critical error during prescription upload:", error);
+      res.status(500).json({ error: `Erro interno no servidor: ${error.message || 'Erro desconhecido'}` });
     }
   });
 
