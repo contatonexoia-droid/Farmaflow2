@@ -66,7 +66,8 @@ app.get("/api/v1/tenants/:id/orders", async (req, res) => {
       .from("orders")
       .select("*")
       .eq("tenant_id", id)
-      .order("created_at", { ascending: false });
+      .order("created_at", { ascending: false })
+      .limit(200); // OTMIZACAO: Limita a 200 ultimos pedidos no dashboard inicial
     
     if (error) throw error;
 
@@ -243,7 +244,7 @@ app.get("/api/v1/store/:tenantId/init", async (req, res) => {
       couponsQuery,
       supabase
         .from("products")
-        .select("id, tenant_id, tenantid, internal_code, internalcode, barcode, name, active_principle, activeprinciple, drug_type, drugtype, manufacturer, presentation, price, original_price, stock, category, grouping_slug, groupingslug, variant_attribute, variantattribute, image, image_url_2, image_url_3, video_uri, videouri, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage, requires_prescription, is_ai_enriched, is_featured")
+        .select("id, tenant_id, internal_code, barcode, name, active_principle, drug_type, manufacturer, presentation, price, original_price, stock, category, grouping_slug, variant_attribute, image, is_featured")
         .eq("tenant_id", tenantId)
         .order("is_featured", { ascending: false })
         .limit(50),
@@ -1312,7 +1313,7 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
     // 2. Server-side intelligent search fallback
     let query = supabase
       .from("products")
-      .select("id, tenant_id, tenantid, internal_code, internalcode, barcode, name, active_principle, activeprinciple, drug_type, drugtype, manufacturer, presentation, price, original_price, stock, category, grouping_slug, groupingslug, variant_attribute, variantattribute, image, image_url_2, image_url_3, video_uri, videouri, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage, requires_prescription, is_ai_enriched, is_featured", { count: "exact" })
+      .select("id, tenant_id, internal_code, barcode, name, active_principle, drug_type, manufacturer, presentation, price, original_price, stock, category, grouping_slug, variant_attribute, image, is_featured", { count: "exact" })
       .eq("tenant_id", tenantId);
 
     if (category && category !== "Todos") {
@@ -1682,7 +1683,7 @@ app.get("/api/v1/tenants/:tenantId/products", async (req, res) => {
     while (hasMore) {
       const { data, error } = await supabase
         .from("products")
-        .select("id, tenant_id, tenantid, internal_code, internalcode, barcode, name, active_principle, activeprinciple, drug_type, drugtype, manufacturer, presentation, price, original_price, stock, category, grouping_slug, groupingslug, variant_attribute, variantattribute, image, image_url_2, image_url_3, video_uri, videouri, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage, requires_prescription, is_ai_enriched, is_featured")
+        .select("id, tenant_id, internal_code, barcode, name, active_principle, drug_type, manufacturer, presentation, price, original_price, stock, category, grouping_slug, variant_attribute, image, is_featured")
         .eq("tenant_id", tenantId)
         .range(from, from + step - 1);
 

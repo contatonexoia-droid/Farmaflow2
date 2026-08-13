@@ -94,5 +94,59 @@
       "is_private": false,
       "created_at": "2026-08-09T13:48:15.954Z"
     }
+  ],
+  "labels": [
+    {
+      "id": "lbl_demo_1",
+      "store_id": "default",
+      "name": "Dúvida",
+      "color": "#3B82F6",
+      "created_at": "2026-08-13T09:51:39.026Z"
+    },
+    {
+      "id": "lbl_demo_2",
+      "store_id": "default",
+      "name": "Orçamento",
+      "color": "#F59E0B",
+      "created_at": "2026-08-13T09:51:39.027Z"
+    },
+    {
+      "id": "lbl_demo_3",
+      "store_id": "default",
+      "name": "Urgente",
+      "color": "#EF4444",
+      "created_at": "2026-08-13T09:51:39.027Z"
+    },
+    {
+      "id": "lbl_demo_4",
+      "store_id": "default",
+      "name": "Finalizado",
+      "color": "#10B981",
+      "created_at": "2026-08-13T09:51:39.027Z"
+    }
+  ],
+  "conversation_labels": [],
+  "canned_responses": [
+    {
+      "id": "canned_demo_1",
+      "store_id": "default",
+      "shortcut": "pix",
+      "text": "Olá! Segue nossa chave PIX para pagamento: CNPJ 12.345.678/0001-90 (FarmaFlow S.A.). Por favor, envie o comprovante por aqui.",
+      "created_at": "2026-08-13T09:51:39.027Z"
+    },
+    {
+      "id": "canned_demo_2",
+      "store_id": "default",
+      "shortcut": "entrega",
+      "text": "Olá! Nossas entregas saem em três períodos: manhã (9h às 11h), tarde (14h às 16h) e noite (18h às 20h). O prazo médio de entrega na sua região é de até 2 horas.",
+      "created_at": "2026-08-13T09:51:39.027Z"
+    },
+    {
+      "id": "canned_demo_3",
+      "store_id": "default",
+      "shortcut": "cadastro",
+      "text": "Para realizar o seu cadastro e agilizar o seu atendimento, por favor envie: Nome Completo, CPF, Endereço de Entrega com CEP e Convênio (se houver).",
+      "created_at": "2026-08-13T09:51:39.027Z"
+    }
   ]
 }

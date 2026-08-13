@@ -631,7 +631,7 @@ export const getProductsByTenant = async (
       try {
         // CORREÇÃO CRÍTICA: Bypassa o cache de borda (Edge CDN) do Vercel usando um parâmetro de timestamp (?t=...)
         // para garantir que as atualizações de preços de planilhas importadas apareçam imediatamente.
-        const response = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/products?t=${Date.now()}`, {
+        const response = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/products`, {
           signal: abortSignal,
         });
         if (!response.ok) throw new Error("API Fetch failed");
@@ -656,7 +656,7 @@ export const getProductsByTenant = async (
         if (abortSignal?.aborted) throw new Error("AbortError");
         let query = supabase
           .from("products")
-          .select("*")
+          .select("id, tenant_id, internal_code, barcode, name, active_principle, drug_type, manufacturer, presentation, price, original_price, stock, category, grouping_slug, variant_attribute, image, is_featured")
           .eq("tenant_id", tenantId)
           .range(from, from + step - 1);
         if (abortSignal) {
