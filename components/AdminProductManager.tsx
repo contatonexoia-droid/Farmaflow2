@@ -928,8 +928,8 @@ const [selectedDeptForEdit, setSelectedDeptForEdit] = useState<string>('Outros')
         }
     }
 
-    const productToSave: Product = {
-        ...editingProduct as Product,
+    const productToSave: any = {
+        ...editingProduct,
         barcode: editingProduct.barcode ? editingProduct.barcode.trim() : '',
         image: finalImage,
         price: Number(editingProduct.price),
@@ -937,6 +937,8 @@ const [selectedDeptForEdit, setSelectedDeptForEdit] = useState<string>('Outros')
         originalPrice: Number(editingProduct.originalPrice) || 0,
         buyX: Number(editingProduct.buyX) || 0,
         payY: Number(editingProduct.payY) || 0,
+        requires_prescription: editingProduct.requires_prescription || false,
+        promotionType: editingProduct.promotionType || 'NONE',
         internalCode: editingProduct.internalCode || Math.random().toString(36).substr(2, 6).toUpperCase()
     };
     

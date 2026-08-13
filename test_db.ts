@@ -1,14 +1,14 @@
-import { createClient } from "@supabase/supabase-js";
-import dotenv from "dotenv";
-dotenv.config();
-
+import { createClient } from '@supabase/supabase-js';
 const supabaseAdmin = createClient(
-  process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '',
-  process.env.SUPABASE_SERVICE_ROLE_KEY || ''
+  process.env.SUPABASE_URL || 'https://nalshjhoiecxooejpiaw.supabase.co',
+  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || 'sb_publishable_Y2lAqlvDUhdjSNtv80GkJA_SiOgynYy'
 );
-
-async function check() {
-  const { data, error } = await supabaseAdmin.from('agent_integrations').select('*, tenants(id, name, erp_url, erpurl)').limit(1);
-  console.log(error || Object.keys(data?.[0]?.tenants || {}));
+async function run() {
+  const { data, error } = await supabaseAdmin.from('products').select('*').limit(1);
+  if (data && data.length > 0) {
+      console.log("Product keys:", Object.keys(data[0]).join(", "));
+  } else {
+      console.log("No data");
+  }
 }
-check();
+run();

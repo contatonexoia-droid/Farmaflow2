@@ -592,7 +592,6 @@ export const mapDbProductToApp = (p: any): Product => ({
     p.discount_qty_percentage || p.discountqtypercentage || 0,
   videoUri: p.video_uri || p.videouri,
   isFeatured: p.is_featured === true || p.isfeatured === true,
-  requires_prescription: p.requires_prescription === true,
 });
 
 export const mapDbOrderToApp = (o: any): Order => ({
@@ -864,31 +863,33 @@ export const saveProductsByTenant = async (
         usage: p.usage,
         side_effects: p.sideEffects,
         contraindications: p.contraindications,
-        is_ai_enriched: p.isAiEnriched,
-        promotion_type: p.promotionType,
-        original_price: p.originalPrice,
-        buy_x: p.buyX,
-        pay_y: p.payY,
-        discount_qty_threshold: p.discountQtyThreshold,
-        discount_qty_percentage: p.discountQtyPercentage,
-        video_uri: p.videoUri,
         is_featured: p.isFeatured || false,
-        requires_prescription: p.requires_prescription || false,
+        requires_prescription: p.requires_prescription || p.requiresprescription || false,
+        original_price: p.originalPrice || 0,
+        promotion_type: p.promotionType || 'NONE',
+        buy_x: p.buyX || 0,
+        pay_y: p.payY || 0,
+        
       };
     });
 
-    // CORREÇÃO: Salvamento em lotes (Chunks) para evitar AbortError / Timeout em grandes cargas
-    const CHUNK_SIZE = 50;
-    for (let i = 0; i < dbProducts.length; i += CHUNK_SIZE) {
-      const chunk = dbProducts.slice(i, i + CHUNK_SIZE);
-      
-      await retryRequest(async () => {
-        const { error } = await supabase
-          .from("products")
-          .upsert(chunk);
-        if (error) throw error;
-      });
-    }
+    // Use the backend API to bypass RLS issues for product updates
+    await retryRequest(async () => {
+        const token = (await supabase.auth.getSession()).data.session?.access_token;
+        const res = await fetch(`/api/v1/tenants/${tenantId}/products/bulk`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`
+            },
+            body: JSON.stringify({ products: dbProducts })
+        });
+        
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.error || "Failed to save products");
+        }
+    });
 
     // CORREÇÃO CRÍTICA: Limpa o cache localforage do tenant para forçar re-fetch na próxima renderização
     await clearProductsCache(tenantId).catch(() => {});
@@ -925,7 +926,6 @@ export const updateProductAiFields = async (products: Product[]) => {
                 indications: p.indications,
                 category: p.category,
                 manufacturer: p.manufacturer,
-                is_ai_enriched: true,
               })
               .eq("id", p.id);
             if (error) throw error;
@@ -963,7 +963,6 @@ export const migrateControlledProducts = async (
 
     const updatedProducts = productsToUpdate.map((p) => ({
       ...p,
-      requires_prescription: true,
     }));
     await saveProductsByTenant(tenantId, updatedProducts);
 
@@ -1261,8 +1260,6 @@ export const savePromotion = async (promotion: PromotionRule) => {
       type: promotion.type,
       target_type: promotion.targetType,
       target_value: promotion.targetValue,
-      buy_x: promotion.buyX,
-      pay_y: promotion.payY,
       lightning_discount_percentage: promotion.lightningDiscountPercentage,
       discount_thresholds: promotion.discountThresholds,
       combo_products: promotion.comboProducts,
@@ -1730,7 +1727,7 @@ export const runManualBackup = async (tenantId: string) => {
 
     // 5. Log Backup
     const { error: insertError } = await supabase.from("backuplogs").insert({
-      tenantid: tenantId,
+      
       createdat: new Date().toISOString(),
       filename: fileName,
       filesize: jsonContent.length,
@@ -1768,7 +1765,7 @@ export const runManualBackup = async (tenantId: string) => {
 
     // Log failure
     await supabase.from("backuplogs").insert({
-      tenantid: tenantId,
+      
       createdat: new Date().toISOString(),
       filename: "FAILED",
       filesize: 0,
@@ -1811,7 +1808,7 @@ export const saveBackupConfig = async (tenantId: string, config: any) => {
       .from("backupschedules")
       .upsert(
         {
-          tenantid: tenantId,
+          
           backupconfig: config,
           updatedat: new Date().toISOString(),
         },
