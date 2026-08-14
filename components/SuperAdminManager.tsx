@@ -3,7 +3,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { PharmacyConfig, Product, AuthSession, AppReview, BackupLog } from '../types';
 import { getTenants, saveTenant, getAllProducts, getProductsByTenant, getAppReviews, getBackupLogs, runManualBackup, saveBackupConfig, getBackupConfig, getPharmacyStats, exportBackupData, downloadLatestBackupFile, getIntegrationLogs } from '../services/storage';
 import { getDepartmentForCategory } from '../lib/departments';
-import { Plus, Trash2, Edit3, ExternalLink, X, Loader2, Key, Calendar, RefreshCw, Check, Store, AlertCircle, ShieldAlert, Lock, Unlock, MapPin, Palette, Phone, FileDown, Download, Filter, Star, MessageSquare, ShieldCheck, Search, Database, History, HardDriveDownload, FileText, FileCode, Link } from 'lucide-react';
+import { Plus, Trash2, Edit3, ExternalLink, X, Loader2, Key, Calendar, RefreshCw, Check, Store, AlertCircle, ShieldAlert, Lock, Unlock, MapPin, Palette, Phone, FileDown, Download, Filter, Star, MessageSquare, ShieldCheck, Search, Database, History, HardDriveDownload, FileText, FileCode, Link, Bot, Sparkles } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { ActivationTokenManager } from './ActivationTokenManager';
 import { StatusMonitor } from './StatusMonitor';
@@ -82,7 +82,9 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
     licenseExpiration: '', 
     type: 'PHARMACY',
     erpUrl: '',
-    erpType: ''
+    erpType: '',
+    isAiAgentEnabled: false,
+    aiAgentConfig: undefined
   });
 
   const formatPhone = (value: string) => {
@@ -562,6 +564,8 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
           erpUrl: editData.erpUrl || '',
           erpType: editData.erpType || '',
           isChatEnabled: editData.isChatEnabled || false,
+          isAiAgentEnabled: editData.isAiAgentEnabled || false,
+          aiAgentConfig: editData.aiAgentConfig || existingTenant?.aiAgentConfig,
           isNetworkMaster: editData.isNetworkMaster || false,
           networkId: editData.networkId || '',
           integrationToken: editData.integrationToken || (existingTenant?.integrationToken) || crypto.randomUUID(),
@@ -950,8 +954,13 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
                   </div>
                 </div>
                 <div className="mb-6 space-y-2">
-                    <div className="flex items-center gap-2 text-[10px] font-black uppercase text-gray-400">
-                        <Calendar size={12} /> Expira em: {t.licenseExpiration ? new Date(t.licenseExpiration).toLocaleDateString('pt-BR') : 'Sem data'}
+                    <div className="flex items-center justify-between text-[10px] font-black uppercase text-gray-400">
+                        <span className="flex items-center gap-1.5"><Calendar size={12} /> Expira em: {t.licenseExpiration ? new Date(t.licenseExpiration).toLocaleDateString('pt-BR') : 'Sem data'}</span>
+                        {t.isAiAgentEnabled && (
+                          <span className="flex items-center gap-1 bg-purple-100 text-purple-700 px-2 py-0.5 rounded-md font-extrabold text-[9px]">
+                            <Sparkles size={10} /> IA Habilitada
+                          </span>
+                        )}
                     </div>
                 </div>
                 <div className="space-y-2 mt-auto">
@@ -1270,9 +1279,12 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
                 </div>
 
                 <div className="bg-indigo-50 p-8 rounded-[2.5rem] border border-indigo-100 space-y-6">
-                    <div className="flex items-center gap-2 mb-2">
-                      <MessageSquare size={16} className="text-indigo-700" />
-                      <span className="text-[11px] font-black text-indigo-700 uppercase tracking-widest">Add-ons e Módulos</span>
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        <MessageSquare size={16} className="text-indigo-700" />
+                        <span className="text-[11px] font-black text-indigo-700 uppercase tracking-widest">Add-ons e Módulos Especiais</span>
+                      </div>
+                      <span className="text-[9px] font-black bg-indigo-200/60 text-indigo-800 px-2.5 py-0.5 rounded-full uppercase tracking-wider">Controle Master</span>
                     </div>
                     
                     <label className="flex items-center gap-4 cursor-pointer group bg-white p-4 rounded-2xl border-2 border-indigo-100 hover:border-indigo-300 transition-colors">
@@ -1284,6 +1296,28 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
                         <div>
                             <p className="font-bold text-gray-900 text-sm group-hover:text-indigo-700 transition-colors">Módulo de Chat Multi-Atendentes</p>
                             <p className="text-xs text-gray-500">Ativa a interface de Chat e a conexão com WhatsApp via Z-API para esta loja.</p>
+                        </div>
+                    </label>
+
+                    {/* Master Switch para o Agente de IA */}
+                    <label className="flex items-center gap-4 cursor-pointer group bg-gradient-to-r from-purple-50 via-white to-indigo-50 p-4 rounded-2xl border-2 border-purple-200 hover:border-purple-400 transition-all shadow-sm">
+                        <div className="relative">
+                            <input 
+                              type="checkbox" 
+                              className="sr-only" 
+                              checked={editData.isAiAgentEnabled || false} 
+                              onChange={e => setEditData({...editData, isAiAgentEnabled: e.target.checked})} 
+                            />
+                            <div className={`block w-14 h-8 rounded-full transition-colors ${editData.isAiAgentEnabled ? 'bg-purple-600' : 'bg-gray-300'}`}></div>
+                            <div className={`absolute left-1 top-1 bg-white w-6 h-6 rounded-full transition-transform ${editData.isAiAgentEnabled ? 'transform translate-x-6' : ''}`}></div>
+                        </div>
+                        <div className="flex-1">
+                            <div className="flex items-center gap-2">
+                                <span className="p-1 rounded-lg bg-purple-100 text-purple-700"><Bot size={16} /></span>
+                                <p className="font-bold text-gray-900 text-sm group-hover:text-purple-700 transition-colors">Módulo de Agente de IA (Atendente Inteligente)</p>
+                                <span className="text-[9px] font-black bg-purple-600 text-white px-2 py-0.5 rounded-full uppercase tracking-wider">Upgrade / Plano PRO</span>
+                            </div>
+                            <p className="text-xs text-gray-600 mt-1">Autoriza esta drogaria a configurar sua chave de API e ativar o Atendente Virtual de IA com direcionamento para a Webloja.</p>
                         </div>
                     </label>
                 </div>

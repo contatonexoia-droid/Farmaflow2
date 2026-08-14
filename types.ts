@@ -151,6 +151,21 @@ export interface DeliverySettingsConfig {
   storePickupEnabled?: boolean;
 }
 
+export interface AiAgentConfig {
+  active?: boolean;
+  enabled?: boolean;
+  provider: 'gemini' | 'openai';
+  apiKey?: string;
+  model?: string;
+  systemPrompt?: string;
+  storeLink?: string;
+  temperature?: number;
+  maxTokens?: number;
+  fallbackMessage?: string;
+  fallbackToHumanOnKeywords?: boolean;
+  welcomeMessage?: string;
+}
+
 export interface PharmacyConfig {
   id: string;
   slug?: string;
@@ -169,6 +184,8 @@ export interface PharmacyConfig {
   bannerSubtitle?: string;
   isBlocked?: boolean;
   isChatEnabled?: boolean;
+  isAiAgentEnabled?: boolean;
+  aiAgentConfig?: AiAgentConfig;
   customCategories?: string[];
   customManufacturers?: string[];
   licenseExpiration?: string;

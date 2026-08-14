@@ -63,6 +63,21 @@ import {
 import { supabase } from "./services/supabase";
 // Added Calendar to lucide-react imports to fix missing component error
 
+// Captura imediata de parâmetros de Deep Link antes que qualquer roteador altere o histórico
+if (typeof window !== "undefined") {
+  try {
+    const p = new URLSearchParams(window.location.search);
+    const prod = p.get("produto") || p.get("prod") || p.get("product") || p.get("p_id") || p.get("item");
+    const search = p.get("busca") || p.get("q") || p.get("search") || p.get("termo");
+    if (prod) {
+      sessionStorage.setItem("ff_deeplink_produto", prod.trim());
+    }
+    if (search) {
+      sessionStorage.setItem("ff_deeplink_busca", search.trim());
+    }
+  } catch {}
+}
+
 import {
 
   X,
@@ -719,6 +734,80 @@ const App: React.FC = () => {
       }).catch(err => console.warn("Analytics tracking failed:", err));
     }
   }, [currentTenant?.id]);
+
+  // --- DEEP LINKING (Direct Product Modal & Search from AI Agent / WhatsApp Links) ---
+  const deepLinkProcessedRef = useRef<string | null>(null);
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const prodParam =
+        params.get("produto") ||
+        params.get("prod") ||
+        params.get("product") ||
+        params.get("p_id") ||
+        params.get("item") ||
+        sessionStorage.getItem("ff_deeplink_produto");
+
+      const searchParam =
+        params.get("busca") ||
+        params.get("q") ||
+        params.get("search") ||
+        params.get("termo") ||
+        sessionStorage.getItem("ff_deeplink_busca");
+
+      if (prodParam && deepLinkProcessedRef.current !== `prod_${prodParam}`) {
+        const cleanParam = prodParam.trim();
+        let targetProd: Product | undefined = undefined;
+
+        if (products && products.length > 0) {
+          targetProd = products.find(
+            (p) =>
+              String(p.id).toLowerCase() === cleanParam.toLowerCase() ||
+              ((p as any).slug &&
+                (p as any).slug.toLowerCase() === cleanParam.toLowerCase()) ||
+              (p.barcode && p.barcode.toLowerCase() === cleanParam.toLowerCase()) ||
+              (p.internalCode &&
+                p.internalCode.toLowerCase() === cleanParam.toLowerCase()) ||
+              (p.name && p.name.toLowerCase().includes(cleanParam.toLowerCase())),
+          );
+        }
+
+        if (targetProd) {
+          deepLinkProcessedRef.current = `prod_${prodParam}`;
+          sessionStorage.removeItem("ff_deeplink_produto");
+          handleProductClick(targetProd);
+        } else {
+          // Se não encontrou na lista carregada no cliente, busca direto na API
+          fetch(`/api/v1/products/${encodeURIComponent(cleanParam)}`)
+            .then((res) => (res.ok ? res.json() : null))
+            .then((dbProd) => {
+              if (dbProd && dbProd.id) {
+                deepLinkProcessedRef.current = `prod_${prodParam}`;
+                sessionStorage.removeItem("ff_deeplink_produto");
+                const fullProd = mapDbProductToApp(dbProd);
+                handleProductClick(fullProd);
+              }
+            })
+            .catch((err) => console.warn("Failed direct deeplink fetch:", err));
+        }
+      }
+
+      if (
+        searchParam &&
+        deepLinkProcessedRef.current !== `search_${searchParam}`
+      ) {
+        deepLinkProcessedRef.current = `search_${searchParam}`;
+        sessionStorage.removeItem("ff_deeplink_busca");
+        setTimeout(() => {
+          window.dispatchEvent(
+            new CustomEvent("ff_search", { detail: searchParam }),
+          );
+        }, 150);
+      }
+    } catch (e) {
+      console.warn("Deep link resolution error:", e);
+    }
+  }, [products, handleProductClick]);
 
   // --- NATIVE BACK BUTTON HANDLING (Browser History Sync) ---
   useEffect(() => {
@@ -2186,7 +2275,8 @@ const App: React.FC = () => {
                   .trim()
                   .replace(/\s+/g, "-")
               : tenant.id;
-            // Preservação de integridade: se não estiver no /loja/slug/ na barra de tarefas, força para elegância do PWA
+            // Preservação de integridade: se não estiver no /loja/slug/ na barra de tarefas, força para elegância do PWA preservando query params
+            const currentSearch = window.location.search || "";
             if (
               window.location.pathname !== `/loja/${targetSlug}/` &&
               window.location.pathname !== `/loja/${targetSlug}`
@@ -2194,7 +2284,7 @@ const App: React.FC = () => {
               window.history.replaceState(
                 { view: ViewMode.CATALOG, adminTab: "dashboard" },
                 "",
-                `/loja/${targetSlug}/`,
+                `/loja/${targetSlug}/${currentSearch}`,
               );
             }
 
@@ -2297,9 +2387,11 @@ const App: React.FC = () => {
             }
 
             setView(ViewMode.CATALOG);
+            const currentFullUrl = window.location.pathname + (window.location.search || "");
             window.history.replaceState(
               { view: ViewMode.CATALOG, adminTab },
               "",
+              currentFullUrl,
             );
           } else {
             console.warn(

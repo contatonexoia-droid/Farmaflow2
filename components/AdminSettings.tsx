@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { PharmacyConfig } from '../types';
-import { Upload, Palette, Phone, Building, Save, CheckCircle, Loader2, Type, MessageSquare, AlertTriangle, FileText, MapPin, Mail, DollarSign, BellRing, PlayCircle, Volume2, Store, CreditCard, Truck } from 'lucide-react';
+import { Upload, Palette, Phone, Building, Save, CheckCircle, Loader2, Type, MessageSquare, AlertTriangle, FileText, MapPin, Mail, DollarSign, BellRing, PlayCircle, Volume2, Store, CreditCard, Truck, Bot, Sparkles } from 'lucide-react';
 import { ImageMigrationTool } from './ImageMigrationTool';
 import { ControlledProductsMigrationTool } from './ControlledProductsMigrationTool';
 import { SmartNumberInput } from './SmartNumberInput';
 import { supabase } from '../services/supabase';
 import { PaymentSettings } from './PaymentSettings';
 import { DeliverySettings } from './DeliverySettings';
+import { AiAgentSettings } from './AiAgentSettings';
 
 const parseFullAddress = (fullAddress?: string) => {
   let cep = "", street = "", number = "", complement = "", neighborhood = "", city = "", state = "";
@@ -121,7 +122,7 @@ interface AdminSettingsProps {
 }
 
 export const AdminSettings: React.FC<AdminSettingsProps> = ({ config, onConfigUpdate }) => {
-  const [activeTab, setActiveTab] = useState<'geral' | 'pagamentos' | 'entrega' | 'atendimento'>('geral');
+  const [activeTab, setActiveTab] = useState<'geral' | 'pagamentos' | 'entrega' | 'atendimento' | 'agente_ia'>('geral');
   const [formData, setFormData] = useState<PharmacyConfig>({ ...config });
   const [showSaved, setShowSaved] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -341,6 +342,21 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ config, onConfigUp
               className={`flex items-center gap-2 px-6 py-3 rounded-2xl font-bold transition-all shrink-0 ${activeTab === 'atendimento' ? 'bg-emerald-50 text-emerald-700' : 'text-gray-500 hover:bg-gray-50'}`}
             >
               <MessageSquare size={18} /> Atendimento (Etiquetas e Atalhos)
+            </button>
+            <button 
+              onClick={() => setActiveTab('agente_ia')}
+              className={`flex items-center gap-2 px-6 py-3 rounded-2xl font-bold transition-all shrink-0 ${
+                activeTab === 'agente_ia' 
+                  ? 'bg-purple-600 text-white shadow-md shadow-purple-600/20' 
+                  : 'text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200'
+              }`}
+            >
+              <Bot size={18} /> Agente de IA (Atendente)
+              {config.isAiAgentEnabled && (
+                <span className="text-[9px] font-black uppercase bg-purple-200 text-purple-900 px-2 py-0.5 rounded-full ml-1">
+                  PRO
+                </span>
+              )}
             </button>
           </div>
         </div>
@@ -926,6 +942,18 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ config, onConfigUp
         {activeTab === 'atendimento' && (
           <div className="animate-in fade-in duration-300">
             <AtendimentoSettings config={formData} onConfigUpdate={onConfigUpdate} />
+          </div>
+        )}
+
+        {activeTab === 'agente_ia' && (
+          <div className="animate-in fade-in duration-300">
+            <AiAgentSettings 
+              config={formData} 
+              onConfigUpdate={async (updated) => {
+                await onConfigUpdate(updated);
+                setFormData(updated);
+              }} 
+            />
           </div>
         )}
       </div>

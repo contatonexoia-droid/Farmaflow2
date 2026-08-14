@@ -1197,12 +1197,19 @@ export const Storefront: React.FC<StorefrontProps> = ({
     promocao_id: string | null;
     cupom_id: string | null;
     termo_busca: string;
-  }>({
-    departamento: "Todos",
-    categoria: "Todos",
-    promocao_id: null,
-    cupom_id: null,
-    termo_busca: "",
+  }>(() => {
+    let initialSearch = "";
+    try {
+      const params = new URLSearchParams(window.location.search);
+      initialSearch = params.get("busca") || params.get("q") || params.get("search") || params.get("termo") || "";
+    } catch {}
+    return {
+      departamento: "Todos",
+      categoria: "Todos",
+      promocao_id: null,
+      cupom_id: null,
+      termo_busca: initialSearch,
+    };
   });
 
   // Reset pagination when search or filters change to keep initial results fast
@@ -1658,6 +1665,26 @@ export const Storefront: React.FC<StorefrontProps> = ({
 
     return () => clearTimeout(handler);
   }, [deferredSearchTerm]);
+
+  // Listener para eventos de busca disparados por deep link ou integrações externas
+  useEffect(() => {
+    const handleFfSearch = (e: any) => {
+      const term = e?.detail || "";
+      if (term) {
+        setFilters((prev) => ({
+          ...prev,
+          termo_busca: term,
+          departamento: "Todos",
+          categoria: "Todos",
+          promocao_id: null,
+          cupom_id: null,
+        }));
+        setDebouncedSearchTerm(term);
+      }
+    };
+    window.addEventListener("ff_search", handleFfSearch);
+    return () => window.removeEventListener("ff_search", handleFfSearch);
+  }, []);
 
   // Scroll into view when filters change logically
   useEffect(() => {

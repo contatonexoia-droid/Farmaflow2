@@ -269,6 +269,8 @@ export const mapDbTenantToApp = (t: any): PharmacyConfig => {
     welcomeMessageText: t.welcome_message_text || t.welcomemessagetext || "Olá! Seja muito bem-vindo(a) à nossa farmácia! Como podemos te ajudar hoje?",
     welcomeMessageFormat: t.welcome_message_format || t.welcomemessageformat || "button",
     welcomeMessageLink: t.welcome_message_link || t.welcomemessagelink || "",
+    isAiAgentEnabled: t.is_ai_agent_enabled === true || t.isaiagentenabled === true,
+    aiAgentConfig: t.ai_agent_config || t.aiagentconfig || undefined,
   };
 };
 
@@ -478,6 +480,8 @@ export const saveTenant = async (
       welcome_message_text: tenant.welcomeMessageText || "",
       welcome_message_format: tenant.welcomeMessageFormat || "button",
       welcome_message_link: tenant.welcomeMessageLink || "",
+      is_ai_agent_enabled: tenant.isAiAgentEnabled ?? false,
+      ai_agent_config: tenant.aiAgentConfig ?? null,
     };
 
     const support = await checkSchemaSupport();
@@ -2067,3 +2071,28 @@ export const getPharmacyStats = async (tenantId: string) => {
     return { averageRating: 0, totalReviews: 0 };
   }
 };
+
+export const testAiAgent = async (
+  tenantId: string,
+  message: string,
+  history: Array<{ role: 'user' | 'model' | 'assistant'; content: string }> = [],
+  configOverride?: any
+): Promise<{ reply: string; provider: string; model: string; storeLinkUsed: string }> => {
+  const response = await fetch("/api/v1/ai/agent/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      tenantId,
+      message,
+      history,
+      configOverride,
+    }),
+  });
+
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.error || "Falha ao testar Agente de IA.");
+  }
+  return data;
+};
+

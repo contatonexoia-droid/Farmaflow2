@@ -1,6 +1,6 @@
 {
   "name": "NexoIA_FarmaFlow",
-  "description": "Ferramenta de investigação técnica e otimização para integração com a API EAN Pictures, incluindo fila de processamento, throttling e cache.",
+  "description": "Plataforma multi-tenant para farmácias e drogarias com Webloja, integração ERP/PDV, módulo Super Admin de licenciamento e Agente de Atendimento Inteligente com IA generativa.",
   "requestFramePermissions": [
     "camera",
     "geolocation"

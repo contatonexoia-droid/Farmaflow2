@@ -26,6 +26,7 @@ import { contactMergeManager } from "./services/contactMergeManager.js";
 import { inboxStore } from "./services/inboxStore.js";
 import { chatStore } from "./services/chatStore.js";
 import { teamStore } from "./services/teamStore.js";
+import { aiAgentService } from "./services/aiAgentService.js";
 
 
 const app = express();
@@ -1759,13 +1760,43 @@ app.get("/api/v1/tenants/:tenantId/products", async (req, res) => {
 
 app.get("/api/v1/products/:id", async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const rawId = req.params.id;
+    // 1. Tenta buscar por ID direto
+    const { data: byId, error: errId } = await supabase
       .from("products")
       .select("*")
-      .eq("id", req.params.id)
-      .single();
-    if (error) throw error;
-    res.json(data);
+      .eq("id", rawId)
+      .maybeSingle();
+
+    if (!errId && byId) {
+      return res.json(byId);
+    }
+
+    // 2. Fallback: Tenta por internal_code ou barcode
+    const { data: byCode } = await supabase
+      .from("products")
+      .select("*")
+      .or(`internal_code.eq.${rawId},barcode.eq.${rawId}`)
+      .limit(1)
+      .maybeSingle();
+
+    if (byCode) {
+      return res.json(byCode);
+    }
+
+    // 3. Fallback: Tenta por aproximação de nome
+    const { data: byName } = await supabase
+      .from("products")
+      .select("*")
+      .ilike("name", `%${rawId}%`)
+      .limit(1)
+      .maybeSingle();
+
+    if (byName) {
+      return res.json(byName);
+    }
+
+    return res.status(404).json({ error: "Produto não encontrado" });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
@@ -5999,6 +6030,55 @@ app.patch("/api/v1/tenants/:tenantId/prescriptions/:id/status", checkTenantAcces
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to update prescription status" });
+  }
+});
+
+// ==========================================
+// AI SMART ATTENDANT AGENT API
+// ==========================================
+
+// Endpoint para testar o agente no playground / simulador de configurações
+app.post("/api/v1/ai/agent/test", async (req, res) => {
+  try {
+    const { tenantId, message, history, configOverride } = req.body;
+    if (!tenantId || !message) {
+      return res.status(400).json({ error: "tenantId e message são obrigatórios." });
+    }
+
+    const result = await aiAgentService.generateReply(
+      tenantId,
+      message,
+      history || [],
+      configOverride
+    );
+
+    return res.json(result);
+  } catch (err: any) {
+    console.error("[AI Agent Test Error]:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ error: err.message || "Erro ao processar mensagem com o Agente de IA." });
+  }
+});
+
+// Endpoint público/atendimento para responder mensagens de clientes
+app.post("/api/v1/ai/agent/chat", async (req, res) => {
+  try {
+    const { tenantId, message, history } = req.body;
+    if (!tenantId || !message) {
+      return res.status(400).json({ error: "tenantId e message são obrigatórios." });
+    }
+
+    const result = await aiAgentService.generateReply(
+      tenantId,
+      message,
+      history || []
+    );
+
+    return res.json(result);
+  } catch (err: any) {
+    console.error("[AI Agent Chat Error]:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ error: err.message || "Erro ao processar mensagem com o Agente de IA." });
   }
 });
 
