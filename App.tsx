@@ -1882,11 +1882,21 @@ const App: React.FC = () => {
       validSuggestions.push(...fallbackProducts);
     }
 
+    const dedupeById = (list: any[]) => {
+      const map = new Map<string, any>();
+      for (const item of list) {
+        if (item && item.id && !map.has(item.id)) {
+          map.set(item.id, item);
+        }
+      }
+      return Array.from(map.values());
+    };
+
     return {
-      samePrinciple: samePrinciple.slice(0, 5),
+      samePrinciple: dedupeById(samePrinciple).slice(0, 5),
       samePrincipleTitle,
       samePrincipleSubtitle,
-      otherSuggestions: validSuggestions.slice(0, 10),
+      otherSuggestions: dedupeById(validSuggestions).slice(0, 10),
       selectedInfo,
     };
   }, [selectedProduct, products, currentTenant, orders]);
@@ -2390,12 +2400,11 @@ const App: React.FC = () => {
       });
 
       await saveProductsByTenant(currentTenant.id, newProducts);
-      // We removed the redundant getProductsByTenant call here to improve performance
-      // The local state is already updated optimistically above.
     } catch (error: any) {
-      alert("Erro ao salvar produtos: " + (error.message || "Tente novamente"));
+      console.error("Erro ao salvar produtos:", error);
       const reverted = await getProductsByTenant(currentTenant.id);
       setProducts(reverted);
+      throw error;
     }
   };
 

@@ -582,16 +582,17 @@ export const mapDbProductToApp = (p: any): Product => ({
   usage: p.usage || "",
   sideEffects: p.side_effects || p.sideeffects || "",
   contraindications: p.contraindications || "",
-  isAiEnriched: p.is_ai_enriched || p.isaienriched,
+  isAiEnriched: p.is_ai_enriched === true || p.isaienriched === true,
   promotionType: p.promotion_type || p.promotiontype || "NONE",
   originalPrice: Number(p.original_price || p.originalprice) || 0,
-  buyX: p.buy_x || p.buyx || 0,
-  payY: p.pay_y || p.payy || 0,
-  discountQtyThreshold: p.discount_qty_threshold || p.discountqtythreshold || 0,
+  buyX: Number(p.buy_x || p.buyx) || 0,
+  payY: Number(p.pay_y || p.payy) || 0,
+  discountQtyThreshold: Number(p.discount_qty_threshold || p.discountqtythreshold) || 0,
   discountQtyPercentage:
-    p.discount_qty_percentage || p.discountqtypercentage || 0,
+    Number(p.discount_qty_percentage || p.discountqtypercentage) || 0,
   videoUri: p.video_uri || p.videouri,
   isFeatured: p.is_featured === true || p.isfeatured === true,
+  requires_prescription: p.requires_prescription === true || p.requiresprescription === true || p.requires_prescription === 1 || p.requires_prescription === "true",
 });
 
 export const mapDbOrderToApp = (o: any): Order => ({
@@ -617,6 +618,16 @@ export const mapDbOrderToApp = (o: any): Order => ({
 
 import localforage from "localforage";
 
+export const deduplicateProducts = (list: Product[]): Product[] => {
+  const map = new Map<string, Product>();
+  for (const item of list) {
+    if (item && item.id) {
+      map.set(item.id, item);
+    }
+  }
+  return Array.from(map.values());
+};
+
 export const getProductsByTenant = async (
   tenantId: string,
   onUpdate?: (products: Product[]) => void,
@@ -636,7 +647,7 @@ export const getProductsByTenant = async (
         if (!response.ok) throw new Error("API Fetch failed");
         const json = await response.json();
         if (json.data) {
-          const mapped = json.data.map(mapDbProductToApp);
+          const mapped = deduplicateProducts(json.data.map(mapDbProductToApp));
           await localforage.setItem(cacheKey, mapped);
           return mapped;
         }
@@ -655,7 +666,7 @@ export const getProductsByTenant = async (
         if (abortSignal?.aborted) throw new Error("AbortError");
         let query = supabase
           .from("products")
-          .select("id, tenant_id, internal_code, barcode, name, active_principle, drug_type, manufacturer, presentation, price, original_price, stock, category, grouping_slug, variant_attribute, image, is_featured")
+          .select("id, tenant_id, internal_code, barcode, name, active_principle, drug_type, manufacturer, presentation, price, original_price, stock, category, grouping_slug, variant_attribute, image, is_featured, requires_prescription, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage, video_uri, description, indications, usage, side_effects, contraindications, is_ai_enriched")
           .eq("tenant_id", tenantId)
           .range(from, from + step - 1);
         if (abortSignal) {
@@ -671,7 +682,7 @@ export const getProductsByTenant = async (
         if (data.length < step) break;
         from += step;
       }
-      const mapped = allData.map(mapDbProductToApp);
+      const mapped = deduplicateProducts(allData.map(mapDbProductToApp));
       await localforage.setItem(cacheKey, mapped);
       return mapped;
     };
@@ -690,6 +701,7 @@ export const getProductsByTenant = async (
     }
 
     if (cachedData && cachedData.length > 0) {
+      const uniqueCached = deduplicateProducts(cachedData);
       if (onUpdate) {
         retryRequest(fetchFromDb)
           .then(onUpdate)
@@ -699,7 +711,7 @@ export const getProductsByTenant = async (
         retryRequest(fetchFromDb)
           .catch((e) => console.error("Background cache update failed", e));
       }
-      return cachedData;
+      return uniqueCached;
     }
 
     // Performance Optimization: TTFB/FCP Fast Path
@@ -709,7 +721,7 @@ export const getProductsByTenant = async (
       if (initResponse.ok) {
         const initJson = await initResponse.json();
         if (initJson.products) {
-          const initialProducts = initJson.products.map(mapDbProductToApp);
+          const initialProducts = deduplicateProducts(initJson.products.map(mapDbProductToApp));
           
           // Fire the heavy fetch in the background to load the remaining 9600+ items
           if (onUpdate) {
@@ -807,30 +819,32 @@ export const saveProductsByTenant = async (
 ) => {
   if (!isSupabaseConfigured()) throw new Error("CONFIG_MISSING");
   try {
-    // Buscar produtos existentes do tenant para mapear IDs corretos por código de barras/código interno
-    const { data: currentDbProducts } = await supabase
-      .from("products")
-      .select("id, barcode, internal_code")
-      .eq("tenant_id", tenantId);
+    const uniqueProductsMap = new Map<string, Product>();
+    products.forEach((p) => uniqueProductsMap.set(p.id, p));
+    const uniqueProducts = Array.from(uniqueProductsMap.values());
 
     const currentByBarcode = new Map<string, string>();
     const currentByInternalCode = new Map<string, string>();
 
-    if (currentDbProducts) {
-      currentDbProducts.forEach((p) => {
-        if (p.barcode) {
-          currentByBarcode.set(p.barcode.trim().toLowerCase(), p.id);
-        }
-        if (p.internal_code) {
-          currentByInternalCode.set(p.internal_code.trim().toLowerCase(), p.id);
-        }
-      });
-    }
+    // Otimização: Apenas consulta o banco se houver produtos sem ID ou novos
+    const barcodesToCheck = uniqueProducts
+      .map((p) => p.barcode?.trim())
+      .filter((b): b is string => Boolean(b && b.length > 0));
 
-    // Deduplicar produtos para evitar erro "ON CONFLICT DO UPDATE cannot affect row a second time"
-    const uniqueProductsMap = new Map<string, Product>();
-    products.forEach((p) => uniqueProductsMap.set(p.id, p));
-    const uniqueProducts = Array.from(uniqueProductsMap.values());
+    if (barcodesToCheck.length > 0 && barcodesToCheck.length <= 100) {
+      const { data: matchedDb } = await supabase
+        .from("products")
+        .select("id, barcode, internal_code")
+        .eq("tenant_id", tenantId)
+        .in("barcode", barcodesToCheck);
+
+      if (matchedDb) {
+        matchedDb.forEach((p) => {
+          if (p.barcode) currentByBarcode.set(p.barcode.trim().toLowerCase(), p.id);
+          if (p.internal_code) currentByInternalCode.set(p.internal_code.trim().toLowerCase(), p.id);
+        });
+      }
+    }
 
     const dbProducts = uniqueProducts.map((p) => {
       const barcode = p.barcode ? p.barcode.trim() : null;
@@ -839,7 +853,7 @@ export const saveProductsByTenant = async (
       let existingId = p.id;
       if (barcode && currentByBarcode.has(barcode.toLowerCase())) {
         existingId = currentByBarcode.get(barcode.toLowerCase())!;
-        p.id = existingId; // Atualiza in-place para sincronizar o estado local do React
+        p.id = existingId;
       }
 
       return {
@@ -848,51 +862,74 @@ export const saveProductsByTenant = async (
         internal_code: internalCode,
         barcode: barcode,
         name: p.name,
-        active_principle: p.activePrinciple,
-        drug_type: p.drugType,
-        price: p.price,
-        stock: p.stock,
-        category: p.category,
+        active_principle: p.activePrinciple || "",
+        drug_type: p.drugType || "",
+        price: Number(p.price) || 0,
+        stock: Number(p.stock) || 0,
+        category: p.category || "Geral",
         grouping_slug: p.groupingSlug || "",
         variant_attribute: p.variantAttribute || "",
-        manufacturer: p.manufacturer,
-        presentation: p.presentation,
-        image: p.image,
-        description: p.description,
-        indications: p.indications,
-        usage: p.usage,
-        side_effects: p.sideEffects,
-        contraindications: p.contraindications,
-        is_featured: p.isFeatured || false,
-        requires_prescription: p.requires_prescription || p.requiresprescription || false,
-        original_price: p.originalPrice || 0,
-        promotion_type: p.promotionType || 'NONE',
-        buy_x: p.buyX || 0,
-        pay_y: p.payY || 0,
-        
+        manufacturer: p.manufacturer || "Outros",
+        presentation: p.presentation || "",
+        image: p.image || null,
+        description: p.description || "",
+        indications: p.indications || "",
+        usage: p.usage || "",
+        side_effects: p.sideEffects || "",
+        contraindications: p.contraindications || "",
+        is_featured: p.isFeatured === true,
+        requires_prescription: Boolean(p.requires_prescription || (p as any).requiresprescription),
+        original_price: Number(p.originalPrice) || 0,
+        promotion_type: p.promotionType || "NONE",
+        buy_x: Number(p.buyX) || 0,
+        pay_y: Number(p.payY) || 0,
+        discount_qty_threshold: Number(p.discountQtyThreshold) || 0,
+        discount_qty_percentage: Number(p.discountQtyPercentage) || 0,
+        video_uri: p.videoUri || null,
+        is_ai_enriched: Boolean(p.isAiEnriched)
       };
     });
 
     // Use the backend API to bypass RLS issues for product updates
     await retryRequest(async () => {
-        const token = (await supabase.auth.getSession()).data.session?.access_token;
-        const res = await fetch(`/api/v1/tenants/${tenantId}/products/bulk`, {
-            method: 'PUT',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${token}`
-            },
-            body: JSON.stringify({ products: dbProducts })
-        });
-        
-        if (!res.ok) {
-            const err = await res.json().catch(() => ({}));
-            throw new Error(err.error || "Failed to save products");
-        }
+      const token = (await supabase.auth.getSession()).data.session?.access_token;
+      const res = await fetch(`/api/v1/tenants/${tenantId}/products/bulk`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ products: dbProducts }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || "Falha ao salvar produtos no servidor.");
+      }
     });
 
-    // CORREÇÃO CRÍTICA: Limpa o cache localforage do tenant para forçar re-fetch na próxima renderização
-    await clearProductsCache(tenantId).catch(() => {});
+    // Sincronização e Invalidação Imediata do Cache IndexedDB / Localforage
+    try {
+      const cacheKey = `products_${tenantId}`;
+      const cached = await localforage.getItem<Product[]>(cacheKey);
+      if (cached && Array.isArray(cached)) {
+        const updatedCache = [...cached];
+        uniqueProducts.forEach((item) => {
+          const idx = updatedCache.findIndex((p) => p.id === item.id);
+          if (idx > -1) {
+            updatedCache[idx] = { ...updatedCache[idx], ...item };
+          } else {
+            updatedCache.push(item);
+          }
+        });
+        await localforage.setItem(cacheKey, updatedCache);
+      } else {
+        await clearProductsCache(tenantId);
+      }
+    } catch (cacheErr) {
+      console.warn("Aviso ao atualizar cache local:", cacheErr);
+      await clearProductsCache(tenantId);
+    }
   } catch (e: any) {
     handleNetworkError(e, "Salvar Produtos");
     throw e;

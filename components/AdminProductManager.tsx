@@ -413,7 +413,8 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
   const [filterPrescription, setFilterPrescription] = useState('Todos');
   
   const [editingProduct, setEditingProduct] = useState<Partial<Product> | null>(null);
-const [selectedDeptForEdit, setSelectedDeptForEdit] = useState<string>('Outros');
+  const [isSavingProduct, setIsSavingProduct] = useState(false);
+  const [selectedDeptForEdit, setSelectedDeptForEdit] = useState<string>('Outros');
   const [selectedProducts, setSelectedProducts] = useState<Set<string>>(new Set());
   const [isManagingLabLogos, setIsManagingLabLogos] = useState(false);
   const [newLabLogo, setNewLabLogo] = useState<{name: string, logo: string, originalName?: string}>({ name: '', logo: '' });
@@ -778,7 +779,7 @@ const [selectedDeptForEdit, setSelectedDeptForEdit] = useState<string>('Outros')
       return matchesDepartment && matchesCategory && matchesManufacturer && matchesPromotion && matchesZeroStock && matchesFeatured && matchesNoImage && matchesPrescription;
     });
 
-    return filtered.sort((a, b) => {
+    const sorted = filtered.sort((a, b) => {
       const aInStock = typeof a.stock === 'number' && a.stock > 0;
       const bInStock = typeof b.stock === 'number' && b.stock > 0;
       
@@ -787,6 +788,14 @@ const [selectedDeptForEdit, setSelectedDeptForEdit] = useState<string>('Outros')
       
       return 0;
     });
+
+    const uniqueMap = new Map<string, Product>();
+    for (const item of sorted) {
+      if (item && item.id && !uniqueMap.has(item.id)) {
+        uniqueMap.set(item.id, item);
+      }
+    }
+    return Array.from(uniqueMap.values());
   }, [products, debouncedSearchTerm, filterDepartment, filterCategory, filterManufacturer, filterPromotion, filterPrescription, filterZeroStock, filterFeatured, filterNoImage, fuse, tenant.departments]);
 
   // Reset category filter when department changes
@@ -914,66 +923,93 @@ const [selectedDeptForEdit, setSelectedDeptForEdit] = useState<string>('Outros')
         return;
     }
 
-    let finalImage = editingProduct.image;
-    if (finalImage && finalImage.startsWith('data:image/')) {
-        try {
-            const { uploadBase64Image } = await import('../services/storageMedia');
-            const fileName = editingProduct.barcode || editingProduct.internalCode || editingProduct.id || 'product';
-            const publicUrl = await uploadBase64Image(finalImage, fileName);
-            if (publicUrl) {
-                finalImage = publicUrl;
-            }
-        } catch (e) {
-            console.error("Erro ao fazer upload da imagem", e);
-        }
+    setIsSavingProduct(true);
+    try {
+      let finalImage = editingProduct.image;
+      if (finalImage && finalImage.startsWith('data:image/')) {
+          try {
+              const { uploadBase64Image } = await import('../services/storageMedia');
+              const fileName = editingProduct.barcode || editingProduct.internalCode || editingProduct.id || 'product';
+              const publicUrl = await uploadBase64Image(finalImage, fileName);
+              if (publicUrl) {
+                  finalImage = publicUrl;
+              }
+          } catch (e) {
+              console.error("Erro ao fazer upload da imagem", e);
+          }
+      }
+
+      const productToSave: Product = {
+          id: editingProduct.id || Math.random().toString(36).substr(2, 9),
+          tenantId: editingProduct.tenantId || tenant.id,
+          name: editingProduct.name.trim(),
+          barcode: cleanBarcode,
+          internalCode: editingProduct.internalCode?.trim() || Math.random().toString(36).substr(2, 6).toUpperCase(),
+          activePrinciple: editingProduct.activePrinciple || '',
+          drugType: editingProduct.drugType || '',
+          manufacturer: editingProduct.manufacturer || 'Outros',
+          presentation: editingProduct.presentation || '',
+          image: finalImage || undefined,
+          description: editingProduct.description || '',
+          indications: editingProduct.indications || '',
+          usage: editingProduct.usage || '',
+          sideEffects: editingProduct.sideEffects || '',
+          contraindications: editingProduct.contraindications || '',
+          isAiEnriched: Boolean(editingProduct.isAiEnriched),
+          price: Number(editingProduct.price) || 0,
+          stock: Number(editingProduct.stock) || 0,
+          category: editingProduct.category || 'Geral',
+          groupingSlug: editingProduct.groupingSlug || '',
+          variantAttribute: editingProduct.variantAttribute || '',
+          isFeatured: Boolean(editingProduct.isFeatured),
+          requires_prescription: Boolean(editingProduct.requires_prescription),
+          originalPrice: Number(editingProduct.originalPrice) || 0,
+          promotionType: (editingProduct.promotionType as any) || 'NONE',
+          buyX: Number(editingProduct.buyX) || 0,
+          payY: Number(editingProduct.payY) || 0,
+          discountQtyThreshold: Number(editingProduct.discountQtyThreshold) || 0,
+          discountQtyPercentage: Number(editingProduct.discountQtyPercentage) || 0,
+          videoUri: editingProduct.videoUri || undefined,
+      };
+      
+      if (productToSave.category && selectedDeptForEdit) {
+          const currentDeptName = getDepartmentForCategory(productToSave.category, tenant.departments);
+          if (currentDeptName !== selectedDeptForEdit) {
+              const depts = [...(tenant.departments || [])];
+              
+              if (currentDeptName && currentDeptName !== 'Outros') {
+                  const oldDeptIdx = depts.findIndex(d => d.name === currentDeptName);
+                  if (oldDeptIdx !== -1) {
+                      depts[oldDeptIdx] = {
+                          ...depts[oldDeptIdx],
+                          categories: depts[oldDeptIdx].categories.filter(c => c !== productToSave.category)
+                      };
+                  }
+              }
+
+              if (selectedDeptForEdit !== 'Outros') {
+                  const newDeptIdx = depts.findIndex(d => d.name === selectedDeptForEdit);
+                  if (newDeptIdx !== -1) {
+                      if (!depts[newDeptIdx].categories.includes(productToSave.category)) {
+                          depts[newDeptIdx] = {
+                              ...depts[newDeptIdx],
+                              categories: [...depts[newDeptIdx].categories, productToSave.category]
+                          };
+                      }
+                  }
+              }
+              await onTenantUpdate({...tenant, departments: depts});
+          }
+      }
+
+      await onProductsUpdate([productToSave]);
+      setEditingProduct(null);
+    } catch (err: any) {
+      console.error("Erro ao salvar produto:", err);
+      alert("Erro ao salvar produto: " + (err.message || "Tente novamente"));
+    } finally {
+      setIsSavingProduct(false);
     }
-
-    const productToSave: any = {
-        ...editingProduct,
-        barcode: editingProduct.barcode ? editingProduct.barcode.trim() : '',
-        image: finalImage,
-        price: Number(editingProduct.price),
-        stock: Number(editingProduct.stock),
-        originalPrice: Number(editingProduct.originalPrice) || 0,
-        buyX: Number(editingProduct.buyX) || 0,
-        payY: Number(editingProduct.payY) || 0,
-        requires_prescription: editingProduct.requires_prescription || false,
-        promotionType: editingProduct.promotionType || 'NONE',
-        internalCode: editingProduct.internalCode || Math.random().toString(36).substr(2, 6).toUpperCase()
-    };
-    
-    if (productToSave.category && selectedDeptForEdit) {
-        const currentDeptName = getDepartmentForCategory(productToSave.category, tenant.departments);
-        if (currentDeptName !== selectedDeptForEdit) {
-            const depts = [...(tenant.departments || [])];
-            
-            if (currentDeptName && currentDeptName !== 'Outros') {
-                const oldDeptIdx = depts.findIndex(d => d.name === currentDeptName);
-                if (oldDeptIdx !== -1) {
-                    depts[oldDeptIdx] = {
-                        ...depts[oldDeptIdx],
-                        categories: depts[oldDeptIdx].categories.filter(c => c !== productToSave.category)
-                    };
-                }
-            }
-
-            if (selectedDeptForEdit !== 'Outros') {
-                const newDeptIdx = depts.findIndex(d => d.name === selectedDeptForEdit);
-                if (newDeptIdx !== -1) {
-                    if (!depts[newDeptIdx].categories.includes(productToSave.category)) {
-                        depts[newDeptIdx] = {
-                            ...depts[newDeptIdx],
-                            categories: [...depts[newDeptIdx].categories, productToSave.category]
-                        };
-                    }
-                }
-            }
-            await onTenantUpdate({...tenant, departments: depts});
-        }
-    }
-
-    await onProductsUpdate([productToSave]);
-    setEditingProduct(null);
   };
 
   const handleAiInfo = async () => {
@@ -3333,7 +3369,13 @@ const [selectedDeptForEdit, setSelectedDeptForEdit] = useState<string>('Outros')
                             </div>
                         </div>
                     </div>
-                    <div className="p-6 border-t bg-gray-50 flex justify-end gap-4 sticky bottom-0 z-10"><button onClick={() => setEditingProduct(null)} className="px-8 py-4 font-black text-gray-500 uppercase text-xs">Cancelar</button><button onClick={handleSaveProduct} className="px-10 py-4 bg-brand text-brand-contrast font-black text-sm rounded-2xl shadow-xl hover:brightness-110 transition-all flex items-center justify-center gap-2"><Save size={18}/> Salvar Item</button></div>
+                    <div className="p-6 border-t bg-gray-50 flex justify-end gap-4 sticky bottom-0 z-10">
+                        <button disabled={isSavingProduct} onClick={() => setEditingProduct(null)} className="px-8 py-4 font-black text-gray-500 uppercase text-xs disabled:opacity-50">Cancelar</button>
+                        <button disabled={isSavingProduct} onClick={handleSaveProduct} className="px-10 py-4 bg-brand text-brand-contrast font-black text-sm rounded-2xl shadow-xl hover:brightness-110 transition-all flex items-center justify-center gap-2 disabled:opacity-50">
+                            {isSavingProduct ? <Loader2 size={18} className="animate-spin" /> : <Save size={18} />}
+                            {isSavingProduct ? "Salvando..." : "Salvar Item"}
+                        </button>
+                    </div>
                 </div>
             </div>
         )}

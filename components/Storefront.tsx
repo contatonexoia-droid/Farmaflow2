@@ -2386,8 +2386,17 @@ export const Storefront: React.FC<StorefrontProps> = ({
       return a.name.localeCompare(b.name);
     });
 
-    searchCache.current[cacheKey] = result;
-    return result;
+    // Garante que não haja duplicatas de ID na lista final
+    const uniqueResultMap = new Map<string, Product>();
+    for (const item of result) {
+      if (item && item.id && !uniqueResultMap.has(item.id)) {
+        uniqueResultMap.set(item.id, item);
+      }
+    }
+    const finalUniqueResult = Array.from(uniqueResultMap.values());
+
+    searchCache.current[cacheKey] = finalUniqueResult;
+    return finalUniqueResult;
   }, [
     products,
     debouncedSearchTerm,
@@ -2436,7 +2445,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
     const currentResultIds = new Set(filteredProducts.map((p) => p.id));
     const targetCatsNorm = targetCategories.map((c) => normalizeStr(c));
 
-    return products
+    const list = products
       .filter((p) => {
         if (!p.id) return false;
         const prodCatNorm = normalizeStr(p.category);
@@ -2459,8 +2468,15 @@ export const Storefront: React.FC<StorefrontProps> = ({
         if (a.isFeatured && !b.isFeatured) return -1;
         if (!a.isFeatured && b.isFeatured) return 1;
         return Math.random() - 0.5;
-      })
-      .slice(0, 15);
+      });
+
+    const uniqueMap = new Map<string, Product>();
+    for (const item of list) {
+      if (item && item.id && !uniqueMap.has(item.id)) {
+        uniqueMap.set(item.id, item);
+      }
+    }
+    return Array.from(uniqueMap.values()).slice(0, 15);
   }, [
     products,
     debouncedSearchTerm,
@@ -2489,6 +2505,16 @@ export const Storefront: React.FC<StorefrontProps> = ({
     let term = normalizeStr(debouncedSearchTerm);
     if (TYPO_MAP[term]) term = TYPO_MAP[term];
 
+    const dedupe = (list: Product[]) => {
+      const map = new Map<string, Product>();
+      for (const item of list) {
+        if (item && item.id && !map.has(item.id)) {
+          map.set(item.id, item);
+        }
+      }
+      return Array.from(map.values()).slice(0, 8);
+    };
+
     const isDiaSeguinte = 
       term.includes("pilula do dia seguinte") || 
       term.includes("pilula dia seguinte") || 
@@ -2512,7 +2538,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
       term.includes("antiácido");
 
     if (isDiaSeguinte) {
-      return products
+      return dedupe(products
         .filter((p) => {
           const pName = normalizeStr(p.name);
           const pActive = normalizeStr(p.activePrinciple || "");
@@ -2533,12 +2559,11 @@ export const Storefront: React.FC<StorefrontProps> = ({
             pInd.includes("emergencia") ||
             (pActive.includes("levonorgestrel") && !pActive.includes("etinilestradiol"))
           );
-        })
-        .slice(0, 8);
+        }));
     }
 
     if (isEstomago) {
-      return products
+      return dedupe(products
         .filter((p) => {
           const pName = normalizeStr(p.name);
           const pActive = normalizeStr(p.activePrinciple || "");
@@ -2591,8 +2616,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
             pActive.includes("domperidona") ||
             pActive.includes("metoclopramida")
           );
-        })
-        .slice(0, 8);
+        }));
     }
 
     const searchTokens_raw = term.split(" ").filter((t) => t.length > 0);
@@ -2604,7 +2628,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
       })
       .map(singularize);
 
-    return products
+    return dedupe(products
       .filter((p) => {
         const pName = normalizeStr(p.name);
         const pActive = normalizeStr(p.activePrinciple || "");
@@ -2677,8 +2701,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
         if (a.isFeatured && !b.isFeatured) return -1;
         if (!a.isFeatured && b.isFeatured) return 1;
         return 0;
-      })
-      .slice(0, 8);
+      }));
   }, [debouncedSearchTerm, products, activePromotions]);
 
   const handleAddToCartWrapper = (product: Product) => {

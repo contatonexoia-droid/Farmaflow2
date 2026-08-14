@@ -244,7 +244,7 @@ app.get("/api/v1/store/:tenantId/init", async (req, res) => {
       couponsQuery,
       supabase
         .from("products")
-        .select("id, tenant_id, internal_code, barcode, name, active_principle, drug_type, manufacturer, presentation, price, original_price, stock, category, grouping_slug, variant_attribute, image, is_featured")
+        .select("id, tenant_id, internal_code, barcode, name, active_principle, drug_type, manufacturer, presentation, price, original_price, stock, category, grouping_slug, variant_attribute, image, is_featured, requires_prescription, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage, video_uri, description, indications, usage, side_effects, contraindications, is_ai_enriched")
         .eq("tenant_id", tenantId)
         .order("is_featured", { ascending: false })
         .limit(50),
@@ -1313,7 +1313,7 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
     // 2. Server-side intelligent search fallback
     let query = supabase
       .from("products")
-      .select("id, tenant_id, internal_code, barcode, name, active_principle, drug_type, manufacturer, presentation, price, original_price, stock, category, grouping_slug, variant_attribute, image, is_featured", { count: "exact" })
+      .select("id, tenant_id, internal_code, barcode, name, active_principle, drug_type, manufacturer, presentation, price, original_price, stock, category, grouping_slug, variant_attribute, image, is_featured, requires_prescription, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage, video_uri, description, indications, usage, side_effects, contraindications, is_ai_enriched", { count: "exact" })
       .eq("tenant_id", tenantId);
 
     if (category && category !== "Todos") {
@@ -1718,7 +1718,7 @@ app.get("/api/v1/tenants/:tenantId/products", async (req, res) => {
     while (hasMore) {
       const { data, error } = await supabase
         .from("products")
-        .select("id, tenant_id, internal_code, barcode, name, active_principle, drug_type, manufacturer, presentation, price, original_price, stock, category, grouping_slug, variant_attribute, image, is_featured")
+        .select("id, tenant_id, internal_code, barcode, name, active_principle, drug_type, manufacturer, presentation, price, original_price, stock, category, grouping_slug, variant_attribute, image, is_featured, requires_prescription, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage, video_uri, description, indications, usage, side_effects, contraindications, is_ai_enriched")
         .eq("tenant_id", tenantId)
         .range(from, from + step - 1);
 
@@ -1735,6 +1735,15 @@ app.get("/api/v1/tenants/:tenantId/products", async (req, res) => {
       }
     }
 
+    // Deduplicate by ID
+    const uniqueMap = new Map();
+    for (const item of allData) {
+      if (item && item.id) {
+        uniqueMap.set(item.id, item);
+      }
+    }
+    const uniqueProducts = Array.from(uniqueMap.values());
+
     // Set Cache-Control Headers for Vercel Edge caching
     // s-maxage=60: Cache in CDN for 60 seconds
     // stale-while-revalidate=300: Serve stale cache up to 5 minutes while fetching fresh in background
@@ -1742,7 +1751,7 @@ app.get("/api/v1/tenants/:tenantId/products", async (req, res) => {
       "Cache-Control",
       "public, s-maxage=60, stale-while-revalidate=300",
     );
-    res.json({ data: allData });
+    res.json({ data: uniqueProducts });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
