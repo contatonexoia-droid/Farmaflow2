@@ -429,6 +429,22 @@ export const Cart: React.FC<CartProps> = ({
     return () => clearInterval(interval);
   }, []);
 
+  const isPickupOrInvalidAddress = (str?: string) => {
+    if (!str) return true;
+    const s = str.trim().toLowerCase();
+    return (
+      s === "" ||
+      s.includes("retirada") ||
+      s.includes("retirar") ||
+      s.includes("balcao") ||
+      s.includes("balcão") ||
+      s === "loja" ||
+      s === "nossa loja" ||
+      s.includes("não informado") ||
+      s.includes("nao informado")
+    );
+  };
+
   const maskText = (text: string) => {
     if (!text) return "";
     if (text.length <= 3) return text.substring(0, 1) + "***";
@@ -454,16 +470,23 @@ export const Cart: React.FC<CartProps> = ({
           const data = await res.json();
           console.log("[CRM Lookup] Resultado:", data);
 
-          if (res.ok) {
-            if (data && data.found && data.data && data.data.customer_name) {
-              const rData = {
-                name: data.data.customer_name,
-                cep: data.data.cep || "",
-                address: data.data.street || "",
-                neighborhood: data.data.neighborhood || "",
-                city: data.data.city || "",
-                addressNumber: data.data.number || "",
-                complement: data.data.complement || "",
+          if (res.ok && data && data.found && data.data) {
+            const hasValidName = data.data.customer_name && !isPickupOrInvalidAddress(data.data.customer_name);
+            const hasValidAddress =
+              data.hasAddress !== false &&
+              data.data.street &&
+              !isPickupOrInvalidAddress(data.data.street) &&
+              !isPickupOrInvalidAddress(data.data.neighborhood);
+
+            if (hasValidName || hasValidAddress) {
+              const rData: Partial<CustomerInfo> = {
+                name: hasValidName ? data.data.customer_name : "",
+                cep: hasValidAddress && data.data.cep && !isPickupOrInvalidAddress(data.data.cep) ? data.data.cep : "",
+                address: hasValidAddress ? data.data.street : "",
+                neighborhood: hasValidAddress ? (data.data.neighborhood || "") : "",
+                city: hasValidAddress ? (data.data.city || "") : "",
+                addressNumber: hasValidAddress ? (data.data.number || "") : "",
+                complement: hasValidAddress ? (data.data.complement || "") : "",
               };
 
               setRealCustomerData(rData);
@@ -471,19 +494,27 @@ export const Cart: React.FC<CartProps> = ({
 
               setCustomer((prev) => ({
                 ...prev,
-                name: maskText(rData.name),
-                cep: maskText(rData.cep),
-                address: maskText(rData.address),
-                addressNumber: maskText(rData.addressNumber),
-                neighborhood: maskText(rData.neighborhood),
-                city: maskText(rData.city),
-                complement: maskText(rData.complement),
+                name: hasValidName ? maskText(rData.name || "") : prev.name,
+                ...(hasValidAddress ? {
+                  cep: rData.cep ? maskText(rData.cep) : "",
+                  address: maskText(rData.address || ""),
+                  addressNumber: rData.addressNumber || "",
+                  neighborhood: maskText(rData.neighborhood || ""),
+                  city: rData.city || "",
+                  complement: rData.complement ? maskText(rData.complement) : "",
+                } : {}),
               }));
 
               setDataRecovered(true);
-              toast.success("Dados de entrega recuperados automaticamente!", {
-                id: "crm-success",
-              });
+              if (hasValidAddress) {
+                toast.success("Dados de entrega recuperados automaticamente!", {
+                  id: "crm-success",
+                });
+              } else if (hasValidName) {
+                toast.success("Nome do cliente identificado!", {
+                  id: "crm-success",
+                });
+              }
             }
           }
         } catch (e) {
@@ -501,6 +532,39 @@ export const Cart: React.FC<CartProps> = ({
       setDataRecovered(false);
     }
   }, [customer.phone, tenant?.id, dataRecovered]);
+
+  const handleSelectDeliveryMode = (mode: "delivery" | "pickup") => {
+    setDeliveryMode(mode);
+    if (mode === "delivery") {
+      setCustomer((prev) => {
+        const isAddrRetirada = isPickupOrInvalidAddress(prev.address);
+        const isNeighRetirada = isPickupOrInvalidAddress(prev.neighborhood);
+        const isCepRetirada = isPickupOrInvalidAddress(prev.cep);
+
+        const hasSavedRealAddress =
+          realCustomerData?.address && !isPickupOrInvalidAddress(realCustomerData.address);
+
+        if (hasSavedRealAddress) {
+          return {
+            ...prev,
+            cep: realCustomerData.cep ? maskText(realCustomerData.cep) : prev.cep,
+            address: maskText(realCustomerData.address || ""),
+            addressNumber: realCustomerData.addressNumber || prev.addressNumber,
+            neighborhood: maskText(realCustomerData.neighborhood || ""),
+            city: realCustomerData.city || prev.city,
+            complement: realCustomerData.complement ? maskText(realCustomerData.complement) : prev.complement,
+          };
+        }
+
+        return {
+          ...prev,
+          address: isAddrRetirada ? "" : prev.address,
+          neighborhood: isNeighRetirada ? "" : prev.neighborhood,
+          cep: isCepRetirada ? "" : prev.cep,
+        };
+      });
+    }
+  };
 
   const getDisplayValue = (field: keyof CustomerInfo) => {
     return customer[field] as string;
@@ -1001,7 +1065,15 @@ export const Cart: React.FC<CartProps> = ({
 
     setStatusMessage("Enviando seu pedido...");
     try {
-      if (tenant?.id && finalCustomerData.phone) {
+      // Salva o endereço de entrega no perfil do cliente APENAS se for Entrega em Domicílio e endereço válido
+      if (
+        deliveryMode === "delivery" &&
+        tenant?.id &&
+        finalCustomerData.phone &&
+        cAddress &&
+        !isPickupOrInvalidAddress(cAddress) &&
+        !isPickupOrInvalidAddress(cNeighborhood)
+      ) {
         fetch("/api/checkout/address-save", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1009,12 +1081,13 @@ export const Cart: React.FC<CartProps> = ({
             tenant_id: tenant.id,
             whatsapp: finalCustomerData.phone,
             customer_name: finalCustomerData.name,
-            cep: finalCustomerData.cep,
-            street: finalCustomerData.address,
-            number: finalCustomerData.addressNumber,
-            neighborhood: finalCustomerData.neighborhood,
-            city: finalCustomerData.city,
-            complement: finalCustomerData.complement,
+            cep: cCep && !isPickupOrInvalidAddress(cCep) ? cCep : "",
+            street: cAddress,
+            number: cNumber || "",
+            neighborhood: cNeighborhood || "",
+            city: cCity || "",
+            complement: cComplement || "",
+            delivery_mode: "delivery",
           }),
         }).catch((e) => console.error("Could not save address history", e));
       }
@@ -1456,7 +1529,7 @@ export const Cart: React.FC<CartProps> = ({
                 <div className="grid grid-cols-2 gap-3 p-1.5 bg-gray-100/80 rounded-2xl border border-gray-200/50">
                   <button
                     type="button"
-                    onClick={() => setDeliveryMode("delivery")}
+                    onClick={() => handleSelectDeliveryMode("delivery")}
                     className={`flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl text-xs font-black transition-all ${
                       deliveryMode === "delivery"
                         ? "bg-emerald-600 text-white shadow-md shadow-emerald-600/20"
@@ -1468,7 +1541,7 @@ export const Cart: React.FC<CartProps> = ({
                   </button>
                   <button
                     type="button"
-                    onClick={() => setDeliveryMode("pickup")}
+                    onClick={() => handleSelectDeliveryMode("pickup")}
                     className={`flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl text-xs font-black transition-all ${
                       deliveryMode === "pickup"
                         ? "bg-emerald-600 text-white shadow-md shadow-emerald-600/20"

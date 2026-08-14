@@ -4008,6 +4008,32 @@ app.post("/api/checkout/calculate-delivery", async (req, res) => {
   }
 });
 
+function isValidRealDeliveryAddress(street?: string, neighborhood?: string, cep?: string): boolean {
+  if (!street) return false;
+  const s = street.trim().toLowerCase();
+  const n = (neighborhood || "").trim().toLowerCase();
+  const c = (cep || "").trim().toLowerCase();
+
+  const isPickupKeyword = (val: string) => {
+    return (
+      val.includes("retirada") ||
+      val.includes("retirar") ||
+      val.includes("balcao") ||
+      val.includes("balcão") ||
+      val === "loja" ||
+      val === "nossa loja" ||
+      val.includes("não informado") ||
+      val.includes("nao informado")
+    );
+  };
+
+  if (isPickupKeyword(s) || isPickupKeyword(n) || isPickupKeyword(c)) {
+    return false;
+  }
+
+  return s.length >= 3;
+}
+
 app.get("/api/checkout/address-lookup", async (req, res) => {
   try {
     const { whatsapp, tenant_id } = req.query;
@@ -4031,16 +4057,41 @@ app.get("/api/checkout/address-lookup", async (req, res) => {
     }
 
     if (data) {
+      const hasRealAddress = isValidRealDeliveryAddress(data.street, data.neighborhood, data.cep);
+      const cleanCep = (data.cep || "").replace(/\D/g, "");
+      const hasValidName = data.customer_name && !data.customer_name.toLowerCase().includes("retirada");
+
+      if (!hasRealAddress) {
+        // Se continha apenas dados corrompidos de retirada no registro legado, não repassa endereço de retirada
+        if (hasValidName) {
+          return res.json({
+            found: true,
+            hasAddress: false,
+            data: {
+              customer_name: data.customer_name,
+              cep: "",
+              street: "",
+              neighborhood: "",
+              city: "",
+              number: "",
+              complement: ""
+            }
+          });
+        }
+        return res.json({ found: false });
+      }
+
       res.json({
         found: true,
+        hasAddress: true,
         data: {
-          customer_name: data.customer_name,
-          cep: data.cep,
+          customer_name: hasValidName ? data.customer_name : "",
+          cep: cleanCep.length === 8 ? data.cep : (cleanCep.length > 0 ? data.cep : ""),
           street: data.street,
           neighborhood: data.neighborhood,
           city: data.city,
-          number: data.number,
-          complement: data.complement
+          number: data.number || "",
+          complement: data.complement || ""
         }
       });
     } else {
@@ -4092,12 +4143,23 @@ app.post("/api/checkout/deduct-stock", async (req, res) => {
 
 app.post("/api/checkout/address-save", async (req, res) => {
   try {
-    const { tenant_id, whatsapp, customer_name, cep, street, number, neighborhood, city, complement } = req.body;
+    const { tenant_id, whatsapp, customer_name, cep, street, number, neighborhood, city, complement, delivery_mode } = req.body;
     if (!tenant_id || !whatsapp) {
       return res.status(400).json({ error: "whatsapp and tenant_id are required" });
     }
 
+    // Se o pedido for retirada na loja, NÃO sobrescrever nem salvar endereço de entrega residencial!
+    if (delivery_mode === "pickup" || delivery_mode === "retirada") {
+      return res.json({ success: true, message: "Pickup address ignored" });
+    }
+
+    // Validar se o endereço enviado é um endereço de entrega real e válido
+    if (!isValidRealDeliveryAddress(street, neighborhood, cep)) {
+      return res.json({ success: true, message: "Non-delivery address ignored" });
+    }
+
     const cleanWhatsapp = whatsapp.replace(/\D/g, "");
+    const cleanCep = (cep || "").replace(/\D/g, "");
     
     // Upsert into delivery_addresses (using unique constraint on tenant_id, whatsapp)
     const { error } = await supabase
@@ -4106,12 +4168,12 @@ app.post("/api/checkout/address-save", async (req, res) => {
         tenant_id,
         whatsapp: cleanWhatsapp,
         customer_name,
-        cep,
-        street,
-        number,
-        neighborhood,
-        city,
-        complement,
+        cep: cleanCep.length === 8 ? cep : (cleanCep.length > 0 ? cep : ""),
+        street: street.trim(),
+        number: (number || "").toString().trim(),
+        neighborhood: (neighborhood || "").trim(),
+        city: (city || "").trim(),
+        complement: (complement || "").trim(),
         updated_at: new Date().toISOString()
       }, {
         onConflict: 'tenant_id,whatsapp'
