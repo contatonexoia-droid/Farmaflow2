@@ -1,11 +1,55 @@
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 require('dotenv').config();
 const sql = require('mssql');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
+const http = require('http');
+
+// Configuração HTTPS resiliente com TLS 1.2/1.3
+const httpsAgent = new https.Agent({
+    rejectUnauthorized: false,
+    minVersion: 'TLSv1.2',
+    maxVersion: 'TLSv1.3',
+    keepAlive: true,
+    keepAliveMsecs: 30000,
+    ciphers: [
+        'TLS_AES_128_GCM_SHA256',
+        'TLS_AES_256_GCM_SHA384',
+        'TLS_CHACHA20_POLY1305_SHA256',
+        'ECDHE-ECDSA-AES128-GCM-SHA256',
+        'ECDHE-RSA-AES128-GCM-SHA256',
+        'ECDHE-ECDSA-AES256-GCM-SHA384',
+        'ECDHE-RSA-AES256-GCM-SHA384',
+        'ECDHE-ECDSA-CHACHA20-POLY1305',
+        'ECDHE-RSA-CHACHA20-POLY1305',
+        'ECDHE-RSA-AES128-SHA',
+        'ECDHE-RSA-AES256-SHA',
+        'AES128-GCM-SHA256',
+        'AES256-GCM-SHA384',
+        'AES128-SHA',
+        'AES256-SHA',
+        'DEFAULT:@SECLEVEL=1'
+    ].join(':'),
+    honorCipherOrder: true
+});
+
+const apiClient = axios.create({
+    httpsAgent,
+    httpAgent: new http.Agent({ keepAlive: true }),
+    timeout: 25000
+});
+
+function sanitizeUrl(raw) {
+    let url = raw || 'https://farmaflow.nexoia.online/api/v1/integration';
+    url = url.replace(/farmaflow\.online\.nexoia\.online/gi, 'farmaflow.nexoia.online');
+    url = url.replace(/nexoia\.online\.farmaflow\.online/gi, 'farmaflow.online');
+    return url;
+}
 
 // Configurações via variáveis de ambiente
-const API_URL = process.env.API_URL || 'https://farmaflow.nexoia.online/api/v1/integration';
+const API_URL = sanitizeUrl(process.env.API_URL);
 const API_KEY = process.env.API_KEY || '02ebf5a7-ccec-47e1-99ae-4e00729b4df1';
 const SYNC_INTERVAL_MS = parseInt(process.env.SYNC_INTERVAL_MS) || 60000; // 1 minuto
 const RETRY_INTERVAL_MS = parseInt(process.env.RETRY_INTERVAL_MS) || 300000; // 5 minutos (Resiliência)
@@ -81,14 +125,14 @@ async function syncData() {
         console.log(`Encontrados ${records.length} novos registros para envio.`);
 
         // 3. Enviar os dados para a API (FarmaFlow)
-        const response = await axios.post(API_URL, {
+        const response = await apiClient.post(API_URL, {
             dados: records
         }, {
             headers: {
                 'x-api-key': API_KEY,
                 'Content-Type': 'application/json'
             },
-            timeout: 15000 // 15 segundos
+            timeout: 20000
         });
 
         if (response.status >= 200 && response.status < 300) {

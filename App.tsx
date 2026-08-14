@@ -4,6 +4,7 @@ import React, {
   useEffect,
   useMemo,
   useCallback,
+  useRef,
   Suspense,
   lazy,
 } from "react";
@@ -396,6 +397,10 @@ const SuggestionCard = ({
       onClick={() => {
         setSelectedProduct(p);
         setPreviewImage(suggestionImage || null);
+        const modalContainer = document.getElementById("product-detail-scroll-container");
+        if (modalContainer) {
+          modalContainer.scrollTo({ top: 0, behavior: "smooth" });
+        }
       }}
       className="bg-white border-2 border-gray-50 p-3 rounded-[2rem] hover:border-brand hover:shadow-xl transition-all cursor-pointer group flex flex-col w-[160px] md:w-[180px] shrink-0 snap-start relative"
     >
@@ -608,6 +613,20 @@ const App: React.FC = () => {
 
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [zoomImage, setZoomImage] = useState<string | null>(null);
+  const productModalScrollRef = useRef<HTMLDivElement>(null);
+
+  // Scroll to top of product modal whenever a new product is selected
+  useEffect(() => {
+    if (selectedProduct) {
+      if (productModalScrollRef.current) {
+        productModalScrollRef.current.scrollTo({ top: 0, behavior: "smooth" });
+      }
+      const scrollEl = document.getElementById("product-detail-scroll-container");
+      if (scrollEl) {
+        scrollEl.scrollTo({ top: 0, behavior: "smooth" });
+      }
+    }
+  }, [selectedProduct?.id]);
 
   // --- DYNAMIC MANIFEST UPDATE ---
   useEffect(() => {
@@ -650,6 +669,13 @@ const App: React.FC = () => {
 
   const handleProductClick = useCallback((product: Product) => {
     setSelectedProduct(product);
+    if (productModalScrollRef.current) {
+      productModalScrollRef.current.scrollTo({ top: 0, behavior: "smooth" });
+    }
+    const scrollEl = document.getElementById("product-detail-scroll-container");
+    if (scrollEl) {
+      scrollEl.scrollTo({ top: 0, behavior: "smooth" });
+    }
     
     // On-demand fetch of detailed product properties (payload reduction pattern)
     fetch(`/api/v1/products/${encodeURIComponent(product.id)}`)
@@ -3668,7 +3694,11 @@ const App: React.FC = () => {
               <X size={24} />
             </button>
 
-            <div className="overflow-y-auto flex-1 p-0 md:p-8 scrollbar-thin">
+            <div
+              ref={productModalScrollRef}
+              id="product-detail-scroll-container"
+              className="overflow-y-auto flex-1 p-0 md:p-8 scrollbar-thin"
+            >
               <div className="flex flex-col md:flex-row gap-0 md:gap-10">
                 <div
                   className={`w-full md:w-[40%] bg-gray-50 flex flex-col items-center justify-center p-6 md:p-8 md:rounded-3xl gap-4 border-b md:border border-gray-100 relative min-h-[300px] md:min-h-[400px]`}
