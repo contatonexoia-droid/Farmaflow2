@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { PharmacyConfig } from '../types';
-import { Upload, Palette, Phone, Building, Save, CheckCircle, Loader2, Type, MessageSquare, AlertTriangle, FileText, MapPin, Mail, DollarSign, BellRing, PlayCircle, Volume2, Store, CreditCard, Truck, Bot, Sparkles } from 'lucide-react';
+import { UpsellCard } from './UpsellCard';
+import { Tags, Zap, Upload, Palette, Phone, Building, Save, CheckCircle, Loader2, Type, MessageSquare, AlertTriangle, FileText, MapPin, Mail, DollarSign, BellRing, PlayCircle, Volume2, Store, CreditCard, Truck, Bot, Sparkles } from 'lucide-react';
 import { ImageMigrationTool } from './ImageMigrationTool';
 import { ControlledProductsMigrationTool } from './ControlledProductsMigrationTool';
 import { SmartNumberInput } from './SmartNumberInput';
@@ -941,7 +942,20 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ config, onConfigUp
 
         {activeTab === 'atendimento' && (
           <div className="animate-in fade-in duration-300">
-            <AtendimentoSettings config={formData} onConfigUpdate={onConfigUpdate} />
+            {config.isChatEnabled ? (
+              <AtendimentoSettings config={formData} onConfigUpdate={onConfigUpdate} />
+            ) : (
+              <UpsellCard
+                title="Atendimento Profissional no WhatsApp"
+                description="Liberte o potencial da sua equipe com as ferramentas avançadas de chat. Crie etiquetas personalizadas para organizar conversas, respostas rápidas para agilizar o atendimento e uma mensagem automática de boas-vindas com o cardápio da sua farmácia."
+                icon={MessageSquare}
+                features={[
+                  { title: "Mensagem de Boas-Vindas", description: "Envie automaticamente seu catálogo na primeira mensagem.", icon: Bot, iconColor: "text-purple-500" },
+                  { title: "Etiquetas e Organização", description: "Classifique clientes por prioridade, financeiro ou status do pedido.", icon: Tags, iconColor: "text-blue-500" },
+                  { title: "Respostas Rápidas", description: "Crie atalhos (ex: /pix, /endereco) para textos frequentes.", icon: Zap, iconColor: "text-yellow-500" }
+                ]}
+              />
+            )}
           </div>
         )}
 

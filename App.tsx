@@ -1,3 +1,4 @@
+import { UpsellCard } from "./components/UpsellCard";
 import useSWR from "swr";
 import React, {
   useState,
@@ -115,6 +116,7 @@ import {
   Laptop,
   MessageSquare,
   FileText,
+  Lock, MessageSquareShare, Zap
 } from "lucide-react";
 
 
@@ -3240,8 +3242,7 @@ const App: React.FC = () => {
                         <Users size={20} />
                         Equipe
                       </button>
-                      {currentTenant?.isChatEnabled && (
-<button
+                                            <button
                         onClick={() => {
                           setAdminTab("inboxes");
                           setIsSidebarOpen(false);
@@ -3250,8 +3251,8 @@ const App: React.FC = () => {
                       >
                         <Inbox size={20} />
                         Departamentos
+                        {!currentTenant?.isChatEnabled && <Lock size={14} className="ml-auto opacity-50" />}
                       </button>
-)}
                       <button
                         onClick={() => {
                           setAdminTab("analytics");
@@ -3291,23 +3292,17 @@ const App: React.FC = () => {
                         <Laptop size={20} />
                         Aplicativo PC
                       </button>
-                      {currentTenant?.isChatEnabled && (
-<button
+                                            <button
                         onClick={() => {
                           setAdminTab("chat");
                           setIsSidebarOpen(false);
                         }}
                         className={`w-full flex items-center gap-3 px-6 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "chat" ? "bg-brand text-brand-contrast" : "text-gray-500 hover:bg-gray-50"}`}
-                        style={
-                          adminTab === "chat"
-                            ? { backgroundColor: currentTenant.primaryColor }
-                            : {}
-                        }
                       >
                         <MessageSquare size={20} />
                         Central de Chat
+                        {!currentTenant?.isChatEnabled && <Lock size={14} className="ml-auto opacity-50" />}
                       </button>
-)}
                       <button
                         onClick={() => {
                           setAdminTab("manual");
@@ -3499,16 +3494,15 @@ const App: React.FC = () => {
                       <Users size={18} />
                       Equipe
                     </button>
-                    {currentTenant?.isChatEnabled && (
-<button
+                                        <button
                       onClick={() => setAdminTab("inboxes")}
                       className={`flex items-center gap-3 px-4 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "inboxes" ? "bg-brand text-brand-contrast shadow-md" : "text-gray-500 hover:bg-gray-100"}`}
                       style={adminTab === "inboxes" ? { backgroundColor: currentTenant.primaryColor } : {}}
                     >
                       <Inbox size={18} />
                       Departamentos
+                      {!currentTenant?.isChatEnabled && <Lock size={14} className="ml-auto opacity-50" />}
                     </button>
-)}
                     <button
                       onClick={() => setAdminTab("analytics")}
                       className={`flex items-center gap-3 px-4 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "analytics" ? "bg-brand text-brand-contrast shadow-md" : "text-gray-500 hover:bg-gray-100"}`}
@@ -3549,8 +3543,7 @@ const App: React.FC = () => {
                       <Laptop size={18} />
                       Baixar Aplicativo para PC
                     </button>
-                    {currentTenant?.isChatEnabled && (
-<button
+                                        <button
                       onClick={() => setAdminTab("chat")}
                       className={`flex items-center gap-3 px-4 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "chat" ? "bg-brand text-brand-contrast shadow-md" : "text-gray-500 hover:bg-gray-100"}`}
                       style={
@@ -3561,8 +3554,8 @@ const App: React.FC = () => {
                     >
                       <MessageSquare size={18} />
                       Central de Chat
+                      {!currentTenant?.isChatEnabled && <Lock size={14} className="ml-auto opacity-50" />}
                     </button>
-)}
                     <button
                       onClick={() => setAdminTab("manual")}
                       className={`flex items-center gap-3 px-4 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "manual" ? "bg-brand text-brand-contrast shadow-md" : "text-gray-500 hover:bg-gray-100"}`}
@@ -3706,10 +3699,22 @@ const App: React.FC = () => {
                 {adminTab === "team" && (
                   <TeamManagement tenantId={currentTenant.id} session={session} />
                 )}
-                {adminTab === "inboxes" && currentTenant?.isChatEnabled && (
-                  <React.Suspense fallback={<div className="flex h-full items-center justify-center p-8"><Loader2 className="w-8 h-8 text-emerald-600 animate-spin" /></div>}>
-                    <InboxManagement tenantId={currentTenant.id} />
-                  </React.Suspense>
+                {adminTab === "inboxes" && (
+                  currentTenant?.isChatEnabled ? (
+                    <React.Suspense fallback={<div className="flex h-full items-center justify-center p-8"><Loader2 className="w-8 h-8 text-emerald-600 animate-spin" /></div>}>
+                      <InboxManagement tenantId={currentTenant.id} />
+                    </React.Suspense>
+                  ) : (
+                    <UpsellCard
+                      title="Departamentos e Filas de Atendimento"
+                      description="Organize o fluxo de mensagens do WhatsApp dividindo o atendimento em setores (ex: Delivery, Farmacêutico, Dúvidas). Atribua conversas automaticamente para as equipes corretas."
+                      icon={Inbox}
+                      features={[
+                        { title: "Filas de Espera", description: "Visualize quantos clientes estão aguardando atendimento em cada setor.", icon: Users, iconColor: "text-blue-400" },
+                        { title: "Transferências Inteligentes", description: "Transfira conversas entre departamentos com um clique.", icon: MessageSquareShare, iconColor: "text-emerald-400" }
+                      ]}
+                    />
+                  )
                 )}
                 {adminTab === "analytics" && (
                   <AdminAnalytics tenant={currentTenant} />
@@ -3731,7 +3736,21 @@ const App: React.FC = () => {
                     <AdminDesktopApp tenant={currentTenant!} />
                   </React.Suspense>
                 )}
-                {adminTab === "chat" && currentTenant?.isChatEnabled && <ChatCentral currentUser={session?.user} userRole={session?.role} tenantId={currentTenant?.id} />}
+                {adminTab === "chat" && (
+                  currentTenant?.isChatEnabled ? (
+                    <ChatCentral currentUser={session?.user} userRole={session?.role} tenantId={currentTenant?.id} />
+                  ) : (
+                    <UpsellCard
+                      title="Central de Chat Multi-Atendentes"
+                      description="Centralize todo o atendimento do WhatsApp da sua farmácia em uma única tela. Vários operadores podem atender simultaneamente usando o mesmo número."
+                      icon={MessageSquare}
+                      features={[
+                        { title: "Múltiplos Atendentes", description: "Toda sua equipe atendendo junto no mesmo número de WhatsApp.", icon: Users, iconColor: "text-emerald-400" },
+                        { title: "Agilidade Total", description: "Envie links de produtos, controle pedidos e histórico na mesma tela.", icon: Zap, iconColor: "text-yellow-400" }
+                      ]}
+                    />
+                  )
+                )}
 
                 {adminTab === "manual" && <AdminManual />}
               </div>

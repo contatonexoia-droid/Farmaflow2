@@ -13,6 +13,13 @@
       "name": "Contato WhatsApp",
       "phone_number": "WhatsApp",
       "created_at": "2026-08-09T13:20:55.219Z"
+    },
+    {
+      "id": "6543cf97-1536-4d36-a117-96a7b57d83a8",
+      "store_id": "nosso-catalogo",
+      "name": "Contato WhatsApp",
+      "phone_number": "WhatsApp",
+      "created_at": "2026-08-14T16:25:13.765Z"
     }
   ],
   "conversations": [
@@ -51,6 +58,23 @@
         "created_at": "2026-08-09T13:20:55.219Z"
       },
       "created_at": "2026-08-09T13:20:55.219Z"
+    },
+    {
+      "id": "a3cb1861-9247-4f36-b002-4dd9e886094a",
+      "store_id": "nosso-catalogo",
+      "contact_id": "6543cf97-1536-4d36-a117-96a7b57d83a8",
+      "inbox_id": "c67b743a-6a2e-4203-97a1-d3e4f38eeaa4",
+      "status": "OPEN",
+      "last_message_at": "2026-08-14T16:25:13.765Z",
+      "last_message_content": "Oi",
+      "contact": {
+        "id": "6543cf97-1536-4d36-a117-96a7b57d83a8",
+        "store_id": "nosso-catalogo",
+        "name": "Contato WhatsApp",
+        "phone_number": "WhatsApp",
+        "created_at": "2026-08-14T16:25:13.765Z"
+      },
+      "created_at": "2026-08-14T16:25:13.765Z"
     }
   ],
   "messages": [
@@ -93,6 +117,14 @@
       "content": "Teste backend evolution api send",
       "is_private": false,
       "created_at": "2026-08-09T13:48:15.954Z"
+    },
+    {
+      "id": "c8f58f8f-93f4-4645-929d-ffde13850966",
+      "conversation_id": "a3cb1861-9247-4f36-b002-4dd9e886094a",
+      "sender_type": "USER",
+      "content": "Oi",
+      "is_private": false,
+      "created_at": "2026-08-14T16:25:13.765Z"
     }
   ],
   "labels": [

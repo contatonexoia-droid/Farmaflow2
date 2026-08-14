@@ -305,56 +305,10 @@ app.get("/api/v1/store/:tenantId/init", async (req, res) => {
   }
 });
 
-// Serve sw.js with Service-Worker-Allowed header to allow registration from scoped subpaths
-app.get("/sw.js", (req, res) => {
+// Ensure Service-Worker-Allowed header is set for all /sw.js requests
+app.use("/sw.js", (req, res, next) => {
   res.setHeader("Service-Worker-Allowed", "/");
-  res.setHeader("Content-Type", "application/javascript");
-  res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-  res.setHeader("Pragma", "no-cache");
-  res.setHeader("Expires", "0");
-  
-  let swPath = "";
-  const paths = [
-    path.join(process.cwd(), "public", "sw.js"),
-    path.join(process.cwd(), "dist", "sw.js"),
-  ];
-
-  try {
-    // @ts-ignore
-    if (typeof __dirname !== "undefined") {
-      // @ts-ignore
-      paths.push(path.join(__dirname, "public", "sw.js"));
-      // @ts-ignore
-      paths.push(path.join(__dirname, "dist", "sw.js"));
-      // @ts-ignore
-      paths.push(path.join(__dirname, "sw.js"));
-      // @ts-ignore
-      paths.push(path.join(__dirname, "..", "public", "sw.js"));
-      // @ts-ignore
-      paths.push(path.join(__dirname, "..", "dist", "sw.js"));
-    }
-    if (typeof import.meta !== "undefined" && import.meta.url) {
-      const dir = path.dirname(fileURLToPath(import.meta.url));
-      paths.push(path.join(dir, "public", "sw.js"));
-      paths.push(path.join(dir, "dist", "sw.js"));
-      paths.push(path.join(dir, "sw.js"));
-      paths.push(path.join(dir, "..", "public", "sw.js"));
-      paths.push(path.join(dir, "..", "dist", "sw.js"));
-    }
-  } catch (err) {}
-
-  for (const p of paths) {
-    if (fs.existsSync(p)) {
-      swPath = p;
-      break;
-    }
-  }
-  
-  if (swPath) {
-    res.sendFile(swPath);
-  } else {
-    res.status(404).send("Service worker file not found");
-  }
+  next();
 });
 
 // Dynamic PWA manifest route to prevent collisions of multiple shops on the same domain
@@ -6122,9 +6076,12 @@ async function startServer() {
           res.setHeader('Pragma', 'no-cache');
           res.setHeader('Expires', '0');
         }
+        if (filepath.endsWith('sw.js')) {
+          res.setHeader('Service-Worker-Allowed', '/');
+        }
       }
     }));
-    app.get("*", (req, res) => {
+    app.get("*all", (req, res) => {
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.setHeader('Pragma', 'no-cache');
       res.setHeader('Expires', '0');
