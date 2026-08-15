@@ -27,19 +27,38 @@ export const AdminPrescriptions: React.FC<Props> = ({ tenantId, session }) => {
         const localToken = localStorage.getItem('farmaflow_admin_token');
         if (localToken) {
           headers["Authorization"] = `Bearer ${localToken}`;
+        } else {
+          try {
+            const rawSession = localStorage.getItem('ff_session');
+            if (rawSession) {
+              const parsed = JSON.parse(rawSession);
+              if (parsed?.access_token) headers["Authorization"] = `Bearer ${parsed.access_token}`;
+            }
+          } catch (_) {}
         }
       }
 
-      const res = await fetch(`/api/v1/tenants/${tenantId}/prescriptions?status=${filter}`, {
+      if (!tenantId) {
+        setPrescriptions([]);
+        return;
+      }
+
+      const res = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/prescriptions?status=${encodeURIComponent(filter)}`, {
         headers
       });
+      const contentType = res.headers.get("content-type") || "";
+      if (!res.ok || !contentType.includes("application/json")) {
+        setPrescriptions([]);
+        return;
+      }
       const data = await res.json();
-      if (data.success) {
+      if (data && data.success && Array.isArray(data.data)) {
         setPrescriptions(data.data || []);
+      } else {
+        setPrescriptions([]);
       }
     } catch (e) {
-      console.error(e);
-      toast.error('Erro ao carregar receitas');
+      console.warn("Could not load prescriptions:", e);
     } finally {
       setIsLoading(false);
     }

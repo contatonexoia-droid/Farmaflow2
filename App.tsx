@@ -600,27 +600,33 @@ const App: React.FC = () => {
   const [networkTenants, setNetworkTenants] = useState<PharmacyConfig[]>([]);
   const [isSwitchingTenant, setIsSwitchingTenant] = useState(false);
 
-  // Carrega lista de filiais / rede quando usuário tem perfil Matriz ou há lojas vinculadas
+  // Carrega lista de filiais / rede quando a loja pertence a uma rede (Matriz ou Filial)
   useEffect(() => {
     if (!currentTenant) return;
     const loadNetworkTenants = async () => {
       try {
         const allStores = await getTenants();
         if (allStores && allStores.length > 0) {
-          const netId = currentTenant.networkId || (currentTenant.isNetworkMaster ? currentTenant.id : null);
-          if (netId || currentTenant.isNetworkMaster || session?.role === "MATRIZ") {
-            const related = allStores.filter(
-              (s) =>
-                s.id === currentTenant.id ||
-                s.id === netId ||
-                s.networkId === netId ||
-                s.networkId === currentTenant.id ||
-                (currentTenant.isNetworkMaster && (s.networkId === currentTenant.id || !s.networkId))
-            );
+          // Identifica o ID da Matriz da rede atual:
+          // Se for filial, seu networkId aponta para o ID da Matriz.
+          // Se for matriz, seu próprio id é o ID da Matriz.
+          const masterNetworkId = (currentTenant.networkId && currentTenant.networkId.trim() !== "")
+            ? currentTenant.networkId.trim()
+            : (currentTenant.isNetworkMaster ? currentTenant.id : null);
+
+          if (masterNetworkId) {
+            // Pertence a ESTA rede se:
+            // 1. É a Matriz desta rede (s.id === masterNetworkId)
+            // 2. É uma Filial vinculada a esta rede (s.networkId === masterNetworkId)
+            const related = allStores.filter((s) => {
+              const isMatrizOfThisNetwork = s.id === masterNetworkId;
+              const isFilialOfThisNetwork = !!s.networkId && s.networkId.trim() === masterNetworkId;
+              return isMatrizOfThisNetwork || isFilialOfThisNetwork;
+            });
             setNetworkTenants(related.length > 0 ? related : [currentTenant]);
           } else {
-            const branches = allStores.filter(s => s.networkId === currentTenant.id || s.id === currentTenant.id);
-            setNetworkTenants(branches.length > 1 ? branches : [currentTenant]);
+            // Loja independente sem rede
+            setNetworkTenants([currentTenant]);
           }
         }
       } catch (e) {
@@ -628,7 +634,7 @@ const App: React.FC = () => {
       }
     };
     loadNetworkTenants();
-  }, [currentTenant?.id, currentTenant?.isNetworkMaster, currentTenant?.networkId, session?.role]);
+  }, [currentTenant?.id, currentTenant?.isNetworkMaster, currentTenant?.networkId]);
 
   const handleSelectTenant = useCallback(async (selected: PharmacyConfig) => {
     if (!selected || selected.id === currentTenant?.id) return;

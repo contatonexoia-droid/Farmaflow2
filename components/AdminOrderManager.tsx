@@ -92,24 +92,45 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
         if (localToken) {
           headers["Authorization"] = `Bearer ${localToken}`;
         } else {
-          const { supabase } = await import("../services/supabase");
-          const { data: { session } } = await supabase.auth.getSession();
-          if (session) headers["Authorization"] = `Bearer ${session.access_token}`;
+          try {
+            const rawSession = localStorage.getItem('ff_session');
+            if (rawSession) {
+              const parsed = JSON.parse(rawSession);
+              if (parsed?.access_token) {
+                headers["Authorization"] = `Bearer ${parsed.access_token}`;
+              }
+            }
+          } catch (_) {}
+
+          if (!headers["Authorization"]) {
+            try {
+              const { supabase } = await import("../services/supabase");
+              const { data: { session } } = await supabase.auth.getSession();
+              if (session?.access_token) {
+                headers["Authorization"] = `Bearer ${session.access_token}`;
+              }
+            } catch (_) {}
+          }
         }
 
-        const res = await fetch(`/api/v1/tenants/${tenant.id}/prescriptions`, { headers });
+        const res = await fetch(`/api/v1/tenants/${encodeURIComponent(tenant.id)}/prescriptions`, { headers });
+        const contentType = res.headers.get("content-type") || "";
+        if (!res.ok || !contentType.includes("application/json")) {
+          return;
+        }
+
         const data = await res.json();
-        if (data.success && data.data) {
+        if (data && data.success && Array.isArray(data.data)) {
           const map: Record<string, string> = {};
           data.data.forEach((p: any) => {
-            if (p.order_id && p.file_url) {
+            if (p && p.order_id && p.file_url) {
               map[p.order_id] = p.file_url;
             }
           });
           setPrescriptionsMap(map);
         }
       } catch (err) {
-        console.error("Error fetching prescriptions in AdminOrderManager:", err);
+        console.warn("Could not fetch prescriptions for orders:", err);
       }
     };
 
