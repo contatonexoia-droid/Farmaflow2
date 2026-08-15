@@ -30,6 +30,7 @@ import {
 } from "./types";
 
 import { Navbar } from "./components/Navbar";
+import { TenantSelector } from "./components/TenantSelector";
 
 import { Storefront } from "./components/Storefront";
 
@@ -595,6 +596,63 @@ const App: React.FC = () => {
       return saved ? JSON.parse(saved) : null;
     },
   );
+
+  const [networkTenants, setNetworkTenants] = useState<PharmacyConfig[]>([]);
+  const [isSwitchingTenant, setIsSwitchingTenant] = useState(false);
+
+  // Carrega lista de filiais / rede quando usuário tem perfil Matriz ou há lojas vinculadas
+  useEffect(() => {
+    if (!currentTenant) return;
+    const loadNetworkTenants = async () => {
+      try {
+        const allStores = await getTenants();
+        if (allStores && allStores.length > 0) {
+          const netId = currentTenant.networkId || (currentTenant.isNetworkMaster ? currentTenant.id : null);
+          if (netId || currentTenant.isNetworkMaster || session?.role === "MATRIZ") {
+            const related = allStores.filter(
+              (s) =>
+                s.id === currentTenant.id ||
+                s.id === netId ||
+                s.networkId === netId ||
+                s.networkId === currentTenant.id ||
+                (currentTenant.isNetworkMaster && (s.networkId === currentTenant.id || !s.networkId))
+            );
+            setNetworkTenants(related.length > 0 ? related : [currentTenant]);
+          } else {
+            const branches = allStores.filter(s => s.networkId === currentTenant.id || s.id === currentTenant.id);
+            setNetworkTenants(branches.length > 1 ? branches : [currentTenant]);
+          }
+        }
+      } catch (e) {
+        console.warn("Failed to load network tenants:", e);
+      }
+    };
+    loadNetworkTenants();
+  }, [currentTenant?.id, currentTenant?.isNetworkMaster, currentTenant?.networkId, session?.role]);
+
+  const handleSelectTenant = useCallback(async (selected: PharmacyConfig) => {
+    if (!selected || selected.id === currentTenant?.id) return;
+    setIsSwitchingTenant(true);
+    setCurrentTenant(selected);
+    localStorage.setItem("ff_tenant", JSON.stringify(selected));
+    try {
+      const [prods, ords, promos, coups] = await Promise.all([
+        getProductsByTenant(selected.id, setProducts),
+        getOrdersByTenant(selected.id),
+        getPromotionsByTenant(selected.id, selected.networkId),
+        getCouponsByTenant(selected.id, selected.networkId),
+      ]);
+      setProducts(prods);
+      setOrders(ords);
+      setPromotions(promos);
+      setCoupons(coups);
+      window.dispatchEvent(new CustomEvent("ff_tenant_switched", { detail: selected.id }));
+    } catch (e) {
+      console.warn("Error switching tenant:", e);
+    } finally {
+      setIsSwitchingTenant(false);
+    }
+  }, [currentTenant?.id]);
 
   const [products, setProducts] = useState<Product[]>([]);
   const [matrizProducts, setMatrizProducts] = useState<Product[]>([]);
@@ -2666,7 +2724,6 @@ const App: React.FC = () => {
   };
 
   const abortControllerRef = React.useRef<AbortController | null>(null);
-  const [isSwitchingTenant, setIsSwitchingTenant] = useState(false);
 
   const handleAccessTenant = async (tenant: PharmacyConfig) => {
     if (abortControllerRef.current) {
@@ -3134,6 +3191,8 @@ const App: React.FC = () => {
               ? () => setIsSidebarOpen(true)
               : undefined
           }
+          networkTenants={networkTenants}
+          onSelectTenant={handleSelectTenant}
         />
       )}
 
@@ -3144,7 +3203,7 @@ const App: React.FC = () => {
             onClick={() => setIsSidebarOpen(false)}
           ></div>
           <aside className="absolute top-0 left-0 w-80 h-[100dvh] bg-white shadow-2xl flex flex-col p-6 animate-in slide-in-from-left">
-            <div className="flex items-center justify-between mb-8">
+            <div className="flex items-center justify-between mb-4">
               <span className="font-black text-gray-900">Gestão FarmaFlow</span>
               <button
                 onClick={() => setIsSidebarOpen(false)}
@@ -3153,6 +3212,25 @@ const App: React.FC = () => {
                 <X size={20} />
               </button>
             </div>
+
+            {view === ViewMode.ADMIN_PHARMACY && networkTenants.length > 1 && (
+              <div className="mb-4 pb-4 border-b border-gray-100">
+                <label className="text-[10px] font-black uppercase tracking-wider text-gray-400 block mb-1.5 px-1">
+                  Unidade Selecionada
+                </label>
+                <TenantSelector
+                  tenants={networkTenants}
+                  currentTenant={currentTenant}
+                  onSelectTenant={(t) => {
+                    handleSelectTenant(t);
+                    setIsSidebarOpen(false);
+                  }}
+                  networkName={networkTenants.find(t => t.isNetworkMaster)?.name || "Rede de Farmácias"}
+                  className="w-full"
+                />
+              </div>
+            )}
+
             <nav className="flex-1 overflow-y-auto pr-1 space-y-1 pb-6">
               {view === ViewMode.ADMIN_PHARMACY ? (
                 <>
@@ -3392,6 +3470,20 @@ const App: React.FC = () => {
           {view === ViewMode.ADMIN_PHARMACY && currentTenant && (
             <>
               <aside className="hidden md:flex w-80 shrink-0 flex-col bg-white rounded-[1.5rem] border border-gray-100 p-4 h-fit sticky top-8">
+                {networkTenants.length > 1 && (
+                  <div className="mb-4 pb-4 border-b border-gray-100">
+                    <label className="text-[10px] font-black uppercase tracking-wider text-gray-400 block mb-1.5 px-2">
+                      Unidade Ativa
+                    </label>
+                    <TenantSelector
+                      tenants={networkTenants}
+                      currentTenant={currentTenant}
+                      onSelectTenant={handleSelectTenant}
+                      networkName={networkTenants.find(t => t.isNetworkMaster)?.name || "Rede de Farmácias"}
+                      className="w-full"
+                    />
+                  </div>
+                )}
                 {isFullAccess && (
                   <button
                     onClick={() => setAdminTab("dashboard")}
@@ -3723,6 +3815,8 @@ const App: React.FC = () => {
                   <AdminSettings
                     config={currentTenant}
                     onConfigUpdate={handleUpdateConfig}
+                    networkTenants={networkTenants}
+                    onSelectTenant={handleSelectTenant}
                   />
                 )}
                 {adminTab === "desktop" && (

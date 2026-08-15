@@ -2,6 +2,7 @@
 import React from 'react';
 import { ViewMode, PharmacyConfig, AuthSession } from '../types';
 import { LogOut, ArrowLeft, Menu, Lock, ShoppingBag, Shield, ShoppingCart } from 'lucide-react';
+import { TenantSelector } from './TenantSelector';
 
 interface NavbarProps {
   currentView: ViewMode;
@@ -10,9 +11,20 @@ interface NavbarProps {
   config: PharmacyConfig;
   session: AuthSession; 
   onToggleSidebar?: () => void;
+  networkTenants?: PharmacyConfig[];
+  onSelectTenant?: (tenant: PharmacyConfig) => void;
 }
 
-export const Navbar: React.FC<NavbarProps> = ({ currentView, onViewChange, cartCount, config, session, onToggleSidebar }) => {
+export const Navbar: React.FC<NavbarProps> = ({ 
+  currentView, 
+  onViewChange, 
+  cartCount, 
+  config, 
+  session, 
+  onToggleSidebar,
+  networkTenants = [],
+  onSelectTenant
+}) => {
   const isStoreContext = !!config.id;
   // Agora consideramos tanto o Catálogo quanto o Carrinho como visualizações da "Loja" (Branding da Drogaria)
   const isCatalogView = currentView === ViewMode.CATALOG || currentView === ViewMode.CART;
@@ -20,6 +32,7 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onViewChange, cartC
   
   // Decidimos ocultar controles administrativos na loja para que o dono veja exatamente o que o cliente vê
   const showAdminControls = !isCatalogView && !isGuest;
+  const hasMultipleUnits = networkTenants && networkTenants.length > 1;
 
   const handleNavigate = (view: ViewMode) => {
     onViewChange(view);
@@ -31,21 +44,21 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onViewChange, cartC
         <div className="flex justify-between h-20 items-center">
           
           {/* Logo Area */}
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3 sm:gap-4 min-w-0">
             
             {onToggleSidebar && !isCatalogView && (
-                 <button onClick={(e) => { e.stopPropagation(); onToggleSidebar(); }} className="md:hidden p-2 -ml-2 text-gray-600 hover:bg-gray-100 rounded-xl transition-colors">
+                 <button onClick={(e) => { e.stopPropagation(); onToggleSidebar(); }} className="md:hidden p-2 -ml-2 text-gray-600 hover:bg-gray-100 rounded-xl transition-colors shrink-0">
                      <Menu size={24} />
                  </button>
             )}
 
             {isCatalogView && (
-                 <button onClick={(e) => { e.stopPropagation(); window.dispatchEvent(new CustomEvent('ffToggleStoreDrawer')); }} className="p-2 -ml-2 text-gray-600 hover:bg-gray-100 rounded-xl transition-colors">
+                 <button onClick={(e) => { e.stopPropagation(); window.dispatchEvent(new CustomEvent('ffToggleStoreDrawer')); }} className="p-2 -ml-2 text-gray-600 hover:bg-gray-100 rounded-xl transition-colors shrink-0">
                      <Menu size={24} />
                  </button>
             )}
 
-            <div className={`w-11 h-11 rounded-xl flex items-center justify-center font-black text-xl overflow-hidden shadow-sm transition-transform ${isCatalogView ? 'bg-transparent border-none' : 'bg-white border border-gray-100 group-hover:scale-105'}`}>
+            <div className={`w-11 h-11 rounded-xl flex items-center justify-center font-black text-xl overflow-hidden shadow-sm transition-transform shrink-0 ${isCatalogView ? 'bg-transparent border-none' : 'bg-white border border-gray-100 group-hover:scale-105'}`}>
                {config.logo ? (
                  <img src={config.logo} alt={config.name} className="w-full h-full object-contain" referrerPolicy="no-referrer" />
                ) : (
@@ -55,7 +68,7 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onViewChange, cartC
                )}
             </div>
             
-            <div className="flex flex-col">
+            <div className="flex flex-col min-w-0">
               {isCatalogView ? (
                   <>
                     <span className="text-lg md:text-xl font-black text-gray-900 leading-none tracking-tight line-clamp-1">
@@ -68,19 +81,52 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onViewChange, cartC
                   </>
               ) : (
                   <>
-                    <span className="text-xl font-black text-gray-900 leading-none tracking-tight">
-                        Farma<span className="text-brand">Flow</span>
-                    </span>
-                    <span className="text-[9px] font-black text-gray-400 uppercase tracking-widest mt-1 opacity-80">
-                        {session.type === 'SUPER_ADMIN' ? 'Portal Master' : 'Painel Administrativo'}
+                    <div className="flex items-center gap-2">
+                      <span className="text-xl font-black text-gray-900 leading-none tracking-tight">
+                          Farma<span className="text-brand">Flow</span>
+                      </span>
+                      {config.isNetworkMaster && (
+                        <span className="hidden sm:inline-block bg-purple-100 text-purple-700 text-[9px] font-black px-2 py-0.5 rounded-full uppercase tracking-wider">
+                          Rede / Matriz
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-[9px] font-black text-gray-400 uppercase tracking-widest mt-1 opacity-80 truncate">
+                        {session.type === 'SUPER_ADMIN' ? 'Portal Master' : config.name ? `${config.name}` : 'Painel Administrativo'}
                     </span>
                   </>
               )}
             </div>
           </div>
 
+          {/* Center: Quick Tenant Selector for Matrix / Multi-Store Networks */}
+          {currentView === ViewMode.ADMIN_PHARMACY && hasMultipleUnits && onSelectTenant && (
+            <div className="hidden lg:flex items-center mx-4">
+              <TenantSelector
+                tenants={networkTenants}
+                currentTenant={config}
+                onSelectTenant={onSelectTenant}
+                networkName={networkTenants.find(t => t.isNetworkMaster)?.name || "Rede de Farmácias"}
+                className="w-72"
+              />
+            </div>
+          )}
+
           {/* Right Actions */}
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+             {/* Seletor compacto para telas médias/pequenas no topo */}
+             {currentView === ViewMode.ADMIN_PHARMACY && hasMultipleUnits && onSelectTenant && (
+                <div className="flex lg:hidden">
+                  <TenantSelector
+                    tenants={networkTenants}
+                    currentTenant={config}
+                    onSelectTenant={onSelectTenant}
+                    networkName={networkTenants.find(t => t.isNetworkMaster)?.name || "Rede"}
+                    className="max-w-[150px] sm:max-w-[200px]"
+                  />
+                </div>
+             )}
+
              {/* Botão de retorno para o Super Admin quando visualizando uma loja específica */}
              {session.type === 'SUPER_ADMIN' && isStoreContext && isCatalogView && (
                 <button 

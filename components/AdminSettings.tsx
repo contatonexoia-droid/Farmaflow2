@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { PharmacyConfig } from '../types';
 import { UpsellCard } from './UpsellCard';
-import { Tags, Zap, Upload, Palette, Phone, Building, Save, CheckCircle, Loader2, Type, MessageSquare, AlertTriangle, FileText, MapPin, Mail, DollarSign, BellRing, PlayCircle, Volume2, Store, CreditCard, Truck, Bot, Sparkles } from 'lucide-react';
+import { Tags, Zap, Upload, Palette, Phone, Building, Save, CheckCircle, Loader2, Type, MessageSquare, AlertTriangle, FileText, MapPin, Mail, DollarSign, BellRing, PlayCircle, Volume2, Store, CreditCard, Truck, Bot, Sparkles, Building2 } from 'lucide-react';
 import { ImageMigrationTool } from './ImageMigrationTool';
 import { ControlledProductsMigrationTool } from './ControlledProductsMigrationTool';
 import { SmartNumberInput } from './SmartNumberInput';
@@ -9,6 +9,7 @@ import { supabase } from '../services/supabase';
 import { PaymentSettings } from './PaymentSettings';
 import { DeliverySettings } from './DeliverySettings';
 import { AiAgentSettings } from './AiAgentSettings';
+import { TenantSelector } from './TenantSelector';
 
 const parseFullAddress = (fullAddress?: string) => {
   let cep = "", street = "", number = "", complement = "", neighborhood = "", city = "", state = "";
@@ -120,9 +121,16 @@ const parseFullAddress = (fullAddress?: string) => {
 interface AdminSettingsProps {
   config: PharmacyConfig;
   onConfigUpdate: (config: PharmacyConfig) => void;
+  networkTenants?: PharmacyConfig[];
+  onSelectTenant?: (tenant: PharmacyConfig) => void;
 }
 
-export const AdminSettings: React.FC<AdminSettingsProps> = ({ config, onConfigUpdate }) => {
+export const AdminSettings: React.FC<AdminSettingsProps> = ({ 
+  config, 
+  onConfigUpdate,
+  networkTenants = [],
+  onSelectTenant
+}) => {
   const [activeTab, setActiveTab] = useState<'geral' | 'pagamentos' | 'entrega' | 'atendimento' | 'agente_ia'>('geral');
   const [formData, setFormData] = useState<PharmacyConfig>({ ...config });
   const [showSaved, setShowSaved] = useState(false);
@@ -185,11 +193,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ config, onConfigUp
   };
 
   useEffect(() => {
-    setFormData(prev => ({
-        ...prev,
-        ...config,
-        logo: prev.logo !== config.logo && prev.logo?.startsWith('data:') ? prev.logo : config.logo
-    }));
+    setFormData({ ...config });
 
     if (config.fullAddress) {
       const parsed = parseFullAddress(config.fullAddress);
@@ -205,7 +209,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ config, onConfigUp
         state: ""
       });
     }
-  }, [config]);
+  }, [config.id, config.updatedAt]);
 
   const formatPhone = (value: string) => {
     const numbers = value.replace(/\D/g, '').slice(0, 11);
@@ -315,8 +319,38 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ config, onConfigUp
         
         {/* Header and Tabs */}
         <div className="mb-12">
+          {networkTenants && networkTenants.length > 1 && onSelectTenant && (
+            <div className="mb-6 p-4 bg-emerald-50/90 border border-emerald-200/80 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-xs">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center font-black shadow-xs shrink-0">
+                  <Building2 size={20} />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] font-black uppercase text-emerald-800 tracking-wider">Unidade em Configuração:</span>
+                    {config.isNetworkMaster && (
+                      <span className="bg-purple-100 text-purple-700 text-[9px] font-black px-2 py-0.5 rounded-full uppercase">
+                        Matriz
+                      </span>
+                    )}
+                  </div>
+                  <h4 className="text-sm font-extrabold text-gray-900">{config.name}</h4>
+                </div>
+              </div>
+              <div className="w-full sm:w-72 shrink-0">
+                <TenantSelector
+                  tenants={networkTenants}
+                  currentTenant={config}
+                  onSelectTenant={onSelectTenant}
+                  networkName={networkTenants.find(t => t.isNetworkMaster)?.name || "Rede FarmaFlow"}
+                  className="w-full"
+                />
+              </div>
+            </div>
+          )}
+
           <h2 className="text-3xl font-black text-gray-900 tracking-tight">Configurações da Drogaria</h2>
-          <p className="text-gray-500 mt-2">Personalize a identidade visual, pagamentos online e mais.</p>
+          <p className="text-gray-500 mt-2">Personalize a identidade visual, pagamentos online, atendimento e integrações de cada unidade.</p>
           <p className="text-xs text-gray-300 mt-1 font-mono">ID: {formData.id}</p>
           
           <div className="flex gap-4 mt-8 border-b border-gray-100 pb-4 overflow-x-auto whitespace-nowrap scrollbar-none">

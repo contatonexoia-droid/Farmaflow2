@@ -223,6 +223,7 @@ export interface PharmacyConfig {
   welcomeMessageText?: string;
   welcomeMessageFormat?: 'button' | 'text';
   welcomeMessageLink?: string;
+  updatedAt?: string;
 }
 
 export interface BackupLog {
@@ -259,7 +260,7 @@ export interface KanbanColumnConfig {
 export interface AuthSession {
   type: "SUPER_ADMIN" | "PHARMACY_ADMIN" | "GUEST";
   tenantId?: string;
-  role?: "owner" | "admin" | "gerente" | "operador" | "entregador";
+  role?: "owner" | "admin" | "gerente" | "operador" | "entregador" | "matriz" | "MATRIZ" | string;
   user?: any;
   access_token?: string;
   refresh_token?: string;
