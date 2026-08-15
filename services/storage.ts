@@ -1209,8 +1209,8 @@ export const mapDbPromotionToApp = (p: any): PromotionRule => ({
   type: p.type || "BUY_X_PAY_Y",
   targetType: p.target_type || p.targettype || "PRODUCT",
   targetValue: p.target_value || p.targetvalue || "",
-  buyX: p.buy_x || p.buyx,
-  payY: p.pay_y || p.payy,
+  buyX: p.buy_x ?? p.buyx ?? (p.filters_metadata || p.filtersmetadata)?.buyX ?? (p.type === "BUY_X_PAY_Y" ? 3 : undefined),
+  payY: p.pay_y ?? p.payy ?? (p.filters_metadata || p.filtersmetadata)?.payY ?? (p.type === "BUY_X_PAY_Y" ? 2 : undefined),
   lightningDiscountPercentage:
     p.lightning_discount_percentage || p.lightningdiscountpercentage,
   discountThresholds: p.discount_thresholds || p.discountthresholds || [],
@@ -1294,6 +1294,9 @@ export const getPromotionsByTenant = async (
 
 export const savePromotion = async (promotion: PromotionRule) => {
   try {
+    const buyXVal = promotion.buyX !== undefined && promotion.buyX !== null ? Number(promotion.buyX) : (promotion.type === "BUY_X_PAY_Y" ? 3 : null);
+    const payYVal = promotion.payY !== undefined && promotion.payY !== null ? Number(promotion.payY) : (promotion.type === "BUY_X_PAY_Y" ? 2 : null);
+
     const payload: any = {
       id: promotion.id,
       tenant_id: promotion.tenantId,
@@ -1301,6 +1304,8 @@ export const savePromotion = async (promotion: PromotionRule) => {
       type: promotion.type,
       target_type: promotion.targetType,
       target_value: promotion.targetValue,
+      buy_x: buyXVal,
+      pay_y: payYVal,
       lightning_discount_percentage: promotion.lightningDiscountPercentage,
       discount_thresholds: promotion.discountThresholds,
       combo_products: promotion.comboProducts,
@@ -1308,6 +1313,8 @@ export const savePromotion = async (promotion: PromotionRule) => {
       specific_product_ids: promotion.specificProductIds,
       filters_metadata: {
         ...(promotion.filtersMetadata || {}),
+        buyX: buyXVal,
+        payY: payYVal,
         highlightInCategoriesBar: promotion.highlightInCategoriesBar,
         highlightColor: promotion.highlightColor,
         highlightIcon: promotion.highlightIcon,

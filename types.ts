@@ -344,6 +344,8 @@ export interface PromotionRule {
     maxPrice?: string;
     minStock?: string;
     branchIds?: string[];
+    buyX?: number;
+    payY?: number;
   };
   networkId?: string;
   targetBranchIds?: string[];

@@ -859,8 +859,19 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
   const handleSave = async () => {
     setIsSaving(true);
     try {
-      let sanitizedPayY = 0;
-      if (editingPromo?.payY !== undefined) {
+      let sanitizedBuyX = 3;
+      if (editingPromo?.buyX !== undefined && editingPromo.buyX !== null) {
+        if (typeof editingPromo.buyX === "string") {
+          sanitizedBuyX = parseInt(
+            String(editingPromo.buyX), 10
+          );
+        } else {
+          sanitizedBuyX = Number(editingPromo.buyX);
+        }
+      }
+
+      let sanitizedPayY = 2;
+      if (editingPromo?.payY !== undefined && editingPromo.payY !== null) {
         if (typeof editingPromo.payY === "string") {
           sanitizedPayY = parseFloat(
             String(editingPromo.payY).replace(",", "."),
@@ -870,10 +881,14 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
         }
       }
 
+      const finalBuyX = isNaN(sanitizedBuyX) || sanitizedBuyX <= 0 ? (editingPromo?.type === "BUY_X_PAY_Y" ? 3 : 0) : sanitizedBuyX;
+      const finalPayY = isNaN(sanitizedPayY) || sanitizedPayY <= 0 ? (editingPromo?.type === "BUY_X_PAY_Y" ? 2 : 0) : sanitizedPayY;
+
       const promoToSave = {
         ...editingPromo,
         id: editingPromo.id || `promo_${Date.now()}`,
-        payY: isNaN(sanitizedPayY) ? 0 : sanitizedPayY,
+        buyX: finalBuyX,
+        payY: finalPayY,
         lightningDiscountPercentage: editingPromo.type === "LIGHTNING_OFFER" ? (editingPromo.lightningDiscountPercentage || 0) : editingPromo.lightningDiscountPercentage,
         specificProductIds:
           editingPromo.targetType === "SPECIFIC_SELECTION"
@@ -881,6 +896,8 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
             : [],
         filtersMetadata: {
           ...(editingPromo.filtersMetadata || {}),
+          buyX: finalBuyX,
+          payY: finalPayY,
           ...(editingPromo.targetType === "SPECIFIC_SELECTION" ? filters : {})
         },
         createdAt: editingPromo.createdAt || new Date().toISOString(),
@@ -2047,7 +2064,7 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
                       <span className="text-gray-500">Regra:</span>
                       <span className="font-bold text-gray-900">
                         {promo.type === "BUY_X_PAY_Y"
-                          ? `Leve ${promo.buyX} Pague ${promo.payY}`
+                          ? `Leve ${promo.buyX ?? (promo.filtersMetadata?.buyX || 3)} Pague ${promo.payY ?? (promo.filtersMetadata?.payY || 2)}`
                           : promo.type === "PROGRESSIVE_DISCOUNT"
                             ? `${promo.discountThresholds?.length} faixas de desconto`
                             : promo.type === "LIGHTNING_OFFER"
