@@ -53,7 +53,7 @@ root.render(
   <App />
 );
 
-if ('serviceWorker' in navigator) {
+if ('serviceWorker' in navigator && process.env.NODE_ENV === 'production') {
   window.addEventListener('load', () => {
     const path = window.location.pathname;
     const lojaMatch = path.match(/^\/loja\/([^/]+)/);
@@ -62,8 +62,8 @@ if ('serviceWorker' in navigator) {
 
     navigator.serviceWorker.register('/sw.js', { scope: swScope }).then((registration) => {
       console.log('SW registered with scope:', registration.scope);
-      // Force update check on every load
-      registration.update();
+      // Non-blocking update check
+      registration.update().catch(() => {});
       
       registration.addEventListener('updatefound', () => {
         const newWorker = registration.installing;
@@ -80,7 +80,7 @@ if ('serviceWorker' in navigator) {
         }
       });
     }).catch((registrationError) => {
-      console.log('SW registration failed: ', registrationError);
+      console.warn('SW registration info: ', registrationError);
     });
     
     let refreshing = false;

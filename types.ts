@@ -164,6 +164,10 @@ export interface AiAgentConfig {
   fallbackMessage?: string;
   fallbackToHumanOnKeywords?: boolean;
   welcomeMessage?: string;
+  maxInteractionsPerSession?: number;
+  transitionToHumanMessage?: string;
+  antiAbuseGuardrailsEnabled?: boolean;
+  strictStoreLinkEnforcement?: boolean;
 }
 
 export interface PharmacyConfig {
@@ -185,6 +189,8 @@ export interface PharmacyConfig {
   isBlocked?: boolean;
   isChatEnabled?: boolean;
   isAiAgentEnabled?: boolean;
+  isAiCopilotEnabled?: boolean;
+  is_ai_copilot_enabled?: boolean;
   aiAgentConfig?: AiAgentConfig;
   customCategories?: string[];
   customManufacturers?: string[];
@@ -234,6 +240,20 @@ export interface PharmacyStats {
   averageRating: number;
   totalReviews: number;
   lastUpdated: string;
+}
+
+export type KanbanStageId = 'NEW' | 'BOT' | 'WAITING' | 'STORE_REDIRECT' | 'HUMAN' | 'CLOSED';
+
+export interface KanbanColumnConfig {
+  id: KanbanStageId;
+  title: string;
+  subtitle: string;
+  color: string;
+  badgeBg: string;
+  badgeText: string;
+  borderColor: string;
+  iconName: string;
+  order: number;
 }
 
 export interface AuthSession {

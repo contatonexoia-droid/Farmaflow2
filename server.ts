@@ -306,9 +306,18 @@ app.get("/api/v1/store/:tenantId/init", async (req, res) => {
 });
 
 // Ensure Service-Worker-Allowed header is set for all /sw.js requests
-app.use("/sw.js", (req, res, next) => {
+app.get("/sw.js", (req, res) => {
   res.setHeader("Service-Worker-Allowed", "/");
-  next();
+  res.setHeader("Content-Type", "application/javascript");
+  const publicSw = path.resolve(process.cwd(), "public/sw.js");
+  if (fs.existsSync(publicSw)) {
+    return res.sendFile(publicSw);
+  }
+  const distSw = path.resolve(process.cwd(), "dist/sw.js");
+  if (fs.existsSync(distSw)) {
+    return res.sendFile(distSw);
+  }
+  return res.send("// sw fallback\nself.addEventListener('install', () => self.skipWaiting());\nself.addEventListener('activate', () => self.clients.claim());");
 });
 
 // Dynamic PWA manifest route to prevent collisions of multiple shops on the same domain
@@ -5328,8 +5337,6 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
 
           if (result && result.conversation && !fromMe) {
             try {
-              await botHandoffManager.processMessageState(result.conversation.id, storeId, text, "OPEN");
-              
               const ratingNum = parseInt(String(text).trim(), 10);
               if (!isNaN(ratingNum) && ratingNum >= 1 && ratingNum <= 5) {
                 await csatManager.recordCsatResponse(storeId, result.conversation.id, ratingNum);
@@ -5337,6 +5344,14 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
 
               // Disparo da Mensagem Automática de Boas-Vindas da Primeira Mensagem do Dia
               await handleDailyWelcomeMessage(storeId, result.conversation, instanceName, text);
+
+              // Processamento Inteligente pelo Agente de Atendimento IA (com trava de interações, anti-abuso e transbordo humano)
+              aiAgentService.processConversationTurn(storeId, result.conversation.id, text, {
+                instanceName,
+                phoneNumber: (result.conversation.contact?.phone_number || msg.key?.remoteJid?.replace(/@.*$/, ''))
+              }).catch(aiErr => {
+                console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao processar turno do Agente de IA:', aiErr.message);
+              });
             } catch (botErr: any) {
               console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao processar bot handoff / CSAT / Boas-Vindas:', botErr.message, botErr.stack);
             }
@@ -5711,6 +5726,29 @@ app.post("/api/v1/chat/conversations/:id/labels", async (req, res) => {
   }
 });
 
+app.post("/api/v1/chat/conversations/:id/stage", async (req, res) => {
+  try {
+    const conversationId = req.params.id;
+    const { stage, assignedUserId, storeId } = req.body;
+    const resolvedStoreId = storeId || (req.headers["x-tenant-id"] as string) || "default";
+
+    if (!stage) {
+      return res.status(400).json({ error: "stage é obrigatório" });
+    }
+
+    const updated = await chatStore.updateConversationStage(
+      conversationId,
+      resolvedStoreId,
+      stage,
+      assignedUserId
+    );
+    return res.json({ success: true, data: updated });
+  } catch (err: any) {
+    console.error("[Chat API] Erro ao atualizar estágio da conversa:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // --- CANNED RESPONSES ENDPOINTS ---
 app.get("/api/v1/chat/canned-responses", async (req, res) => {
   try {
@@ -5991,6 +6029,32 @@ app.patch("/api/v1/tenants/:tenantId/prescriptions/:id/status", checkTenantAcces
 // AI SMART ATTENDANT AGENT API
 // ==========================================
 
+// Endpoint do Assistente de IA para Atendentes (Copilot de Redação no Chat)
+app.post(["/api/v1/chat/ai-copilot", "/api/v1/ai/copilot"], async (req, res) => {
+  try {
+    const { tenantId, action, text, customInstruction } = req.body;
+    if (!tenantId) {
+      return res.status(400).json({ error: "tenantId é obrigatório." });
+    }
+    if (!action) {
+      return res.status(400).json({ error: "action é obrigatório (fix, empathy, summarize, expand, custom)." });
+    }
+
+    const result = await aiAgentService.generateCopilotAssistance(
+      tenantId,
+      action,
+      text || "",
+      customInstruction
+    );
+
+    return res.json(result);
+  } catch (err: any) {
+    console.error("[AI Copilot Error]:", err);
+    const status = err.statusCode || 500;
+    return res.status(status).json({ error: err.message || "Erro ao processar auxílio de IA para o atendente." });
+  }
+});
+
 // Endpoint para testar o agente no playground / simulador de configurações
 app.post("/api/v1/ai/agent/test", async (req, res) => {
   try {
@@ -6033,6 +6097,82 @@ app.post("/api/v1/ai/agent/chat", async (req, res) => {
     console.error("[AI Agent Chat Error]:", err);
     const status = err.statusCode || 500;
     return res.status(status).json({ error: err.message || "Erro ao processar mensagem com o Agente de IA." });
+  }
+});
+
+// Endpoint para alternar estado do Bot de IA em uma conversa (Silenciar / Reativar)
+app.post("/api/v1/chat/conversations/:id/toggle-bot", async (req, res) => {
+  try {
+    const conversationId = req.params.id;
+    const { storeId, isBotActive } = req.body;
+
+    if (!conversationId || !storeId || typeof isBotActive !== 'boolean') {
+      return res.status(400).json({ error: "conversationId, storeId e isBotActive são obrigatórios." });
+    }
+
+    const success = await botHandoffManager.toggleBotActive(conversationId, storeId, isBotActive);
+    return res.json({ success, isBotActive });
+  } catch (err: any) {
+    console.error("[Toggle Bot Error]:", err);
+    return res.status(500).json({ error: err.message || "Erro ao alterar estado do bot." });
+  }
+});
+
+// Endpoint para acionar transbordo manual para humano
+app.post("/api/v1/chat/conversations/:id/trigger-handoff", async (req, res) => {
+  try {
+    const conversationId = req.params.id;
+    const { storeId, reason, message } = req.body;
+
+    if (!conversationId || !storeId) {
+      return res.status(400).json({ error: "conversationId e storeId são obrigatórios." });
+    }
+
+    const result = await botHandoffManager.triggerHandoff(
+      conversationId,
+      storeId,
+      reason || "MANUAL_OPERATOR_TRIGGER",
+      message
+    );
+    return res.json(result);
+  } catch (err: any) {
+    console.error("[Trigger Handoff Error]:", err);
+    return res.status(500).json({ error: err.message || "Erro ao executar transbordo." });
+  }
+});
+
+// Endpoint para movimentação de estágio no Kanban (Drag-and-Drop)
+app.all("/api/v1/chat/conversations/:id/stage", async (req, res) => {
+  try {
+    const conversationId = req.params.id;
+    const storeId = (req.body?.storeId || req.query?.storeId || req.headers["x-tenant-id"] || "default") as string;
+    const { stage, assignedUserId } = req.body;
+
+    if (!conversationId || !stage) {
+      return res.status(400).json({ error: "conversationId e stage são obrigatórios." });
+    }
+
+    const validStages = ["NEW", "BOT", "WAITING", "STORE_REDIRECT", "HUMAN", "CLOSED"];
+    if (!validStages.includes(stage)) {
+      return res.status(400).json({ error: `Estágio inválido: ${stage}. Válidos: ${validStages.join(", ")}` });
+    }
+
+    const updated = await chatStore.updateConversationStage(conversationId, storeId, stage, assignedUserId);
+    
+    // Broadcast em tempo real para todos os atendentes conectados no Kanban
+    realtimeHub.broadcastToStore(storeId, "conversation_stage_changed", {
+      conversationId,
+      stage,
+      status: updated?.status,
+      is_bot_active: updated?.is_bot_active,
+      assigned_user_id: updated?.assigned_user_id,
+      updated_at: new Date().toISOString()
+    });
+
+    return res.json({ success: true, conversation: updated });
+  } catch (err: any) {
+    console.error("[Kanban Stage Update Error]:", err);
+    return res.status(500).json({ error: err.message || "Erro ao atualizar estágio do Kanban." });
   }
 });
 

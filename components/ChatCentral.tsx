@@ -1,10 +1,19 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Search, Send, FileText, Image as ImageIcon, Paperclip, User, Users, Clock, ShoppingBag, CreditCard, MessageSquare, Lock, AlertCircle, RefreshCw, Smartphone, ChevronLeft, Info, BarChart2, CheckCircle2, UserPlus, Inbox, MoreVertical } from 'lucide-react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { Search, Send, FileText, Image as ImageIcon, Paperclip, User, Users, Clock, ShoppingBag, CreditCard, MessageSquare, Lock, AlertCircle, RefreshCw, Smartphone, ChevronLeft, Info, BarChart2, CheckCircle2, UserPlus, Inbox, MoreVertical, Kanban, LayoutList, Columns } from 'lucide-react';
 import { ChatTransferModal } from './ChatTransferModal';
+import { AiChatCopilot } from './AiChatCopilot';
+import { ChatKanban } from './ChatKanban';
 import { supabase } from '../services/supabase';
 
 // Helper to determine active tenant logic for demo
 const DEMO_TENANT_ID = 'tenant-id'; // Assume this for now if not passed
+
+const FILTER_TABS = [
+  { id: 'todas', label: 'Todas' },
+  { id: 'minhas', label: 'Minhas' },
+  { id: 'nao_atribuidas', label: 'Não Atribuídas' },
+  { id: 'finalizadas', label: 'Finalizadas' }
+];
 
 export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }: any) => {
   const [conversations, setConversations] = useState<any[]>([]);
@@ -23,6 +32,13 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [activeView, setActiveView] = useState<'LIST' | 'CHAT' | 'SIDEBAR'>('LIST');
+  const [chatDisplayMode, setChatDisplayMode] = useState<'SPLIT' | 'KANBAN'>('KANBAN');
+
+  const handleOpenFromKanban = (conv: any) => {
+    setSelectedConversation(conv);
+    setChatDisplayMode('SPLIT');
+    setActiveView('CHAT');
+  };
 
   // Customer Context Data
   const [customerOrders, setCustomerOrders] = useState<any[]>([]);
@@ -229,11 +245,108 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   }, [tenantId]);
 
   useEffect(() => {
-    if (isOperador && selectedInboxId === 'all') {
-      return;
-    }
     fetchConversations();
-  }, [filter, searchQuery, selectedInboxId, selectedTeamId, selectedTagId, tenantId, isOperador]);
+  }, [tenantId, isOperador]);
+
+  // Contadores dinâmicos para as abas de status
+  const tabCounters = useMemo(() => {
+    let todas = 0;
+    let minhas = 0;
+    let naoAtribuidas = 0;
+    let finalizadas = 0;
+
+    conversations.forEach((c: any) => {
+      // Se houver filtro de caixa selecionado, considera no cálculo
+      if (selectedInboxId !== 'all' && c.inbox_id !== selectedInboxId) return;
+      if (selectedTeamId !== 'all' && c.team_id !== selectedTeamId) return;
+
+      const isClosed = c.status === 'CLOSED' || c.kanban_stage === 'CLOSED';
+      if (isClosed) {
+        finalizadas++;
+      } else {
+        todas++;
+        const isMine =
+          (userId && c.assigned_user_id === userId) ||
+          (localUser?.id && c.assigned_user_id === localUser.id) ||
+          (localUser?.email && c.assigned_user_id === localUser.email);
+        if (isMine) minhas++;
+        if (!c.assigned_user_id || c.assigned_user_id === '') naoAtribuidas++;
+      }
+    });
+
+    return { todas, minhas, naoAtribuidas, finalizadas };
+  }, [conversations, selectedInboxId, selectedTeamId, userId, localUser]);
+
+  // Lista de conversas estritamente filtrada pelo critério ativo na interface
+  const displayedConversations = useMemo(() => {
+    return conversations.filter((conv: any) => {
+      // 1. Permissão de Operador por Caixa de Entrada
+      if (isOperador && userId && allowedInboxIds.length > 0 && conv.inbox_id) {
+        if (!allowedInboxIds.includes(conv.inbox_id)) return false;
+      }
+
+      // 2. Filtro de Caixa de Entrada selecionada
+      if (selectedInboxId !== 'all' && conv.inbox_id !== selectedInboxId) {
+        return false;
+      }
+
+      // 3. Filtro por Time
+      if (selectedTeamId !== 'all' && conv.team_id !== selectedTeamId) {
+        return false;
+      }
+
+      // 4. Filtro por Etiqueta / Tag
+      if (selectedTagId !== 'all') {
+        const hasTag = conv.labels && Array.isArray(conv.labels) && conv.labels.some((l: any) => l.id === selectedTagId || l.name === selectedTagId);
+        if (!hasTag) return false;
+      }
+
+      // 5. Filtro por Busca Textual (Nome, Telefone ou Última Mensagem)
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase().trim();
+        const contactName = (conv.contact?.name || '').toLowerCase();
+        const contactPhone = (conv.contact?.phone_number || '').replace(/\D/g, '');
+        const qDigits = q.replace(/\D/g, '');
+        const lastMsg = (conv.last_message_content || '').toLowerCase();
+
+        const matchName = contactName.includes(q);
+        const matchPhone = qDigits && contactPhone.includes(qDigits);
+        const matchMsg = lastMsg.includes(q);
+
+        if (!matchName && !matchPhone && !matchMsg) return false;
+      }
+
+      // 6. Filtro por Aba de Status (Todas, Minhas, Não Atribuídas, Finalizadas)
+      const isClosed = conv.status === 'CLOSED' || conv.kanban_stage === 'CLOSED';
+      const isMine =
+        (userId && conv.assigned_user_id === userId) ||
+        (localUser?.id && conv.assigned_user_id === localUser.id) ||
+        (localUser?.email && conv.assigned_user_id === localUser.email);
+      const isUnassigned = !conv.assigned_user_id || conv.assigned_user_id === '';
+
+      const normalizedFilter = filter.toLowerCase().trim();
+
+      if (normalizedFilter === 'finalizadas') {
+        return isClosed;
+      }
+
+      // Todas as abas ativas excluem conversas finalizadas
+      if (isClosed) {
+        return false;
+      }
+
+      if (normalizedFilter === 'minhas') {
+        return isMine;
+      }
+
+      if (normalizedFilter === 'nao_atribuidas' || normalizedFilter === 'não atribuídas' || normalizedFilter === 'nao atribuidas') {
+        return isUnassigned;
+      }
+
+      // 'todas' exibe todas as conversas ativas (não fechadas)
+      return true;
+    });
+  }, [conversations, filter, searchQuery, selectedInboxId, selectedTeamId, selectedTagId, userId, localUser, isOperador, allowedInboxIds]);
 
   useEffect(() => {
     if (selectedConversation) {
@@ -330,9 +443,6 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   };
 
   const fetchConversations = async () => {
-    if (isOperador && selectedInboxId === 'all') {
-      return;
-    }
     try {
       let allowedIds = allowedInboxIds;
       if (isOperador && userId && allowedIds.length === 0) {
@@ -347,30 +457,18 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       }
 
       const queryParams = userId ? `&userId=${userId}&role=${cleanRole}` : '';
-      const res = await fetch(`/api/v1/chat/conversations?tenantId=${tenantId}&inboxId=${selectedInboxId}${queryParams}`);
+      const res = await fetch(`/api/v1/chat/conversations?tenantId=${tenantId}&inboxId=all${queryParams}`);
       if (res.ok) {
         const json = await res.json();
-        if (json.data) {
-          let list = json.data;
-          if (isOperador && userId) {
-            list = list.filter((c: any) => c.inbox_id && allowedIds.includes(c.inbox_id));
-          }
-          if (selectedTeamId !== 'all') {
-            list = list.filter((c: any) => c.team_id === selectedTeamId);
-          }
-          if (selectedTagId !== 'all') {
-            list = list.filter((c: any) => c.labels?.some((l: any) => l.id === selectedTagId));
-          }
-          if (searchQuery) {
-            list = list.filter((c: any) => c.contact?.name?.toLowerCase().includes(searchQuery.toLowerCase()) || c.last_message_content?.toLowerCase().includes(searchQuery.toLowerCase()));
-          }
-          if (filter !== 'todas') {
-             // simplified logic
-             if (filter === 'minhas') list = list.filter((c: any) => c.assigned_user_id === userId);
-             else if (filter === 'não atribuídas') list = list.filter((c: any) => !c.assigned_user_id);
-             else if (filter === 'finalizadas') list = list.filter((c: any) => c.status === 'CLOSED');
-          } else {
-             list = list.filter((c: any) => c.status !== 'CLOSED'); // default non-closed
+        if (json.data && Array.isArray(json.data)) {
+          let list = json.data.map((c: any) => ({
+            ...c,
+            contact: c.contact || { name: 'Cliente sem nome', phone_number: '' },
+            kanban_stage: c.kanban_stage || (c.status === 'CLOSED' ? 'CLOSED' : c.is_bot_active !== false && (c.status === 'BOT' || !c.status) ? 'BOT' : c.status === 'PENDING' ? 'WAITING' : c.bot_handoff_reason === 'STORE_REDIRECT' ? 'STORE_REDIRECT' : c.assigned_user_id ? 'HUMAN' : 'NEW')
+          }));
+
+          if (isOperador && userId && allowedIds.length > 0) {
+            list = list.filter((c: any) => !c.inbox_id || allowedIds.includes(c.inbox_id));
           }
           setConversations(list);
           return;
@@ -383,48 +481,28 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
         .eq('store_id', tenantId)
         .order('last_message_at', { ascending: false });
 
-      if (selectedInboxId !== 'all') {
-        query = query.eq('inbox_id', selectedInboxId);
-      }
-      if (selectedTeamId !== 'all') {
-        query = query.eq('team_id', selectedTeamId);
-      }
-      if (filter === 'finalizadas') {
-         query = query.eq('status', 'CLOSED');
-      } else if (filter !== 'todas') {
-         query = query.neq('status', 'CLOSED');
-         if (filter === 'minhas') query = query.eq('assigned_user_id', userId);
-         if (filter === 'não atribuídas') query = query.is('assigned_user_id', null);
-      } else {
-         query = query.neq('status', 'CLOSED');
-      }
-
       const { data, error } = await query;
       if (!error && data && data.length > 0) {
-        let list = data;
-        if (isOperador && userId) {
-          list = list.filter((c: any) => c.inbox_id && allowedIds.includes(c.inbox_id));
-        }
-        if (selectedTagId !== 'all') {
-          list = list.filter((c: any) => c.labels?.some((l: any) => l.id === selectedTagId));
-        }
-        if (searchQuery) {
-            list = list.filter((c: any) => c.contact?.name?.toLowerCase().includes(searchQuery.toLowerCase()) || c.last_message_content?.toLowerCase().includes(searchQuery.toLowerCase()));
+        let list = data.map((c: any) => ({
+          ...c,
+          contact: c.contact || { name: 'Cliente sem nome', phone_number: '' },
+          kanban_stage: c.kanban_stage || (c.status === 'CLOSED' ? 'CLOSED' : c.is_bot_active !== false && (c.status === 'BOT' || !c.status) ? 'BOT' : c.status === 'PENDING' ? 'WAITING' : c.bot_handoff_reason === 'STORE_REDIRECT' ? 'STORE_REDIRECT' : c.assigned_user_id ? 'HUMAN' : 'NEW')
+        }));
+        if (isOperador && userId && allowedIds.length > 0) {
+          list = list.filter((c: any) => !c.inbox_id || allowedIds.includes(c.inbox_id));
         }
         setConversations(list);
       } else {
         const saved = localStorage.getItem(`chat_conversations_${tenantId}`);
         if (saved) {
           try {
-            let list = JSON.parse(saved);
-            if (isOperador && userId) {
-              list = list.filter((c: any) => c.inbox_id && allowedIds.includes(c.inbox_id));
-            }
-            if (selectedTeamId !== 'all') {
-              list = list.filter((c: any) => c.team_id === selectedTeamId);
-            }
-            if (selectedTagId !== 'all') {
-              list = list.filter((c: any) => c.labels?.some((l: any) => l.id === selectedTagId));
+            let list = JSON.parse(saved).map((c: any) => ({
+              ...c,
+              contact: c.contact || { name: 'Cliente sem nome', phone_number: '' },
+              kanban_stage: c.kanban_stage || (c.status === 'CLOSED' ? 'CLOSED' : c.is_bot_active !== false && (c.status === 'BOT' || !c.status) ? 'BOT' : c.status === 'PENDING' ? 'WAITING' : c.bot_handoff_reason === 'STORE_REDIRECT' ? 'STORE_REDIRECT' : c.assigned_user_id ? 'HUMAN' : 'NEW')
+            }));
+            if (isOperador && userId && allowedIds.length > 0) {
+              list = list.filter((c: any) => !c.inbox_id || allowedIds.includes(c.inbox_id));
             }
             setConversations(list);
           } catch (_) {}
@@ -644,6 +722,27 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
     setConversations(conversations.map(c => c.id === updated.id ? updated : c));
   };
 
+  const handleToggleBot = async () => {
+    if (!selectedConversation) return;
+    const currentStatus = selectedConversation.is_bot_active !== false;
+    const nextStatus = !currentStatus;
+    
+    // Optimistic UI update
+    const updated = { ...selectedConversation, is_bot_active: nextStatus };
+    setSelectedConversation(updated);
+    setConversations(conversations.map(c => c.id === updated.id ? updated : c));
+
+    try {
+      await fetch(`/api/v1/chat/conversations/${selectedConversation.id}/toggle-bot`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ storeId: tenantId, isBotActive: nextStatus })
+      });
+    } catch (e) {
+      console.error("Erro ao alterar estado do bot:", e);
+    }
+  };
+
   const handleCloseConversation = () => {
     if (!selectedConversation) return;
     const updated = { ...selectedConversation, status: 'CLOSED' };
@@ -653,16 +752,72 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   };
 
   return (
-    <div className="flex h-screen bg-white md:rounded-2xl md:shadow-xl overflow-hidden border-0 md:border md:border-gray-100 md:m-4 relative">
-      
-      {/* COLUMN 1: Lista de Conversas */}
-      <div className={`${activeView === 'LIST' ? 'flex' : 'hidden'} md:flex w-full md:w-1/3 lg:w-1/4 border-r border-gray-200 bg-gray-50 flex-col absolute inset-0 md:relative z-20`}>
-        <div className="p-4 border-b border-gray-200 bg-white">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
-              <MessageSquare className="w-5 h-5 text-emerald-600" /> Chat
-            </h2>
+    <div className="flex flex-col h-screen bg-white md:rounded-2xl md:shadow-xl overflow-hidden border-0 md:border md:border-gray-100 md:m-4 relative">
+      {/* GLOBAL TOP BAR: Mode switcher (Kanban vs Split Chat) */}
+      <div className="bg-white border-b border-gray-200 px-4 py-2.5 flex items-center justify-between z-30 flex-shrink-0">
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <MessageSquare className="w-5 h-5 text-emerald-600" />
+            <h1 className="font-black text-gray-900 text-sm md:text-base tracking-tight">Central de Atendimento FarmaFlow</h1>
           </div>
+        </div>
+
+        <div className="flex items-center bg-gray-100 p-1 rounded-xl border border-gray-200 shadow-2xs">
+          <button
+            type="button"
+            onClick={() => setChatDisplayMode('KANBAN')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+              chatDisplayMode === 'KANBAN'
+                ? 'bg-white text-purple-700 shadow-xs'
+                : 'text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            <Kanban size={14} />
+            <span className="hidden sm:inline">Painel Kanban</span>
+            <span className="sm:hidden">Kanban</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setChatDisplayMode('SPLIT')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+              chatDisplayMode === 'SPLIT'
+                ? 'bg-white text-emerald-700 shadow-xs'
+                : 'text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            <LayoutList size={14} />
+            <span className="hidden sm:inline">Chat em Lista</span>
+            <span className="sm:hidden">Lista</span>
+          </button>
+        </div>
+      </div>
+
+      {chatDisplayMode === 'KANBAN' ? (
+        <div className="flex-1 overflow-hidden">
+          <ChatKanban
+            tenantId={tenantId}
+            currentUser={localUser}
+            userRole={cleanRole}
+            conversations={conversations}
+            onConversationsChange={(updated) => setConversations(updated)}
+            onOpenConversation={handleOpenFromKanban}
+            inboxes={inboxes}
+            teams={teams}
+            availableLabels={availableLabels}
+            onRefresh={fetchConversations}
+          />
+        </div>
+      ) : (
+        <div className="flex flex-1 overflow-hidden relative">
+          {/* COLUMN 1: Lista de Conversas */}
+          <div className={`${activeView === 'LIST' ? 'flex' : 'hidden'} md:flex w-full md:w-1/3 lg:w-1/4 border-r border-gray-200 bg-gray-50 flex-col absolute inset-0 md:relative z-20`}>
+            <div className="p-4 border-b border-gray-200 bg-white">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
+                  <MessageSquare className="w-5 h-5 text-emerald-600" /> Conversas
+                </h2>
+              </div>
 
           {/* Manager Dashboard Widget */}
           <div className="mb-4 bg-gray-50 rounded-xl p-3 border border-gray-100 flex items-center justify-between">
@@ -745,50 +900,88 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
           </div>
 
           <div className="flex gap-2 mt-4 overflow-x-auto pb-2 scrollbar-hide">
-            {['Minhas', 'Não Atribuídas', 'Todas', 'Finalizadas'].map(f => (
-              <button 
-                key={f}
-                onClick={() => setFilter(f.toLowerCase())}
-                className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap transition-colors ${
-                  filter === f.toLowerCase() ? 'bg-emerald-600 text-white' : 'bg-gray-50 text-gray-500 border border-gray-200 hover:bg-gray-100'
-                }`}
-              >
-                {f}
-              </button>
-            ))}
+            {FILTER_TABS.map(tab => {
+              const isActive = filter.toLowerCase().trim() === tab.id;
+              const count = tab.id === 'todas' ? tabCounters.todas
+                          : tab.id === 'minhas' ? tabCounters.minhas
+                          : tab.id === 'nao_atribuidas' ? tabCounters.naoAtribuidas
+                          : tabCounters.finalizadas;
+              return (
+                <button 
+                  key={tab.id}
+                  onClick={() => setFilter(tab.id)}
+                  className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap transition-all flex items-center gap-1.5 shadow-2xs ${
+                    isActive 
+                      ? 'bg-emerald-600 text-white shadow-xs' 
+                      : 'bg-gray-50 text-gray-600 border border-gray-200 hover:bg-gray-100 hover:text-gray-900'
+                  }`}
+                >
+                  <span>{tab.label}</span>
+                  <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-black ${
+                    isActive ? 'bg-emerald-700 text-white' : 'bg-gray-200 text-gray-700'
+                  }`}>
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </div>
 
         <div className="flex-1 overflow-y-auto p-2 space-y-1">
-          
-          {conversations.length === 0 && (
+          {displayedConversations.length === 0 && (
             <div className="flex flex-col items-center justify-center h-full text-gray-400 p-6 text-center space-y-3">
               <MessageSquare size={48} className="text-gray-300" />
-              <p className="font-bold text-sm">Nenhuma conversa encontrada</p>
-              <p className="text-xs">As mensagens recebidas aparecerão aqui.</p>
+              <p className="font-bold text-sm text-gray-700">Nenhuma conversa encontrada</p>
+              <p className="text-xs text-gray-500 max-w-xs">
+                {searchQuery 
+                  ? `Nenhum resultado para "${searchQuery}". Tente outro termo ou limpe a busca.` 
+                  : filter === 'minhas' 
+                  ? 'Você não possui conversas atribuídas no momento.' 
+                  : filter === 'nao_atribuidas' 
+                  ? 'Não há conversas pendentes na fila de espera.' 
+                  : filter === 'finalizadas' 
+                  ? 'Nenhum atendimento finalizado registrado neste filtro.' 
+                  : 'Nenhuma conversa ativa no momento.'}
+              </p>
+              {(searchQuery || selectedTagId !== 'all' || selectedTeamId !== 'all') && (
+                <button
+                  onClick={() => {
+                    setSearchQuery('');
+                    setSelectedTagId('all');
+                    setSelectedTeamId('all');
+                  }}
+                  className="mt-2 text-xs font-bold text-emerald-600 hover:underline"
+                >
+                  Limpar todos os filtros
+                </button>
+              )}
             </div>
           )}
-          {conversations.map(conv => {
-            const inboxName = inboxes.find(i => i.id === conv.inbox_id)?.name || 'Sem Caixa';
+          {displayedConversations.map(conv => {
+            const inboxName = inboxes.find(i => i.id === conv.inbox_id)?.name || 'Geral';
+            const contactDisplayName = conv.contact?.name || conv.contact?.phone_number || 'Cliente';
             
             return (
               <div 
                 key={conv.id}
                 onClick={() => handleSelectConversation(conv)}
-                className={`p-3 rounded-xl cursor-pointer transition-colors ${
-                  selectedConversation?.id === conv.id ? 'bg-emerald-50 border border-emerald-200' : 'bg-white hover:bg-gray-100 border border-transparent'
+                className={`p-3 rounded-xl cursor-pointer transition-all border ${
+                  selectedConversation?.id === conv.id 
+                    ? 'bg-emerald-50 border-emerald-300 shadow-2xs' 
+                    : 'bg-white hover:bg-gray-100 border-gray-100 shadow-2xs'
                 }`}
               >
                 <div className="flex justify-between items-start mb-1">
-                  <span className="font-bold text-gray-800 text-sm truncate">{conv.contact.name}</span>
-                  <span className="text-[10px] text-gray-400">
+                  <span className="font-bold text-gray-900 text-sm truncate max-w-[70%]">{contactDisplayName}</span>
+                  <span className="text-[10px] font-medium text-gray-400">
                     {conv.last_message_at 
                       ? new Date(conv.last_message_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' }) 
                       : ''}
                   </span>
                 </div>
                 <div className="flex justify-between items-center mb-1">
-                  <span className="text-xs text-gray-500 truncate w-3/4">{conv.last_message_content || 'Nova conversa'}</span>
+                  <span className="text-xs text-gray-500 truncate w-3/4">{conv.last_message_content || 'Nova conversa iniciada'}</span>
                   {conv.unread_count > 0 && (
                     <span className="bg-emerald-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">
                       {conv.unread_count}
@@ -796,19 +989,27 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                   )}
                 </div>
                 <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
-                  <span className="text-[9px] font-black uppercase tracking-wider text-indigo-700 bg-indigo-100 px-1.5 py-0.5 rounded flex items-center gap-1">
+                  <span className="text-[9px] font-black uppercase tracking-wider text-indigo-700 bg-indigo-50 border border-indigo-100 px-1.5 py-0.5 rounded flex items-center gap-1">
                     <Inbox className="w-2 h-2"/> {inboxName}
                   </span>
-                  {!conv.assigned_user_id && (
+                  {conv.status === 'CLOSED' || conv.kanban_stage === 'CLOSED' ? (
+                    <span className="text-[9px] font-black uppercase tracking-wider text-slate-700 bg-slate-100 px-1.5 py-0.5 rounded">
+                      Finalizado
+                    </span>
+                  ) : !conv.assigned_user_id ? (
                     <span className="text-[9px] font-black uppercase tracking-wider text-orange-700 bg-orange-100 px-1.5 py-0.5 rounded">
                       Fila
+                    </span>
+                  ) : (
+                    <span className="text-[9px] font-black uppercase tracking-wider text-emerald-700 bg-emerald-100 px-1.5 py-0.5 rounded">
+                      Atribuído
                     </span>
                   )}
                   {conv.labels && conv.labels.map((lbl: any) => (
                     <span
                       key={lbl.id}
-                      className="text-[9px] font-bold px-1.5 py-0.5 rounded text-white shadow-xs"
-                      style={{ backgroundColor: lbl.color }}
+                      className="text-[9px] font-bold px-1.5 py-0.5 rounded text-white shadow-2xs"
+                      style={{ backgroundColor: lbl.color || '#10b981' }}
                     >
                       {lbl.name}
                     </span>
@@ -893,6 +1094,22 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                       {inboxes.find(i => i.id === selectedConversation.inbox_id)?.name || 'Sem Caixa'}
                     </span>
                     
+                    {/* Bot IA Status Indicator & Toggle */}
+                    <button
+                      onClick={handleToggleBot}
+                      className={`text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full flex items-center gap-1 transition-all border ${
+                        selectedConversation.is_bot_active !== false
+                          ? 'bg-purple-100 text-purple-800 border-purple-200 hover:bg-purple-200'
+                          : 'bg-gray-100 text-gray-600 border-gray-200 hover:bg-gray-200'
+                      }`}
+                      title={selectedConversation.is_bot_active !== false ? 'Clique para pausar o robô de IA nesta conversa' : 'Clique para reativar o robô de IA'}
+                    >
+                      <span>{selectedConversation.is_bot_active !== false ? '🤖 Bot Ativo' : '👤 Humano'}</span>
+                      {selectedConversation.is_bot_active !== false && (
+                        <span className="opacity-75 font-mono">({selectedConversation.bot_interaction_count || 0}/4)</span>
+                      )}
+                    </button>
+
                     {/* Visual labels in active chat header */}
                     {selectedConversation.labels && selectedConversation.labels.map((lbl: any) => (
                       <span
@@ -1041,19 +1258,29 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
             {/* Input Area */}
             {selectedConversation.assigned_user_id ? (
               <div className="p-3 md:p-4 bg-gray-50 border-t border-gray-200 pb-safe">
-                <div className="flex items-center gap-2 mb-2">
-                  <button 
-                    onClick={() => setIsPrivateNote(false)}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${!isPrivateNote ? 'bg-emerald-100 text-emerald-700' : 'text-gray-500 hover:bg-gray-200'}`}
-                  >
-                    <MessageSquare className="w-3 h-3 inline mr-1" /> Cliente
-                  </button>
-                  <button 
-                    onClick={() => setIsPrivateNote(true)}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${isPrivateNote ? 'bg-yellow-100 text-yellow-700' : 'text-gray-500 hover:bg-gray-200'}`}
-                  >
-                    <Lock className="w-3 h-3 inline mr-1" /> Interna
-                  </button>
+                                <div className="flex items-center justify-between gap-2 mb-2">
+                  <div className="flex items-center gap-2">
+                    <button 
+                      onClick={() => setIsPrivateNote(false)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${!isPrivateNote ? 'bg-emerald-100 text-emerald-700' : 'text-gray-500 hover:bg-gray-200'}`}
+                    >
+                      <MessageSquare className="w-3 h-3 inline mr-1" /> Cliente
+                    </button>
+                    <button 
+                      onClick={() => setIsPrivateNote(true)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${isPrivateNote ? 'bg-yellow-100 text-yellow-700' : 'text-gray-500 hover:bg-gray-200'}`}
+                    >
+                      <Lock className="w-3 h-3 inline mr-1" /> Interna
+                    </button>
+                  </div>
+                  
+                  {/* Assistente de IA para Atendentes (Copilot) */}
+                  <AiChatCopilot
+                    tenantId={tenantId}
+                    currentMessage={messageInput}
+                    onApplyText={(newText) => setMessageInput(newText)}
+                    disabled={!!otherUserViewing}
+                  />
                 </div>
                 <div className="flex items-end gap-2">
                   <div className="flex-1 bg-white rounded-xl border border-gray-300 shadow-sm flex items-end p-1 relative">
@@ -1211,6 +1438,8 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
           )}
         </div>
       </div>
+      </div>
+      )}
 
       <ChatTransferModal 
         isOpen={isTransferModalOpen}

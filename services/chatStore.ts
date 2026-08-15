@@ -34,9 +34,14 @@ export interface ChatConversation {
   team_id?: string | null;
   assigned_user_id?: string | null;
   status: "OPEN" | "PENDING" | "CLOSED" | "BOT";
+  kanban_stage?: "NEW" | "BOT" | "WAITING" | "STORE_REDIRECT" | "HUMAN" | "CLOSED";
   last_message_at: string;
   last_message_content: string;
   unread_count?: number;
+  is_bot_active?: boolean;
+  bot_interaction_count?: number;
+  bot_handoff_reason?: string;
+  bot_handoff_at?: string;
   contact?: ChatContact;
   labels?: ChatLabel[];
   created_at: string;
@@ -240,6 +245,22 @@ class ChatStore {
       if (!error && data) {
         const conversations = data as any[];
         for (const conv of conversations) {
+          // Normalize legacy conversations where kanban_stage is NULL or undefined
+          if (!conv.kanban_stage || !["NEW", "BOT", "WAITING", "STORE_REDIRECT", "HUMAN", "CLOSED"].includes(conv.kanban_stage)) {
+            if (conv.status === "CLOSED") {
+              conv.kanban_stage = "CLOSED";
+            } else if (conv.is_bot_active !== false && (conv.status === "BOT" || !conv.status)) {
+              conv.kanban_stage = "BOT";
+            } else if (conv.status === "PENDING") {
+              conv.kanban_stage = "WAITING";
+            } else if (conv.bot_handoff_reason === "STORE_REDIRECT") {
+              conv.kanban_stage = "STORE_REDIRECT";
+            } else if (conv.assigned_user_id) {
+              conv.kanban_stage = "HUMAN";
+            } else {
+              conv.kanban_stage = "NEW";
+            }
+          }
           conv.labels = await this.getConversationLabels(conv.id);
         }
         return conversations;
@@ -261,6 +282,21 @@ class ChatStore {
       // populate contact from this.contacts if missing
       if (!conv.contact && conv.contact_id) {
         conv.contact = this.contacts.find(c => c.id === conv.contact_id);
+      }
+      if (!conv.kanban_stage || !["NEW", "BOT", "WAITING", "STORE_REDIRECT", "HUMAN", "CLOSED"].includes(conv.kanban_stage)) {
+        if (conv.status === "CLOSED") {
+          conv.kanban_stage = "CLOSED";
+        } else if (conv.is_bot_active !== false && (conv.status === "BOT" || !conv.status)) {
+          conv.kanban_stage = "BOT";
+        } else if (conv.status === "PENDING") {
+          conv.kanban_stage = "WAITING";
+        } else if (conv.bot_handoff_reason === "STORE_REDIRECT") {
+          conv.kanban_stage = "STORE_REDIRECT";
+        } else if (conv.assigned_user_id) {
+          conv.kanban_stage = "HUMAN";
+        } else {
+          conv.kanban_stage = "NEW";
+        }
       }
       conv.labels = await this.getConversationLabels(conv.id);
     }
@@ -918,6 +954,124 @@ class ChatStore {
     this.canned_responses = this.canned_responses.filter(cr => !(cr.id === id && cr.store_id === storeId));
     this.saveToFile();
     return true;
+  }
+
+  public async getConversationById(conversationId: string): Promise<ChatConversation | null> {
+    try {
+      const { data, error } = await supabaseAdmin
+        .from("chat_conversations")
+        .select("*, contact:chat_contacts(*)")
+        .eq("id", conversationId)
+        .maybeSingle();
+      if (!error && data) {
+        return data as ChatConversation;
+      }
+    } catch (err) {
+      console.warn("[ChatStore] getConversationById fallback:", err);
+    }
+    const found = this.conversations.find(c => c.id === conversationId);
+    return found || null;
+  }
+
+  public async updateConversationBotStatus(
+    conversationId: string,
+    updates: {
+      is_bot_active?: boolean;
+      bot_interaction_count?: number;
+      bot_handoff_reason?: string;
+      bot_handoff_at?: string;
+      status?: "OPEN" | "PENDING" | "CLOSED" | "BOT";
+      kanban_stage?: "NEW" | "BOT" | "WAITING" | "STORE_REDIRECT" | "HUMAN" | "CLOSED";
+      assigned_user_id?: string | null;
+      last_message_at?: string;
+      last_message_content?: string;
+    }
+  ): Promise<void> {
+    try {
+      await supabaseAdmin
+        .from("chat_conversations")
+        .update(updates)
+        .eq("id", conversationId);
+    } catch (err) {
+      console.warn("[ChatStore] updateConversationBotStatus error:", err);
+    }
+    const idx = this.conversations.findIndex(c => c.id === conversationId);
+    if (idx >= 0) {
+      this.conversations[idx] = {
+        ...this.conversations[idx],
+        ...updates
+      };
+      this.saveToFile();
+    }
+  }
+
+  public async updateConversationStage(
+    conversationId: string,
+    storeId: string,
+    targetStage: "NEW" | "BOT" | "WAITING" | "STORE_REDIRECT" | "HUMAN" | "CLOSED",
+    assignedUserId?: string | null
+  ): Promise<ChatConversation | null> {
+    const nowIso = new Date().toISOString();
+    const updates: any = {
+      kanban_stage: targetStage,
+      updated_at: nowIso
+    };
+
+    if (assignedUserId !== undefined) {
+      updates.assigned_user_id = assignedUserId;
+    }
+
+    switch (targetStage) {
+      case "NEW":
+        updates.status = "OPEN";
+        updates.is_bot_active = false;
+        break;
+      case "BOT":
+        updates.status = "BOT";
+        updates.is_bot_active = true;
+        updates.bot_interaction_count = 0;
+        updates.bot_handoff_reason = null;
+        updates.bot_handoff_at = null;
+        break;
+      case "WAITING":
+        updates.status = "PENDING";
+        break;
+      case "STORE_REDIRECT":
+        updates.status = "OPEN";
+        updates.bot_handoff_reason = "STORE_REDIRECT";
+        break;
+      case "HUMAN":
+        updates.status = "OPEN";
+        updates.is_bot_active = false;
+        updates.bot_handoff_reason = "OPERATOR_ASSIGNED_OR_HANDOFF";
+        updates.bot_handoff_at = nowIso;
+        break;
+      case "CLOSED":
+        updates.status = "CLOSED";
+        updates.is_bot_active = false;
+        break;
+    }
+
+    try {
+      await supabaseAdmin
+        .from("chat_conversations")
+        .update(updates)
+        .eq("id", conversationId);
+    } catch (err: any) {
+      console.warn("[ChatStore] updateConversationStage Supabase fallback:", err.message);
+    }
+
+    const idx = this.conversations.findIndex(c => c.id === conversationId);
+    if (idx >= 0) {
+      this.conversations[idx] = {
+        ...this.conversations[idx],
+        ...updates
+      };
+      this.saveToFile();
+      return this.conversations[idx];
+    }
+
+    return await this.getConversationById(conversationId);
   }
 }
 

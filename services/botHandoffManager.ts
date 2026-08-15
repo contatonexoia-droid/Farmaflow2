@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
+import { realtimeHub } from "./realtimeHub.js";
 
 const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || "https://nalshjhoiecxooejpiaw.supabase.co";
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_Y2lAqlvDUhdjSNtv80GkJA_SiOgynYy";
@@ -10,6 +11,8 @@ export interface HandoffResult {
   newState: BotState;
   assignedOperatorId?: string;
   message?: string;
+  isBotActive: boolean;
+  handoffReason?: string;
 }
 
 export class BotHandoffManager {
@@ -28,15 +31,23 @@ export class BotHandoffManager {
   private sensitiveKeywords = [
     "atendente",
     "falar com humano",
+    "falar com atendente",
+    "falar com pessoa",
     "farmaceutico",
     "farmacêutico",
+    "balconista",
     "receita",
     "remédio controlado",
     "remedio controlado",
+    "tarja preta",
+    "antibiótico",
+    "antibiotico",
     "duvida",
     "dúvida",
     "atendimento",
     "urgente",
+    "emergencia",
+    "emergência",
     "prescrição",
     "prescricao"
   ];
@@ -52,55 +63,157 @@ export class BotHandoffManager {
   ): Promise<HandoffResult> {
     const lowerContent = content.toLowerCase().trim();
 
-    // Se já estiver em atendimento humano, mantém
-    if (currentStatus === "in_progress") {
-      return { newState: "HUMAN_ASSIGNED" };
+    // Se já estiver em atendimento humano em progresso
+    if (currentStatus === "in_progress" || currentStatus === "OPEN") {
+      // Verifica se é um comando explícito de transferência
     }
 
-    // Verificar se a mensagem contém gatilhos de transbordo
+    // Verificar se a mensagem contém gatilhos de transbordo imediato
     const triggersHandoff = this.sensitiveKeywords.some((term) => lowerContent.includes(term));
 
-    if (triggersHandoff || lowerContent === "0" || lowerContent === "falar com atendente") {
-      console.log(`[BotHandoffManager] Handoff triggered for conversation ${conversationId} (keyword match)`);
+    if (triggersHandoff || lowerContent === "0" || lowerContent === "falar com atendente" || lowerContent === "humano") {
+      console.log(`[BotHandoffManager] Handoff triggered for conversation ${conversationId} (keyword match: ${lowerContent})`);
+      return await this.triggerHandoff(
+        conversationId,
+        storeId,
+        "KEYWORD_TRIGGER",
+        "Encaminhei sua dúvida e o link da nossa loja. Um dos nossos balconistas humanos já vai te atender por aqui!"
+      );
+    }
 
-      // 1. Tentar alocação por Round-Robin de operadores online
-      const assignedOperator = await this.allocateNextOnlineOperator(storeId);
+    return { newState: "BOT_TRIAGE", isBotActive: true };
+  }
 
-      if (assignedOperator) {
-        // Atribuído diretamente a um operador ativo
+  /**
+   * Executa a transição da conversa do Bot para a Fila de Atendimento Humano
+   */
+  public async triggerHandoff(
+    conversationId: string,
+    storeId: string,
+    reason: string = "MANUAL_OR_BOT_COMPLETED",
+    customMessage?: string
+  ): Promise<HandoffResult> {
+    const nowIso = new Date().toISOString();
+    const assignedOperator = await this.allocateNextOnlineOperator(storeId);
+
+    const defaultTransitionMsg = customMessage || "Encaminhei sua solicitação para a nossa equipe. Um de nossos atendentes humanos já vai te atender por aqui!";
+
+    if (assignedOperator) {
+      // Atribuído diretamente a um operador ativo
+      try {
         await supabaseAdmin
           .from("chat_conversations")
           .update({
             assigned_user_id: assignedOperator.id,
-            status: "in_progress",
-            updated_at: new Date().toISOString()
+            status: "OPEN",
+            kanban_stage: "HUMAN",
+            is_bot_active: false,
+            bot_handoff_reason: reason,
+            bot_handoff_at: nowIso,
+            updated_at: nowIso
           })
           .eq("id", conversationId);
+      } catch (e: any) {
+        console.warn("[BotHandoffManager] Erro ao atualizar status no supabase:", e.message);
+      }
 
-        return {
-          newState: "HUMAN_ASSIGNED",
-          assignedOperatorId: assignedOperator.id,
-          message: `Atendimento transferido para o atendente **${assignedOperator.full_name || assignedOperator.email}**.`
-        };
-      } else {
-        // Nenhum operador disponível no momento: marcar como pendente/unassigned
+      realtimeHub.broadcastToStore(storeId, "conversation_status_changed", {
+        conversationId,
+        status: "OPEN",
+        kanban_stage: "HUMAN",
+        is_bot_active: false,
+        assigned_user_id: assignedOperator.id,
+        bot_handoff_reason: reason
+      });
+
+      return {
+        newState: "HUMAN_ASSIGNED",
+        assignedOperatorId: assignedOperator.id,
+        message: defaultTransitionMsg,
+        isBotActive: false,
+        handoffReason: reason
+      };
+    } else {
+      // Nenhum operador disponível no momento: marcar como pendente/unassigned na fila
+      try {
         await supabaseAdmin
           .from("chat_conversations")
           .update({
             assigned_user_id: null,
-            status: "pending",
-            updated_at: new Date().toISOString()
+            status: "PENDING",
+            kanban_stage: "HUMAN",
+            is_bot_active: false,
+            bot_handoff_reason: reason,
+            bot_handoff_at: nowIso,
+            updated_at: nowIso
           })
           .eq("id", conversationId);
-
-        return {
-          newState: "HUMAN_UNASSIGNED",
-          message: "Sua solicitação foi encaminhada para a nossa equipe. Em instantes um de nossos balconistas irá atendê-lo."
-        };
+      } catch (e: any) {
+        console.warn("[BotHandoffManager] Erro ao atualizar status pendente no supabase:", e.message);
       }
-    }
 
-    return { newState: "BOT_TRIAGE" };
+      realtimeHub.broadcastToStore(storeId, "conversation_status_changed", {
+        conversationId,
+        status: "PENDING",
+        kanban_stage: "HUMAN",
+        is_bot_active: false,
+        assigned_user_id: null,
+        bot_handoff_reason: reason
+      });
+
+      return {
+        newState: "HUMAN_UNASSIGNED",
+        message: defaultTransitionMsg,
+        isBotActive: false,
+        handoffReason: reason
+      };
+    }
+  }
+
+  /**
+   * Permite que o atendente humano silencie a IA ou reative o robô na conversa
+   */
+  public async toggleBotActive(
+    conversationId: string,
+    storeId: string,
+    isBotActive: boolean
+  ): Promise<boolean> {
+    const nowIso = new Date().toISOString();
+    try {
+      const updateData: any = {
+        is_bot_active: isBotActive,
+        kanban_stage: isBotActive ? "BOT" : "HUMAN",
+        updated_at: nowIso
+      };
+      if (isBotActive) {
+        // Ao reativar o bot, reseta o contador de interações da sessão
+        updateData.bot_interaction_count = 0;
+        updateData.bot_handoff_reason = null;
+        updateData.bot_handoff_at = null;
+        updateData.status = "BOT";
+      } else {
+        updateData.bot_handoff_reason = "OPERATOR_TAKEOVER";
+        updateData.bot_handoff_at = nowIso;
+        updateData.status = "OPEN";
+      }
+
+      await supabaseAdmin
+        .from("chat_conversations")
+        .update(updateData)
+        .eq("id", conversationId);
+
+      realtimeHub.broadcastToStore(storeId, "conversation_bot_toggled", {
+        conversationId,
+        is_bot_active: isBotActive,
+        kanban_stage: isBotActive ? "BOT" : "HUMAN",
+        bot_interaction_count: isBotActive ? 0 : undefined
+      });
+
+      return true;
+    } catch (err: any) {
+      console.error("[BotHandoffManager] Erro ao alternar estado do bot:", err.message);
+      return false;
+    }
   }
 
   /**

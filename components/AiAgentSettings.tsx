@@ -32,6 +32,10 @@ DIRETRIZES DE ATENDIMENTO:
     temperature: 0.7,
     maxTokens: 500,
     fallbackMessage: 'Desculpe, estou com uma instabilidade momentânea. Um de nossos atendentes humanos responderá sua mensagem em breve!',
+    maxInteractionsPerSession: 4,
+    transitionToHumanMessage: 'Encaminhei sua dúvida e o link da nossa loja. Um dos nossos balconistas humanos já vai te atender por aqui!',
+    antiAbuseGuardrailsEnabled: true,
+    strictStoreLinkEnforcement: true,
   };
 
   const [agentConfig, setAgentConfig] = useState<AiAgentConfig>({
@@ -401,6 +405,115 @@ DIRETRIZES DE ATENDIMENTO:
               </div>
             </div>
 
+            {/* Bloco 3: Trava de Segurança, Limite de Tokens e Transição para Humano */}
+            <div className="bg-white p-6 md:p-8 rounded-[2.5rem] border border-gray-100 shadow-sm space-y-6">
+              <div className="flex items-center gap-3 pb-3 border-b border-gray-100">
+                <ShieldCheck className="text-emerald-600" size={22} />
+                <div>
+                  <h5 className="font-black text-gray-900 text-base">Trava de Segurança & Transição para Humano</h5>
+                  <p className="text-xs text-gray-500">Controle estrito de consumo de tokens, proteção contra loops e handoff automático para o balcão.</p>
+                </div>
+              </div>
+
+              {/* Limite de Interações por Sessão */}
+              <div className="space-y-3 bg-gray-50 p-4 md:p-5 rounded-2xl border border-gray-200/80">
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <label className="text-xs font-black uppercase text-gray-700 flex items-center gap-1.5">
+                      <Zap size={14} className="text-amber-500" /> Limite Máximo de Interações por Sessão
+                    </label>
+                    <p className="text-[11px] text-gray-500">
+                      Evita consumo excessivo de tokens e loops infinitos. Após o limite, a IA conclui a resposta, injeta o link da loja e transfere para o balconista.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-xl border border-gray-300 shadow-sm">
+                    <input
+                      type="number"
+                      min={2}
+                      max={10}
+                      value={agentConfig.maxInteractionsPerSession || 4}
+                      onChange={(e) => setAgentConfig({ ...agentConfig, maxInteractionsPerSession: Math.max(2, Math.min(10, parseInt(e.target.value) || 4)) })}
+                      className="w-12 text-center font-black text-sm text-purple-700 outline-none"
+                    />
+                    <span className="text-xs font-bold text-gray-400">mensagens</span>
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  {[3, 4, 5].map((num) => (
+                    <button
+                      key={num}
+                      type="button"
+                      onClick={() => setAgentConfig({ ...agentConfig, maxInteractionsPerSession: num })}
+                      className={`text-[11px] px-3 py-1 rounded-lg font-bold transition-all ${
+                        (agentConfig.maxInteractionsPerSession || 4) === num
+                          ? 'bg-purple-600 text-white shadow-sm'
+                          : 'bg-white text-gray-600 hover:bg-gray-200 border border-gray-200'
+                      }`}
+                    >
+                      {num} {num === 4 ? 'Mensagens (Recomendado)' : 'Mensagens'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Mensagem Padrão de Transição para Atendimento Humano */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-black uppercase text-gray-500">Mensagem de Transição para o Atendente Humano</label>
+                  <button
+                    type="button"
+                    onClick={() => setAgentConfig({
+                      ...agentConfig,
+                      transitionToHumanMessage: 'Encaminhei sua dúvida e o link da nossa loja. Um dos nossos balconistas humanos já vai te atender por aqui!'
+                    })}
+                    className="text-[11px] font-bold text-purple-600 hover:text-purple-800 transition-colors flex items-center gap-1"
+                  >
+                    <RefreshCw size={10} /> Restaurar Padrão
+                  </button>
+                </div>
+                <textarea
+                  rows={2}
+                  value={agentConfig.transitionToHumanMessage || ''}
+                  onChange={(e) => setAgentConfig({ ...agentConfig, transitionToHumanMessage: e.target.value })}
+                  placeholder="Ex: Encaminhei sua dúvida e o link da nossa loja. Um dos nossos balconistas humanos já vai te atender por aqui!"
+                  className="w-full bg-gray-50 border-2 border-gray-200 rounded-2xl p-3.5 text-xs md:text-sm font-medium text-gray-800 outline-none focus:border-purple-500 transition-colors"
+                />
+              </div>
+
+              {/* Toggles de Proteção e Injeção de Link */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
+                <label className="flex items-start gap-3 p-3.5 bg-emerald-50/70 border border-emerald-200 rounded-2xl cursor-pointer hover:bg-emerald-50 transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={agentConfig.antiAbuseGuardrailsEnabled !== false}
+                    onChange={(e) => setAgentConfig({ ...agentConfig, antiAbuseGuardrailsEnabled: e.target.checked })}
+                    className="mt-1 rounded text-emerald-600 focus:ring-emerald-500"
+                  />
+                  <div>
+                    <span className="text-xs font-black text-emerald-950 block">Proteção Ativa Anti-Abuso</span>
+                    <span className="text-[11px] text-emerald-800 leading-tight block mt-0.5">
+                      Bloqueia comandos de prompt injection, spam repetitivo e bypass de regras sem gastar tokens.
+                    </span>
+                  </div>
+                </label>
+
+                <label className="flex items-start gap-3 p-3.5 bg-purple-50/70 border border-purple-200 rounded-2xl cursor-pointer hover:bg-purple-50 transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={agentConfig.strictStoreLinkEnforcement !== false}
+                    onChange={(e) => setAgentConfig({ ...agentConfig, strictStoreLinkEnforcement: e.target.checked })}
+                    className="mt-1 rounded text-purple-600 focus:ring-purple-500"
+                  />
+                  <div>
+                    <span className="text-xs font-black text-purple-950 block">Link Obrigatório da Webloja</span>
+                    <span className="text-[11px] text-purple-800 leading-tight block mt-0.5">
+                      Garante que todas as mensagens do bot contenham o link oficial da loja virtual da farmácia.
+                    </span>
+                  </div>
+                </label>
+              </div>
+            </div>
+
             {/* Botão de Salvar */}
             <div className="flex justify-end pt-2">
               <button
@@ -432,16 +545,21 @@ DIRETRIZES DE ATENDIMENTO:
                       <span className="text-[9px] bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded-full font-bold">Sem Chave</span>
                     )}
                   </div>
-                  <p className="text-[10px] text-gray-400">Teste as respostas em tempo real</p>
+                  <p className="text-[10px] text-gray-400">Teste com travas de segurança ativas</p>
                 </div>
               </div>
-              <button
-                onClick={handleClearChat}
-                className="text-[11px] text-gray-400 hover:text-white px-2.5 py-1 bg-gray-800 rounded-lg transition-colors flex items-center gap-1"
-                title="Limpar conversa"
-              >
-                <RefreshCw size={12} /> Limpar
-              </button>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-mono px-2 py-0.5 bg-gray-800 border border-gray-700 text-gray-300 rounded-md">
+                  Interações: {chatHistory.filter(m => m.role === 'user').length} / {agentConfig.maxInteractionsPerSession || 4}
+                </span>
+                <button
+                  onClick={handleClearChat}
+                  className="text-[11px] text-gray-400 hover:text-white px-2.5 py-1 bg-gray-800 rounded-lg transition-colors flex items-center gap-1"
+                  title="Reiniciar sessão"
+                >
+                  <RefreshCw size={12} /> Reiniciar
+                </button>
+              </div>
             </div>
 
             {/* Chat Messages */}

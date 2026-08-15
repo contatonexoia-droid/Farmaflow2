@@ -84,6 +84,7 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
     erpUrl: '',
     erpType: '',
     isAiAgentEnabled: false,
+    isAiCopilotEnabled: false,
     aiAgentConfig: undefined
   });
 
@@ -565,6 +566,7 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
           erpType: editData.erpType || '',
           isChatEnabled: editData.isChatEnabled || false,
           isAiAgentEnabled: editData.isAiAgentEnabled || false,
+          isAiCopilotEnabled: editData.isAiCopilotEnabled || false,
           aiAgentConfig: editData.aiAgentConfig || existingTenant?.aiAgentConfig,
           isNetworkMaster: editData.isNetworkMaster || false,
           networkId: editData.networkId || '',
@@ -958,7 +960,12 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
                         <span className="flex items-center gap-1.5"><Calendar size={12} /> Expira em: {t.licenseExpiration ? new Date(t.licenseExpiration).toLocaleDateString('pt-BR') : 'Sem data'}</span>
                         {t.isAiAgentEnabled && (
                           <span className="flex items-center gap-1 bg-purple-100 text-purple-700 px-2 py-0.5 rounded-md font-extrabold text-[9px]">
-                            <Sparkles size={10} /> IA Habilitada
+                            <Bot size={10} /> Bot IA
+                          </span>
+                        )}
+                        {(t.isAiCopilotEnabled || (t as any).is_ai_copilot_enabled) && (
+                          <span className="flex items-center gap-1 bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-md font-extrabold text-[9px]">
+                            <Sparkles size={10} /> Copilot IA
                           </span>
                         )}
                     </div>
@@ -1296,6 +1303,28 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
                         <div>
                             <p className="font-bold text-gray-900 text-sm group-hover:text-indigo-700 transition-colors">Módulo de Chat Multi-Atendentes</p>
                             <p className="text-xs text-gray-500">Ativa a interface de Chat e a conexão com WhatsApp via Z-API para esta loja.</p>
+                        </div>
+                    </label>
+
+                                        {/* Master Switch para o Assistente de IA dos Atendentes (Copilot) */}
+                    <label className="flex items-center gap-4 cursor-pointer group bg-gradient-to-r from-blue-50 via-indigo-50/50 to-purple-50 p-4 rounded-2xl border-2 border-indigo-200 hover:border-indigo-400 transition-all shadow-sm">
+                        <div className="relative">
+                            <input 
+                              type="checkbox" 
+                              className="sr-only" 
+                              checked={editData.isAiCopilotEnabled || false} 
+                              onChange={e => setEditData({...editData, isAiCopilotEnabled: e.target.checked})} 
+                            />
+                            <div className={`block w-14 h-8 rounded-full transition-colors ${editData.isAiCopilotEnabled ? 'bg-indigo-600' : 'bg-gray-300'}`}></div>
+                            <div className={`absolute left-1 top-1 bg-white w-6 h-6 rounded-full transition-transform ${editData.isAiCopilotEnabled ? 'transform translate-x-6' : ''}`}></div>
+                        </div>
+                        <div className="flex-1">
+                            <div className="flex items-center gap-2">
+                                <span className="p-1 rounded-lg bg-indigo-100 text-indigo-700"><Sparkles size={16} /></span>
+                                <p className="font-bold text-gray-900 text-sm group-hover:text-indigo-700 transition-colors">Módulo de Assistente de IA para Atendentes (Co-piloto do Chat)</p>
+                                <span className="text-[9px] font-black bg-indigo-600 text-white px-2 py-0.5 rounded-full uppercase tracking-wider">Upgrade / Plano PRO</span>
+                            </div>
+                            <p className="text-xs text-gray-600 mt-1">Habilita as ferramentas de IA na tela de chat para os operadores corrigirem textos, ajustarem o tom para empático, resumirem ou criarem respostas a partir de tópicos.</p>
                         </div>
                     </label>
 

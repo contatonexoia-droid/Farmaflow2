@@ -1,6 +1,9 @@
 import { GoogleGenAI } from "@google/genai";
 import { createClient } from "@supabase/supabase-js";
 import { AiAgentConfig, PharmacyConfig } from "../types.js";
+import { chatStore } from "./chatStore.js";
+import { botHandoffManager } from "./botHandoffManager.js";
+import { realtimeHub } from "./realtimeHub.js";
 
 const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || "https://nalshjhoiecxooejpiaw.supabase.co";
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_Y2lAqlvDUhdjSNtv80GkJA_SiOgynYy";
@@ -34,6 +37,10 @@ export interface AiAgentExecutionResult {
   model: string;
   transferredToHuman?: boolean;
   storeLinkUsed: string;
+  interactionCount?: number;
+  maxInteractions?: number;
+  handoffReason?: string;
+  isBotActive?: boolean;
 }
 
 const STOP_WORDS = new Set([
@@ -45,6 +52,66 @@ const STOP_WORDS = new Set([
   "onde", "acho", "queria", "consigo", "encontrar", "para", "com", "de", "da", "do",
   "das", "dos", "um", "uma", "uns", "umas", "em", "sobre", "que", "temos"
 ]);
+
+// Expressões e padrões para detecção de Prompt Injection e Abuso
+const PROMPT_INJECTION_PATTERNS = [
+  /ignore\s+(all\s+)?(previous|prior|above)\s+instructions/i,
+  /ignore\s+(as\s+)?regras\s+(anteriores|do\s+sistema)/i,
+  /desconsidere\s+(todas\s+as\s+)?(instru[çc][õo]es|regras)/i,
+  /esque[çc]a\s+(tudo|todas\s+as\s+instru[çc][õo]es|o\s+prompt)/i,
+  /novas\s+regras\s*:/i,
+  /system\s+prompt/i,
+  /prompt\s+do\s+sistema/i,
+  /mostre\s+(suas|o\s+seu)\s+(prompt|instru[çc][õo]es|diretrizes)/i,
+  /quais\s+(s[ãa]o\s+as\s+)?suas\s+instru[çc][õo]es/i,
+  /revele\s+(seu|o)\s+prompt/i,
+  /repeat\s+(everything|the\s+words)\s+above/i,
+  /repita\s+o\s+texto\s+acima/i,
+  /dan\s+mode/i,
+  /developer\s+mode\s+enabled/i,
+  /voc[êe]\s+agora\s+[ée]\s+(um\s+)?(hacker|assistente\s+sem\s+filtros|outro)/i,
+  /finja\s+que\s+n[ãa]o\s+[ée]\s+uma\s+farm[áa]cia/i,
+  /jailbreak/i,
+  /<script[\s\S]*?>/i,
+  /union\s+select/i,
+  /drop\s+table/i
+];
+
+export function detectAbuseOrPromptInjection(message: string): { isSuspicious: boolean; reason?: string } {
+  if (!message || typeof message !== 'string') {
+    return { isSuspicious: false };
+  }
+
+  const clean = message.trim();
+
+  // 1. Mensagens com mais de 1500 caracteres (tentativa de buffer overflow ou exaustão de contexto)
+  if (clean.length > 1500) {
+    return {
+      isSuspicious: true,
+      reason: "Mensagem excessivamente longa (limite de proteção contra consumo abusivo de tokens)."
+    };
+  }
+
+  // 2. Repetição excessiva de caracteres (spam)
+  if (/(.)\1{35,}/i.test(clean)) {
+    return {
+      isSuspicious: true,
+      reason: "Sequência repetitiva de caracteres detectada (anti-spam)."
+    };
+  }
+
+  // 3. Padrões conhecidos de Prompt Injection / Jailbreak
+  for (const pattern of PROMPT_INJECTION_PATTERNS) {
+    if (pattern.test(clean)) {
+      return {
+        isSuspicious: true,
+        reason: "Comando não autorizado ou tentativa de bypass de diretrizes detectada."
+      };
+    }
+  }
+
+  return { isSuspicious: false };
+}
 
 const CLINICAL_INTENTS: Record<string, string[]> = {
   "cabeca": ["paracetamol", "dipirona", "neosaldina", "dorflex", "ibuprofeno", "aspirina"],
@@ -187,7 +254,26 @@ export class AiAgentService {
     // Remover barra final para padronizar parâmetros
     storeLink = storeLink.replace(/\/+$/, '');
 
-    // 4. Preparar Prompt do Sistema com variáveis
+    // 4. Detecção Ativa de Prompt Injection e Padrões Abusivos (Proteção de Custos e Tokens)
+    const guardrailsEnabled = effectiveConfig.antiAbuseGuardrailsEnabled !== false;
+    if (guardrailsEnabled) {
+      const abuseCheck = detectAbuseOrPromptInjection(incomingMessage);
+      if (abuseCheck.isSuspicious) {
+        console.warn(`[AiAgentService] Prompt Injection ou Abuso detectado (${tenantId}):`, abuseCheck.reason);
+        const transitionMsg = effectiveConfig.transitionToHumanMessage || "Encaminhei sua dúvida e o link da nossa loja. Um dos nossos balconistas humanos já vai te atender por aqui!";
+        const safeReply = `Olá! Para garantir sua segurança e o melhor suporte sobre nossos produtos e medicamentos, você pode consultar nosso catálogo completo e valores em nossa Webloja:\n👉 ${storeLink}\n\n${transitionMsg}`;
+        return {
+          reply: safeReply,
+          provider: 'guardrails',
+          model: 'rule-based-safety',
+          storeLinkUsed: storeLink,
+          transferredToHuman: true,
+          handoffReason: 'SECURITY_INJECTION_DETECTED'
+        };
+      }
+    }
+
+    // 5. Preparar Prompt do Sistema com variáveis
     const storeName = tenant.name || "Nossa Drogaria";
     let basePrompt = effectiveConfig.systemPrompt || DEFAULT_AI_AGENT_PROMPT;
     basePrompt = basePrompt
@@ -196,7 +282,7 @@ export class AiAgentService {
       .replace(/\{NOME_FARMACIA\}/g, storeName)
       .replace(/\{LINK_LOJA\}/g, storeLink);
 
-    // 5. Busca contextual aprofundada de produtos no banco de dados real da drogaria
+    // 6. Busca contextual aprofundada de produtos no banco de dados real da drogaria
     let catalogContext = "";
     const searchTerms = extractKeywordsAndIntents(incomingMessage);
     const primarySearchTerm = searchTerms[0] || incomingMessage.trim().split(/\s+/)[0] || "";
@@ -323,7 +409,21 @@ Nenhum produto específico identificado na mensagem. Link geral da Webloja: ${st
       catalogContext = `\n\nLink da Webloja: ${storeLink}`;
     }
 
-    const fullSystemInstruction = `${basePrompt}${catalogContext}\n\nLembre-se: Link da Webloja: ${storeLink}`;
+    // 7. Trava de Interações: Se for a última interação da sessão antes do transbordo
+    const maxInteractions = Number(effectiveConfig.maxInteractionsPerSession) || 4;
+    const currentInteraction = (chatHistory.filter(m => m.role === 'user').length) + 1;
+    const isFinalSessionTurn = currentInteraction >= maxInteractions;
+
+    let finalTurnDirective = "";
+    if (isFinalSessionTurn) {
+      finalTurnDirective = `\n\n[DIRETRIZ CRÍTICA DE ÚLTIMA INTERAÇÃO DA SESSÃO]:
+Esta é a última resposta permitida nesta sessão antes do transbordo para o atendente humano.
+1. Responda a dúvida do cliente de forma conclusiva, amigável e direta.
+2. OBRIGATÓRIAMENTE recomende a compra na Webloja através do link: ${storeLink}
+3. Informe que um balconista humano da farmácia dará continuidade ao atendimento logo em seguida caso ele precise de algo a mais.`;
+    }
+
+    const fullSystemInstruction = `${basePrompt}${catalogContext}${finalTurnDirective}\n\nLembre-se: Link da Webloja: ${storeLink}`;
 
     const provider = effectiveConfig.provider || 'gemini';
     const apiKey = effectiveConfig.apiKey?.trim() || (provider === 'gemini' ? process.env.GEMINI_API_KEY : process.env.OPENAI_API_KEY);
@@ -334,13 +434,335 @@ Nenhum produto específico identificado na mensagem. Link geral da Webloja: ${st
       throw new Error(`Por favor, insira sua Chave de API do ${providerLabel} nas configurações ao lado para ativar as respostas inteligentes. Obtenha sua chave em: ${keyUrl}`);
     }
 
-    // 6. Chamada ao Provedor Escolhido
+    // 8. Chamada ao Provedor Escolhido
+    let rawResult: AiAgentExecutionResult;
     if (provider === 'openai') {
-      return await this.callOpenAi(apiKey, effectiveConfig.model || 'gpt-4o-mini', fullSystemInstruction, incomingMessage, chatHistory, storeLink);
+      rawResult = await this.callOpenAi(apiKey, effectiveConfig.model || 'gpt-4o-mini', fullSystemInstruction, incomingMessage, chatHistory, storeLink);
     } else {
       // Default: Google Gemini
-      return await this.callGemini(apiKey, effectiveConfig.model || 'gemini-2.5-flash', fullSystemInstruction, incomingMessage, chatHistory, storeLink);
+      rawResult = await this.callGemini(apiKey, effectiveConfig.model || 'gemini-2.5-flash', fullSystemInstruction, incomingMessage, chatHistory, storeLink);
     }
+
+    // 9. Garantia de Presença do Link da Webloja (Strict Enforcement)
+    let enforcedReply = rawResult.reply;
+    if (!enforcedReply.includes("http") && !enforcedReply.includes(".online") && !enforcedReply.includes(".com")) {
+      enforcedReply = `${enforcedReply}\n\n🛍️ *Consulte nosso catálogo e compre online:* ${storeLink}`;
+    }
+
+    // 10. Se for o último turno da sessão, anexa mensagem de transição humana
+    const transitionMsg = effectiveConfig.transitionToHumanMessage || "Encaminhei sua dúvida e o link da nossa loja. Um dos nossos balconistas humanos já vai te atender por aqui!";
+    if (isFinalSessionTurn) {
+      if (!enforcedReply.includes("balconista") && !enforcedReply.includes("atendente humano")) {
+        enforcedReply = `${enforcedReply}\n\n${transitionMsg}`;
+      }
+      return {
+        ...rawResult,
+        reply: enforcedReply,
+        transferredToHuman: true,
+        interactionCount: currentInteraction,
+        maxInteractions,
+        handoffReason: 'MAX_INTERACTIONS_REACHED'
+      };
+    }
+
+    return {
+      ...rawResult,
+      reply: enforcedReply,
+      interactionCount: currentInteraction,
+      maxInteractions,
+      transferredToHuman: false
+    };
+  }
+
+  /**
+   * Processamento completo de turno de conversa do WhatsApp / Chat Central
+   * Gerencia contagem de interações, travas anti-abuso, transbordo para humano e disparos
+   */
+  public async processConversationTurn(
+    storeId: string,
+    conversationId: string,
+    incomingMessage: string,
+    options?: {
+      instanceName?: string;
+      phoneNumber?: string;
+      chatHistory?: AiChatMessage[];
+    }
+  ): Promise<{
+    handled: boolean;
+    replyText?: string;
+    transferredToHuman: boolean;
+    reason?: string;
+  }> {
+    try {
+      // 1. Obter tenant e validar se o módulo de IA está autorizado
+      const tenant = await this.verifyTenantAuthorization(storeId);
+      const dbConfig: AiAgentConfig = tenant.ai_agent_config || tenant.aiagentconfig || {};
+
+      if (!dbConfig.active && !dbConfig.enabled) {
+        return { handled: false, transferredToHuman: false, reason: "AGENT_PAUSED" };
+      }
+
+      // 2. Obter conversa atual para inspecionar estado do bot
+      const conv = await chatStore.getConversationById(conversationId);
+      if (conv) {
+        // Se o operador humano já assumiu ou o bot foi silenciado
+        if (conv.is_bot_active === false || conv.status === "OPEN" && conv.assigned_user_id) {
+          return { handled: false, transferredToHuman: true, reason: "ALREADY_HUMAN_ASSIGNED" };
+        }
+      }
+
+      const currentCount = conv?.bot_interaction_count || 0;
+      const maxInteractions = Number(dbConfig.maxInteractionsPerSession) || 4;
+      const transitionMsg = dbConfig.transitionToHumanMessage || "Encaminhei sua dúvida e o link da nossa loja. Um dos nossos balconistas humanos já vai te atender por aqui!";
+
+      // 3. Montar link da Loja Online
+      let storeLink = dbConfig.storeLink || tenant.welcome_message_link || tenant.welcomemessagelink;
+      if (!storeLink) {
+        storeLink = tenant.custom_domain ? `https://${tenant.custom_domain}` : `https://${tenant.slug || tenant.id}.farmaflow.online`;
+      }
+      storeLink = storeLink.replace(/\/+$/, '');
+
+      // 4. Verificar Termos Sensíveis de Transbordo Imediato (ex: receita, falar com humano)
+      const handoffCheck = await botHandoffManager.processMessageState(
+        conversationId,
+        storeId,
+        incomingMessage,
+        conv?.status || "BOT"
+      );
+
+      if (handoffCheck.isBotActive === false) {
+        const transMessage = `${handoffCheck.message || transitionMsg}\n\n🛍️ *Nossa Webloja:* ${storeLink}`;
+        
+        // Enviar mensagem pelo canal
+        await chatStore.addMessage(storeId, conversationId, "BOT", transMessage, false, options?.instanceName);
+        await chatStore.updateConversationBotStatus(conversationId, {
+          is_bot_active: false,
+          bot_handoff_reason: handoffCheck.handoffReason || "KEYWORD_TRIGGER",
+          kanban_stage: "HUMAN",
+          status: "OPEN",
+          bot_handoff_at: new Date().toISOString()
+        });
+
+        return {
+          handled: true,
+          replyText: transMessage,
+          transferredToHuman: true,
+          reason: handoffCheck.handoffReason || "KEYWORD_TRIGGER"
+        };
+      }
+
+      // 5. Verificar Proteção Ativa Anti-Abuso / Prompt Injection
+      if (dbConfig.antiAbuseGuardrailsEnabled !== false) {
+        const abuseCheck = detectAbuseOrPromptInjection(incomingMessage);
+        if (abuseCheck.isSuspicious) {
+          console.warn(`[AiAgentService] Abuso/Injection bloqueado para conversa ${conversationId}:`, abuseCheck.reason);
+          const safeReply = `Olá! Para garantir a sua segurança e o melhor suporte sobre nossos produtos e medicamentos, você pode consultar nosso catálogo completo e valores em nossa Loja Online:\n👉 ${storeLink}\n\n${transitionMsg}`;
+
+          await chatStore.addMessage(storeId, conversationId, "BOT", safeReply, false, options?.instanceName);
+          await botHandoffManager.triggerHandoff(conversationId, storeId, "SECURITY_INJECTION_DETECTED", transitionMsg);
+          await chatStore.updateConversationBotStatus(conversationId, {
+            is_bot_active: false,
+            bot_handoff_reason: "SECURITY_INJECTION_DETECTED",
+            bot_handoff_at: new Date().toISOString()
+          });
+
+          return {
+            handled: true,
+            replyText: safeReply,
+            transferredToHuman: true,
+            reason: "SECURITY_INJECTION_DETECTED"
+          };
+        }
+      }
+
+      // 6. Se já tiver atingido o limite de mensagens da sessão
+      if (currentCount >= maxInteractions) {
+        console.log(`[AiAgentService] Limite de interações atingido (${currentCount}/${maxInteractions}) para conversa ${conversationId}. Silenciando IA.`);
+        await botHandoffManager.triggerHandoff(conversationId, storeId, "MAX_INTERACTIONS_REACHED", transitionMsg);
+        return {
+          handled: false,
+          transferredToHuman: true,
+          reason: "MAX_INTERACTIONS_REACHED"
+        };
+      }
+
+      // 7. Carregar histórico recente da conversa para contexto
+      const history = options?.chatHistory || [];
+      const nextCount = currentCount + 1;
+      const isFinalTurn = nextCount >= maxInteractions;
+
+      // 8. Gerar resposta com a LLM
+      const aiResult = await this.generateReply(
+        storeId,
+        incomingMessage,
+        history,
+        dbConfig
+      );
+
+      let finalReply = aiResult.reply;
+
+      // 9. Se for a última interação da sessão, realizar transbordo definitivo para humano
+      if (isFinalTurn || aiResult.transferredToHuman) {
+        if (!finalReply.includes("balconista") && !finalReply.includes("atendente humano")) {
+          finalReply = `${finalReply}\n\n${transitionMsg}`;
+        }
+
+        await chatStore.addMessage(storeId, conversationId, "BOT", finalReply, false, options?.instanceName);
+        await botHandoffManager.triggerHandoff(conversationId, storeId, "MAX_INTERACTIONS_REACHED", transitionMsg);
+        await chatStore.updateConversationBotStatus(conversationId, {
+          is_bot_active: false,
+          bot_interaction_count: nextCount,
+          bot_handoff_reason: "MAX_INTERACTIONS_REACHED",
+          kanban_stage: "HUMAN",
+          status: "OPEN",
+          bot_handoff_at: new Date().toISOString()
+        });
+
+        return {
+          handled: true,
+          replyText: finalReply,
+          transferredToHuman: true,
+          reason: "MAX_INTERACTIONS_REACHED"
+        };
+      }
+
+      // 10. Interação normal do bot: Enviar mensagem e incrementar contador
+      await chatStore.addMessage(storeId, conversationId, "BOT", finalReply, false, options?.instanceName);
+      await chatStore.updateConversationBotStatus(conversationId, {
+        is_bot_active: true,
+        bot_interaction_count: nextCount,
+        kanban_stage: "BOT",
+        status: "BOT"
+      });
+
+      return {
+        handled: true,
+        replyText: finalReply,
+        transferredToHuman: false
+      };
+    } catch (err: any) {
+      console.error("[AiAgentService] Erro no processConversationTurn:", err.message);
+      return {
+        handled: false,
+        transferredToHuman: false,
+        reason: err.message
+      };
+    }
+  }
+
+  /**
+   * Assistente de IA para Atendentes (Copilot interno de redação no chat)
+   */
+  public async generateCopilotAssistance(
+    tenantId: string,
+    action: 'fix' | 'empathy' | 'summarize' | 'expand' | 'custom',
+    text: string,
+    customInstruction?: string
+  ): Promise<{ suggestedText: string; action: string }> {
+    if (!text && action !== 'expand') {
+      throw new Error("Texto base é obrigatório para processamento da IA.");
+    }
+
+    // 1. Validar autorização do tenant no Super Admin
+    let tenant: any = null;
+    const { data: tenantData } = await supabaseAdmin
+      .from("tenants")
+      .select("*")
+      .or(`id.eq.${tenantId},slug.eq.${tenantId}`)
+      .maybeSingle();
+
+    if (tenantData) {
+      tenant = tenantData;
+    } else {
+      const { data: fallbackTenant } = await supabaseAdmin
+        .from("tenants")
+        .select("*")
+        .eq("id", tenantId)
+        .maybeSingle();
+      tenant = fallbackTenant;
+    }
+
+    if (!tenant) {
+      throw new Error(`Drogaria não encontrada (${tenantId}).`);
+    }
+
+    const isCopilotAllowed = 
+      tenant.is_ai_copilot_enabled === true || 
+      tenant.is_ai_agent_enabled === true ||
+      tenant.isaiagentenabled === true;
+
+    if (!isCopilotAllowed) {
+      const err = new Error("MÓDULO_NÃO_AUTORIZADO: O Assistente de IA para Atendentes não está liberado no plano desta drogaria. Solicite liberação no Super Admin.");
+      (err as any).statusCode = 403;
+      throw err;
+    }
+
+    const pharmacyName = tenant.name || "Nossa Farmácia";
+    let effectiveConfig: AiAgentConfig = {
+      enabled: true,
+      provider: 'gemini',
+      apiKey: '',
+      model: 'gemini-2.5-flash'
+    };
+
+    if (tenant.ai_agent_config) {
+      try {
+        effectiveConfig = typeof tenant.ai_agent_config === 'string'
+          ? JSON.parse(tenant.ai_agent_config)
+          : tenant.ai_agent_config;
+      } catch (e) {}
+    }
+
+    const provider = effectiveConfig.provider || 'gemini';
+    const apiKey = effectiveConfig.apiKey?.trim() || (provider === 'gemini' ? process.env.GEMINI_API_KEY : process.env.OPENAI_API_KEY);
+
+    if (!apiKey) {
+      throw new Error("Chave de API de IA não configurada no servidor ou na drogaria.");
+    }
+
+    // Definir prompt com base na ação
+    let taskInstruction = "";
+    switch (action) {
+      case 'fix':
+        taskInstruction = "Sua tarefa é CORRIGIR a ortografia, pontuação, acentuação e concordância gramatical da mensagem abaixo. Mantenha o sentido, o tom original e os termos técnicos farmacêuticos ou nomes comerciais de medicamentos intactos. Retorne APENAS o texto corrigido, sem explicações ou introduções.";
+        break;
+      case 'empathy':
+        taskInstruction = `Sua tarefa é REESCREVER a mensagem para torná-la altamente acolhedora, empática, profissional e humanizada, adequada para o atendimento de balcão da farmácia "${pharmacyName}". Transmita cuidado genuíno com a saúde e bem-estar do cliente, com linguagem clara e calorosa. Retorne APENAS o texto aprimorado, sem explicações.`;
+        break;
+      case 'summarize':
+        taskInstruction = "Sua tarefa é RESUMIR e tornar a mensagem o mais DIRETA, clara e concisa possível para leitura rápida no WhatsApp, mantendo todas as informações essenciais (preços, orientações, prazos). Retorne APENAS o texto resumido.";
+        break;
+      case 'expand':
+        taskInstruction = `Sua tarefa é CRIAR uma mensagem de WhatsApp completa, profissional, educada e pronta para envio pelo atendente da farmácia "${pharmacyName}", a partir das anotações/tópicos soltos fornecidos. Seja atencioso, claro e bem estruturado com quebras de linha confortáveis. Retorne APENAS a mensagem pronta para envio.`;
+        break;
+      case 'custom':
+        taskInstruction = `Sua tarefa é reescrever ou ajustar a mensagem de atendimento da farmácia "${pharmacyName}" seguindo estritamente esta instrução: "${customInstruction || 'Aprimorar a mensagem'}". Retorne APENAS o texto final pronto para envio.`;
+        break;
+    }
+
+    const systemPrompt = `Você é o Copilot Especialista em Comunicação Farmacêutica da farmácia "${pharmacyName}".
+Você auxilia atendentes humanos a redigirem mensagens perfeitas para clientes no WhatsApp.
+REGRAS OBRIGATÓRIAS:
+- Retorne SEMPRE E APENAS o texto final pronto para ser colado no WhatsApp.
+- NUNCA inclua frases de introdução como "Aqui está a mensagem:", "Sugestão:", aspas extras ou comentários.
+- Preserve números de telefone, links, valores em R$ e nomes de produtos/medicamentos informados.
+${taskInstruction}`;
+
+    const incomingMessage = text || (customInstruction || "Olá");
+    let resultText = "";
+
+    if (provider === 'openai') {
+      const res = await this.callOpenAi(apiKey, effectiveConfig.model || 'gpt-4o-mini', systemPrompt, incomingMessage, [], '');
+      resultText = res.reply;
+    } else {
+      const res = await this.callGemini(apiKey, effectiveConfig.model || 'gemini-2.5-flash', systemPrompt, incomingMessage, [], '');
+      resultText = res.reply;
+    }
+
+    return {
+      suggestedText: resultText.replace(/^["']|["']$/g, '').trim(),
+      action
+    };
   }
 
   private async callGemini(
