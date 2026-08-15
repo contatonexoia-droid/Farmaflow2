@@ -7,12 +7,35 @@ interface TeamManagementProps {
   session?: any;
 }
 
-const ROLES = [
-  { id: 'admin', label: 'Admin Matriz', color: 'bg-purple-100 text-purple-800', border: 'border-purple-200', desc: 'Acesso total a todas as filiais' },
-  { id: 'gerente', label: 'Gerente', color: 'bg-emerald-100 text-emerald-800', border: 'border-emerald-200', desc: 'Gestão da loja atual' },
-  { id: 'operador', label: 'Operador / Balconista', color: 'bg-blue-100 text-blue-800', border: 'border-blue-200', desc: 'Atendimento e chat' },
-  { id: 'entregador', label: 'Entregador', color: 'bg-orange-100 text-orange-800', border: 'border-orange-200', desc: 'Apenas entregas' }
+// Perfis permitidos para cadastro e edição pelo painel da loja
+const STORE_ALLOWED_ROLES = [
+  { 
+    id: 'gerente', 
+    label: 'Gerente', 
+    color: 'bg-emerald-100 text-emerald-800', 
+    border: 'border-emerald-200', 
+    desc: 'Gestão da loja atual' 
+  },
+  { 
+    id: 'operador', 
+    label: 'Operador / Balconista', 
+    color: 'bg-blue-100 text-blue-800', 
+    border: 'border-blue-200', 
+    desc: 'Atendimento e chat' 
+  }
 ];
+
+// Mapeamento visual para exibição de qualquer cargo existente na listagem
+const ROLE_DISPLAY_MAP: Record<string, { label: string; color: string; border: string }> = {
+  admin: { label: 'Admin Matriz', color: 'bg-purple-100 text-purple-800', border: 'border-purple-200' },
+  matriz: { label: 'Admin Matriz', color: 'bg-purple-100 text-purple-800', border: 'border-purple-200' },
+  admin_matriz: { label: 'Admin Matriz', color: 'bg-purple-100 text-purple-800', border: 'border-purple-200' },
+  owner: { label: 'Proprietário', color: 'bg-amber-100 text-amber-800', border: 'border-amber-200' },
+  gerente: { label: 'Gerente', color: 'bg-emerald-100 text-emerald-800', border: 'border-emerald-200' },
+  operador: { label: 'Operador / Balconista', color: 'bg-blue-100 text-blue-800', border: 'border-blue-200' },
+  balconista: { label: 'Operador / Balconista', color: 'bg-blue-100 text-blue-800', border: 'border-blue-200' },
+  entregador: { label: 'Entregador', color: 'bg-orange-100 text-orange-800', border: 'border-orange-200' }
+};
 
 import { TeamsSettings } from './TeamsSettings';
 
@@ -29,13 +52,6 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ tenantId, sessio
   
   const [loadingAuth, setLoadingAuth] = useState(true);
   const [user, setUser] = useState<any>(null);
-  const [currentUserRole, setCurrentUserRole] = useState('operador');
-  
-  // Mocking stores for Admin Matriz selection
-  const [stores, setStores] = useState([
-     { id: tenantId, name: 'Loja Atual (Sessão)' },
-     { id: 'loja-matriz-1', name: 'FarmaFlow Matriz' }
-  ]);
 
   useEffect(() => {
     let isMounted = true;
@@ -44,11 +60,6 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ tenantId, sessio
         const { data: { session } } = await supabase.auth.getSession();
         if (isMounted) {
           setUser(session?.user ?? null);
-          
-          if (session?.user) {
-             const { data: profile } = await supabase.from('profiles').select('role').eq('id', session.user.id).single();
-             if (profile) setCurrentUserRole(profile.role);
-          }
         }
       } catch (error) {
         console.error("Erro ao recuperar sessão:", error);
@@ -236,7 +247,8 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ tenantId, sessio
                 <tr><td colSpan={6} className="py-12 text-center text-gray-400 font-medium">Nenhum funcionário encontrado na tabela de perfis.</td></tr>
               ) : (
                 filteredTeam.map(t => {
-                  const roleCfg = ROLES.find(r => r.id === t.role) || ROLES[2];
+                  const roleKey = (t.role || 'operador').toLowerCase();
+                  const roleCfg = ROLE_DISPLAY_MAP[roleKey] || { label: t.role || 'Operador', color: 'bg-blue-100 text-blue-800', border: 'border-blue-200' };
                   return (
                     <tr key={t.id} className={`border-b border-gray-50 transition-colors ${!t.is_active ? 'opacity-50 grayscale' : 'hover:bg-gray-50/50'}`}>
                       <td className="py-4 px-6">
@@ -311,7 +323,7 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ tenantId, sessio
                <div className="space-y-1.5">
                   <label className="text-[11px] font-black text-gray-500 uppercase tracking-widest">Perfil de Permissão (Role)</label>
                   <div className="grid grid-cols-1 gap-2">
-                    {ROLES.map(role => (
+                    {STORE_ALLOWED_ROLES.map(role => (
                        <label key={role.id} className={`flex items-center justify-between p-3 rounded-xl border-2 cursor-pointer transition-all ${formData.role === role.id ? 'border-emerald-500 bg-emerald-50' : 'border-gray-100 hover:border-gray-200'}`}>
                           <div className="flex flex-col">
                             <span className="font-bold text-sm text-gray-900">{role.label}</span>
@@ -322,19 +334,6 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ tenantId, sessio
                     ))}
                   </div>
                </div>
-
-               {currentUserRole === 'admin' && (
-                 <div className="space-y-1.5">
-                    <label className="text-[11px] font-black text-gray-500 uppercase tracking-widest">Atribuir a qual Loja (Store ID)?</label>
-                    <select 
-                       value={formData.store_id} 
-                       onChange={e => setFormData({...formData, store_id: e.target.value})}
-                       className="w-full bg-gray-50 focus:bg-white border-2 border-transparent focus:border-emerald-500 rounded-xl py-3 px-4 outline-none font-bold text-gray-800 transition-colors text-sm"
-                    >
-                      {stores.map(s => <option key={s.id} value={s.id}>{s.name} ({s.id})</option>)}
-                    </select>
-                 </div>
-               )}
 
                {error && <div className="text-red-500 text-xs font-bold p-3 bg-red-50 rounded-xl border border-red-100">{error}</div>}
             </div>

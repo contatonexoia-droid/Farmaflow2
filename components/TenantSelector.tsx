@@ -7,6 +7,7 @@ interface TenantSelectorProps {
   currentTenant: PharmacyConfig | null;
   onSelectTenant: (tenant: PharmacyConfig) => void;
   isMatrixUser?: boolean;
+  userRole?: string;
   networkName?: string;
   isConsolidated?: boolean;
   onToggleConsolidated?: (consolidated: boolean) => void;
@@ -17,7 +18,8 @@ export const TenantSelector: React.FC<TenantSelectorProps> = ({
   tenants,
   currentTenant,
   onSelectTenant,
-  isMatrixUser = true,
+  isMatrixUser = false,
+  userRole = '',
   networkName = 'Rede FarmaFlow',
   isConsolidated = false,
   onToggleConsolidated,
@@ -26,6 +28,12 @@ export const TenantSelector: React.FC<TenantSelectorProps> = ({
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
   const dropdownRef = useRef<HTMLDivElement>(null);
+
+  // Se o usuário não for da Matriz (ou se houver apenas 1 loja), o seletor é estático
+  const canSwitch = isMatrixUser && tenants && tenants.length > 1;
+
+  // Lojas visíveis: se não tiver permissão de matriz, estritamente APENAS a loja atual
+  const visibleTenants = canSwitch ? tenants : (currentTenant ? [currentTenant] : []);
 
   // Fecha dropdown ao clicar fora
   useEffect(() => {
@@ -38,7 +46,7 @@ export const TenantSelector: React.FC<TenantSelectorProps> = ({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  const filteredTenants = tenants.filter(t => {
+  const filteredTenants = visibleTenants.filter(t => {
     const q = search.toLowerCase().trim();
     if (!q) return true;
     return (
@@ -49,7 +57,40 @@ export const TenantSelector: React.FC<TenantSelectorProps> = ({
     );
   });
 
-  const matrixStore = tenants.find(t => t.isNetworkMaster);
+  const matrixStore = visibleTenants.find(t => t.isNetworkMaster);
+
+  // Se for usuário de filial sem permissão de troca, renderiza apenas o card estático da unidade
+  if (!canSwitch) {
+    return (
+      <div className={`relative inline-block text-left ${className}`}>
+        <div className="w-full flex items-center justify-between gap-2.5 px-3 py-2 bg-gray-50/80 text-gray-800 rounded-xl border border-gray-200 shadow-2xs text-xs font-bold select-none">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-7 h-7 rounded-lg bg-gray-100 text-gray-700 flex items-center justify-center shrink-0 font-black">
+              <Store size={15} className="text-gray-700" />
+            </div>
+            <div className="flex flex-col text-left min-w-0">
+              <div className="flex items-center gap-1.5">
+                <span className="text-[9px] uppercase font-black tracking-wider text-gray-400 truncate">
+                  Unidade Atual
+                </span>
+                {currentTenant?.isNetworkMaster && (
+                  <span className="bg-purple-100 text-purple-700 text-[8px] font-black px-1.5 py-0.2 rounded-full uppercase shrink-0">
+                    Matriz
+                  </span>
+                )}
+              </div>
+              <span className="text-gray-900 font-extrabold text-xs truncate max-w-[160px] sm:max-w-[220px]">
+                {currentTenant?.name || 'Drogaria'}
+              </span>
+            </div>
+          </div>
+          <span className="text-[9px] font-bold text-gray-400 bg-gray-200/60 px-1.5 py-0.5 rounded shrink-0">
+            Filial
+          </span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={`relative inline-block text-left ${className}`} ref={dropdownRef}>
@@ -57,7 +98,7 @@ export const TenantSelector: React.FC<TenantSelectorProps> = ({
       <button
         type="button"
         onClick={() => setIsOpen(!isOpen)}
-        className="w-full flex items-center justify-between gap-2.5 px-3 py-2 bg-white hover:bg-gray-50 text-gray-800 rounded-xl border border-gray-200 hover:border-gray-300 shadow-2xs transition-all text-xs font-bold focus:outline-hidden focus:ring-2 focus:ring-emerald-500/20"
+        className="w-full flex items-center justify-between gap-2.5 px-3 py-2 bg-white hover:bg-gray-50 text-gray-800 rounded-xl border border-gray-200 hover:border-gray-300 shadow-2xs transition-all text-xs font-bold focus:outline-hidden focus:ring-2 focus:ring-emerald-500/20 cursor-pointer"
       >
         <div className="flex items-center gap-2.5 min-w-0">
           <div className="w-7 h-7 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0 font-black">
@@ -71,7 +112,7 @@ export const TenantSelector: React.FC<TenantSelectorProps> = ({
           <div className="flex flex-col text-left min-w-0">
             <div className="flex items-center gap-1.5">
               <span className="text-[9px] uppercase font-black tracking-wider text-gray-400 truncate">
-                {isConsolidated ? 'Visão Consolidada' : isMatrixUser ? 'Unidade Selecionada' : 'Minha Unidade'}
+                {isConsolidated ? 'Visão Consolidada' : 'Unidade Selecionada'}
               </span>
               {currentTenant?.isNetworkMaster && !isConsolidated && (
                 <span className="bg-purple-100 text-purple-700 text-[8px] font-black px-1.5 py-0.2 rounded-full uppercase shrink-0">
@@ -80,7 +121,7 @@ export const TenantSelector: React.FC<TenantSelectorProps> = ({
               )}
             </div>
             <span className="text-gray-900 font-extrabold text-xs truncate max-w-[140px] sm:max-w-[200px]">
-              {isConsolidated ? `Todas as Unidades (${tenants.length})` : currentTenant?.name || 'Selecione uma loja'}
+              {isConsolidated ? `Todas as Unidades (${visibleTenants.length})` : currentTenant?.name || 'Selecione uma loja'}
             </span>
           </div>
         </div>
@@ -99,7 +140,7 @@ export const TenantSelector: React.FC<TenantSelectorProps> = ({
                 <span className="text-xs font-black text-gray-900">{networkName}</span>
               </div>
               <span className="text-[10px] font-bold text-gray-500 bg-gray-200/80 px-2 py-0.5 rounded-full">
-                {tenants.length} {tenants.length === 1 ? 'Loja' : 'Lojas'}
+                {visibleTenants.length} {visibleTenants.length === 1 ? 'Loja' : 'Lojas'}
               </span>
             </div>
             <p className="text-[11px] text-gray-500 mt-1">

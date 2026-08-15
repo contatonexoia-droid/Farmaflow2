@@ -600,9 +600,32 @@ const App: React.FC = () => {
   const [networkTenants, setNetworkTenants] = useState<PharmacyConfig[]>([]);
   const [isSwitchingTenant, setIsSwitchingTenant] = useState(false);
 
-  // Carrega lista de filiais / rede quando a loja pertence a uma rede (Matriz ou Filial)
+  // Determina se a sessão atual possui privilégios de gestão da Matriz / Rede
+  const isMatrixAdmin = useMemo(() => {
+    if (!session || session.type === "GUEST") return false;
+    if (session.type === "SUPER_ADMIN") return true;
+    const role = (session.role || "").toLowerCase();
+    if (role === "matriz" || role === "admin_matriz" || role === "network_admin") return true;
+
+    // Se o usuário logou em uma Matriz (ou a loja vinculada à sessão for a matriz) com perfil administrativo
+    const sessionTenantIsMaster = currentTenant?.isNetworkMaster || (session.tenantId && session.tenantId === currentTenant?.id && currentTenant?.isNetworkMaster);
+    if (sessionTenantIsMaster && (role === "owner" || role === "admin" || !role)) {
+      return true;
+    }
+    return false;
+  }, [session, currentTenant?.id, currentTenant?.isNetworkMaster]);
+
+  // Carrega lista de filiais / rede estritamente se o usuário for Administrador da Matriz ou SuperAdmin
   useEffect(() => {
     if (!currentTenant) return;
+
+    // Se o usuário for de uma filial comum (operador, gerente ou filial sem privilégios de rede),
+    // a lista de unidades é restrita estritamente à sua própria loja
+    if (!isMatrixAdmin) {
+      setNetworkTenants([currentTenant]);
+      return;
+    }
+
     const loadNetworkTenants = async () => {
       try {
         const allStores = await getTenants();
@@ -634,7 +657,7 @@ const App: React.FC = () => {
       }
     };
     loadNetworkTenants();
-  }, [currentTenant?.id, currentTenant?.isNetworkMaster, currentTenant?.networkId]);
+  }, [currentTenant?.id, currentTenant?.isNetworkMaster, currentTenant?.networkId, isMatrixAdmin]);
 
   const handleSelectTenant = useCallback(async (selected: PharmacyConfig) => {
     if (!selected || selected.id === currentTenant?.id) return;
@@ -3219,7 +3242,7 @@ const App: React.FC = () => {
               </button>
             </div>
 
-            {view === ViewMode.ADMIN_PHARMACY && networkTenants.length > 1 && (
+            {view === ViewMode.ADMIN_PHARMACY && isMatrixAdmin && networkTenants.length > 1 && (
               <div className="mb-4 pb-4 border-b border-gray-100">
                 <label className="text-[10px] font-black uppercase tracking-wider text-gray-400 block mb-1.5 px-1">
                   Unidade Selecionada
@@ -3231,6 +3254,8 @@ const App: React.FC = () => {
                     handleSelectTenant(t);
                     setIsSidebarOpen(false);
                   }}
+                  isMatrixUser={isMatrixAdmin}
+                  userRole={session?.role}
                   networkName={networkTenants.find(t => t.isNetworkMaster)?.name || "Rede de Farmácias"}
                   className="w-full"
                 />
@@ -3476,7 +3501,7 @@ const App: React.FC = () => {
           {view === ViewMode.ADMIN_PHARMACY && currentTenant && (
             <>
               <aside className="hidden md:flex w-80 shrink-0 flex-col bg-white rounded-[1.5rem] border border-gray-100 p-4 h-fit sticky top-8">
-                {networkTenants.length > 1 && (
+                {isMatrixAdmin && networkTenants.length > 1 && (
                   <div className="mb-4 pb-4 border-b border-gray-100">
                     <label className="text-[10px] font-black uppercase tracking-wider text-gray-400 block mb-1.5 px-2">
                       Unidade Ativa
@@ -3485,6 +3510,8 @@ const App: React.FC = () => {
                       tenants={networkTenants}
                       currentTenant={currentTenant}
                       onSelectTenant={handleSelectTenant}
+                      isMatrixUser={isMatrixAdmin}
+                      userRole={session?.role}
                       networkName={networkTenants.find(t => t.isNetworkMaster)?.name || "Rede de Farmácias"}
                       className="w-full"
                     />
@@ -3823,6 +3850,8 @@ const App: React.FC = () => {
                     onConfigUpdate={handleUpdateConfig}
                     networkTenants={networkTenants}
                     onSelectTenant={handleSelectTenant}
+                    session={session}
+                    isMatrixUser={isMatrixAdmin}
                   />
                 )}
                 {adminTab === "desktop" && (

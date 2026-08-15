@@ -55,7 +55,39 @@ export const checkTenantAccess = async (req: Request, res: Response, next: NextF
       }
     }
 
-    // 4. Default fallback
+    // 4. Check if user is a Matriz Administrator accessing a branch of their network
+    if (!isAuthorized && userTenantId && routeTenantId) {
+      try {
+        const { data: userStore } = await supabaseAuth
+          .from('tenants')
+          .select('id, is_network_master, network_id')
+          .eq('id', userTenantId)
+          .single();
+
+        const isMatrixUserRole = userRole && (
+          userRole.toLowerCase() === 'matriz' || 
+          userRole.toLowerCase() === 'admin_matriz' ||
+          userRole.toLowerCase() === 'network_admin'
+        );
+
+        // ONLY users whose home store is the Matriz or have matrix role can access network branches
+        if (userStore?.is_network_master || isMatrixUserRole) {
+          const { data: targetStore } = await supabaseAuth
+            .from('tenants')
+            .select('id, network_id')
+            .eq('id', routeTenantId)
+            .single();
+
+          if (targetStore && (targetStore.network_id === userTenantId || targetStore.id === userTenantId)) {
+            isAuthorized = true;
+          }
+        }
+      } catch (err) {
+        console.error('Error verifying network tenant access:', err);
+      }
+    }
+
+    // 5. Default fallback (User ID equals routeTenantId)
     if (!isAuthorized && user.id === routeTenantId) {
       isAuthorized = true;
     }

@@ -30,9 +30,17 @@ export const Navbar: React.FC<NavbarProps> = ({
   const isCatalogView = currentView === ViewMode.CATALOG || currentView === ViewMode.CART;
   const isGuest = session.type === 'GUEST';
   
+  // Apenas Super Admin ou Administrador da Matriz tem privilégios de alternar unidades
+  const userRole = (session?.role || "").toLowerCase();
+  const isMatrixUser = session?.type === 'SUPER_ADMIN' || 
+    userRole === 'matriz' || 
+    userRole === 'admin_matriz' || 
+    userRole === 'network_admin' || 
+    (config?.isNetworkMaster && (userRole === 'owner' || userRole === 'admin' || !userRole));
+
   // Decidimos ocultar controles administrativos na loja para que o dono veja exatamente o que o cliente vê
   const showAdminControls = !isCatalogView && !isGuest;
-  const hasMultipleUnits = networkTenants && networkTenants.length > 1;
+  const hasMultipleUnits = isMatrixUser && networkTenants && networkTenants.length > 1;
 
   const handleNavigate = (view: ViewMode) => {
     onViewChange(view);
@@ -106,6 +114,8 @@ export const Navbar: React.FC<NavbarProps> = ({
                 tenants={networkTenants}
                 currentTenant={config}
                 onSelectTenant={onSelectTenant}
+                isMatrixUser={isMatrixUser}
+                userRole={session?.role}
                 networkName={networkTenants.find(t => t.isNetworkMaster)?.name || "Rede de Farmácias"}
                 className="w-72"
               />
@@ -121,6 +131,8 @@ export const Navbar: React.FC<NavbarProps> = ({
                     tenants={networkTenants}
                     currentTenant={config}
                     onSelectTenant={onSelectTenant}
+                    isMatrixUser={isMatrixUser}
+                    userRole={session?.role}
                     networkName={networkTenants.find(t => t.isNetworkMaster)?.name || "Rede"}
                     className="max-w-[150px] sm:max-w-[200px]"
                   />

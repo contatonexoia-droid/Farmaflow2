@@ -480,6 +480,9 @@ app.get("/api/v1/team/users", checkTenantAccess, async (req, res) => {
   }
 });
 
+// Roles estritamente permitidas para cadastro e gestão por estabelecimentos (lojas)
+const STORE_ALLOWED_OPERATIONAL_ROLES = ["gerente", "operador", "balconista"];
+
 app.post("/api/v1/team/users", checkTenantAccess, async (req, res) => {
   try {
     const { email, password, full_name, role, store_id } = req.body;
@@ -491,6 +494,13 @@ app.post("/api/v1/team/users", checkTenantAccess, async (req, res) => {
     const cleanEmail = email.trim().toLowerCase();
     const cleanRole = role.trim().toLowerCase();
     const cleanStoreId = store_id || req.headers["x-tenant-id"] || req.query.tenantId;
+
+    // Validação de Segurança RBAC: Lojas só podem cadastrar colaboradores com papéis operacionais
+    if (!STORE_ALLOWED_OPERATIONAL_ROLES.includes(cleanRole)) {
+      return res.status(403).json({ 
+        error: "Permissão negada: As lojas podem cadastrar apenas colaboradores operacionais (Gerente ou Operador/Balconista). Cargos administrativos/matriz são de exclusividade do Super Admin." 
+      });
+    }
 
     let authUserId = "";
     
@@ -572,9 +582,24 @@ app.patch("/api/v1/team/users/:id", checkTenantAccess, async (req, res) => {
     const userId = req.params.id;
     const { full_name, role, is_active } = req.body;
 
+    let cleanRole: string | undefined = undefined;
+    if (role !== undefined && role !== null) {
+      cleanRole = String(role).trim().toLowerCase();
+      if (!STORE_ALLOWED_OPERATIONAL_ROLES.includes(cleanRole)) {
+        return res.status(403).json({ 
+          error: "Permissão negada: As lojas podem atribuir apenas cargos operacionais (Gerente ou Operador/Balconista)." 
+        });
+      }
+    }
+
+    const updatePayload: any = {};
+    if (full_name !== undefined) updatePayload.name = full_name;
+    if (cleanRole !== undefined) updatePayload.role = cleanRole;
+    if (is_active !== undefined) updatePayload.is_active = is_active;
+
     const { data, error } = await supabaseAdmin
       .from("tenant_users")
-      .update({ name: full_name, role, is_active })
+      .update(updatePayload)
       .eq("id", userId)
       .select()
       .single();
@@ -798,6 +823,14 @@ app.post("/api/v1/tenants/:tenantId/users", checkTenantAccess, async (req, res) 
       return res.status(400).json({ error: "Todos os campos (nome, e-mail, função e senha) são obrigatórios." });
     }
 
+    const cleanRole = String(role).trim().toLowerCase();
+    // Validação de Segurança RBAC: Apenas funções operacionais permitidas para estabelecimentos
+    if (!STORE_ALLOWED_OPERATIONAL_ROLES.includes(cleanRole)) {
+      return res.status(403).json({ 
+        error: "Permissão negada: As lojas podem cadastrar apenas colaboradores operacionais (Gerente ou Operador/Balconista). Cargos administrativos/matriz são de exclusividade do Super Admin." 
+      });
+    }
+
     const cleanEmail = email.toLowerCase().trim();
 
     // 1. Preventative check: check if the email has already been registered in tenant_users (HTTP 409)
@@ -937,10 +970,25 @@ app.patch("/api/v1/tenants/:tenantId/users/:userId", checkTenantAccess, async (r
     const userId = req.params.userId;
     const { name, role, is_active } = req.body;
 
+    let cleanRole: string | undefined = undefined;
+    if (role !== undefined && role !== null) {
+      cleanRole = String(role).trim().toLowerCase();
+      if (!STORE_ALLOWED_OPERATIONAL_ROLES.includes(cleanRole)) {
+        return res.status(403).json({ 
+          error: "Permissão negada: As lojas podem atribuir apenas cargos operacionais (Gerente ou Operador/Balconista)." 
+        });
+      }
+    }
+
+    const updatePayload: any = {};
+    if (name !== undefined) updatePayload.name = name;
+    if (cleanRole !== undefined) updatePayload.role = cleanRole;
+    if (is_active !== undefined) updatePayload.is_active = is_active;
+
     // Update in tenant_users
     const { data: userData, error: userError } = await supabase
       .from("tenant_users")
-      .update({ name, role, is_active })
+      .update(updatePayload)
       .eq("id", userId)
       .eq("tenant_id", tenantId)
       .select()

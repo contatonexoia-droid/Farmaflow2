@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { PharmacyConfig } from '../types';
+import { PharmacyConfig, AuthSession } from '../types';
 import { UpsellCard } from './UpsellCard';
 import { Tags, Zap, Upload, Palette, Phone, Building, Save, CheckCircle, Loader2, Type, MessageSquare, AlertTriangle, FileText, MapPin, Mail, DollarSign, BellRing, PlayCircle, Volume2, Store, CreditCard, Truck, Bot, Sparkles, Building2 } from 'lucide-react';
 import { ImageMigrationTool } from './ImageMigrationTool';
@@ -123,14 +123,29 @@ interface AdminSettingsProps {
   onConfigUpdate: (config: PharmacyConfig) => void;
   networkTenants?: PharmacyConfig[];
   onSelectTenant?: (tenant: PharmacyConfig) => void;
+  session?: AuthSession;
+  isMatrixUser?: boolean;
 }
 
 export const AdminSettings: React.FC<AdminSettingsProps> = ({ 
   config, 
   onConfigUpdate,
   networkTenants = [],
-  onSelectTenant
+  onSelectTenant,
+  session,
+  isMatrixUser
 }) => {
+  const userRole = (session?.role || "").toLowerCase();
+  const effectiveIsMatrixUser = isMatrixUser ?? (
+    session?.type === 'SUPER_ADMIN' || 
+    userRole === 'matriz' || 
+    userRole === 'admin_matriz' || 
+    userRole === 'network_admin' || 
+    (config?.isNetworkMaster && (userRole === 'owner' || userRole === 'admin' || !userRole))
+  );
+
+  const canSwitchStore = effectiveIsMatrixUser && networkTenants && networkTenants.length > 1 && !!onSelectTenant;
+
   const [activeTab, setActiveTab] = useState<'geral' | 'pagamentos' | 'entrega' | 'atendimento' | 'agente_ia'>('geral');
   const [formData, setFormData] = useState<PharmacyConfig>({ ...config });
   const [showSaved, setShowSaved] = useState(false);
@@ -319,7 +334,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
         
         {/* Header and Tabs */}
         <div className="mb-12">
-          {networkTenants && networkTenants.length > 1 && onSelectTenant && (
+          {canSwitchStore && (
             <div className="mb-6 p-4 bg-emerald-50/90 border border-emerald-200/80 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-xs">
               <div className="flex items-center gap-3">
                 <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center font-black shadow-xs shrink-0">
@@ -341,7 +356,9 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
                 <TenantSelector
                   tenants={networkTenants}
                   currentTenant={config}
-                  onSelectTenant={onSelectTenant}
+                  onSelectTenant={onSelectTenant!}
+                  isMatrixUser={effectiveIsMatrixUser}
+                  userRole={session?.role}
                   networkName={networkTenants.find(t => t.isNetworkMaster)?.name || "Rede FarmaFlow"}
                   className="w-full"
                 />
