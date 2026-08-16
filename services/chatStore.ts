@@ -79,6 +79,56 @@ export interface CannedResponse {
   created_at: string;
 }
 
+export interface PrescriptionRejectionReasonItem {
+  id: string;
+  store_id: string;
+  title: string;
+  description?: string;
+  message_template: string;
+  is_active: boolean;
+  order_index: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export const DEFAULT_PRESCRIPTION_REASONS: Array<Omit<PrescriptionRejectionReasonItem, "id" | "store_id" | "created_at" | "updated_at">> = [
+  {
+    title: "Receita Vencida",
+    description: "Prazo de validade do receituário expirado conforme normas sanitárias da ANVISA.",
+    message_template: "⚠️ *Receita Médica Vencida*\n\nOlá! Analisamos a foto da sua receita médica e identificamos que o prazo de validade está expirado. De acordo com as normas da ANVISA (RDC), não é permitida a dispensação de medicamentos com receita vencida.\n\nPor favor, consulte seu médico para emissão de um novo receituário atualizado. Ficamos à disposição!",
+    is_active: true,
+    order_index: 1,
+  },
+  {
+    title: "Rasurada ou Ilegível",
+    description: "Foto sem nitidez, dados cortados ou caligrafia ilegível.",
+    message_template: "📷 *Receita Ilegível ou com Rasuras*\n\nOlá! Recebemos a foto da sua receita, porém a caligrafia, dosagem ou identificação do medicamento não estão nitidamente legíveis para garantir uma dispensação 100% segura.\n\nVocê poderia nos enviar uma nova foto com melhor iluminação, foco e enquadramento completo do documento?",
+    is_active: true,
+    order_index: 2,
+  },
+  {
+    title: "Sem Carimbo ou CRM do Médico",
+    description: "Ausência de assinatura, carimbo legível ou registro CRM do médico prescritor.",
+    message_template: "👨‍⚕️ *Identificação Médica Incompleta*\n\nOlá! Para validação farmacêutica da receita, é obrigatório constar de forma legível a assinatura, carimbo e número de registro no CRM do médico prescritor.\n\nA imagem enviada não possui esses dados claros. Caso tenha a via completa, por gentileza envie uma nova foto.",
+    is_active: true,
+    order_index: 3,
+  },
+  {
+    title: "Via Controlada Exige Presença Física",
+    description: "Medicamento controlado com retenção de receita física obrigatória (Portaria 344/98).",
+    message_template: "📋 *Retenção de Receita Obrigatória*\n\nOlá! O medicamento solicitado requer a retenção da via original física da Notificação de Receita (Portaria 344/98 da ANVISA).\n\nNossa equipe pode agilizar a separação do seu pedido, porém será indispensável a entrega da receita física original ao nosso entregador ou na retirada no balcão da farmácia.",
+    is_active: true,
+    order_index: 4,
+  },
+  {
+    title: "Medicamento em Falta / Dosagem Indisponível",
+    description: "Apresentação ou princípio ativo temporariamente sem estoque na loja.",
+    message_template: "💊 *Medicamento Temporariamente Indisponível*\n\nOlá! Agradecemos o envio da sua receita. No momento, a dosagem ou apresentação específica indicada encontra-se temporariamente esgotada em nosso estoque.\n\nPodemos verificar para você opções de medicamentos genéricos ou similares equivalentes com o mesmo princípio ativo?",
+    is_active: true,
+    order_index: 5,
+  },
+];
+
 class ChatStore {
   private contacts: ChatContact[] = [];
   private conversations: ChatConversation[] = [];
@@ -86,6 +136,8 @@ class ChatStore {
   private labels: ChatLabel[] = [];
   private conversation_labels: ChatConversationLabel[] = [];
   private canned_responses: CannedResponse[] = [];
+  private rejection_reasons: PrescriptionRejectionReasonItem[] = [];
+  private prescriptions: any[] = [];
 
   constructor() {
     this.loadFromFile();
@@ -103,6 +155,8 @@ class ChatStore {
         this.labels = parsed.labels || [];
         this.conversation_labels = parsed.conversation_labels || [];
         this.canned_responses = parsed.canned_responses || [];
+        this.rejection_reasons = parsed.rejection_reasons || [];
+        this.prescriptions = parsed.prescriptions || [];
       }
     } catch (err) {
       console.warn("[ChatStore] Could not load local chat_data.json:", err);
@@ -121,6 +175,8 @@ class ChatStore {
             labels: this.labels,
             conversation_labels: this.conversation_labels,
             canned_responses: this.canned_responses,
+            rejection_reasons: this.rejection_reasons,
+            prescriptions: this.prescriptions,
           },
           null,
           2
@@ -140,7 +196,21 @@ class ChatStore {
         { id: "lbl_demo_2", store_id: "default", name: "Orçamento", color: "#F59E0B", created_at: new Date().toISOString() },
         { id: "lbl_demo_3", store_id: "default", name: "Urgente", color: "#EF4444", created_at: new Date().toISOString() },
         { id: "lbl_demo_4", store_id: "default", name: "Finalizado", color: "#10B981", created_at: new Date().toISOString() },
+        { id: "lbl_demo_rec_recusada", store_id: "default", name: "Receita Recusada", color: "#EF4444", created_at: new Date().toISOString() },
+        { id: "lbl_demo_rec_aprovada", store_id: "default", name: "Receita Aprovada", color: "#10B981", created_at: new Date().toISOString() },
       ];
+    }
+
+    // Add default rejection reasons if empty
+    if (this.rejection_reasons.length === 0) {
+      const nowIso = new Date().toISOString();
+      this.rejection_reasons = DEFAULT_PRESCRIPTION_REASONS.map((r, idx) => ({
+        ...r,
+        id: `rejection_reason_default_${idx + 1}`,
+        store_id: "default",
+        created_at: nowIso,
+        updated_at: nowIso,
+      }));
     }
 
     // Add default canned responses if empty
@@ -1072,6 +1142,249 @@ class ChatStore {
     }
 
     return await this.getConversationById(conversationId);
+  }
+
+  // --- PRESCRIPTION REJECTION REASONS & EVALUATION ---
+  public async getPrescriptionRejectionReasons(storeId: string): Promise<PrescriptionRejectionReasonItem[]> {
+    try {
+      const { data, error } = await supabaseAdmin
+        .from("prescription_rejection_reasons")
+        .select("*")
+        .eq("store_id", storeId)
+        .order("order_index", { ascending: true })
+        .order("created_at", { ascending: true });
+
+      if (!error && data && data.length > 0) {
+        return data as PrescriptionRejectionReasonItem[];
+      }
+
+      // If empty in database for this store, seed default reasons into DB
+      if (!error && data && data.length === 0) {
+        const nowIso = new Date().toISOString();
+        const rowsToSeed = DEFAULT_PRESCRIPTION_REASONS.map((r, idx) => ({
+          id: stringToUuid(`rejection_reason_${storeId}_${idx + 1}`),
+          store_id: storeId,
+          title: r.title,
+          description: r.description,
+          message_template: r.message_template,
+          is_active: r.is_active,
+          order_index: r.order_index,
+          created_at: nowIso,
+          updated_at: nowIso
+        }));
+
+        try {
+          const { data: seededData } = await supabaseAdmin
+            .from("prescription_rejection_reasons")
+            .insert(rowsToSeed)
+            .select();
+          if (seededData && seededData.length > 0) {
+            return seededData as PrescriptionRejectionReasonItem[];
+          }
+        } catch (_) {}
+      }
+    } catch (err) {
+      console.warn("[ChatStore] Supabase getPrescriptionRejectionReasons fallback:", err);
+    }
+
+    // Memory fallback
+    let list = this.rejection_reasons.filter(r => r.store_id === storeId || r.store_id === "default");
+    if (list.length === 0) {
+      const nowIso = new Date().toISOString();
+      list = DEFAULT_PRESCRIPTION_REASONS.map((r, idx) => ({
+        ...r,
+        id: `rejection_reason_${storeId}_${idx + 1}`,
+        store_id: storeId,
+        created_at: nowIso,
+        updated_at: nowIso,
+      }));
+      this.rejection_reasons.push(...list);
+      this.saveToFile();
+    }
+    return list.sort((a, b) => (a.order_index || 0) - (b.order_index || 0));
+  }
+
+  public async savePrescriptionRejectionReason(reason: {
+    id?: string;
+    store_id: string;
+    title: string;
+    description?: string;
+    message_template: string;
+    is_active?: boolean;
+    order_index?: number;
+  }): Promise<PrescriptionRejectionReasonItem> {
+    const id = reason.id || stringToUuid(`rej_reason_${Date.now()}_${Math.random()}`);
+    const nowIso = new Date().toISOString();
+    const item: PrescriptionRejectionReasonItem = {
+      id,
+      store_id: reason.store_id,
+      title: reason.title,
+      description: reason.description || "",
+      message_template: reason.message_template,
+      is_active: reason.is_active !== undefined ? reason.is_active : true,
+      order_index: reason.order_index || 0,
+      created_at: nowIso,
+      updated_at: nowIso,
+    };
+
+    try {
+      const { error } = await supabaseAdmin
+        .from("prescription_rejection_reasons")
+        .upsert([item]);
+      if (error) {
+        console.warn("[ChatStore] Supabase savePrescriptionRejectionReason error:", error.message);
+      }
+    } catch (err) {
+      console.warn("[ChatStore] Supabase savePrescriptionRejectionReason fallback:", err);
+    }
+
+    const idx = this.rejection_reasons.findIndex(r => r.id === id);
+    if (idx >= 0) {
+      this.rejection_reasons[idx] = item;
+    } else {
+      this.rejection_reasons.push(item);
+    }
+    this.saveToFile();
+    return item;
+  }
+
+  public async deletePrescriptionRejectionReason(id: string, storeId: string): Promise<boolean> {
+    try {
+      const { error } = await supabaseAdmin
+        .from("prescription_rejection_reasons")
+        .delete()
+        .eq("id", id)
+        .eq("store_id", storeId);
+      if (error) {
+        console.warn("[ChatStore] Supabase deletePrescriptionRejectionReason error:", error.message);
+      }
+    } catch (err) {
+      console.warn("[ChatStore] Supabase deletePrescriptionRejectionReason fallback:", err);
+    }
+
+    this.rejection_reasons = this.rejection_reasons.filter(r => !(r.id === id && (r.store_id === storeId || r.store_id === "default")));
+    this.saveToFile();
+    return true;
+  }
+
+  public async savePrescriptionRecord(data: {
+    id?: string;
+    store_id: string;
+    conversation_id?: string;
+    customer_id?: string;
+    order_id?: string;
+    file_url: string;
+    status: "PENDING" | "APPROVED" | "REJECTED";
+    rejection_reason_id?: string;
+    rejection_reason_title?: string;
+    rejection_notes?: string;
+    evaluated_by?: string;
+    evaluated_by_name?: string;
+    evaluated_at?: string;
+    notes?: string;
+  }): Promise<any> {
+    const id = data.id || stringToUuid(`presc_${Date.now()}_${Math.random()}`);
+    const nowIso = new Date().toISOString();
+    const record = {
+      id,
+      store_id: data.store_id,
+      conversation_id: data.conversation_id || null,
+      customer_id: data.customer_id || null,
+      order_id: data.order_id || null,
+      file_url: data.file_url || "",
+      status: data.status,
+      rejection_reason_id: data.rejection_reason_id || null,
+      rejection_reason_title: data.rejection_reason_title || null,
+      rejection_notes: data.rejection_notes || null,
+      evaluated_by: data.evaluated_by || null,
+      evaluated_by_name: data.evaluated_by_name || null,
+      evaluated_at: data.evaluated_at || nowIso,
+      notes: data.notes || null,
+      created_at: nowIso,
+      updated_at: nowIso
+    };
+
+    try {
+      const { data: inserted, error } = await supabaseAdmin
+        .from("medical_prescriptions")
+        .upsert([record])
+        .select()
+        .maybeSingle();
+
+      if (!error && inserted) {
+        return inserted;
+      }
+      if (error) {
+        console.warn("[ChatStore] Supabase savePrescriptionRecord error:", error.message);
+      }
+    } catch (err) {
+      console.warn("[ChatStore] Supabase savePrescriptionRecord fallback:", err);
+    }
+
+    const idx = this.prescriptions.findIndex(p => p.id === id);
+    if (idx >= 0) {
+      this.prescriptions[idx] = record;
+    } else {
+      this.prescriptions.push(record);
+    }
+    this.saveToFile();
+    return record;
+  }
+
+  public async getPrescriptionsByConversation(conversationId: string): Promise<any[]> {
+    try {
+      const { data, error } = await supabaseAdmin
+        .from("medical_prescriptions")
+        .select("*")
+        .eq("conversation_id", conversationId)
+        .order("created_at", { ascending: false });
+      if (!error && data) {
+        return data;
+      }
+    } catch (err) {
+      console.warn("[ChatStore] getPrescriptionsByConversation fallback:", err);
+    }
+
+    return this.prescriptions.filter(p => p.conversation_id === conversationId);
+  }
+
+  public async tagConversationWithPrescriptionStatus(
+    conversationId: string,
+    storeId: string,
+    decision: "APPROVED" | "REJECTED"
+  ): Promise<ChatLabel> {
+    const tagName = decision === "APPROVED" ? "Receita Aprovada" : "Receita Recusada";
+    const tagColor = decision === "APPROVED" ? "#10B981" : "#EF4444";
+
+    // 1. Get existing labels for store
+    const existingLabels = await this.getLabels(storeId);
+    let targetLabel = existingLabels.find(l => l.name.trim().toLowerCase() === tagName.toLowerCase());
+
+    if (!targetLabel) {
+      targetLabel = await this.saveLabel({
+        store_id: storeId,
+        name: tagName,
+        color: tagColor
+      });
+    }
+
+    // 2. Attach label to conversation
+    const currentConvLabels = await this.getConversationLabels(conversationId);
+    const existingIds = currentConvLabels.map(l => l.id);
+    
+    // Remove the opposite tag if present to keep state clean
+    const oppositeTagName = decision === "APPROVED" ? "Receita Recusada" : "Receita Aprovada";
+    const filteredIds = existingIds.filter(id => {
+      const lbl = existingLabels.find(l => l.id === id);
+      return lbl?.name.trim().toLowerCase() !== oppositeTagName.toLowerCase();
+    });
+
+    if (!filteredIds.includes(targetLabel.id)) {
+      filteredIds.push(targetLabel.id);
+    }
+
+    await this.setConversationLabels(conversationId, filteredIds);
+    return targetLabel;
   }
 }
 

@@ -5682,9 +5682,43 @@ app.post("/api/v1/chat/send", requireChatEnabled, async (req, res) => {
         } catch (resolveErr: any) {
           console.warn("[Chat API] Warning resolving instance name for conversation, using fallback:", resolveErr.message);
         }
-        // Extrai apenas os numeros de telefone de `contact_<phone>_...` ou `conv_<phone>_...`
+        // Extrai o numero de telefone com fallback robusto (UUID ou formato conv_<phone>_...)
+        let number: string | null = null;
         const phoneMatch = conversation_id.match(/_(.+?)_/);
-        const number = phoneMatch ? phoneMatch[1] : null;
+        if (phoneMatch && /^\d+$/.test(phoneMatch[1])) {
+          number = phoneMatch[1];
+        }
+
+        if (!number) {
+          try {
+            const { data: convData } = await supabaseAdmin
+              .from("chat_conversations")
+              .select("contact_id")
+              .eq("id", conversation_id)
+              .maybeSingle();
+
+            if (convData?.contact_id) {
+              const { data: contactData } = await supabaseAdmin
+                .from("chat_contacts")
+                .select("phone_number")
+                .eq("id", convData.contact_id)
+                .maybeSingle();
+
+              if (contactData?.phone_number) {
+                number = contactData.phone_number.replace(/\D/g, "");
+              }
+            }
+          } catch (numErr: any) {
+            console.warn("[Chat API] Phone lookup fallback:", numErr.message);
+          }
+        }
+
+        if (!number) {
+          const localConv = (chatStore as any).conversations?.find((c: any) => c.id === conversation_id);
+          if (localConv?.contact?.phone_number) {
+            number = localConv.contact.phone_number.replace(/\D/g, "");
+          }
+        }
 
         if (number) {
           await fetch(`${evolutionUrl}/message/sendText/${instanceName}`, {
@@ -5830,6 +5864,277 @@ app.delete("/api/v1/chat/canned-responses/:id", async (req, res) => {
     return res.json({ success: true });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
+  }
+});
+
+// ==============================================================================
+// PRESCRIPTION REJECTION REASONS & EVALUATION ENDPOINTS
+// ==============================================================================
+app.get(["/api/v1/tenants/:tenantId/prescription-rejection-reasons", "/api/v1/chat/prescription-rejection-reasons"], async (req, res) => {
+  try {
+    const storeId = String(req.params.tenantId || req.query.tenantId || req.headers["x-tenant-id"] || "default");
+    const reasons = await chatStore.getPrescriptionRejectionReasons(storeId);
+    return res.json({ data: reasons });
+  } catch (err: any) {
+    console.error("[Prescription API] Error fetching rejection reasons:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post(["/api/v1/tenants/:tenantId/prescription-rejection-reasons", "/api/v1/chat/prescription-rejection-reasons"], async (req, res) => {
+  try {
+    const storeId = String(req.params.tenantId || req.body.tenantId || req.headers["x-tenant-id"] || "default");
+    const { id, title, description, message_template, is_active, order_index } = req.body;
+    if (!title || !message_template) {
+      return res.status(400).json({ error: "Título e Modelo de Mensagem são obrigatórios." });
+    }
+    const saved = await chatStore.savePrescriptionRejectionReason({
+      id: id ? String(id) : undefined,
+      store_id: storeId,
+      title: String(title),
+      description: description ? String(description) : undefined,
+      message_template: String(message_template),
+      is_active,
+      order_index: typeof order_index === "number" ? order_index : undefined,
+    });
+    return res.json({ data: saved });
+  } catch (err: any) {
+    console.error("[Prescription API] Error saving rejection reason:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.put(["/api/v1/tenants/:tenantId/prescription-rejection-reasons/:id", "/api/v1/chat/prescription-rejection-reasons/:id"], async (req, res) => {
+  try {
+    const storeId = String(req.params.tenantId || req.body.tenantId || req.headers["x-tenant-id"] || "default");
+    const id = String(req.params.id);
+    const { title, description, message_template, is_active, order_index } = req.body;
+    if (!title || !message_template) {
+      return res.status(400).json({ error: "Título e Modelo de Mensagem são obrigatórios." });
+    }
+    const saved = await chatStore.savePrescriptionRejectionReason({
+      id,
+      store_id: storeId,
+      title: String(title),
+      description: description ? String(description) : undefined,
+      message_template: String(message_template),
+      is_active,
+      order_index: typeof order_index === "number" ? order_index : undefined,
+    });
+    return res.json({ data: saved });
+  } catch (err: any) {
+    console.error("[Prescription API] Error updating rejection reason:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete(["/api/v1/tenants/:tenantId/prescription-rejection-reasons/:id", "/api/v1/chat/prescription-rejection-reasons/:id"], async (req, res) => {
+  try {
+    const storeId = String(req.params.tenantId || req.query.tenantId || req.headers["x-tenant-id"] || "default");
+    const id = String(req.params.id);
+    await chatStore.deletePrescriptionRejectionReason(id, storeId);
+    return res.json({ success: true });
+  } catch (err: any) {
+    console.error("[Prescription API] Error deleting rejection reason:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/v1/tenants/:tenantId/conversations/:conversationId/prescriptions", async (req, res) => {
+  try {
+    const conversationId = String(req.params.conversationId);
+    const list = await chatStore.getPrescriptionsByConversation(conversationId);
+    return res.json({ data: list });
+  } catch (err: any) {
+    console.error("[Prescription API] Error fetching conversation prescriptions:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/v1/tenants/:tenantId/conversations/:conversationId/prescription-evaluation", async (req, res) => {
+  try {
+    const conversationId = String(req.params.conversationId);
+    const storeId = String(req.params.tenantId || req.headers["x-tenant-id"] || "default");
+    const {
+      decision,
+      fileUrl,
+      rejectionReasonId,
+      rejectionReasonTitle,
+      rejectionNotes,
+      customMessage,
+      pharmacistName,
+      pharmacistId,
+      orderId
+    } = req.body;
+
+    if (!decision || !["APPROVED", "REJECTED"].includes(decision)) {
+      return res.status(400).json({ error: "Decisão inválida. Deve ser 'APPROVED' ou 'REJECTED'." });
+    }
+
+    // Determine message text to send to customer
+    let messageText = customMessage?.trim();
+    if (!messageText) {
+      if (decision === "APPROVED") {
+        messageText = "✅ *Receita Médica Aprovada!*\n\nOlá! A sua receita médica foi analisada e aprovada com sucesso pelo nosso Farmacêutico Responsável. Estamos dando andamento ao seu pedido/atendimento.";
+      } else {
+        messageText = "⚠️ *Receita Médica com Inconsistência*\n\nOlá! Analisamos a sua receita médica e ela precisará de correção ou apresentação física para liberação do medicamento. Por favor, verifique as orientações com nossa equipe.";
+      }
+    }
+
+    // 1. Save evaluation in medical_prescriptions
+    const prescriptionRecord = await chatStore.savePrescriptionRecord({
+      store_id: storeId,
+      conversation_id: conversationId,
+      order_id: orderId || undefined,
+      file_url: fileUrl || "",
+      status: decision,
+      rejection_reason_id: rejectionReasonId || undefined,
+      rejection_reason_title: rejectionReasonTitle || undefined,
+      rejection_notes: rejectionNotes || undefined,
+      evaluated_by: pharmacistId || undefined,
+      evaluated_by_name: pharmacistName || "Farmacêutico Responsável",
+      evaluated_at: new Date().toISOString()
+    });
+
+    // 2. Add message to chat history as official store message
+    const { message, conversation } = await chatStore.addMessage(
+      storeId,
+      conversationId,
+      "USER",
+      messageText,
+      false,
+      fileUrl || undefined,
+      fileUrl ? "image" : undefined
+    );
+
+    // 3. Tag conversation with status tag (Receita Aprovada / Receita Recusada)
+    const attachedLabel = await chatStore.tagConversationWithPrescriptionStatus(
+      conversationId,
+      storeId,
+      decision
+    );
+
+    // 4. Update conversation stage to HUMAN if not already
+    await chatStore.updateConversationStage(conversationId, storeId, "HUMAN", pharmacistId || null);
+
+    // 5. Send via WhatsApp / Evolution API
+    try {
+      const evolutionUrl = process.env.EVOLUTION_API_URL?.replace(/\/$/, '');
+      const evolutionKey = process.env.EVOLUTION_API_KEY;
+      if (evolutionUrl && evolutionKey) {
+        let instanceName = `store_${storeId.replace(/-/g,"")}`;
+        try {
+          const { data: conv } = await supabaseAdmin
+            .from("chat_conversations")
+            .select("inbox_id")
+            .eq("id", conversationId)
+            .maybeSingle();
+
+          if (conv?.inbox_id) {
+            const { data: inbox } = await supabaseAdmin
+              .from("inboxes")
+              .select("whatsapp_instance_id")
+              .eq("id", conv.inbox_id)
+              .maybeSingle();
+
+            if (inbox?.whatsapp_instance_id) {
+              const { data: inst } = await supabaseAdmin
+                .from("whatsapp_instances")
+                .select("instance_name")
+                .eq("id", inbox.whatsapp_instance_id)
+                .maybeSingle();
+
+              if (inst?.instance_name) {
+                instanceName = inst.instance_name;
+              }
+            }
+          }
+        } catch (instErr: any) {
+          console.warn("[Prescription Evaluation] Warning resolving instance name:", instErr.message);
+        }
+
+        // Extrai o numero de telefone com fallback robusto (UUID ou formato conv_<phone>_...)
+        let number: string | null = null;
+        const phoneMatch = conversationId.match(/_(.+?)_/);
+        if (phoneMatch && /^\d+$/.test(phoneMatch[1])) {
+          number = phoneMatch[1];
+        }
+
+        if (!number) {
+          try {
+            const { data: convData } = await supabaseAdmin
+              .from("chat_conversations")
+              .select("contact_id")
+              .eq("id", conversationId)
+              .maybeSingle();
+
+            if (convData?.contact_id) {
+              const { data: contactData } = await supabaseAdmin
+                .from("chat_contacts")
+                .select("phone_number")
+                .eq("id", convData.contact_id)
+                .maybeSingle();
+
+              if (contactData?.phone_number) {
+                number = contactData.phone_number.replace(/\D/g, "");
+              }
+            }
+          } catch (numErr: any) {
+            console.warn("[Prescription Evaluation] Phone lookup fallback:", numErr.message);
+          }
+        }
+
+        if (!number) {
+          const localConv = (chatStore as any).conversations?.find((c: any) => c.id === conversationId);
+          if (localConv?.contact?.phone_number) {
+            number = localConv.contact.phone_number.replace(/\D/g, "");
+          }
+        }
+
+        if (number) {
+          await fetch(`${evolutionUrl}/message/sendText/${instanceName}`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "apikey": evolutionKey
+            },
+            body: JSON.stringify({
+              number: number,
+              text: messageText
+            })
+          });
+          console.log(`[Prescription Evaluation] Mensagem de ${decision} enviada via WhatsApp para ${number}`);
+        }
+      }
+    } catch (evoErr) {
+      console.warn("[Prescription Evaluation] Falha ao enviar para a Evolution API:", evoErr);
+    }
+
+    // 6. Broadcast Realtime
+    realtimeHub.broadcastToStore(storeId, "chat_message", {
+      conversationId: conversationId,
+      message,
+      conversation
+    });
+
+    realtimeHub.broadcastToStore(storeId, "prescription_evaluated", {
+      conversationId,
+      prescription: prescriptionRecord,
+      decision,
+      label: attachedLabel
+    });
+
+    return res.status(200).json({
+      success: true,
+      decision,
+      message,
+      prescription: prescriptionRecord,
+      label: attachedLabel,
+      conversation
+    });
+  } catch (error: any) {
+    console.error("[Prescription API] Erro ao avaliar receita:", error);
+    return res.status(500).json({ error: error.message || "Erro interno ao processar avaliação de receita." });
   }
 });
 
