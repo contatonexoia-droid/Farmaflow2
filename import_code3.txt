@@ -1,0 +1,201 @@
+            const normalizedKeys = keys.map(k => normalize(k));
+            
+            for (const key of Object.keys(row)) {
+                if (normalizedKeys.includes(normalize(key))) {
+                    return row[key];
+                }
+            }
+            return undefined;
+        };
+
+        rawData.forEach(row => {
+            const getVal = (keys: string[]) => getValFromRow(row, keys);
+
+            const rawEan = getVal(['ean', 'ean_barras', 'barcode', 'codigo_de_barras', 'codigo barras', 'cod barras', 'EAN', 'Barras', 'CodigoBarras', 'EAN_BARRAS']);
+            const priceRaw = getVal(['valor', 'preco', 'preco_venda', 'preco venda', 'valor_venda', 'novo_preco', 'Preco', 'Valor', 'Preço', 'Venda', 'PRECO_VENDA']);
+
+            let ean = rawEan !== undefined && rawEan !== null ? String(rawEan).trim() : '';
+            if (ean.toLowerCase().includes('e')) {
+                const parsed = Number(ean);
+                if (!isNaN(parsed)) {
+                    ean = parsed.toLocaleString('fullwide', { useGrouping: false });
+                }
+            }
+            if (ean.includes('.')) {
+                ean = ean.split('.')[0];
+            }
+            console.log("[FarmaFlow Debug] EAN Processado da Planilha:", ean);
+            
+            // Tratamento de Strings Vazias na Leitura:
+            if (!ean || ean.trim() === '') {
+                return; // Descarta/filtra essa linha específica
+            }
+
+            if (priceRaw !== undefined && priceRaw !== null) {
+                const parsedPrice = parseNumberSafe(priceRaw);
+                if (parsedPrice > 0) {
+                    priceMap.set(ean, parsedPrice);
+                }
+            }
+        });
+
+        if (priceMap.size === 0) {
+            alert("Nenhum preço/EAN válido encontrado na planilha.");
+            setIsProcessingCentralPrice(false);
+            if (centralPriceInputRef.current) centralPriceInputRef.current.value = '';
+            return;
+        }
+
+        const targetBranches = centralPriceScope === 'ALL' ? centralPriceBranches : centralPriceBranches.filter(b => selectedCentralBranches.has(b.id));
+        
+        let totalBranches = targetBranches.length;
+        let processedBranches = 0;
+        const newLogs: AuditItem[] = [];
+        const historyArr = JSON.parse(localStorage.getItem('ff_import_history') || '[]');
+
+        for (const branch of targetBranches) {
+            try {
+                const branchProducts = await getProductsByTenant(branch.id);
+                let updatedCount = 0;
+                let branchLogItems: AuditItem[] = [];
+
+                const productsToUpdate: Product[] = [];
+                const updatedProducts = branchProducts.map(p => {
+                    const dbBarcode = p.barcode ? String(p.barcode).trim() : '';
+                    if (dbBarcode && priceMap.has(dbBarcode)) {
+                        const newPrice = priceMap.get(dbBarcode)!;
+                        if (p.price !== newPrice) {
+                            branchLogItems.push({
+                                name: p.name,
+                                code: p.barcode,
+                                status: 'updated',
+                                details: `EAN: ${p.barcode} | Filial: ${branch.name} | De: R$ ${p.price.toFixed(2)} Para: R$ ${newPrice.toFixed(2)}`
+                            });
+                            updatedCount++;
+                            const updated = { ...p, price: newPrice };
+                            productsToUpdate.push(updated);
+                            return updated;
+                        }
+                    }
+                    return p;
+                });
+
+                if (updatedCount > 0) {
+                    // Update the product price directly based on its unique ID to avoid ON CONFLICT constraint errors
+                    for (const prod of productsToUpdate) {
+                        if (prod.id) {
+                            const { error } = await supabase
+                                .from('products')
+                                .update({ price: prod.price })
+                                .eq('id', prod.id);
+                                
+                            if (error) {
+                                console.error(`[FarmaFlow Debug] Erro ao atualizar EAN ${prod.barcode} (ID: ${prod.id}) na filial ${branch.name}:`, error);
+                            }
+                        }
+                    }
+                    
+                    newLogs.push(...branchLogItems);
+
+                    historyArr.push({
+                        id: `central_price_${Date.now()}_${branch.id}`,
+                        tenantId: tenant.id,
+                        timestamp: Date.now(),
+                        items: branchLogItems
+                    });
+                }
+            } catch (err) {
+                console.error(`Erro ao atualizar filial ${branch.name}:`, err);
+            }
+
+            processedBranches++;
+            setCentralPriceProgress(Math.round((processedBranches / totalBranches) * 100));
+            await new Promise(r => setTimeout(r, 100)); 
+        }
+
+        const now = Date.now();
+        const oneDay = 24 * 60 * 60 * 1000;
+        const validHistory = historyArr.filter((s: any) => (now - s.timestamp) < oneDay);
+        
+        try {
+            localStorage.setItem('ff_import_history', JSON.stringify(validHistory));
+        } catch(e) {
+            console.warn("Could not save to localStorage, trying to trim", e);
+            localStorage.setItem('ff_import_history', JSON.stringify([historyArr[historyArr.length-1]]));
+        }
+
+        setCentralPriceLogs(newLogs);
+        
+        if (newLogs.length > 0) {
+            alert(`Upload concluído! ${newLogs.length} preços atualizados em ${targetBranches.length} filiais.`);
+        } else {
+            alert("Nenhum preço foi alterado (os EANs não foram encontrados ou os preços já eram iguais).");
+        }
+
+  };
+
+  const processCentralPriceUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (centralPriceScope === 'SELECT' && selectedCentralBranches.size === 0) {
+        alert("Selecione pelo menos uma filial.");
+        if (centralPriceInputRef.current) centralPriceInputRef.current.value = '';
+        return;
+    }
+
+    setIsProcessingCentralPrice(true);
+    setCentralPriceProgress(0);
+    setCentralPriceLogs([]);
+
+    try {
+        const rawData = await readSpreadsheetToJSON(file);
+        await executeCentralPriceImport(rawData);
+    } catch (err: any) {
+        console.error(err);
+        alert(`Erro ao processar planilha: ${err.message}`);
+    } finally {
+        setIsProcessingCentralPrice(false);
+        if (centralPriceInputRef.current) centralPriceInputRef.current.value = '';
+    }
+  };
+
+  const importPastedCentralPrices = async () => {
+    if (centralPriceScope === 'SELECT' && selectedCentralBranches.size === 0) {
+        alert("Selecione pelo menos uma filial.");
+        return;
+    }
+
+    if (!pastedCentralPricesText.trim()) {
+        alert("Cole os dados dos preços antes de continuar.");
+        return;
+    }
+    const json = parsePastedData(pastedCentralPricesText);
+    if (json.length === 0) {
+        alert("Nenhum dado válido encontrado. Verifique se copiou os dados da tabela com os cabeçalhos corretamente.");
+        return;
+    }
+
+    setIsProcessingCentralPrice(true);
+    setCentralPriceProgress(0);
+    setCentralPriceLogs([]);
+
+    try {
+        await executeCentralPriceImport(json);
+        setPastedCentralPricesText('');
+    } catch (err: any) {
+        console.error(err);
+        alert(`Erro ao processar preços colados: ${err.message}`);
+    } finally {
+        setIsProcessingCentralPrice(false);
+    }
+  };
+
+  const executeProductImport = async (json: any[]) => {
+        console.log("[FarmaFlow Debug] executeProductImport start. Total items:", json.length);
+        if (json.length > 0) {
+            console.log("[FarmaFlow Debug] First item in json:", JSON.stringify(json[0]));
+            const getVal = (keys: string[]) => {
+                const normalize = (str: string) => str.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+                const normalizedKeys = keys.map(k => normalize(k));
+                for (const key of Object.keys(json[0])) {

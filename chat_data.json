@@ -1,0 +1,184 @@
+{
+  "contacts": [
+    {
+      "id": "contact_demo_1",
+      "store_id": "default",
+      "name": "Cliente Demonstração",
+      "phone_number": "5511999998888",
+      "created_at": "2026-08-08T20:50:04.088Z"
+    },
+    {
+      "id": "a95e4ca7-d8d1-4d16-afd5-120be1121f9f",
+      "store_id": "nosso-catalogo",
+      "name": "Contato WhatsApp",
+      "phone_number": "WhatsApp",
+      "created_at": "2026-08-09T13:20:55.219Z"
+    },
+    {
+      "id": "6543cf97-1536-4d36-a117-96a7b57d83a8",
+      "store_id": "nosso-catalogo",
+      "name": "Contato WhatsApp",
+      "phone_number": "WhatsApp",
+      "created_at": "2026-08-14T16:25:13.765Z"
+    }
+  ],
+  "conversations": [
+    {
+      "id": "conv_demo_1",
+      "store_id": "default",
+      "contact_id": "contact_demo_1",
+      "inbox_id": "inbox_default_default",
+      "assigned_user_id": null,
+      "status": "OPEN",
+      "last_message_at": "2026-08-08T20:50:04.088Z",
+      "last_message_content": "Olá, gostaria de consultar a disponibilidade de medicamentos.",
+      "unread_count": 1,
+      "contact": {
+        "id": "contact_demo_1",
+        "store_id": "default",
+        "name": "Cliente Demonstração",
+        "phone_number": "5511999998888",
+        "created_at": "2026-08-08T20:50:04.088Z"
+      },
+      "created_at": "2026-08-08T20:50:04.088Z"
+    },
+    {
+      "id": "629d0f3e-a72a-455a-bcbe-c370f0554949",
+      "store_id": "nosso-catalogo",
+      "contact_id": "a95e4ca7-d8d1-4d16-afd5-120be1121f9f",
+      "inbox_id": "c67b743a-6a2e-4203-97a1-d3e4f38eeaa4",
+      "status": "OPEN",
+      "last_message_at": "2026-08-09T13:48:15.954Z",
+      "last_message_content": "Teste backend evolution api send",
+      "contact": {
+        "id": "a95e4ca7-d8d1-4d16-afd5-120be1121f9f",
+        "store_id": "nosso-catalogo",
+        "name": "Contato WhatsApp",
+        "phone_number": "WhatsApp",
+        "created_at": "2026-08-09T13:20:55.219Z"
+      },
+      "created_at": "2026-08-09T13:20:55.219Z"
+    },
+    {
+      "id": "a3cb1861-9247-4f36-b002-4dd9e886094a",
+      "store_id": "nosso-catalogo",
+      "contact_id": "6543cf97-1536-4d36-a117-96a7b57d83a8",
+      "inbox_id": "c67b743a-6a2e-4203-97a1-d3e4f38eeaa4",
+      "status": "OPEN",
+      "last_message_at": "2026-08-14T16:25:13.765Z",
+      "last_message_content": "Oi",
+      "contact": {
+        "id": "6543cf97-1536-4d36-a117-96a7b57d83a8",
+        "store_id": "nosso-catalogo",
+        "name": "Contato WhatsApp",
+        "phone_number": "WhatsApp",
+        "created_at": "2026-08-14T16:25:13.765Z"
+      },
+      "created_at": "2026-08-14T16:25:13.765Z"
+    }
+  ],
+  "messages": [
+    {
+      "id": "msg_demo_1",
+      "conversation_id": "conv_demo_1",
+      "sender_type": "CUSTOMER",
+      "content": "Olá, gostaria de consultar a disponibilidade de medicamentos.",
+      "is_private": false,
+      "created_at": "2026-08-08T19:50:04.088Z"
+    },
+    {
+      "id": "msg_demo_2",
+      "conversation_id": "conv_demo_1",
+      "sender_type": "BOT",
+      "content": "Olá! Sou o assistente da farmácia. Em que posso ajudar hoje?",
+      "is_private": false,
+      "created_at": "2026-08-08T19:51:44.088Z"
+    },
+    {
+      "id": "c5b60128-2df3-40ec-a96f-4730c291c51e",
+      "conversation_id": "629d0f3e-a72a-455a-bcbe-c370f0554949",
+      "sender_type": "USER",
+      "content": "Teste backend para chat envio evolution API",
+      "is_private": false,
+      "created_at": "2026-08-09T13:20:55.219Z"
+    },
+    {
+      "id": "0cad49e6-7f25-4b33-b4b2-5984df9f3fd7",
+      "conversation_id": "629d0f3e-a72a-455a-bcbe-c370f0554949",
+      "sender_type": "USER",
+      "content": "Teste backend await evolution",
+      "is_private": false,
+      "created_at": "2026-08-09T13:42:21.797Z"
+    },
+    {
+      "id": "0fa1b7a9-40f0-4a4d-8285-c687d988ee6d",
+      "conversation_id": "629d0f3e-a72a-455a-bcbe-c370f0554949",
+      "sender_type": "USER",
+      "content": "Teste backend evolution api send",
+      "is_private": false,
+      "created_at": "2026-08-09T13:48:15.954Z"
+    },
+    {
+      "id": "c8f58f8f-93f4-4645-929d-ffde13850966",
+      "conversation_id": "a3cb1861-9247-4f36-b002-4dd9e886094a",
+      "sender_type": "USER",
+      "content": "Oi",
+      "is_private": false,
+      "created_at": "2026-08-14T16:25:13.765Z"
+    }
+  ],
+  "labels": [
+    {
+      "id": "lbl_demo_1",
+      "store_id": "default",
+      "name": "Dúvida",
+      "color": "#3B82F6",
+      "created_at": "2026-08-13T09:51:39.026Z"
+    },
+    {
+      "id": "lbl_demo_2",
+      "store_id": "default",
+      "name": "Orçamento",
+      "color": "#F59E0B",
+      "created_at": "2026-08-13T09:51:39.027Z"
+    },
+    {
+      "id": "lbl_demo_3",
+      "store_id": "default",
+      "name": "Urgente",
+      "color": "#EF4444",
+      "created_at": "2026-08-13T09:51:39.027Z"
+    },
+    {
+      "id": "lbl_demo_4",
+      "store_id": "default",
+      "name": "Finalizado",
+      "color": "#10B981",
+      "created_at": "2026-08-13T09:51:39.027Z"
+    }
+  ],
+  "conversation_labels": [],
+  "canned_responses": [
+    {
+      "id": "canned_demo_1",
+      "store_id": "default",
+      "shortcut": "pix",
+      "text": "Olá! Segue nossa chave PIX para pagamento: CNPJ 12.345.678/0001-90 (FarmaFlow S.A.). Por favor, envie o comprovante por aqui.",
+      "created_at": "2026-08-13T09:51:39.027Z"
+    },
+    {
+      "id": "canned_demo_2",
+      "store_id": "default",
+      "shortcut": "entrega",
+      "text": "Olá! Nossas entregas saem em três períodos: manhã (9h às 11h), tarde (14h às 16h) e noite (18h às 20h). O prazo médio de entrega na sua região é de até 2 horas.",
+      "created_at": "2026-08-13T09:51:39.027Z"
+    },
+    {
+      "id": "canned_demo_3",
+      "store_id": "default",
+      "shortcut": "cadastro",
+      "text": "Para realizar o seu cadastro e agilizar o seu atendimento, por favor envie: Nome Completo, CPF, Endereço de Entrega com CEP e Convênio (se houver).",
+      "created_at": "2026-08-13T09:51:39.027Z"
+    }
+  ]
+}

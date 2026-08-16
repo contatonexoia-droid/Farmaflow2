@@ -1,0 +1,171 @@
+120:    return (
+121-        <div 
+122-            onClick={() => { setSelectedProduct(p); setPreviewImage(suggestionImage || null); }}
+123-            className="bg-white border-2 border-gray-50 p-3 rounded-[2rem] hover:border-brand hover:shadow-xl transition-all cursor-pointer group flex flex-col w-[160px] md:w-[180px] shrink-0 snap-start relative"
+124-        >
+125-            {p.suggestionBadge && (
+126-                <div className="absolute top-2 left-2 z-10">
+127-                    <span className={`px-2 py-0.5 rounded-lg text-[7px] font-black uppercase tracking-widest shadow-md ${
+128-                        p.suggestionBadge === 'Mesma Fórmula' ? 'bg-blue-600 text-white' : 
+129-                        p.suggestionBadge === 'Oferta do Dia' ? 'bg-red-600 text-white animate-pulse' : 
+130-                        p.suggestionBadge === 'Melhor Preço' ? 'bg-green-600 text-white' : 
+131-                        p.suggestionBadge === 'Mais Vendidos' ? 'bg-purple-600 text-white' : 
+132-                        p.suggestionBadge === 'Mesma Marca' ? 'bg-teal-600 text-white' : 
+133-                        p.suggestionBadge === 'Aproveite' ? 'bg-orange-500 text-white' : 
+134-                        'bg-brand text-brand-contrast'
+135-                    }`}>
+136-                        {p.suggestionBadge}
+137-                    </span>
+138-                </div>
+139-            )}
+140-            <div className="aspect-square bg-gray-50 rounded-2xl overflow-hidden mb-3 relative flex items-center justify-center p-2">
+--
+173:    return (savedView as ViewMode) || ViewMode.CATALOG;
+174-  });
+175-
+176-  const [adminTab, setAdminTab] = useState<'dashboard' | 'orders' | 'products' | 'settings' | 'manual' | 'history'>(() => {
+177:    return (localStorage.getItem('ff_admin_tab') as any) || 'dashboard';
+178-  });
+179-
+180-  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+181-  const [isLoading, setIsLoading] = useState(true);
+182-  
+183-  const [currentTenant, setCurrentTenant] = useState<PharmacyConfig | null>(() => {
+184-    const saved = localStorage.getItem('ff_tenant');
+185-    return saved ? JSON.parse(saved) : null;
+186-  });
+187-
+188-  const [products, setProducts] = useState<Product[]>([]);
+189-  const [orders, setOrders] = useState<Order[]>([]);
+190-  const [recentAlerts, setRecentAlerts] = useState<any[]>([]);
+191-  const [cart, setCart] = useState<CartItem[]>([]);
+192-  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+193-  const [showAddedFeedback, setShowAddedFeedback] = useState(false);
+194-  const [globalToast, setGlobalToast] = useState<string | null>(null);
+195-
+196-  const [previewImage, setPreviewImage] = useState<string | null>(null);
+197-  const [zoomImage, setZoomImage] = useState<string | null>(null);
+--
+232:    return () => window.removeEventListener('popstate', handlePopState);
+233-  }, [selectedProduct, zoomImage, isSidebarOpen, view, adminTab]);
+234-
+235-  // Sincroniza o estado atual com a URL/History quando algo "navegável" muda
+236-  useEffect(() => {
+237-    const hasModalOpen = !!selectedProduct || !!zoomImage || isSidebarOpen;
+238-    
+239-    // Se abrimos um modal, empurramos um estado para o histórico para que o 'back' possa fechá-lo
+240-    if (hasModalOpen) {
+241-      window.history.pushState({ isModal: true, view, adminTab }, '');
+242-    }
+243-  }, [selectedProduct, zoomImage, isSidebarOpen]);
+244-
+245-  const handleViewChange = useCallback((newView: ViewMode) => {
+246-    if (newView === ViewMode.LOGIN) {
+247-        setSession({ type: 'GUEST' });
+248-        setCurrentTenant(null);
+249-        setProducts([]);
+250-        setOrders([]);
+251-        setCart([]);
+252-        localStorage.clear(); 
+--
+389:    return () => {
+390-      supabase.removeChannel(channel);
+391-    };
+392-  }, [currentTenant?.id, session?.type]);
+393-
+394-  // Realtime subscription for products
+395-  const lastGlowTimeRef = React.useRef<number>(0);
+396-
+397-  useEffect(() => {
+398-    if (!currentTenant) return;
+399-
+400-    const channel = supabase
+401-      .channel(`public:products:tenant_id=eq.${currentTenant.id}`)
+402-      .on(
+403-        'postgres_changes',
+404-        {
+405-          event: 'UPDATE',
+406-          schema: 'public',
+407-          table: 'products',
+408-          filter: `tenant_id=eq.${currentTenant.id}`
+409-        },
+--
+434:    return () => {
+435-      supabase.removeChannel(channel);
+436-    };
+437-  }, [currentTenant?.id]);
+438-
+439-  // Clear the _justUpdated flag after a short delay
+440-  useEffect(() => {
+441-    const hasUpdated = products.some(p => (p as any)._justUpdated);
+442-    if (hasUpdated) {
+443-      const timer = setTimeout(() => {
+444-        setProducts(prev => prev.map(p => {
+445-          if ((p as any)._justUpdated) {
+446-            const { _justUpdated, ...rest } = p as any;
+447-            return rest as Product;
+448-          }
+449-          return p;
+450-        }));
+451-      }, 2000); // 2 seconds flash
+452:      return () => clearTimeout(timer);
+453-    }
+454-  }, [products]);
+455-
+456-  // Cart validation against products
+457-  useEffect(() => {
+458-    if (cart.length === 0 || products.length === 0) return;
+459-    
+460-    let cartChanged = false;
+461-    const newCart = cart.map(item => {
+462-      const product = products.find(p => p.id === item.id);
+463-      if (product && product.stock < item.quantity) {
+464-        cartChanged = true;
+465-        if (product.stock <= 0) {
+466-          alert(`Ops! O item "${product.name}" acabou de ser vendido no balcão físico e não está mais disponível.`);
+467-          return { ...item, quantity: 0, _remove: true };
+468-        } else {
+469-          alert(`Atenção: O estoque do item "${product.name}" foi atualizado no balcão físico e ajustamos sua quantidade para garantir sua entrega.`);
+470-          return { ...item, quantity: product.stock };
+471-        }
+472-      }
+--
+1245:      return (
+1246-          <div className="min-h-screen flex items-center justify-center bg-gray-50 p-6">
+1247-              <div className="max-w-md w-full bg-white p-12 rounded-[3.5rem] shadow-2xl text-center space-y-8 animate-in zoom-in-95">
+1248-                  <div className="w-24 h-24 bg-red-50 text-red-500 rounded-full flex items-center justify-center mx-auto animate-pulse">
+1249-                      <ShieldAlert size={48} />
+1250-                  </div>
+1251-                  <div className="space-y-3">
+1252-                      <h1 className="text-3xl font-black text-gray-900 tracking-tight">{isLicenseExpiredActive ? 'Licença Expirada' : 'Loja Suspensa'}</h1>
+1253-                      <p className="text-gray-500 font-medium leading-relaxed">
+1254-                          {isLicenseExpiredActive ? "O período de uso deste sistema terminou. Renove sua assinatura para continue operando." : "Esta drogaria está temporariamente indisponível no catálogo FarmaFlow."}
+1255-                      </p>
+1256-                  </div>
+1257-                  <button onClick={() => handleViewChange(ViewMode.LOGIN)} className="w-full py-5 bg-gray-900 text-white rounded-[2rem] font-black text-lg active:scale-95 transition-all shadow-xl shadow-gray-200">Voltar ao Início</button>
+1258-              </div>
+1259-          </div>
+1260-      );
+1261-  }
+1262-
+1263:  return (
+1264-    <div className="min-h-screen bg-[#fcfdfe]">
+1265-      {view !== ViewMode.LOGIN && (
+1266-        <Navbar 
+1267-          currentView={view} 
+1268-          onViewChange={handleViewChange} 
+1269-          cartCount={cart.reduce((a, c) => a + c.quantity, 0)} 
+1270-          config={currentTenant || ({ name: 'FarmaFlow', whatsapp: '', primaryColor: '#059669', id: '' } as PharmacyConfig)}
+1271-          session={session} 
+1272-          onToggleSidebar={(view === ViewMode.ADMIN_PHARMACY || view === ViewMode.ADMIN_SUPER) ? () => setIsSidebarOpen(true) : undefined}
+1273-        />
+1274-      )}
+1275-
+1276-      {isSidebarOpen && (
+1277-        <div className="fixed inset-0 z-[100] md:hidden">
+1278-          <div className="absolute inset-0 bg-gray-900/60 backdrop-blur-sm" onClick={() => setIsSidebarOpen(false)}></div>
+1279-          <aside className="absolute top-0 left-0 w-72 h-full bg-white shadow-2xl flex flex-col p-6 animate-in slide-in-from-left">
+1280-            <div className="flex items-center justify-between mb-8"><span className="font-black text-gray-900">Gestão FarmaFlow</span><button onClick={() => setIsSidebarOpen(false)} className="p-2 bg-gray-50 rounded-lg"><X size={20}/></button></div>
+1281-            <nav className="flex-1 space-y-1">
+1282-              {view === ViewMode.ADMIN_PHARMACY ? (
+1283-                <>

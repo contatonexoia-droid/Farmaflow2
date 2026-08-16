@@ -1,0 +1,21 @@
+                        const chunkBarcodes = newBarcodes.slice(i, i + CHUNK_SIZE_MATCH);
+                        const { data: dbMatches, error: matchErr } = await supabase
+                            .from('products')
+                            .select('id, barcode, tenant_id')
+                            .eq('tenant_id', tenant.id)
+                            .in('barcode', chunkBarcodes);
+                            
+                        if (!matchErr && dbMatches) {
+                            dbMatches.forEach(item => {
+                                if (item.barcode) {
+                                    dbExistingMap.set(String(item.barcode).trim(), item);
+                                }
+                            });
+                        }
+                    }
+                }
+
+                const actualNewProducts: Product[] = [];
+                const actualUpdateFromNewProducts: any[] = [];
+
+                newProducts.forEach(p => {
