@@ -5623,7 +5623,7 @@ app.get("/api/v1/chat/instance/status", requireChatEnabled, async (req, res) => 
                   }
 
                   return res.json({ 
-                    status: 'QRCODE', 
+                    status: base64 ? 'QRCODE' : 'DISCONNECTED', 
                     qrcodeBase64: base64 || null, 
                     instanceName, 
                     evolutionUrl,
@@ -5641,8 +5641,12 @@ app.get("/api/v1/chat/instance/status", requireChatEnabled, async (req, res) => 
         try {
           const { data: existing } = await supabaseAdmin.from('whatsapp_instances').select('*').eq('instance_name', instanceName).maybeSingle();
           if (existing) {
+            const resolvedStatus = existing.status === 'CONNECTED' 
+              ? 'CONNECTED' 
+              : (existing.qrcode_base64 ? 'QRCODE' : 'DISCONNECTED');
+
             return res.json({ 
-              status: existing.status || 'DISCONNECTED',
+              status: resolvedStatus,
               phoneNumber: existing.phone_number || null,
               phone_number: existing.phone_number || null,
               qrcodeBase64: existing.qrcode_base64 || null,

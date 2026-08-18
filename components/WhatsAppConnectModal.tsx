@@ -138,21 +138,21 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
       });
 
       if (ok && data) {
-        if (data.status) {
-          setStatus(data.status);
-          if (data.status === 'CONNECTED') {
-            setIsPolling(false);
-            if (data.phoneNumber || data.phone_number) {
-              setPhoneNumber(data.phoneNumber || data.phone_number);
-            }
+        if (data.status === 'CONNECTED') {
+          setStatus('CONNECTED');
+          setIsPolling(false);
+          if (data.phoneNumber || data.phone_number) {
+            setPhoneNumber(data.phoneNumber || data.phone_number);
           }
-        }
-        if (data.qrcodeBase64) {
+        } else if (data.qrcodeBase64) {
           let b64 = data.qrcodeBase64;
           if (!b64.startsWith('data:image')) {
             b64 = `data:image/png;base64,${b64}`;
           }
           setQrCodeBase64(b64);
+          setStatus('QRCODE');
+        } else if (!qrCodeBase64) {
+          setStatus('DISCONNECTED');
         }
         
         // Só atualiza os campos de input se for na carga inicial ou se o usuário não estiver na aba de ajustes
@@ -557,20 +557,29 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
                     <p className="text-[11px] text-gray-500">• Webhooks e sincronização em tempo real ativados</p>
                   </div>
 
-                  <div className="flex items-center gap-3 w-full pt-2">
+                  <div className="flex flex-col sm:flex-row items-center gap-3 w-full pt-2">
                     <button 
                       onClick={fetchInstanceStatus}
-                      className="flex-1 py-3 px-4 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold rounded-2xl transition-colors flex items-center justify-center gap-2 text-xs"
+                      className="w-full sm:w-auto py-3 px-4 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold rounded-2xl transition-colors flex items-center justify-center gap-2 text-xs"
                     >
-                      <RefreshCw className="w-4 h-4" /> Verificar Status
+                      <RefreshCw className="w-4 h-4" /> Status
                     </button>
                     <button 
                       onClick={handleGenerateQRCode}
                       disabled={isLoading}
-                      className="flex-2 py-3 px-6 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-2xl shadow-lg shadow-emerald-600/20 transition-all flex items-center justify-center gap-2 text-xs uppercase tracking-wider"
+                      className="w-full flex-1 py-3 px-6 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-2xl shadow-lg shadow-emerald-600/20 transition-all flex items-center justify-center gap-2 text-xs uppercase tracking-wider"
                     >
                       {isLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <QrCode className="w-4 h-4" />}
-                      {isLoading ? 'Criando Instância & QR Code...' : 'Gerar QR Code'}
+                      {isLoading ? 'Gerando QR Code...' : 'Gerar QR Code'}
+                    </button>
+                  </div>
+                  <div className="pt-1">
+                    <button
+                      onClick={handleRecreateInstance}
+                      disabled={isLoading}
+                      className="text-xs text-amber-700 hover:text-amber-800 font-bold hover:underline flex items-center gap-1.5"
+                    >
+                      <Zap className="w-3.5 h-3.5" /> Forçar Recriação da Instância na Evolution
                     </button>
                   </div>
                 </div>
@@ -595,19 +604,36 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
                           QR Code Ativo • Pronto para Leitura
                         </span>
                       </div>
-                    ) : (
+                    ) : isLoading ? (
                       <div className="w-56 h-56 bg-emerald-50/50 border border-dashed border-emerald-300 rounded-2xl flex flex-col items-center justify-center text-center p-4 space-y-3">
                         <RefreshCw className="w-8 h-8 animate-spin text-emerald-600" />
                         <div>
                           <p className="text-xs font-bold text-gray-800">Gerando QR Code...</p>
                           <p className="text-[11px] text-gray-500 mt-0.5">Iniciando sessão com a Evolution API</p>
                         </div>
+                      </div>
+                    ) : (
+                      <div className="w-56 h-56 bg-emerald-50/50 border border-dashed border-emerald-300 rounded-2xl flex flex-col items-center justify-center text-center p-4 space-y-3">
+                        <div className="w-10 h-10 rounded-xl bg-emerald-100 flex items-center justify-center text-emerald-600">
+                          <QrCode className="w-6 h-6" />
+                        </div>
+                        <div>
+                          <p className="text-xs font-bold text-gray-800">QR Code não carregado</p>
+                          <p className="text-[11px] text-gray-500 mt-0.5">Clique abaixo para gerar o QR Code</p>
+                        </div>
+                        <button
+                          onClick={handleGenerateQRCode}
+                          disabled={isLoading}
+                          className="w-full py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs shadow-md transition-all flex items-center justify-center gap-1.5"
+                        >
+                          <Zap className="w-3.5 h-3.5" /> Gerar QR Code Agora
+                        </button>
                         <button
                           onClick={handleRecreateInstance}
                           disabled={isLoading}
-                          className="text-[10px] font-bold text-emerald-700 hover:text-emerald-800 bg-emerald-100/80 hover:bg-emerald-200/80 px-2.5 py-1.5 rounded-lg transition-colors flex items-center gap-1 shadow-xs"
+                          className="text-[10px] font-bold text-amber-700 hover:text-amber-800 hover:underline flex items-center gap-1"
                         >
-                          <Zap className="w-3 h-3 text-emerald-600" /> Recriar do Zero
+                          <RefreshCw className="w-2.5 h-2.5" /> Recriar Instância do Zero
                         </button>
                       </div>
                     )}
