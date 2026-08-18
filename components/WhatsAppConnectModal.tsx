@@ -328,6 +328,50 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     }
   };
 
+  const handleRecreateInstance = async () => {
+    if (!tenantId || tenantId === 'undefined') return;
+    setIsLoading(true);
+    setErrorMessage(null);
+    setSuccessMessage(null);
+    setQrCodeBase64(null);
+    try {
+      const { ok, data, error } = await safeFetchJson('/api/v1/chat/instance/recreate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-tenant-id': tenantId,
+          'Authorization': `Bearer ${localStorage.getItem('farmaflow_admin_token') || ''}`
+        },
+        body: JSON.stringify({
+          tenantId,
+          inboxId,
+          evolutionUrl: evolutionUrl.trim(),
+          evolutionKey: evolutionKey.trim(),
+          instanceName: (instanceName || defaultInstanceName).trim()
+        })
+      });
+
+      if (ok && data) {
+        if (data.qrcodeBase64) {
+          let b64 = data.qrcodeBase64;
+          if (!b64.startsWith('data:image')) {
+            b64 = `data:image/png;base64,${b64}`;
+          }
+          setQrCodeBase64(b64);
+        }
+        setStatus('QRCODE');
+        setIsPolling(true);
+        setSuccessMessage("Instância reiniciada com sucesso na Evolution API! QR Code gerado.");
+      } else {
+        setErrorMessage(error || data?.error || "Erro ao recriar instância na Evolution API.");
+      }
+    } catch (e: any) {
+      setErrorMessage("Falha ao recriar instância na Evolution API.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const handleDisconnect = async () => {
     if (!window.confirm("Deseja realmente desconectar este WhatsApp da Evolution API?")) return;
     setIsDisconnecting(true);
@@ -539,20 +583,32 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
                     <p className="text-xs text-gray-500 mt-0.5">Escaneie no WhatsApp do celular para conectar automaticamente</p>
                   </div>
 
-                  <div className="p-4 bg-white border-2 border-emerald-500/40 rounded-3xl shadow-xl relative flex items-center justify-center min-h-[250px] min-w-[250px]">
+                  <div className="p-4 bg-white border-2 border-emerald-500/40 rounded-3xl shadow-xl relative flex items-center justify-center min-h-[260px] min-w-[260px]">
                     {qrCodeBase64 ? (
-                      <img 
-                        src={qrCodeBase64} 
-                        alt="WhatsApp QR Code Evolution" 
-                        className="w-56 h-56 object-contain rounded-xl" 
-                      />
+                      <div className="flex flex-col items-center space-y-2">
+                        <img 
+                          src={qrCodeBase64} 
+                          alt="WhatsApp QR Code Evolution" 
+                          className="w-56 h-56 object-contain rounded-xl shadow-xs" 
+                        />
+                        <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full">
+                          QR Code Ativo • Pronto para Leitura
+                        </span>
+                      </div>
                     ) : (
-                      <div className="w-56 h-56 bg-emerald-50/50 border border-dashed border-emerald-300 rounded-2xl flex flex-col items-center justify-center text-center p-4 space-y-2.5">
+                      <div className="w-56 h-56 bg-emerald-50/50 border border-dashed border-emerald-300 rounded-2xl flex flex-col items-center justify-center text-center p-4 space-y-3">
                         <RefreshCw className="w-8 h-8 animate-spin text-emerald-600" />
                         <div>
                           <p className="text-xs font-bold text-gray-800">Gerando QR Code...</p>
                           <p className="text-[11px] text-gray-500 mt-0.5">Iniciando sessão com a Evolution API</p>
                         </div>
+                        <button
+                          onClick={handleRecreateInstance}
+                          disabled={isLoading}
+                          className="text-[10px] font-bold text-emerald-700 hover:text-emerald-800 bg-emerald-100/80 hover:bg-emerald-200/80 px-2.5 py-1.5 rounded-lg transition-colors flex items-center gap-1 shadow-xs"
+                        >
+                          <Zap className="w-3 h-3 text-emerald-600" /> Recriar do Zero
+                        </button>
                       </div>
                     )}
                   </div>
@@ -566,14 +622,24 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
                     <p className="text-emerald-700 font-bold pt-0.5">✨ O sistema conecta automaticamente assim que você escanear!</p>
                   </div>
                   
-                  <div className="flex items-center justify-between w-full pt-1">
-                    <button 
-                      onClick={handleGenerateQRCode}
-                      disabled={isLoading}
-                      className="text-xs font-bold text-gray-600 hover:text-gray-900 flex items-center gap-1.5 py-2 px-3 rounded-xl hover:bg-gray-100 transition-colors"
-                    >
-                      <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} /> Atualizar QR Code
-                    </button>
+                  <div className="flex flex-wrap items-center justify-between gap-2 w-full pt-1">
+                    <div className="flex items-center gap-2">
+                      <button 
+                        onClick={handleGenerateQRCode}
+                        disabled={isLoading}
+                        className="text-xs font-bold text-gray-600 hover:text-gray-900 flex items-center gap-1.5 py-2 px-3 rounded-xl hover:bg-gray-100 transition-colors"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} /> Atualizar
+                      </button>
+                      <button 
+                        onClick={handleRecreateInstance}
+                        disabled={isLoading}
+                        className="text-xs font-bold text-amber-700 hover:text-amber-800 bg-amber-50 hover:bg-amber-100 flex items-center gap-1.5 py-2 px-2.5 rounded-xl transition-colors border border-amber-200/60"
+                        title="Caso a instância esteja travada, recria ela do zero na Evolution"
+                      >
+                        <Zap className="w-3 h-3 text-amber-600" /> Recriar Instância
+                      </button>
+                    </div>
                     
                     <button 
                       onClick={fetchInstanceStatus}
