@@ -72,76 +72,68 @@ export class WhatsappHealthManager extends EventEmitter {
   public async checkInstanceHealth(inst: any, evolutionUrl: string, evolutionKey: string) {
     const storeId = inst.store_id;
     const instanceName = inst.instance_name || `store_${storeId.replace(/-/g, "")}`;
-    const previousState = this.healthMap.get(storeId)?.status || inst.status || "DISCONNECTED";
+    const previousState: HealthStatus = this.healthMap.get(storeId)?.status || inst.status || "DISCONNECTED";
 
     try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
+
       const stateRes = await fetch(`${evolutionUrl}/instance/connectionState/${instanceName}`, {
         headers: { apikey: evolutionKey },
+        signal: controller.signal
       });
+      clearTimeout(timeout);
 
       if (stateRes.status === 404) {
+        // Se a instância não existe na Evolution mas está em QRCODE no FarmaFlow, mantemos em QRCODE para pareamento
+        if (previousState === "QRCODE") {
+          return;
+        }
         await this.handleStatusChange(storeId, instanceName, "DISCONNECTED", previousState, "Instância não encontrada na Evolution API.");
         return;
       }
 
-      const stateData = await stateRes.json();
+      if (!stateRes.ok) {
+        return;
+      }
+
+      const stateData = await stateRes.json().catch(() => ({}));
       const rawState = stateData?.instance?.state || stateData?.state;
 
-      let currentStatus: HealthStatus = "DISCONNECTED";
+      let currentStatus: HealthStatus = previousState;
       if (rawState === "open") {
         currentStatus = "CONNECTED";
       } else if (rawState === "connecting") {
         currentStatus = "RECONNECTING";
-      } else {
-        currentStatus = "DISCONNECTED";
+      } else if (rawState === "close" || rawState === "refused") {
+        currentStatus = previousState === "QRCODE" ? "QRCODE" : "DISCONNECTED";
       }
 
-      await this.handleStatusChange(storeId, instanceName, currentStatus, previousState, `State: ${rawState}`);
-
-      // Auto-reconectar com Exponential Backoff se estiver desconectado
-      if (currentStatus === "DISCONNECTED") {
-        const health = this.healthMap.get(storeId);
-        const failures = (health?.consecutiveFailures || 0) + 1;
-        this.healthMap.set(storeId, {
-          storeId,
-          instanceName,
-          status: "DISCONNECTED",
-          lastCheckAt: new Date().toISOString(),
-          consecutiveFailures: failures,
-        });
-
-        if (failures <= 5) {
-          const backoffDelay = Math.pow(2, failures) * 1000;
-          setTimeout(() => {
-            this.attemptReconnection(instanceName, evolutionUrl, evolutionKey).catch(() => {});
-          }, backoffDelay);
-        }
-      } else {
-        // Reset failures counter when connected
-        this.healthMap.set(storeId, {
-          storeId,
-          instanceName,
-          status: currentStatus,
-          lastCheckAt: new Date().toISOString(),
-          consecutiveFailures: 0,
-        });
+      if (currentStatus !== previousState) {
+        await this.handleStatusChange(storeId, instanceName, currentStatus, previousState, `State: ${rawState}`);
       }
+
+      // Atualiza mapa interno
+      this.healthMap.set(storeId, {
+        storeId,
+        instanceName,
+        status: currentStatus,
+        lastCheckAt: new Date().toISOString(),
+        consecutiveFailures: 0,
+      });
+
     } catch (err: any) {
+      // Se a chamada falhou (servidor offline ou timeout), não sobrescreve QRCODE nem CONNECTED indevidamente
       const health = this.healthMap.get(storeId);
       const failures = (health?.consecutiveFailures || 0) + 1;
       
-      if (failures >= 3) {
-        await this.handleStatusChange(storeId, instanceName, "DISCONNECTED", previousState, err.message);
-      } else {
-        // Guardar a falha transiente sem mudar o status
-        this.healthMap.set(storeId, {
-          storeId,
-          instanceName,
-          status: previousState as any,
-          lastCheckAt: new Date().toISOString(),
-          consecutiveFailures: failures,
-        });
-      }
+      this.healthMap.set(storeId, {
+        storeId,
+        instanceName,
+        status: previousState,
+        lastCheckAt: new Date().toISOString(),
+        consecutiveFailures: failures,
+      });
     }
   }
 

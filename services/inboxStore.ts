@@ -56,6 +56,7 @@ class InboxStore {
   }
 
   public async getInboxes(storeId: string): Promise<InboxItem[]> {
+    let dbInboxes: InboxItem[] = [];
     try {
       const { data, error } = await supabaseAdmin
         .from("inboxes")
@@ -64,16 +65,28 @@ class InboxStore {
         .order("created_at", { ascending: true });
 
       if (!error && data) {
-        return data;
+        dbInboxes = data.map((d: any) => ({
+          ...d,
+          channel_type: d.channel_type || "whatsapp"
+        }));
       }
     } catch (err) {
       console.warn("[InboxStore] Supabase query error, falling back to memory:", err);
     }
 
-    // Fallback to memory/file store
-    const storeInboxes = this.inboxes.filter(i => i.store_id === storeId);
-    if (storeInboxes.length === 0) {
-      // Create default
+    const fileInboxes = this.inboxes.filter(i => i.store_id === storeId);
+    
+    // Combine dbInboxes with any file inboxes that aren't yet in dbInboxes
+    const dbIds = new Set(dbInboxes.map(i => i.id));
+    const merged = [...dbInboxes];
+    for (const fi of fileInboxes) {
+      if (!dbIds.has(fi.id)) {
+        merged.push(fi);
+      }
+    }
+
+    if (merged.length === 0) {
+      // Create default inbox
       const defaultInbox: InboxItem = {
         id: `inbox_default_${storeId}`,
         store_id: storeId,
@@ -87,37 +100,50 @@ class InboxStore {
       this.saveToFile();
       return [defaultInbox];
     }
-    return storeInboxes;
+
+    return merged;
   }
 
   public async createInbox(storeId: string, name: string, description?: string, whatsappInstanceId?: string | null, channelType?: string | null): Promise<InboxItem> {
+    const isUuid = whatsappInstanceId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(whatsappInstanceId);
+    const validInstId = isUuid ? whatsappInstanceId : null;
+
     const newInbox: InboxItem = {
       id: `inbox_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       store_id: storeId,
       name,
       description: description || "",
-      whatsapp_instance_id: whatsappInstanceId || null,
+      whatsapp_instance_id: validInstId,
       channel_type: channelType || "whatsapp",
       created_at: new Date().toISOString()
     };
 
     try {
+      // First try inserting clean payload
+      const payload: any = {
+        store_id: storeId,
+        name,
+        description: description || null,
+        whatsapp_instance_id: validInstId
+      };
+
       const { data, error } = await supabaseAdmin
         .from("inboxes")
-        .insert([{
-          store_id: storeId,
-          name,
-          description: description || null,
-          whatsapp_instance_id: whatsappInstanceId || null,
-          channel_type: channelType || "whatsapp"
-        }])
+        .insert([payload])
         .select()
         .single();
 
       if (!error && data) {
-        this.inboxes.push(data);
+        const item: InboxItem = {
+          ...data,
+          channel_type: channelType || data.channel_type || "whatsapp"
+        };
+        this.inboxes.push(item);
         this.saveToFile();
-        return data;
+        return item;
+      }
+      if (error) {
+        console.warn("[InboxStore] Supabase insert warning:", error.message);
       }
     } catch (err) {
       console.warn("[InboxStore] Supabase insert failed, using fallback:", err);
@@ -129,11 +155,13 @@ class InboxStore {
   }
 
   public async updateInbox(id: string, name: string, description?: string, whatsappInstanceId?: string | null, channelType?: string | null): Promise<InboxItem> {
-    const payload = {
+    const isUuid = whatsappInstanceId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(whatsappInstanceId);
+    const validInstId = isUuid ? whatsappInstanceId : null;
+
+    const payload: any = {
       name,
       description: description || "",
-      whatsapp_instance_id: whatsappInstanceId || null,
-      channel_type: channelType || "whatsapp"
+      whatsapp_instance_id: validInstId
     };
 
     try {
@@ -145,23 +173,25 @@ class InboxStore {
         .single();
 
       if (!error && data) {
-        this.inboxes = this.inboxes.map(i => i.id === id ? data : i);
+        const updatedItem = { ...data, channel_type: channelType || "whatsapp" };
+        this.inboxes = this.inboxes.map(i => i.id === id ? updatedItem : i);
         this.saveToFile();
-        return data;
+        return updatedItem;
       }
     } catch (err) {
       console.warn("[InboxStore] Supabase update failed, using fallback:", err);
     }
 
+    const localPayload = { ...payload, channel_type: channelType || "whatsapp" };
     const index = this.inboxes.findIndex(i => i.id === id);
     if (index >= 0) {
-      this.inboxes[index] = { ...this.inboxes[index], ...payload };
+      this.inboxes[index] = { ...this.inboxes[index], ...localPayload };
     } else {
-      const created = { id, store_id: "default", created_at: new Date().toISOString(), ...payload };
+      const created = { id, store_id: "default", created_at: new Date().toISOString(), ...localPayload };
       this.inboxes.push(created);
     }
     this.saveToFile();
-    return this.inboxes.find(i => i.id === id) || { id, store_id: "default", created_at: new Date().toISOString(), ...payload };
+    return this.inboxes.find(i => i.id === id) || { id, store_id: "default", created_at: new Date().toISOString(), ...localPayload };
   }
 
   public async deleteInbox(id: string): Promise<boolean> {

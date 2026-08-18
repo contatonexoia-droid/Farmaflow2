@@ -27,6 +27,7 @@ import { inboxStore } from "./services/inboxStore.js";
 import { chatStore } from "./services/chatStore.js";
 import { teamStore } from "./services/teamStore.js";
 import { aiAgentService } from "./services/aiAgentService.js";
+import QRCode from "qrcode";
 
 
 const app = express();
@@ -4951,77 +4952,375 @@ const requireChatEnabled = async (req: any, res: any, next: any) => {
 
 // --- EVOLUTION API WHATSAPP INSTANCE ENDPOINTS ---
 
+async function resolveEvolutionConfig(tenantId: string, inboxId?: string, override?: any) {
+  let evolutionUrl = override?.evolutionUrl || process.env.EVOLUTION_API_URL;
+  let evolutionKey = override?.evolutionKey || process.env.EVOLUTION_API_KEY;
+  let instanceName = override?.instanceName;
+
+  if (!instanceName) {
+    instanceName = inboxId ? `inbox_${inboxId.replace(/-/g,"")}` : `store_${tenantId.replace(/-/g,"")}`;
+  }
+
+  // Tenta obter do banco de dados se não fornecido
+  try {
+    const { data: inst } = await supabaseAdmin
+      .from('whatsapp_instances')
+      .select('*')
+      .eq(inboxId ? 'id' : 'store_id', inboxId || tenantId)
+      .maybeSingle();
+
+    if (inst) {
+      if (!override?.evolutionUrl && inst.evolution_url) evolutionUrl = inst.evolution_url;
+      if (!override?.evolutionKey && inst.evolution_key) evolutionKey = inst.evolution_key;
+      if (!override?.instanceName && inst.instance_name) instanceName = inst.instance_name;
+    }
+  } catch (e) {}
+
+  if (!evolutionUrl || evolutionUrl.includes('seudominio.com') || evolutionUrl.includes('yourdomain.com')) {
+    evolutionUrl = "https://evolution-evolution-api.7wcbhg.easypanel.host";
+  }
+
+  evolutionUrl = evolutionUrl.replace(/\/$/, '');
+  return { evolutionUrl, evolutionKey, instanceName };
+}
+
+app.post("/api/v1/chat/instance/test-evolution", requireChatEnabled, async (req, res) => {
+  try {
+    const tenantId = (req as any).tenantId || req.body.tenantId || (req.headers["x-tenant-id"] as string);
+    const { evolutionUrl: inputUrl, evolutionKey: inputKey, instanceName: inputInstance } = req.body;
+
+    const { evolutionUrl, evolutionKey, instanceName } = await resolveEvolutionConfig(tenantId, req.body.inboxId, {
+      evolutionUrl: inputUrl,
+      evolutionKey: inputKey,
+      instanceName: inputInstance
+    });
+
+    if (!evolutionUrl) {
+      return res.status(400).json({ ok: false, error: "URL da Evolution API não informada." });
+    }
+
+    if (!evolutionKey) {
+      return res.status(400).json({ ok: false, error: "Chave Global (API Key) da Evolution API não informada." });
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6000);
+
+    // Testa fetchInstances para validar API Key e conectividade
+    let testRes: any;
+    try {
+      testRes = await fetch(`${evolutionUrl}/instance/fetchInstances`, {
+        headers: { "apikey": evolutionKey },
+        signal: controller.signal
+      });
+    } catch (netErr: any) {
+      clearTimeout(timeout);
+      return res.status(502).json({ 
+        ok: false, 
+        error: `Servidor da Evolution API inacessível em ${evolutionUrl}. Verifique se o endereço está correto e com HTTPS ativo.` 
+      });
+    }
+    clearTimeout(timeout);
+
+    if (testRes.status === 401 || testRes.status === 403) {
+      return res.status(401).json({ 
+        ok: false, 
+        error: "Chave de API (apikey) inválida ou não autorizada na Evolution API." 
+      });
+    }
+
+    let instances: any[] = [];
+    if (testRes.ok) {
+      const data = await testRes.json().catch(() => []);
+      instances = Array.isArray(data) ? data : (data?.instances || []);
+    }
+
+    // Verifica se a instância específica existe
+    let instanceExists = false;
+    let instanceState = "disconnected";
+    let instanceOwner = null;
+
+    if (instanceName) {
+      const matching = instances.find((i: any) => 
+        (i.name === instanceName || i.instance?.instanceName === instanceName || i.instanceName === instanceName || i.id === instanceName)
+      );
+      if (matching) {
+        instanceExists = true;
+        instanceState = matching.connectionStatus || matching.state || matching.instance?.state || "disconnected";
+        instanceOwner = matching.owner || matching.instance?.owner || null;
+      }
+    }
+
+    return res.json({
+      ok: true,
+      evolutionUrl,
+      instanceName,
+      totalInstances: instances.length,
+      instanceExists,
+      instanceState,
+      instanceOwner,
+      message: "Conexão com a Evolution API estabelecida com sucesso!"
+    });
+  } catch (error: any) {
+    return res.status(500).json({ ok: false, error: error.message || "Erro ao testar conexão com Evolution API" });
+  }
+});
+
+app.post("/api/v1/chat/instance/save-config", requireChatEnabled, async (req, res) => {
+  try {
+    const tenantId = (req as any).tenantId || req.body.tenantId || (req.headers["x-tenant-id"] as string);
+    const inboxId = req.body.inboxId;
+    const { evolutionUrl, evolutionKey, instanceName } = req.body;
+
+    if (!tenantId) return res.status(400).json({ error: "Tenant ID is required." });
+
+    const targetInstanceName = instanceName || (inboxId ? `inbox_${inboxId.replace(/-/g,"")}` : `store_${tenantId.replace(/-/g,"")}`);
+
+    const { data: existing } = await supabaseAdmin
+      .from('whatsapp_instances')
+      .select('id')
+      .eq(inboxId ? 'id' : 'store_id', inboxId || tenantId)
+      .maybeSingle();
+
+    const updatePayload: any = {
+      store_id: tenantId,
+      instance_name: targetInstanceName,
+      updated_at: new Date().toISOString()
+    };
+
+    if (evolutionUrl) updatePayload.evolution_url = evolutionUrl.trim().replace(/\/$/, '');
+    if (evolutionKey) updatePayload.evolution_key = evolutionKey.trim();
+
+    if (existing) {
+      await supabaseAdmin.from('whatsapp_instances').update(updatePayload).eq('id', existing.id);
+    } else {
+      await supabaseAdmin.from('whatsapp_instances').insert({
+        ...updatePayload,
+        status: 'DISCONNECTED'
+      });
+    }
+
+    return res.json({ success: true, message: "Configurações da Evolution API salvas com sucesso!" });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || "Erro ao salvar configurações" });
+  }
+});
+
 app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) => {
   try {
-    const tenantId = (req as any).tenantId || req.body.tenantId;
+    const tenantId = (req as any).tenantId || req.body.tenantId || (req.headers["x-tenant-id"] as string);
     const inboxId = req.body.inboxId;
     if (!tenantId) return res.status(400).json({ error: "Tenant ID is required." });
 
-    const evolutionUrl = process.env.EVOLUTION_API_URL?.replace(/\/$/, '');
-    const evolutionKey = process.env.EVOLUTION_API_KEY;
+    const { evolutionUrl, evolutionKey, instanceName } = await resolveEvolutionConfig(tenantId, inboxId, req.body);
 
     if (!evolutionUrl || !evolutionKey) {
-      return res.status(500).json({ error: "A API do WhatsApp (Evolution API) não está configurada no servidor. Faltam credenciais (EVOLUTION_API_URL e EVOLUTION_API_KEY)." });
+      return res.status(400).json({ 
+        error: "Evolution API não configurada. Por favor, informe a URL e a Global API Key nas configurações." 
+      });
     }
 
-    const instanceName = inboxId ? `inbox_${inboxId.replace(/-/g,"")}` : `store_${tenantId.replace(/-/g,"")}`;
+    const hostOrigin = req.headers.origin || `https://${req.headers.host}`;
+    const webhookUrl = `${hostOrigin}/api/v1/chat/webhook?tenantId=${tenantId}`;
 
-    // 1. Criar a instância
-    const createRes = await fetch(`${evolutionUrl}/instance/create`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "apikey": evolutionKey
-      },
-      body: JSON.stringify({
-        instanceName: instanceName,
-        qrcode: true,
-        integration: "WHATSAPP-BAILEYS"
-      })
-    });
+    let base64: string | null = null;
+    let isEvolutionLive = false;
+    let isConnected = false;
+    let phoneNumber: string | null = null;
 
-    const createData = await createRes.json();
-    
-    // Verifica se já existe ou retornou o base64
-    let base64 = createData?.qrcode?.base64 || createData?.base64;
+    try {
+      // 1. Primeiro checa se a instância já existe e está conectada
+      const stateController = new AbortController();
+      const stateTimeout = setTimeout(() => stateController.abort(), 4000);
+      const stateRes = await fetch(`${evolutionUrl}/instance/connectionState/${instanceName}`, {
+        headers: { "apikey": evolutionKey },
+        signal: stateController.signal
+      }).catch(() => null);
+      clearTimeout(stateTimeout);
 
-    if (!base64 && createRes.status === 403 && createData?.message?.includes("already exists")) {
-        // Se já existe, tenta buscar o QR code conectando
-        const connectRes = await fetch(`${evolutionUrl}/instance/connect/${instanceName}`, {
-            headers: { "apikey": evolutionKey }
-        });
-        const connectData = await connectRes.json();
-        base64 = connectData?.base64;
-    }
-
-    if (base64) {
-      // Salva ou atualiza no banco de forma segura
-      const { data: existing } = await supabaseAdmin.from('whatsapp_instances').select('id').eq('instance_name', instanceName).single();
-      if (existing) {
-        await supabaseAdmin.from('whatsapp_instances').update({
-           status: 'QRCODE',
-           updated_at: new Date().toISOString()
-        }).eq('id', existing.id);
-      } else {
-        await supabaseAdmin.from('whatsapp_instances').insert({
-           store_id: tenantId,
-           instance_name: instanceName,
-           status: 'QRCODE',
-           updated_at: new Date().toISOString()
-        });
-      }
-
-      if (inboxId) {
-        // Link instance to inbox
-        const { data: inst } = await supabaseAdmin.from('whatsapp_instances').select('id').eq('instance_name', instanceName).single();
-        if (inst) {
-           await supabaseAdmin.from('inboxes').update({ whatsapp_instance_id: inst.id }).eq('id', inboxId);
+      if (stateRes && stateRes.ok) {
+        const stateData: any = await stateRes.json().catch(() => ({}));
+        const rawState = stateData?.instance?.state || stateData?.state;
+        if (rawState === "open") {
+          isConnected = true;
+          isEvolutionLive = true;
+          phoneNumber = stateData?.instance?.owner?.split('@')[0] || stateData?.owner?.split('@')[0] || null;
         }
       }
 
-      return res.json({ success: true, qrcodeBase64: base64 });
+      // 2. Se não está conectada, tenta obter QR code chamando /instance/connect ou /instance/create
+      if (!isConnected) {
+        // Tenta /instance/connect primeiro (caso a instância já exista)
+        const connectController = new AbortController();
+        const connectTimeout = setTimeout(() => connectController.abort(), 4000);
+        const connectRes = await fetch(`${evolutionUrl}/instance/connect/${instanceName}`, {
+          headers: { "apikey": evolutionKey },
+          signal: connectController.signal
+        }).catch(() => null);
+        clearTimeout(connectTimeout);
+
+        if (connectRes && connectRes.ok) {
+          const connectData: any = await connectRes.json().catch(() => ({}));
+          const rawBase64 = connectData?.qrcode?.base64 || connectData?.base64;
+          const rawCode = connectData?.qrcode?.code || connectData?.code;
+
+          if (rawBase64) {
+            base64 = rawBase64.startsWith('data:image') ? rawBase64 : `data:image/png;base64,${rawBase64}`;
+            isEvolutionLive = true;
+          } else if (rawCode) {
+            base64 = await QRCode.toDataURL(rawCode, {
+              width: 320,
+              margin: 2,
+              color: { dark: '#064e3b', light: '#ffffff' }
+            });
+            isEvolutionLive = true;
+          }
+        }
+
+        // Se /instance/connect não retornou QR (ou a instância não existe ainda), cria a instância
+        if (!base64 && !isConnected) {
+          const createController = new AbortController();
+          const createTimeout = setTimeout(() => createController.abort(), 6000);
+
+          const createRes = await fetch(`${evolutionUrl}/instance/create`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "apikey": evolutionKey
+            },
+            body: JSON.stringify({
+              instanceName: instanceName,
+              qrcode: true,
+              integration: "WHATSAPP-BAILEYS",
+              webhook: webhookUrl,
+              webhook_by_events: false,
+              events: [
+                "MESSAGES_UPSERT",
+                "QRCODE_UPDATED",
+                "CONNECTION_UPDATE",
+                "CONTACTS_SET",
+                "MESSAGES_UPDATE"
+              ]
+            }),
+            signal: createController.signal
+          }).catch((fetchErr: any) => {
+            throw new Error(`Falha ao conectar com o servidor da Evolution API (${evolutionUrl}): ${fetchErr.message}`);
+          });
+          clearTimeout(createTimeout);
+
+          if (createRes.status === 401 || createRes.status === 403) {
+            return res.status(401).json({
+              error: "Chave Global de API (apikey) inválida ou não autorizada na Evolution API."
+            });
+          }
+
+          const createData: any = await createRes.json().catch(() => ({}));
+          const rawBase64 = createData?.qrcode?.base64 || createData?.base64;
+          const rawCode = createData?.qrcode?.code || createData?.code;
+
+          if (rawBase64) {
+            base64 = rawBase64.startsWith('data:image') ? rawBase64 : `data:image/png;base64,${rawBase64}`;
+            isEvolutionLive = true;
+          } else if (rawCode) {
+            base64 = await QRCode.toDataURL(rawCode, {
+              width: 320,
+              margin: 2,
+              color: { dark: '#064e3b', light: '#ffffff' }
+            });
+            isEvolutionLive = true;
+          }
+        }
+
+        // 3. Configurar Webhook automaticamente na Evolution API
+        try {
+          fetch(`${evolutionUrl}/webhook/set/${instanceName}`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "apikey": evolutionKey
+            },
+            body: JSON.stringify({
+              enabled: true,
+              url: webhookUrl,
+              webhookByEvents: false,
+              webhook_by_events: false,
+              events: [
+                "MESSAGES_UPSERT",
+                "QRCODE_UPDATED",
+                "CONNECTION_UPDATE",
+                "CONTACTS_SET",
+                "MESSAGES_UPDATE"
+              ]
+            })
+          }).catch(() => {});
+        } catch (e) {}
+      }
+
+    } catch (evolutionError: any) {
+      console.error("[Evolution API Error]:", evolutionError.message || evolutionError);
+      return res.status(502).json({
+        error: `Erro ao comunicar com a Evolution API em "${evolutionUrl}": ${evolutionError.message}. Verifique a URL e a API Key nas configurações.`
+      });
+    }
+
+    if (isConnected) {
+      try {
+        await supabaseAdmin.from('whatsapp_instances').upsert({
+          store_id: tenantId,
+          instance_name: instanceName,
+          status: 'CONNECTED',
+          phone_number: phoneNumber,
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'instance_name' });
+      } catch (e) {}
+
+      return res.json({
+        success: true,
+        status: 'CONNECTED',
+        phoneNumber,
+        instanceName,
+        isEvolutionLive: true
+      });
+    }
+
+    if (base64) {
+      try {
+        const { data: existing } = await supabaseAdmin.from('whatsapp_instances').select('id').eq('instance_name', instanceName).maybeSingle();
+        if (existing) {
+          await supabaseAdmin.from('whatsapp_instances').update({
+             status: 'QRCODE',
+             updated_at: new Date().toISOString()
+          }).eq('id', existing.id);
+        } else {
+          await supabaseAdmin.from('whatsapp_instances').insert({
+             store_id: tenantId,
+             instance_name: instanceName,
+             status: 'QRCODE',
+             updated_at: new Date().toISOString()
+          });
+        }
+
+        if (inboxId) {
+          const { data: inst } = await supabaseAdmin.from('whatsapp_instances').select('id').eq('instance_name', instanceName).maybeSingle();
+          if (inst) {
+             await supabaseAdmin.from('inboxes').update({ whatsapp_instance_id: inst.id }).eq('id', inboxId);
+          }
+        }
+      } catch (dbErr: any) {
+        console.warn("[WhatsApp Instance DB Update Warning]:", dbErr.message);
+      }
+
+      return res.json({ 
+        success: true, 
+        qrcodeBase64: base64,
+        isEvolutionLive,
+        instanceName,
+        evolutionUrl
+      });
     } else {
-      return res.status(500).json({ error: "Não foi possível gerar o QR Code. A instância pode já estar conectada." });
+      return res.status(500).json({ 
+        error: `A Evolution API não retornou o QR Code. Certifique-se de que a instância "${instanceName}" está disponível ou crie-a no Evolution Manager.` 
+      });
     }
 
   } catch (error: any) {
@@ -5035,61 +5334,163 @@ app.get("/api/v1/chat/instance/status", requireChatEnabled, async (req, res) => 
         const tenantId = (req as any).tenantId || req.query.tenantId;
         const inboxId = req.query.inboxId as string;
         if (!tenantId) return res.status(400).json({ error: "Tenant ID is required." });
-        const evolutionUrl = process.env.EVOLUTION_API_URL?.replace(/\/$/, '');
-        const evolutionKey = process.env.EVOLUTION_API_KEY;
-        if (!evolutionUrl || !evolutionKey) {
-            return res.status(500).json({ error: "A API do WhatsApp não está configurada." });
-        }
-        const instanceName = inboxId ? `inbox_${inboxId.replace(/-/g,"")}` : `store_${tenantId.replace(/-/g,"")}`;
-        const stateRes = await fetch(`${evolutionUrl}/instance/connectionState/${instanceName}`, {
-            headers: { "apikey": evolutionKey }
-        });
-        if (stateRes.status === 404) {
-            return res.json({ status: 'DISCONNECTED' });
-        }
-        const stateData = await stateRes.json();
-        const connectionState = stateData?.instance?.state || stateData?.state;
-        if (connectionState === "open") {
-            const phoneNumber = stateData?.instance?.owner?.split('@')[0] || stateData?.owner?.split('@')[0] || null;
-            
-            const { data: existing } = await supabaseAdmin.from('whatsapp_instances').select('id').eq('instance_name', instanceName).single();
-            if (existing) {
-                await supabaseAdmin.from('whatsapp_instances').update({
-                   status: 'CONNECTED',
-                   ...(phoneNumber ? { phone_number: phoneNumber } : {}),
-                   updated_at: new Date().toISOString()
-                }).eq('id', existing.id);
-            } else {
-                await supabaseAdmin.from('whatsapp_instances').insert({
-                   store_id: tenantId,
-                   instance_name: instanceName,
-                   status: 'CONNECTED',
-                   ...(phoneNumber ? { phone_number: phoneNumber } : {}),
-                   updated_at: new Date().toISOString()
-                });
-            }
+        
+        const { evolutionUrl, evolutionKey, instanceName } = await resolveEvolutionConfig(tenantId, inboxId);
 
-            return res.json({ status: 'CONNECTED' });
-        } else if (connectionState === "connecting") {
-            // Fetch the latest QR code
-            try {
-                const connectRes = await fetch(`${evolutionUrl}/instance/connect/${instanceName}`, {
-                    headers: { "apikey": evolutionKey }
-                });
-                const connectData = await connectRes.json();
-                const base64 = connectData?.qrcode?.base64 || connectData?.base64;
-                if (base64) {
-                    return res.json({ status: 'QRCODE', qrcodeBase64: base64 });
-                }
-            } catch (e) {
-                console.error("Error fetching latest QR code", e);
+        // Se Evolution estiver configurada, consulta estado real com timeout
+        if (evolutionUrl && evolutionKey) {
+          try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 3500);
+            const stateRes = await fetch(`${evolutionUrl}/instance/connectionState/${instanceName}`, {
+              headers: { "apikey": evolutionKey },
+              signal: controller.signal
+            }).catch(() => null);
+            clearTimeout(timeout);
+
+            if (stateRes && stateRes.status === 404) {
+              return res.json({ status: 'DISCONNECTED', instanceName, evolutionUrl });
             }
-            return res.json({ status: 'QRCODE' });
+            if (stateRes && stateRes.ok) {
+              const stateData: any = await stateRes.json().catch(() => ({}));
+              const connectionState = stateData?.instance?.state || stateData?.state;
+              if (connectionState === "open") {
+                  const phoneNumber = stateData?.instance?.owner?.split('@')[0] || stateData?.owner?.split('@')[0] || null;
+                  
+                  const { data: existing } = await supabaseAdmin.from('whatsapp_instances').select('id').eq('instance_name', instanceName).maybeSingle();
+                  if (existing) {
+                      await supabaseAdmin.from('whatsapp_instances').update({
+                         status: 'CONNECTED',
+                         ...(phoneNumber ? { phone_number: phoneNumber } : {}),
+                         updated_at: new Date().toISOString()
+                      }).eq('id', existing.id);
+                  } else {
+                      await supabaseAdmin.from('whatsapp_instances').insert({
+                         store_id: tenantId,
+                         instance_name: instanceName,
+                         status: 'CONNECTED',
+                         ...(phoneNumber ? { phone_number: phoneNumber } : {}),
+                         updated_at: new Date().toISOString()
+                      });
+                  }
+
+                  return res.json({ status: 'CONNECTED', phoneNumber, phone_number: phoneNumber, instanceName, evolutionUrl });
+              } else if (connectionState === "connecting") {
+                  try {
+                      const connectRes = await fetch(`${evolutionUrl}/instance/connect/${instanceName}`, {
+                          headers: { "apikey": evolutionKey }
+                      }).catch(() => null);
+                      if (connectRes && connectRes.ok) {
+                        const connectData: any = await connectRes.json().catch(() => ({}));
+                        let base64 = connectData?.qrcode?.base64 || connectData?.base64;
+                        const code = connectData?.qrcode?.code || connectData?.code;
+                        if (!base64 && code) {
+                          base64 = await QRCode.toDataURL(code, { width: 320, margin: 2 });
+                        }
+                        if (base64) {
+                          if (!base64.startsWith('data:image')) base64 = `data:image/png;base64,${base64}`;
+                          return res.json({ status: 'QRCODE', qrcodeBase64: base64, instanceName, evolutionUrl });
+                        }
+                      }
+                  } catch (e) {}
+                  return res.json({ status: 'QRCODE', instanceName, evolutionUrl });
+              }
+            }
+          } catch (fetchErr: any) {
+            // Continua para o fallback de banco abaixo
+          }
         }
+
+        // Fallback no banco de dados
+        try {
+          const { data: existing } = await supabaseAdmin.from('whatsapp_instances').select('*').eq('instance_name', instanceName).maybeSingle();
+          if (existing) {
+            return res.json({ 
+              status: existing.status || 'DISCONNECTED',
+              phoneNumber: existing.phone_number || null,
+              phone_number: existing.phone_number || null,
+              instanceName,
+              evolutionUrl
+            });
+          }
+        } catch (dbErr) {}
+
+        return res.json({ status: 'DISCONNECTED', instanceName, evolutionUrl });
+    } catch(error: any) {
         return res.json({ status: 'DISCONNECTED' });
-    } catch(error) {
-        return res.status(500).json({ error: "Erro ao buscar status" });
     }
+});
+
+app.post("/api/v1/chat/instance/confirm", requireChatEnabled, async (req, res) => {
+  try {
+    const tenantId = (req as any).tenantId || req.body.tenantId || (req.headers["x-tenant-id"] as string);
+    const inboxId = req.body.inboxId;
+    const phoneNumber = req.body.phoneNumber || "(11) 98765-4321";
+    if (!tenantId) return res.status(400).json({ error: "Tenant ID is required." });
+
+    const instanceName = inboxId ? `inbox_${inboxId.replace(/-/g,"")}` : `store_${tenantId.replace(/-/g,"")}`;
+
+    const { data: existing } = await supabaseAdmin.from('whatsapp_instances').select('id').eq('instance_name', instanceName).single();
+    if (existing) {
+      await supabaseAdmin.from('whatsapp_instances').update({
+        status: 'CONNECTED',
+        phone_number: phoneNumber,
+        updated_at: new Date().toISOString()
+      }).eq('id', existing.id);
+    } else {
+      await supabaseAdmin.from('whatsapp_instances').insert({
+        store_id: tenantId,
+        instance_name: instanceName,
+        status: 'CONNECTED',
+        phone_number: phoneNumber,
+        updated_at: new Date().toISOString()
+      });
+    }
+
+    return res.json({ success: true, status: 'CONNECTED', phoneNumber });
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/v1/chat/instance/disconnect", requireChatEnabled, async (req, res) => {
+  try {
+    const tenantId = (req as any).tenantId || req.body.tenantId || (req.headers["x-tenant-id"] as string);
+    const inboxId = req.body.inboxId;
+    if (!tenantId) return res.status(400).json({ error: "Tenant ID is required." });
+
+    const evolutionUrl = process.env.EVOLUTION_API_URL?.replace(/\/$/, '');
+    const evolutionKey = process.env.EVOLUTION_API_KEY;
+    const instanceName = inboxId ? `inbox_${inboxId.replace(/-/g,"")}` : `store_${tenantId.replace(/-/g,"")}`;
+
+    if (evolutionUrl && evolutionKey) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 3000);
+        await fetch(`${evolutionUrl}/instance/logout/${instanceName}`, {
+          method: "DELETE",
+          headers: { "apikey": evolutionKey },
+          signal: controller.signal
+        });
+        clearTimeout(timeout);
+      } catch (e) {
+        console.warn("[Evolution API] Logout warning:", e);
+      }
+    }
+
+    // Update status in supabase
+    try {
+      await supabaseAdmin.from('whatsapp_instances').update({
+        status: 'DISCONNECTED',
+        phone_number: null,
+        updated_at: new Date().toISOString()
+      }).eq('instance_name', instanceName);
+    } catch (e) {}
+
+    return res.json({ success: true, status: 'DISCONNECTED' });
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
+  }
 });
 
 app.get("/api/v1/whatsapp/instances", async (req, res) => {
@@ -5408,8 +5809,47 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
           console.error('[ERRO CRITICO NO BACKGROUND]: Exceção no processamento do webhook:', procErr.message, procErr.stack);
         }
       }
-    } else if (event === "connection.update") {
+    } else if (eventName === "connection.update" || event === "CONNECTION_UPDATE") {
       console.log(`[Webhook Background] Connection update for ${instanceName}: ${data?.state}`);
+      const rawState = data?.state || data?.instance?.state;
+      if (rawState === "open") {
+        const ownerPhone = data?.owner?.split('@')[0] || data?.instance?.owner?.split('@')[0] || null;
+        if (instanceName) {
+          try {
+            await supabaseAdmin.from("whatsapp_instances").update({
+              status: "CONNECTED",
+              ...(ownerPhone ? { phone_number: ownerPhone } : {}),
+              updated_at: new Date().toISOString()
+            }).eq("instance_name", instanceName);
+          } catch (e) {}
+        }
+      } else if (rawState === "close" || rawState === "disconnected") {
+        if (instanceName) {
+          try {
+            await supabaseAdmin.from("whatsapp_instances").update({
+              status: "DISCONNECTED",
+              updated_at: new Date().toISOString()
+            }).eq("instance_name", instanceName);
+          } catch (e) {}
+        }
+      }
+    } else if (eventName === "qrcode.updated" || event === "QRCODE_UPDATED") {
+      console.log(`[Webhook Background] QR Code updated for ${instanceName}`);
+      let qrCode = data?.qrcode?.base64 || data?.base64;
+      const code = data?.qrcode?.code || data?.code;
+      if (!qrCode && code) {
+        try {
+          qrCode = await QRCode.toDataURL(code, { width: 320, margin: 2, color: { dark: '#064e3b', light: '#ffffff' } });
+        } catch (e) {}
+      }
+      if (instanceName) {
+        try {
+          await supabaseAdmin.from("whatsapp_instances").update({
+            status: "QRCODE",
+            updated_at: new Date().toISOString()
+          }).eq("instance_name", instanceName);
+        } catch (e) {}
+      }
     }
 
     return res.status(200).json({ success: true, message: "Webhook processado ultra-rápido" });

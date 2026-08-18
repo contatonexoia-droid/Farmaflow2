@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Search, Send, FileText, Image as ImageIcon, Paperclip, User, Users, Clock, ShoppingBag, CreditCard, MessageSquare, Lock, AlertCircle, RefreshCw, Smartphone, ChevronLeft, Info, BarChart2, CheckCircle2, UserPlus, Inbox, MoreVertical, Kanban, LayoutList, Columns } from 'lucide-react';
+import { Search, Send, FileText, Image as ImageIcon, Paperclip, User, Users, Clock, ShoppingBag, CreditCard, MessageSquare, Lock, AlertCircle, RefreshCw, Smartphone, ChevronLeft, Info, BarChart2, CheckCircle2, UserPlus, Inbox, MoreVertical, Kanban, LayoutList, Columns, QrCode } from 'lucide-react';
 import { ChatTransferModal } from './ChatTransferModal';
 import { AiChatCopilot } from './AiChatCopilot';
 import { ChatKanban } from './ChatKanban';
+import { WhatsAppConnectModal } from './WhatsAppConnectModal';
 import { supabase } from '../services/supabase';
 
 // Helper to determine active tenant logic for demo
@@ -817,6 +818,16 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                 <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
                   <MessageSquare className="w-5 h-5 text-emerald-600" /> Conversas
                 </h2>
+                {!isOperador && (
+                  <button
+                    onClick={() => setIsConnectModalOpen(true)}
+                    title="Conectar WhatsApp Evolution"
+                    className="flex items-center gap-1.5 text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2.5 py-1.5 rounded-xl transition-all shadow-2xs"
+                  >
+                    <Smartphone className="w-3.5 h-3.5 text-emerald-600" />
+                    <span className="hidden sm:inline">WhatsApp</span>
+                  </button>
+                )}
               </div>
 
           {/* Manager Dashboard Widget */}
@@ -1445,6 +1456,16 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
         isOpen={isTransferModalOpen}
         onClose={() => setIsTransferModalOpen(false)}
         onTransfer={handleTransfer}
+        tenantId={tenantId}
+      />
+
+      <WhatsAppConnectModal
+        isOpen={isConnectModalOpen}
+        onClose={() => {
+          setIsConnectModalOpen(false);
+          fetchConversations();
+          fetchInboxes();
+        }}
         tenantId={tenantId}
       />
     </div>

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Inbox, Plus, Settings, Users, X, Check, Trash2, Smartphone, Shield, Loader2, Building2, Globe, MessageSquare, Instagram, MessageCircle } from 'lucide-react';
+import { Inbox, Plus, Settings, Users, X, Check, Trash2, Smartphone, Shield, Loader2, Building2, Globe, MessageSquare, Instagram, MessageCircle, QrCode, RefreshCw, Zap } from 'lucide-react';
 import { supabase } from '../services/supabase';
 import toast, { Toaster } from 'react-hot-toast';
 import { WhatsAppConnectModal } from './WhatsAppConnectModal';
@@ -15,6 +15,7 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
   const [formData, setFormData] = useState({ id: '', name: '', description: '', whatsapp_instance_id: '', channel_type: 'whatsapp' });
   const [formLoading, setFormLoading] = useState(false);
   const [connectInboxId, setConnectInboxId] = useState<string | null>(null);
+  const [isGlobalConnectModalOpen, setIsGlobalConnectModalOpen] = useState(false);
   
   // Managing members and teams
   const [isMembersModalOpen, setIsMembersModalOpen] = useState(false);
@@ -178,20 +179,28 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
   };
 
   const handleSaveInbox = async () => {
-    if (!formData.name) return;
+    const trimmedName = (formData.name || '').trim();
+    if (!trimmedName) {
+      toast.error('O nome da caixa de entrada é obrigatório.');
+      return;
+    }
     setFormLoading(true);
     try {
       let savedInbox: any = null;
+      const cleanInstanceId = formData.whatsapp_instance_id && formData.whatsapp_instance_id.trim() !== '' ? formData.whatsapp_instance_id.trim() : null;
 
       if (formData.id) {
         // Edit existing
         const res = await fetch(`/api/v1/inboxes/${formData.id}`, {
           method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 
+            'Content-Type': 'application/json',
+            'x-tenant-id': tenantId
+          },
           body: JSON.stringify({
-            name: formData.name,
-            description: formData.description,
-            whatsapp_instance_id: formData.whatsapp_instance_id || null,
+            name: trimmedName,
+            description: formData.description || '',
+            whatsapp_instance_id: cleanInstanceId,
             channel_type: formData.channel_type || 'whatsapp'
           })
         });
@@ -200,23 +209,38 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
           const json = await res.json();
           savedInbox = json.data;
         } else {
-          // Direct Supabase fallback
-          const payload = { name: formData.name, description: formData.description, whatsapp_instance_id: formData.whatsapp_instance_id || null, channel_type: formData.channel_type || 'whatsapp' };
-          await supabase.from('inboxes').update(payload).eq('id', formData.id);
-          savedInbox = { id: formData.id, store_id: tenantId, ...payload };
+          // Direct Supabase fallback (omits channel_type to match DB schema)
+          const isUuid = cleanInstanceId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanInstanceId);
+          const dbPayload: any = { 
+            name: trimmedName, 
+            description: formData.description || '', 
+            whatsapp_instance_id: isUuid ? cleanInstanceId : null 
+          };
+          await supabase.from('inboxes').update(dbPayload).eq('id', formData.id);
+          savedInbox = { id: formData.id, store_id: tenantId, ...dbPayload, channel_type: formData.channel_type || 'whatsapp' };
         }
 
-        setInboxes(prev => prev.map(item => item.id === formData.id ? { ...item, name: formData.name, description: formData.description, whatsapp_instance_id: formData.whatsapp_instance_id || null, channel_type: formData.channel_type || 'whatsapp' } : item));
+        setInboxes(prev => prev.map(item => item.id === formData.id ? { 
+          ...item, 
+          name: trimmedName, 
+          description: formData.description || '', 
+          whatsapp_instance_id: cleanInstanceId, 
+          channel_type: formData.channel_type || 'whatsapp' 
+        } : item));
+        toast.success('Caixa de entrada atualizada com sucesso!');
       } else {
         // Create new
         const res = await fetch('/api/v1/inboxes', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 
+            'Content-Type': 'application/json',
+            'x-tenant-id': tenantId
+          },
           body: JSON.stringify({
             store_id: tenantId,
-            name: formData.name,
-            description: formData.description,
-            whatsapp_instance_id: formData.whatsapp_instance_id || null,
+            name: trimmedName,
+            description: formData.description || '',
+            whatsapp_instance_id: cleanInstanceId,
             channel_type: formData.channel_type || 'whatsapp'
           })
         });
@@ -225,31 +249,31 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
           const json = await res.json();
           savedInbox = json.data;
         } else {
-          const newObj = {
-            id: `inbox_${Date.now()}`,
+          const newId = `inbox_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+          const isUuid = cleanInstanceId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanInstanceId);
+          const dbPayload = {
             store_id: tenantId,
-            name: formData.name,
-            description: formData.description,
-            whatsapp_instance_id: formData.whatsapp_instance_id || null,
-            channel_type: formData.channel_type || 'whatsapp',
-            created_at: new Date().toISOString()
+            name: trimmedName,
+            description: formData.description || null,
+            whatsapp_instance_id: isUuid ? cleanInstanceId : null
           };
           try {
-            const { data } = await supabase.from('inboxes').insert([{ store_id: tenantId, name: formData.name, description: formData.description, whatsapp_instance_id: formData.whatsapp_instance_id || null, channel_type: formData.channel_type || 'whatsapp' }]).select().single();
-            savedInbox = data || newObj;
+            const { data } = await supabase.from('inboxes').insert([dbPayload]).select().single();
+            savedInbox = data ? { ...data, channel_type: formData.channel_type || 'whatsapp' } : { id: newId, ...dbPayload, channel_type: formData.channel_type || 'whatsapp', created_at: new Date().toISOString() };
           } catch (_) {
-            savedInbox = newObj;
+            savedInbox = { id: newId, ...dbPayload, channel_type: formData.channel_type || 'whatsapp', created_at: new Date().toISOString() };
           }
         }
 
         setInboxes(prev => [...prev, savedInbox]);
+        toast.success('Caixa de entrada criada com sucesso!');
       }
 
       // Save associated teams
-      if (savedInbox && savedInbox.id) {
+      if (savedInbox && savedInbox.id && selectedTeamIds.length > 0) {
         await fetch(`/api/v1/inboxes/${savedInbox.id}/teams`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantId },
           body: JSON.stringify({ teamIds: selectedTeamIds })
         }).catch(err => console.warn("Error saving inbox teams:", err));
       }
@@ -257,7 +281,13 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
       // Update localStorage fallback
       const currentInboxes = JSON.parse(localStorage.getItem(`inboxes_${tenantId}`) || '[]');
       if (formData.id) {
-        const updated = currentInboxes.map((i: any) => i.id === formData.id ? { ...i, name: formData.name, description: formData.description, whatsapp_instance_id: formData.whatsapp_instance_id || null, channel_type: formData.channel_type || 'whatsapp' } : i);
+        const updated = currentInboxes.map((i: any) => i.id === formData.id ? { 
+          ...i, 
+          name: trimmedName, 
+          description: formData.description || '', 
+          whatsapp_instance_id: cleanInstanceId, 
+          channel_type: formData.channel_type || 'whatsapp' 
+        } : i);
         localStorage.setItem(`inboxes_${tenantId}`, JSON.stringify(updated));
       } else {
         localStorage.setItem(`inboxes_${tenantId}`, JSON.stringify([...currentInboxes, savedInbox]));
@@ -265,18 +295,19 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
 
       setIsModalOpen(false);
       fetchInboxes();
-    } catch (e) {
+    } catch (e: any) {
       console.warn("[InboxManagement] Exception saving inbox, executing resilient fallback:", e);
       const fallbackInbox = {
         id: formData.id || `inbox_${Date.now()}`,
         store_id: tenantId,
         name: formData.name,
-        description: formData.description,
+        description: formData.description || '',
         whatsapp_instance_id: formData.whatsapp_instance_id || null,
         channel_type: formData.channel_type || 'whatsapp',
         created_at: new Date().toISOString()
       };
       setInboxes(prev => formData.id ? prev.map(i => i.id === formData.id ? fallbackInbox : i) : [...prev, fallbackInbox]);
+      toast.success('Caixa de entrada salva localmente!');
       setIsModalOpen(false);
     } finally {
       setFormLoading(false);
@@ -364,21 +395,36 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
   return (
     <div className="animate-in fade-in duration-300 pb-10">
       <Toaster position="top-right" />
+      
+      {/* Header with Title and Actions */}
       <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4">
         <div>
-           <h3 className="text-xl font-bold text-gray-900 mb-1 flex items-center gap-2"><Inbox className="w-6 h-6 text-emerald-600"/> Caixas de Entrada (Departamentos)</h3>
-           <p className="text-sm text-gray-500">Organize os chats por setores e defina quem pode acessá-los.</p>
+           <h3 className="text-xl font-black text-gray-900 mb-1 flex items-center gap-2">
+             <Inbox className="w-6 h-6 text-emerald-600"/> Caixas de Entrada (Departamentos)
+           </h3>
+           <p className="text-sm text-gray-500">Organize canais de atendimento por setores e conecte com o WhatsApp Evolution.</p>
         </div>
-        <button 
-          onClick={() => {
-            setFormData({ id: '', name: '', description: '', whatsapp_instance_id: '', channel_type: 'whatsapp' });
-            setSelectedTeamIds([]);
-            setIsModalOpen(true);
-          }}
-          className="bg-emerald-600 text-white font-bold px-6 py-3 rounded-2xl flex items-center justify-center gap-2 hover:bg-emerald-700 transition-colors shadow-lg shadow-emerald-600/20"
-        >
-          <Plus size={18} /> Nova Caixa
-        </button>
+        <div className="flex flex-wrap items-center gap-3">
+          <button 
+            onClick={() => setIsGlobalConnectModalOpen(true)}
+            className="bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300/80 font-bold px-5 py-3 rounded-2xl flex items-center justify-center gap-2 transition-all shadow-xs text-sm"
+          >
+            <Smartphone className="w-4 h-4 text-emerald-600" />
+            <QrCode className="w-4 h-4 text-emerald-600" />
+            <span>Conectar WhatsApp (Evolution)</span>
+          </button>
+          
+          <button 
+            onClick={() => {
+              setFormData({ id: '', name: '', description: '', whatsapp_instance_id: '', channel_type: 'whatsapp' });
+              setSelectedTeamIds([]);
+              setIsModalOpen(true);
+            }}
+            className="bg-emerald-600 text-white font-bold px-6 py-3 rounded-2xl flex items-center justify-center gap-2 hover:bg-emerald-700 transition-colors shadow-lg shadow-emerald-600/20 text-sm"
+          >
+            <Plus size={18} /> Nova Caixa
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -390,7 +436,7 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
            <div className="col-span-full py-12 bg-white rounded-3xl border border-gray-100 flex flex-col items-center justify-center text-gray-400">
              <Inbox className="w-12 h-12 mb-3 opacity-20" />
              <p className="font-bold">Nenhuma caixa de entrada configurada.</p>
-             <p className="text-sm mt-1">Crie caixas como "Vendas", "Financeiro" para organizar o chat.</p>
+             <p className="text-sm mt-1">Crie caixas como "Vendas", "Atendimento" para organizar as mensagens.</p>
            </div>
         ) : (
           inboxes.map(inbox => (
@@ -404,7 +450,7 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                   ) : inbox.channel_type === 'instagram' ? (
                     <Instagram className="w-6 h-6 text-pink-500" />
                   ) : (
-                    <Inbox className="w-6 h-6 text-emerald-600" />
+                    <Smartphone className="w-6 h-6 text-emerald-600" />
                   )}
                 </div>
                 <div className="flex gap-2">
@@ -423,7 +469,7 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                     }}
                     className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-gray-500 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors border border-gray-200 hover:border-emerald-200"
                   >
-                    <Settings className="w-3.5 h-3.5" /> Editar Caixa
+                    <Settings className="w-3.5 h-3.5" /> Editar
                   </button>
                   <button onClick={() => handleDeleteInbox(inbox.id)} className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors">
                     <Trash2 className="w-4 h-4" />
@@ -439,7 +485,7 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
               </div>
 
               <div className="mt-auto space-y-3 relative z-10">
-                <div className="flex items-center gap-2 text-xs font-bold text-gray-500 bg-gray-50 p-2 rounded-xl">
+                <div className="flex items-center gap-2 text-xs font-bold text-gray-500 bg-gray-50 p-2.5 rounded-2xl border border-gray-100">
                   {inbox.channel_type === 'widget' ? (
                     <span className="flex items-center gap-1.5 text-blue-600"><Globe className="w-4 h-4" /> Site / Widget</span>
                   ) : inbox.channel_type === 'sms' ? (
@@ -448,23 +494,35 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                     <span className="flex items-center gap-1.5 text-pink-500"><Instagram className="w-4 h-4" /> Instagram</span>
                   ) : (
                     <div className="flex flex-col gap-2 w-full">
-                      <span className="flex items-center gap-1.5 text-emerald-600"><Smartphone className="w-4 h-4" /> WhatsApp</span>
+                      <div className="flex items-center justify-between">
+                        <span className="flex items-center gap-1.5 text-emerald-700 font-bold"><Smartphone className="w-4 h-4" /> WhatsApp Evolution</span>
+                        <span className="text-[10px] bg-emerald-100/60 text-emerald-800 px-2 py-0.5 rounded-md font-semibold">Oficial</span>
+                      </div>
+                      
                       {(() => {
-                        const instance = whatsappInstances.find(i => i.id === inbox.whatsapp_instance_id);
+                        const instance = whatsappInstances.find(i => i.id === inbox.whatsapp_instance_id || i.instance_name === inbox.whatsapp_instance_id);
                         const isConnected = instance?.status === 'CONNECTED';
                         return (
-                          <div className="flex items-center justify-between w-full bg-white p-2 rounded-lg border border-gray-100">
+                          <div className="flex items-center justify-between w-full bg-white p-2 rounded-xl border border-gray-200/80">
                             <span className="text-[10px] uppercase font-black tracking-wider text-gray-500">Status</span>
                             {isConnected ? (
-                              <span className="text-xs font-bold text-emerald-600 flex items-center gap-1">
-                                <span className="w-2 h-2 rounded-full bg-emerald-500"></span> Conectado
-                              </span>
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-bold text-emerald-600 flex items-center gap-1">
+                                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span> Conectado
+                                </span>
+                                <button
+                                  onClick={() => setConnectInboxId(inbox.id)}
+                                  className="text-[11px] font-bold text-gray-500 hover:text-emerald-700 underline"
+                                >
+                                  Gerenciar
+                                </button>
+                              </div>
                             ) : (
                               <button
                                 onClick={() => setConnectInboxId(inbox.id)}
-                                className="text-xs font-bold text-blue-600 hover:text-blue-700 bg-blue-50 px-2 py-1 rounded-md transition-colors"
+                                className="text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 px-3 py-1 rounded-lg transition-all flex items-center gap-1 shadow-xs"
                               >
-                                Conectar WhatsApp
+                                <QrCode className="w-3.5 h-3.5" /> Conectar WhatsApp
                               </button>
                             )}
                           </div>
@@ -482,6 +540,7 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
         )}
       </div>
 
+      {/* WhatsApp Modal for specific inbox */}
       <WhatsAppConnectModal
         isOpen={!!connectInboxId}
         onClose={() => {
@@ -491,6 +550,18 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
         }}
         tenantId={tenantId}
         inboxId={connectInboxId || undefined}
+        inboxName={inboxes.find(i => i.id === connectInboxId)?.name}
+      />
+
+      {/* WhatsApp Modal for Global Store instance */}
+      <WhatsAppConnectModal
+        isOpen={isGlobalConnectModalOpen}
+        onClose={() => {
+          setIsGlobalConnectModalOpen(false);
+          fetchInboxes();
+          fetchWhatsappInstances();
+        }}
+        tenantId={tenantId}
       />
 
       {/* Modal Caixa de Entrada */}
@@ -503,8 +574,8 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
             </div>
             <div className="p-6 space-y-5 max-h-[65vh] overflow-y-auto">
                <div className="space-y-1.5">
-                  <label className="text-[11px] font-black text-gray-500 uppercase tracking-widest">Nome do Departamento / Canal</label>
-                  <input type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full bg-gray-50 focus:bg-white border-2 border-transparent focus:border-emerald-500 rounded-xl py-3 px-4 outline-none font-bold text-gray-800 text-sm" placeholder="Ex: Vendas Balcão" />
+                  <label className="text-[11px] font-black text-gray-500 uppercase tracking-widest">Nome do Departamento / Canal *</label>
+                  <input type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full bg-gray-50 focus:bg-white border-2 border-transparent focus:border-emerald-500 rounded-xl py-3 px-4 outline-none font-bold text-gray-800 text-sm" placeholder="Ex: Atendimento Balcão" />
                </div>
                <div className="space-y-1.5">
                   <label className="text-[11px] font-black text-gray-500 uppercase tracking-widest">Descrição</label>
@@ -518,7 +589,7 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                     onChange={e => setFormData({...formData, channel_type: e.target.value, whatsapp_instance_id: e.target.value === 'whatsapp' ? formData.whatsapp_instance_id : ''})} 
                     className="w-full bg-gray-50 focus:bg-white border-2 border-transparent focus:border-emerald-500 rounded-xl py-3 px-4 outline-none font-bold text-gray-800 text-sm"
                   >
-                    <option value="whatsapp">WhatsApp (Mensagens instantâneas)</option>
+                    <option value="whatsapp">WhatsApp Evolution API (Recomendado)</option>
                     <option value="widget">Site / Widget (Chat de Atendimento)</option>
                     <option value="sms">SMS (Torpedos Celular)</option>
                     <option value="instagram">Instagram Direct</option>
@@ -526,16 +597,40 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                </div>
 
                {(formData.channel_type === 'whatsapp' || !formData.channel_type) && (
-                 <div className="space-y-1.5">
-                    <label className="text-[11px] font-black text-gray-500 uppercase tracking-widest flex items-center gap-1"><Smartphone className="w-3 h-3"/> Instância WhatsApp Vinculada</label>
-                    <select value={formData.whatsapp_instance_id} onChange={e => setFormData({...formData, whatsapp_instance_id: e.target.value})} className="w-full bg-gray-50 focus:bg-white border-2 border-transparent focus:border-emerald-500 rounded-xl py-3 px-4 outline-none font-bold text-gray-800 text-sm">
-                      <option value="">(Nenhuma)</option>
+                 <div className="space-y-2 bg-emerald-50/50 p-4 rounded-2xl border border-emerald-100">
+                    <div className="flex items-center justify-between">
+                      <label className="text-[11px] font-black text-emerald-900 uppercase tracking-widest flex items-center gap-1.5">
+                        <Smartphone className="w-3.5 h-3.5 text-emerald-600"/> Instância WhatsApp Vinculada
+                      </label>
+                      <button 
+                        type="button" 
+                        onClick={fetchWhatsappInstances} 
+                        className="text-[11px] text-emerald-700 hover:text-emerald-900 font-bold flex items-center gap-1"
+                      >
+                        <RefreshCw className="w-3 h-3" /> Atualizar
+                      </button>
+                    </div>
+                    
+                    <select 
+                      value={formData.whatsapp_instance_id} 
+                      onChange={e => setFormData({...formData, whatsapp_instance_id: e.target.value})} 
+                      className="w-full bg-white border border-emerald-200 focus:border-emerald-500 rounded-xl py-2.5 px-3 outline-none font-bold text-gray-800 text-xs"
+                    >
+                      <option value="">(Instância Padrão da Loja)</option>
                       {whatsappInstances.map(inst => (
                         <option key={inst.id || inst.instance_name} value={inst.id || inst.instance_name}>
-                          {inst.instance_name} {inst.phone_number ? `(${inst.phone_number})` : ''}
+                          {inst.instance_name} {inst.phone_number ? `(${inst.phone_number})` : ''} - {inst.status || 'OFFLINE'}
                         </option>
                       ))}
                     </select>
+
+                    <button
+                      type="button"
+                      onClick={() => setIsGlobalConnectModalOpen(true)}
+                      className="w-full mt-2 py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 transition-colors shadow-xs"
+                    >
+                      <QrCode className="w-3.5 h-3.5" /> Conectar / Gerar QR Code WhatsApp
+                    </button>
                  </div>
                )}
 
@@ -575,8 +670,12 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                </div>
             </div>
             <div className="p-6 border-t border-gray-100 bg-gray-50/50">
-               <button onClick={handleSaveInbox} disabled={formLoading || !formData.name} className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-300 text-white font-black uppercase tracking-wider text-xs py-4 px-8 rounded-xl flex items-center justify-center gap-2 transition-all shadow-lg">
-                 {formLoading ? <Loader2 className="animate-spin w-4 h-4" /> : 'Salvar Configurações'}
+               <button 
+                 onClick={handleSaveInbox} 
+                 disabled={formLoading || !formData.name.trim()} 
+                 className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-300 text-white font-black uppercase tracking-wider text-xs py-4 px-8 rounded-xl flex items-center justify-center gap-2 transition-all shadow-lg"
+               >
+                 {formLoading ? <Loader2 className="animate-spin w-4 h-4" /> : 'Salvar Caixa de Entrada'}
                </button>
             </div>
           </div>
