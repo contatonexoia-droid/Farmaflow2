@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { 
   QrCode, X, RefreshCw, CheckCircle, Smartphone, AlertCircle, Unlink, 
-  PhoneCall, ShieldCheck, Zap, Settings, Globe, Key, Layers, ExternalLink,
-  Check, Copy, Info
+  PhoneCall, ShieldCheck, Zap, Settings, Globe, Key, Layers, Eye, EyeOff,
+  Check, Copy, Info, Sparkles, ArrowRight
 } from 'lucide-react';
 
 interface WhatsAppConnectModalProps {
@@ -29,18 +29,26 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
   const [isDisconnecting, setIsDisconnecting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [showKey, setShowKey] = useState(false);
 
   // Configurações da Evolution API
   const [evolutionUrl, setEvolutionUrl] = useState('https://evolution-evolution-api.7wcbhg.easypanel.host');
   const [evolutionKey, setEvolutionKey] = useState('');
+  const [hasSavedKey, setHasSavedKey] = useState(false);
   const [instanceName, setInstanceName] = useState('');
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string; instancesCount?: number } | null>(null);
   const [copiedWebhook, setCopiedWebhook] = useState(false);
 
-  const defaultInstanceName = inboxId 
-    ? `inbox_${inboxId.replace(/-/g, "")}` 
-    : `store_${tenantId ? tenantId.replace(/-/g, "") : "principal"}`;
+  const cleanStoreName = (tenantId || "principal")
+    .replace(/^store_/, '')
+    .replace(/^tenant_/, '')
+    .replace(/[^a-zA-Z0-9]/g, "")
+    .toLowerCase();
+
+  const defaultInstanceName = inboxId && inboxId !== 'default' && !inboxId.includes('default')
+    ? `inbox_${inboxId.replace(/^inbox_/, '').replace(/[^a-zA-Z0-9]/g, "").toLowerCase()}`
+    : (cleanStoreName ? `store_${cleanStoreName}` : 'store_principal');
 
   const currentWebhookUrl = typeof window !== 'undefined' 
     ? `${window.location.origin}/api/v1/chat/webhook`
@@ -60,13 +68,13 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     }
   }, [isOpen, tenantId, inboxId]);
 
-  // Polling logic when QR code is active or connecting
+  // Polling automático de status enquanto exibe QR Code
   useEffect(() => {
     let interval: NodeJS.Timeout;
     if (isPolling && status !== 'CONNECTED') {
       interval = setInterval(() => {
         fetchInstanceStatus();
-      }, 3000);
+      }, 2500);
     }
     return () => clearInterval(interval);
   }, [isPolling, status]);
@@ -104,6 +112,12 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
         if (data.evolutionUrl) {
           setEvolutionUrl(data.evolutionUrl);
         }
+        if (data.evolutionKey) {
+          setEvolutionKey(data.evolutionKey);
+          setHasSavedKey(true);
+        } else if (data.hasKey) {
+          setHasSavedKey(true);
+        }
         if (data.instanceName && !instanceName) {
           setInstanceName(data.instanceName);
         }
@@ -137,7 +151,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
       if (res.ok && data.ok) {
         setTestResult({
           ok: true,
-          message: data.message || `Evolution API conectada! (${data.totalInstances || 0} instância(s) encontrada(s))`
+          message: data.message || `Evolution API conectada! (${data.totalInstances || 0} instância(s) no servidor)`
         });
       } else {
         setTestResult({
@@ -178,6 +192,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
       const data = await res.json();
       if (res.ok && data.success) {
         setSuccessMessage("Configurações salvas com sucesso!");
+        setHasSavedKey(true);
         setTimeout(() => setSuccessMessage(null), 3000);
       } else {
         setErrorMessage(data.error || "Erro ao salvar configurações.");
@@ -194,6 +209,12 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
       setErrorMessage("Identificador da loja não encontrado.");
       return;
     }
+
+    if (!evolutionKey.trim() && !hasSavedKey) {
+      setErrorMessage("Informe a Chave Global da Evolution API (AUTHENTICATION_API_KEY) para criar a instância automaticamente.");
+      return;
+    }
+
     setIsLoading(true);
     setErrorMessage(null);
     setSuccessMessage(null);
@@ -219,7 +240,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
           setStatus('CONNECTED');
           setPhoneNumber(data.phoneNumber || null);
           setIsPolling(false);
-          setSuccessMessage("WhatsApp já está conectado!");
+          setSuccessMessage("WhatsApp conectado com sucesso!");
         } else if (data.qrcodeBase64) {
           let b64 = data.qrcodeBase64;
           if (!b64.startsWith('data:image')) {
@@ -229,10 +250,10 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
           setStatus('QRCODE');
           setIsPolling(true);
         } else {
-          setErrorMessage(data.error || "Não foi possível obter o QR Code da Evolution API.");
+          setErrorMessage(data.error || "Aguardando geração do QR Code pela Evolution API. Tente novamente.");
         }
       } else {
-        setErrorMessage(data.error || "Não foi possível gerar o QR Code. Verifique se a Evolution API está ativa.");
+        setErrorMessage(data.error || "Não foi possível criar a instância automaticamente na Evolution API.");
       }
     } catch (e: any) {
       console.error("[WhatsAppConnectModal] Erro ao gerar QR Code:", e);
@@ -300,7 +321,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
             <div>
               <h2 className="font-black text-gray-900 text-base flex items-center gap-2">
                 Conectar WhatsApp
-                <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">Evolution API</span>
+                <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">Evolution API Automática</span>
               </h2>
               <p className="text-xs text-gray-500 font-medium">{instanceTitle}</p>
             </div>
@@ -343,7 +364,17 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
         {errorMessage && (
           <div className="m-4 mb-0 p-3.5 bg-red-50 border border-red-200 rounded-2xl flex items-start gap-2.5 text-xs text-red-700 font-medium">
             <AlertCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
-            <span>{errorMessage}</span>
+            <div className="flex-1">
+              <span>{errorMessage}</span>
+              {!hasSavedKey && (
+                <button 
+                  onClick={() => setActiveTab('settings')}
+                  className="block mt-1 text-[11px] font-bold text-red-800 underline hover:text-red-900"
+                >
+                  Abrir configurações da Evolution para inserir a Chave API &rarr;
+                </button>
+              )}
+            </div>
           </div>
         )}
 
@@ -361,24 +392,59 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
             <div className="flex flex-col items-center justify-center text-center">
               
               {status === 'DISCONNECTED' && (
-                <div className="space-y-5 w-full flex flex-col items-center">
-                  <div className="w-16 h-16 rounded-3xl bg-amber-50 border border-amber-100 flex items-center justify-center mb-1">
-                    <Smartphone className="w-8 h-8 text-amber-500" />
+                <div className="space-y-4 w-full flex flex-col items-center">
+                  <div className="w-14 h-14 rounded-3xl bg-emerald-50 border border-emerald-100 flex items-center justify-center mb-1">
+                    <Sparkles className="w-7 h-7 text-emerald-600" />
                   </div>
+                  
                   <div className="space-y-1">
-                    <h3 className="font-black text-gray-900 text-lg">WhatsApp Desconectado</h3>
+                    <h3 className="font-black text-gray-900 text-lg">Criação & Conexão Automática</h3>
                     <p className="text-xs text-gray-600 max-w-sm">
-                      Gere o QR Code oficial da Evolution API para parear seu WhatsApp diretamente com a plataforma.
+                      Ao clicar no botão abaixo, o sistema criará a instância na Evolution API e exibirá o QR Code para leitura no WhatsApp.
                     </p>
                   </div>
 
-                  <div className="bg-gray-50 rounded-2xl p-4 w-full border border-gray-100 text-left space-y-2 text-xs text-gray-600">
-                    <div className="flex items-center gap-2 font-bold text-gray-800">
-                      <Zap className="w-4 h-4 text-emerald-600" /> Vantagens da Conexão Direta:
+                  {/* Inline API Key input if not saved yet */}
+                  {!hasSavedKey && (
+                    <div className="bg-amber-50/80 border border-amber-200/80 rounded-2xl p-4 w-full text-left space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs font-bold text-amber-900 flex items-center gap-1.5">
+                          <Key className="w-3.5 h-3.5 text-amber-700" />
+                          Chave Global da Evolution (AUTHENTICATION_API_KEY):
+                        </label>
+                        <span className="text-[10px] bg-amber-200/60 text-amber-900 font-bold px-1.5 py-0.5 rounded">Easypanel</span>
+                      </div>
+                      <div className="relative">
+                        <input 
+                          type={showKey ? "text" : "password"}
+                          value={evolutionKey}
+                          onChange={(e) => setEvolutionKey(e.target.value)}
+                          placeholder="Cole a AUTHENTICATION_API_KEY do seu Easypanel"
+                          className="w-full p-2.5 pr-9 text-xs bg-white border border-amber-200 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-hidden font-mono"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowKey(!showKey)}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                        >
+                          {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                      <p className="text-[11px] text-amber-800">
+                        Insira uma única vez. O sistema salva automaticamente e cria a instância sem trabalho manual.
+                      </p>
                     </div>
-                    <p>• Envio e recebimento em tempo real na Central de Atendimento.</p>
-                    <p>• IA Generativa responde dúvidas e atende clientes no WhatsApp.</p>
-                    <p>• Instância Evolution: <span className="font-mono text-emerald-700 font-bold">{instanceName || defaultInstanceName}</span></p>
+                  )}
+
+                  <div className="bg-gray-50 rounded-2xl p-3.5 w-full border border-gray-100 text-left space-y-1.5 text-xs text-gray-600">
+                    <div className="flex items-center justify-between font-bold text-gray-800">
+                      <span className="flex items-center gap-1.5"><Zap className="w-3.5 h-3.5 text-emerald-600" /> Instância Automática:</span>
+                      <span className="font-mono text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-lg border border-emerald-200/60 font-bold text-[11px]">
+                        {instanceName || defaultInstanceName}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-gray-500">• Criação automática no WhatsApp-Baileys</p>
+                    <p className="text-[11px] text-gray-500">• Webhooks e sincronização em tempo real ativados</p>
                   </div>
 
                   <div className="flex items-center gap-3 w-full pt-2">
@@ -394,7 +460,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
                       className="flex-2 py-3 px-6 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-2xl shadow-lg shadow-emerald-600/20 transition-all flex items-center justify-center gap-2 text-xs uppercase tracking-wider"
                     >
                       {isLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <QrCode className="w-4 h-4" />}
-                      {isLoading ? 'Gerando QR Code...' : 'Gerar QR Code'}
+                      {isLoading ? 'Criando Instância & QR Code...' : 'Gerar QR Code'}
                     </button>
                   </div>
                 </div>
@@ -404,7 +470,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
                 <div className="space-y-4 w-full flex flex-col items-center">
                   <div>
                     <h3 className="font-black text-gray-900 text-lg">Leia o QR Code com seu WhatsApp</h3>
-                    <p className="text-xs text-gray-500 mt-0.5">Escaneie na tela "Aparelhos Conectados" do WhatsApp</p>
+                    <p className="text-xs text-gray-500 mt-0.5">Escaneie no WhatsApp do celular para conectar automaticamente</p>
                   </div>
 
                   <div className="p-4 bg-white border-2 border-emerald-500/40 rounded-3xl shadow-xl relative flex items-center justify-center">
@@ -425,9 +491,9 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
                     <p className="font-bold text-emerald-900 flex items-center gap-1.5">
                       <Smartphone className="w-3.5 h-3.5 text-emerald-600" /> Passo a passo no seu celular:
                     </p>
-                    <p>1. Abra o <strong>WhatsApp</strong> no celular &gt; Toque nos 3 pontos (ou Ajustes)</p>
-                    <p>2. Selecione <strong>Aparelhos conectados</strong> &gt; <strong>Conectar um aparelho</strong></p>
-                    <p>3. Aponte a câmera para o QR Code acima</p>
+                    <p>1. Abra o <strong>WhatsApp</strong> &gt; Toque em <strong>Aparelhos conectados</strong></p>
+                    <p>2. Toque em <strong>Conectar um aparelho</strong> e aponte para a tela</p>
+                    <p className="text-emerald-700 font-bold pt-0.5">✨ O sistema conecta automaticamente assim que você escanear!</p>
                   </div>
                   
                   <div className="flex items-center justify-between w-full pt-1">
@@ -443,7 +509,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
                       onClick={fetchInstanceStatus}
                       className="text-xs font-bold text-emerald-700 bg-emerald-100 hover:bg-emerald-200 py-2 px-4 rounded-xl transition-colors flex items-center gap-1.5"
                     >
-                      <CheckCircle className="w-3.5 h-3.5 text-emerald-600" /> Verificar Conexão
+                      <CheckCircle className="w-3.5 h-3.5 text-emerald-600" /> Já Escaneei
                     </button>
                   </div>
                 </div>
@@ -460,7 +526,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
                       <ShieldCheck className="w-5 h-5 text-emerald-600" />
                     </h3>
                     <p className="text-xs text-gray-500">
-                      Instância Evolution pareada e pronta para receber e enviar mensagens.
+                      Instância ativa e integrada à Central de Atendimento e IA.
                     </p>
                   </div>
 
@@ -498,7 +564,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
               <div>
                 <h4 className="font-bold text-gray-900 text-sm">Parâmetros da Evolution API</h4>
                 <p className="text-xs text-gray-500">
-                  Configure o endpoint e as credenciais da Evolution API para sua loja.
+                  Configure o endpoint e as credenciais da Evolution API para criação e pareamento automático.
                 </p>
               </div>
 
@@ -519,21 +585,30 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
               {/* Global API Key */}
               <div className="space-y-1">
                 <label className="text-xs font-bold text-gray-700 flex items-center gap-1.5">
-                  <Key className="w-3.5 h-3.5 text-gray-500" /> Chave Global de API (API Key):
+                  <Key className="w-3.5 h-3.5 text-gray-500" /> Chave Global de API (AUTHENTICATION_API_KEY):
                 </label>
-                <input 
-                  type="password"
-                  value={evolutionKey}
-                  onChange={(e) => setEvolutionKey(e.target.value)}
-                  placeholder="Informe a global api key da sua Evolution"
-                  className="w-full p-2.5 text-xs bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-hidden font-mono"
-                />
+                <div className="relative">
+                  <input 
+                    type={showKey ? "text" : "password"}
+                    value={evolutionKey}
+                    onChange={(e) => setEvolutionKey(e.target.value)}
+                    placeholder="Chave AUTHENTICATION_API_KEY do Easypanel"
+                    className="w-full p-2.5 pr-9 text-xs bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-hidden font-mono"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowKey(!showKey)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                  >
+                    {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
               </div>
 
               {/* Instance Name */}
               <div className="space-y-1">
                 <label className="text-xs font-bold text-gray-700 flex items-center gap-1.5">
-                  <Layers className="w-3.5 h-3.5 text-gray-500" /> Nome ou ID da Instância:
+                  <Layers className="w-3.5 h-3.5 text-gray-500" /> Nome da Instância (Automático):
                 </label>
                 <input 
                   type="text"
@@ -542,9 +617,6 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
                   placeholder={defaultInstanceName}
                   className="w-full p-2.5 text-xs bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-hidden font-mono"
                 />
-                <p className="text-[11px] text-gray-400">
-                  Padrão: <span className="font-mono text-gray-600">{defaultInstanceName}</span>
-                </p>
               </div>
 
               {/* Test Result Message */}
@@ -585,35 +657,29 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
                 </button>
               </div>
 
-              {/* Webhook Guide Box */}
+              {/* Webhook Info */}
               <div className="mt-4 pt-4 border-t border-gray-100 space-y-2">
                 <div className="flex items-center gap-1.5 text-xs font-bold text-gray-800">
-                  <Info className="w-4 h-4 text-emerald-600" /> Configuração do Webhook no Evolution Manager:
+                  <Info className="w-4 h-4 text-emerald-600" /> Webhook Integrado Automático:
                 </div>
                 
-                <div className="p-3 bg-gray-50 border border-gray-200 rounded-xl space-y-2 text-xs text-gray-600">
+                <div className="p-3 bg-gray-50 border border-gray-200 rounded-xl space-y-1.5 text-xs text-gray-600">
                   <div className="flex items-center justify-between">
-                    <span className="font-semibold text-gray-700">URL do Webhook:</span>
+                    <span className="font-semibold text-gray-700">URL Registrada Automaticamente:</span>
                     <button
                       onClick={handleCopyWebhook}
                       className="text-emerald-700 hover:text-emerald-800 font-bold flex items-center gap-1 text-[11px]"
                     >
                       {copiedWebhook ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
-                      {copiedWebhook ? 'Copiado!' : 'Copiar URL'}
+                      {copiedWebhook ? 'Copiado!' : 'Copiar'}
                     </button>
                   </div>
                   <div className="p-2 bg-white rounded-lg border border-gray-200 font-mono text-[11px] break-all text-gray-800">
                     {currentWebhookUrl}
                   </div>
-                  <div className="text-[11px] text-gray-500 space-y-1">
-                    <p>• <strong>Eventos Essenciais:</strong></p>
-                    <p className="font-mono text-[10px] text-emerald-800 bg-emerald-50/80 p-1.5 rounded-md">
-                      MESSAGES_UPSERT, QRCODE_UPDATED, CONNECTION_UPDATE, CONTACTS_SET
-                    </p>
-                    <p className="text-amber-700 font-medium pt-1">
-                      ⚠️ <strong>Atenção:</strong> Certifique-se de marcar <strong>CONNECTION_UPDATE</strong> na Evolution para detecção instantânea do pareamento!
-                    </p>
-                  </div>
+                  <p className="text-[11px] text-gray-500">
+                    Ao gerar o QR Code, o sistema registra os eventos automaticamente na Evolution API.
+                  </p>
                 </div>
               </div>
 
