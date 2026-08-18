@@ -13,6 +13,39 @@ interface WhatsAppConnectModalProps {
   inboxName?: string;
 }
 
+async function safeFetchJson(url: string, options?: RequestInit): Promise<{ ok: boolean; status: number; data: any; error?: string }> {
+  try {
+    const res = await fetch(url, options);
+    const contentType = res.headers.get('content-type') || '';
+    let data: any = null;
+    
+    if (contentType.includes('application/json')) {
+      data = await res.json().catch(() => null);
+    } else {
+      const text = await res.text().catch(() => '');
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = { message: text };
+      }
+    }
+    
+    if (!res.ok) {
+      const errorMsg = data?.error || data?.message || `Erro HTTP ${res.status}`;
+      return { ok: false, status: res.status, data, error: errorMsg };
+    }
+    
+    return { ok: true, status: res.status, data: data || {} };
+  } catch (err: any) {
+    return {
+      ok: false,
+      status: 0,
+      data: null,
+      error: err.message || 'Falha de conexão com o servidor FarmaFlow.'
+    };
+  }
+}
+
 export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({ 
   isOpen, 
   onClose, 
@@ -32,8 +65,19 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
   const [showKey, setShowKey] = useState(false);
 
   // Configurações da Evolution API
-  const [evolutionUrl, setEvolutionUrl] = useState('https://evolution-evolution-api.7wcbhg.easypanel.host');
-  const [evolutionKey, setEvolutionKey] = useState('');
+  const DEFAULT_EVOLUTION_URL = 'https://evolution.nexoia.online';
+  const [evolutionUrl, setEvolutionUrl] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem(`farmaflow_evo_url_${tenantId}`) || DEFAULT_EVOLUTION_URL;
+    }
+    return DEFAULT_EVOLUTION_URL;
+  });
+  const [evolutionKey, setEvolutionKey] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem(`farmaflow_evo_key_${tenantId}`) || '';
+    }
+    return '';
+  });
   const [hasSavedKey, setHasSavedKey] = useState(false);
   const [instanceName, setInstanceName] = useState('');
   const [isTesting, setIsTesting] = useState(false);
@@ -62,7 +106,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
       if (!instanceName) {
         setInstanceName(defaultInstanceName);
       }
-      fetchInstanceStatus();
+      fetchInstanceStatus(true);
     } else {
       setIsPolling(false);
     }
@@ -73,26 +117,27 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     let interval: NodeJS.Timeout;
     if (isPolling && status !== 'CONNECTED') {
       interval = setInterval(() => {
-        fetchInstanceStatus();
+        fetchInstanceStatus(false);
       }, 2500);
     }
     return () => clearInterval(interval);
-  }, [isPolling, status]);
+  }, [isPolling, status, activeTab]);
 
-  const fetchInstanceStatus = async () => {
+  const fetchInstanceStatus = async (isInitial: boolean | React.MouseEvent = false) => {
     if (!tenantId) return;
+    const isInit = isInitial === true;
     try {
       let url = `/api/v1/chat/instance/status?tenantId=${encodeURIComponent(tenantId)}`;
       if (inboxId) url += `&inboxId=${encodeURIComponent(inboxId)}`;
       
-      const res = await fetch(url, {
+      const { ok, data } = await safeFetchJson(url, {
         headers: {
           'x-tenant-id': tenantId,
           'Authorization': `Bearer ${localStorage.getItem('farmaflow_admin_token') || ''}`
         }
       });
-      const data = await res.json();
-      if (res.ok) {
+
+      if (ok && data) {
         if (data.status) {
           setStatus(data.status);
           if (data.status === 'CONNECTED') {
@@ -109,17 +154,23 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
           }
           setQrCodeBase64(b64);
         }
-        if (data.evolutionUrl) {
-          setEvolutionUrl(data.evolutionUrl);
-        }
-        if (data.evolutionKey) {
-          setEvolutionKey(data.evolutionKey);
-          setHasSavedKey(true);
-        } else if (data.hasKey) {
-          setHasSavedKey(true);
-        }
-        if (data.instanceName && !instanceName) {
-          setInstanceName(data.instanceName);
+        
+        // Só atualiza os campos de input se for na carga inicial ou se o usuário não estiver na aba de ajustes
+        if (isInit || activeTab !== 'settings') {
+          if (data.evolutionUrl) {
+            setEvolutionUrl(data.evolutionUrl);
+            localStorage.setItem(`farmaflow_evo_url_${tenantId}`, data.evolutionUrl);
+          }
+          if (data.evolutionKey) {
+            setEvolutionKey(data.evolutionKey);
+            setHasSavedKey(true);
+            localStorage.setItem(`farmaflow_evo_key_${tenantId}`, data.evolutionKey);
+          } else if (data.hasKey) {
+            setHasSavedKey(true);
+          }
+          if (data.instanceName && !instanceName) {
+            setInstanceName(data.instanceName);
+          }
         }
       }
     } catch (e: any) {
@@ -132,7 +183,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     setTestResult(null);
     setErrorMessage(null);
     try {
-      const res = await fetch('/api/v1/chat/instance/test-evolution', {
+      const { ok, data, error } = await safeFetchJson('/api/v1/chat/instance/test-evolution', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -142,13 +193,13 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
         body: JSON.stringify({
           tenantId,
           inboxId,
-          evolutionUrl,
-          evolutionKey,
-          instanceName: instanceName || defaultInstanceName
+          evolutionUrl: evolutionUrl.trim(),
+          evolutionKey: evolutionKey.trim(),
+          instanceName: (instanceName || defaultInstanceName).trim()
         })
       });
-      const data = await res.json();
-      if (res.ok && data.ok) {
+
+      if (ok && data?.ok) {
         setTestResult({
           ok: true,
           message: data.message || `Evolution API conectada! (${data.totalInstances || 0} instância(s) no servidor)`
@@ -156,13 +207,13 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
       } else {
         setTestResult({
           ok: false,
-          message: data.error || "Não foi possível conectar à Evolution API. Verifique a URL e a API Key."
+          message: error || data?.error || "Não foi possível conectar à Evolution API. Verifique a URL e a API Key."
         });
       }
     } catch (err: any) {
       setTestResult({
         ok: false,
-        message: "Falha de rede ao tentar contatar o servidor Evolution API."
+        message: "Falha ao tentar contatar o servidor Evolution API."
       });
     } finally {
       setIsTesting(false);
@@ -174,7 +225,11 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     setErrorMessage(null);
     setSuccessMessage(null);
     try {
-      const res = await fetch('/api/v1/chat/instance/save-config', {
+      const trimmedUrl = evolutionUrl.trim() || DEFAULT_EVOLUTION_URL;
+      const trimmedKey = evolutionKey.trim();
+      const trimmedInstance = (instanceName || defaultInstanceName).trim();
+
+      const { ok, data, error } = await safeFetchJson('/api/v1/chat/instance/save-config', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -184,21 +239,27 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
         body: JSON.stringify({
           tenantId,
           inboxId,
-          evolutionUrl,
-          evolutionKey,
-          instanceName: instanceName || defaultInstanceName
+          evolutionUrl: trimmedUrl,
+          evolutionKey: trimmedKey,
+          instanceName: trimmedInstance
         })
       });
-      const data = await res.json();
-      if (res.ok && data.success) {
-        setSuccessMessage("Configurações salvas com sucesso!");
-        setHasSavedKey(true);
-        setTimeout(() => setSuccessMessage(null), 3000);
+
+      if (ok && data?.success) {
+        const savedUrl = data.evolutionUrl || trimmedUrl;
+        setEvolutionUrl(savedUrl);
+        localStorage.setItem(`farmaflow_evo_url_${tenantId}`, savedUrl);
+        if (trimmedKey) {
+          localStorage.setItem(`farmaflow_evo_key_${tenantId}`, trimmedKey);
+          setHasSavedKey(true);
+        }
+        setSuccessMessage("Configurações da Evolution API salvas com sucesso!");
+        setTimeout(() => setSuccessMessage(null), 4000);
       } else {
-        setErrorMessage(data.error || "Erro ao salvar configurações.");
+        setErrorMessage(error || data?.error || "Erro ao salvar configurações.");
       }
     } catch (e: any) {
-      setErrorMessage("Erro de rede ao salvar configurações.");
+      setErrorMessage("Erro ao salvar configurações.");
     } finally {
       setIsLoading(false);
     }
@@ -219,7 +280,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     setErrorMessage(null);
     setSuccessMessage(null);
     try {
-      const res = await fetch('/api/v1/chat/instance/create', {
+      const { ok, data, error } = await safeFetchJson('/api/v1/chat/instance/create', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -234,30 +295,34 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
           instanceName: (instanceName || defaultInstanceName).trim()
         })
       });
-      const data = await res.json();
-      if (res.ok) {
+
+      if (ok && data) {
         if (data.status === 'CONNECTED') {
           setStatus('CONNECTED');
-          setPhoneNumber(data.phoneNumber || null);
+          setPhoneNumber(data.phoneNumber || data.phone_number || null);
           setIsPolling(false);
           setSuccessMessage("WhatsApp conectado com sucesso!");
-        } else if (data.qrcodeBase64) {
-          let b64 = data.qrcodeBase64;
-          if (!b64.startsWith('data:image')) {
-            b64 = `data:image/png;base64,${b64}`;
+        } else if (data.status === 'QRCODE' || data.success) {
+          if (data.qrcodeBase64) {
+            let b64 = data.qrcodeBase64;
+            if (!b64.startsWith('data:image')) {
+              b64 = `data:image/png;base64,${b64}`;
+            }
+            setQrCodeBase64(b64);
+          } else {
+            setQrCodeBase64(null);
           }
-          setQrCodeBase64(b64);
           setStatus('QRCODE');
           setIsPolling(true);
         } else {
           setErrorMessage(data.error || "Aguardando geração do QR Code pela Evolution API. Tente novamente.");
         }
       } else {
-        setErrorMessage(data.error || "Não foi possível criar a instância automaticamente na Evolution API.");
+        setErrorMessage(error || data?.error || "Não foi possível criar a instância automaticamente na Evolution API.");
       }
     } catch (e: any) {
       console.error("[WhatsAppConnectModal] Erro ao gerar QR Code:", e);
-      setErrorMessage("Erro de conexão ao comunicar com a Evolution API.");
+      setErrorMessage(e.message || "Erro de conexão ao comunicar com a Evolution API.");
     } finally {
       setIsLoading(false);
     }
@@ -268,7 +333,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     setIsDisconnecting(true);
     setErrorMessage(null);
     try {
-      const res = await fetch('/api/v1/chat/instance/disconnect', {
+      const { ok } = await safeFetchJson('/api/v1/chat/instance/disconnect', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -278,12 +343,13 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
         body: JSON.stringify({ 
           tenantId, 
           inboxId,
-          evolutionUrl,
-          evolutionKey,
-          instanceName: instanceName || defaultInstanceName
+          evolutionUrl: evolutionUrl.trim(),
+          evolutionKey: evolutionKey.trim(),
+          instanceName: (instanceName || defaultInstanceName).trim()
         })
       });
-      if (res.ok) {
+
+      if (ok) {
         setStatus('DISCONNECTED');
         setQrCodeBase64(null);
         setPhoneNumber(null);
@@ -473,7 +539,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
                     <p className="text-xs text-gray-500 mt-0.5">Escaneie no WhatsApp do celular para conectar automaticamente</p>
                   </div>
 
-                  <div className="p-4 bg-white border-2 border-emerald-500/40 rounded-3xl shadow-xl relative flex items-center justify-center">
+                  <div className="p-4 bg-white border-2 border-emerald-500/40 rounded-3xl shadow-xl relative flex items-center justify-center min-h-[250px] min-w-[250px]">
                     {qrCodeBase64 ? (
                       <img 
                         src={qrCodeBase64} 
@@ -481,8 +547,12 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
                         className="w-56 h-56 object-contain rounded-xl" 
                       />
                     ) : (
-                      <div className="w-56 h-56 bg-gray-100 animate-pulse rounded-xl flex items-center justify-center text-gray-400">
+                      <div className="w-56 h-56 bg-emerald-50/50 border border-dashed border-emerald-300 rounded-2xl flex flex-col items-center justify-center text-center p-4 space-y-2.5">
                         <RefreshCw className="w-8 h-8 animate-spin text-emerald-600" />
+                        <div>
+                          <p className="text-xs font-bold text-gray-800">Gerando QR Code...</p>
+                          <p className="text-[11px] text-gray-500 mt-0.5">Iniciando sessão com a Evolution API</p>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -570,16 +640,30 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
 
               {/* URL da Evolution API */}
               <div className="space-y-1">
-                <label className="text-xs font-bold text-gray-700 flex items-center gap-1.5">
-                  <Globe className="w-3.5 h-3.5 text-gray-500" /> URL da Evolution API:
-                </label>
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-gray-700 flex items-center gap-1.5">
+                    <Globe className="w-3.5 h-3.5 text-gray-500" /> URL da Evolution API:
+                  </label>
+                  {evolutionUrl !== DEFAULT_EVOLUTION_URL && (
+                    <button
+                      type="button"
+                      onClick={() => setEvolutionUrl(DEFAULT_EVOLUTION_URL)}
+                      className="text-[11px] text-emerald-700 hover:text-emerald-800 font-semibold underline"
+                    >
+                      Restaurar padrão ({DEFAULT_EVOLUTION_URL})
+                    </button>
+                  )}
+                </div>
                 <input 
                   type="url"
                   value={evolutionUrl}
                   onChange={(e) => setEvolutionUrl(e.target.value)}
-                  placeholder="https://evolution-evolution-api.7wcbhg.easypanel.host"
+                  placeholder="https://evolution.nexoia.online"
                   className="w-full p-2.5 text-xs bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-hidden font-mono"
                 />
+                <p className="text-[11px] text-gray-500">
+                  Informe o endereço da sua Evolution API (ex: <code className="text-emerald-800 font-bold bg-emerald-50 px-1 py-0.5 rounded">https://evolution.nexoia.online</code> ou seu domínio/IP personalizado).
+                </p>
               </div>
 
               {/* Global API Key */}
