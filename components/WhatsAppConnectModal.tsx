@@ -273,6 +273,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
 
     if (!evolutionKey.trim() && !hasSavedKey) {
       setErrorMessage("Informe a Chave Global da Evolution API (AUTHENTICATION_API_KEY) para criar a instância automaticamente.");
+      setActiveTab('settings');
       return;
     }
 
@@ -302,23 +303,20 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
           setPhoneNumber(data.phoneNumber || data.phone_number || null);
           setIsPolling(false);
           setSuccessMessage("WhatsApp conectado com sucesso!");
-        } else if (data.status === 'QRCODE' || data.success) {
-          if (data.qrcodeBase64) {
-            let b64 = data.qrcodeBase64;
-            if (!b64.startsWith('data:image')) {
-              b64 = `data:image/png;base64,${b64}`;
-            }
-            setQrCodeBase64(b64);
-          } else {
-            setQrCodeBase64(null);
+        } else if (data.qrcodeBase64) {
+          let b64 = data.qrcodeBase64;
+          if (!b64.startsWith('data:image')) {
+            b64 = `data:image/png;base64,${b64}`;
           }
+          setQrCodeBase64(b64);
           setStatus('QRCODE');
           setIsPolling(true);
+          setSuccessMessage("QR Code gerado com sucesso! Aponte o WhatsApp do celular para conectar.");
         } else {
-          setErrorMessage(data.error || "Aguardando geração do QR Code pela Evolution API. Tente novamente.");
+          setErrorMessage(data.error || "Aguardando resposta da Evolution API. Clique em 'Recriar Instância' caso não apareça.");
         }
       } else {
-        setErrorMessage(error || data?.error || "Não foi possível criar a instância automaticamente na Evolution API.");
+        setErrorMessage(error || data?.error || "Não foi possível criar a instância na Evolution API. Verifique a URL e a API Key na aba Configurações.");
       }
     } catch (e: any) {
       console.error("[WhatsAppConnectModal] Erro ao gerar QR Code:", e);

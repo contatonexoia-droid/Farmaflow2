@@ -5354,12 +5354,26 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
     let phoneNumber: string | null = null;
 
     try {
+      const evoHeaders = {
+        "Content-Type": "application/json",
+        "apikey": evolutionKey,
+        "apiKey": evolutionKey,
+        "Authorization": `Bearer ${evolutionKey}`
+      };
+
+      const createPayload = {
+        instanceName: instanceName,
+        token: instanceName,
+        qrcode: true,
+        integration: "WHATSAPP-BAILEYS"
+      };
+
       // Se solicitado recriação forçada, apaga a instância anterior da Evolution API primeiro
       if (forceRecreate) {
         console.log(`[Evolution API] Forçando recriação da instância ${instanceName}...`);
         await safeEvolutionRequest(`${evolutionUrl}/instance/delete/${instanceName}`, {
           method: "DELETE",
-          headers: { "apikey": evolutionKey }
+          headers: evoHeaders
         }, 5000).catch(() => {});
         await new Promise(r => setTimeout(r, 1000));
       }
@@ -5367,7 +5381,7 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
       // 1. Verificar se a instância já existe e está conectada
       if (!forceRecreate) {
         const stateRes = await safeEvolutionRequest(`${evolutionUrl}/instance/connectionState/${instanceName}`, {
-          headers: { "apikey": evolutionKey }
+          headers: evoHeaders
         }, 4000);
 
         if (stateRes.ok && stateRes.data) {
@@ -5385,7 +5399,7 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
         // Tenta buscar o QR code conectando primeiro caso já exista
         if (!forceRecreate) {
           const connectRes = await safeEvolutionRequest(`${evolutionUrl}/instance/connect/${instanceName}`, {
-            headers: { "apikey": evolutionKey }
+            headers: evoHeaders
           }, 4000);
 
           if (connectRes.ok && connectRes.data) {
@@ -5398,33 +5412,41 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
 
         // Se ainda não temos QR Code ou foi forçado, cria a instância via POST /instance/create
         if (!base64 && !isConnected) {
-          const createRes = await safeEvolutionRequest(`${evolutionUrl}/instance/create`, {
+          let createRes = await safeEvolutionRequest(`${evolutionUrl}/instance/create`, {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "apikey": evolutionKey
-            },
-            body: JSON.stringify({
-              instanceName: instanceName,
-              qrcode: true,
-              integration: "WHATSAPP-BAILEYS"
-            })
+            headers: evoHeaders,
+            body: JSON.stringify(createPayload)
           }, 9000);
+
+          // Se a instância já existia na Evolution mas estava sem QR Code ativo, deleta e recria do zero
+          if (!createRes.ok && (createRes.status === 403 || createRes.status === 400)) {
+            const errTxt = JSON.stringify(createRes.data || '').toLowerCase();
+            if (errTxt.includes('already exist') || errTxt.includes('já existe') || errTxt.includes('in use')) {
+              console.log(`[Evolution API] Instância ${instanceName} já existe no servidor mas sem sessão ativa. Recriando do zero...`);
+              await safeEvolutionRequest(`${evolutionUrl}/instance/delete/${instanceName}`, {
+                method: "DELETE",
+                headers: evoHeaders
+              }, 5000).catch(() => {});
+              await new Promise(r => setTimeout(r, 800));
+
+              createRes = await safeEvolutionRequest(`${evolutionUrl}/instance/create`, {
+                method: "POST",
+                headers: evoHeaders,
+                body: JSON.stringify(createPayload)
+              }, 9000);
+            }
+          }
 
           if (!createRes.ok) {
             if (createRes.status === 401 || createRes.status === 403) {
-              // Se foi 403 por instância já existente, tenta reconectar
-              const errTxt = JSON.stringify(createRes.data || '');
-              if (!errTxt.includes('already exists') && !errTxt.includes('já existe')) {
-                return res.status(401).json({
-                  error: "Chave Global de API (AUTHENTICATION_API_KEY) incorreta. Verifique a chave no Easypanel.",
-                  needsKey: true
-                });
-              }
+              return res.status(401).json({
+                error: "Chave Global de API (AUTHENTICATION_API_KEY) incorreta ou rejeitada pela Evolution API. Verifique a chave no Easypanel.",
+                needsKey: true
+              });
             }
             if (createRes.error && !createRes.data) {
               return res.status(502).json({
-                error: `Servidor da Evolution inacessível em ${evolutionUrl}. Verifique se a URL está correta e ativa.`
+                error: `Servidor da Evolution inacessível em ${evolutionUrl}. Verifique se a URL está correta e ativa no Easypanel.`
               });
             }
           }
@@ -5441,7 +5463,7 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
             for (let attempt = 0; attempt < 6; attempt++) {
               await new Promise(r => setTimeout(r, 1200));
               const pollRes = await safeEvolutionRequest(`${evolutionUrl}/instance/connect/${instanceName}`, {
-                headers: { "apikey": evolutionKey }
+                headers: evoHeaders
               }, 4000);
 
               if (pollRes.ok && pollRes.data) {
@@ -5459,10 +5481,7 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
         // 3. Configurar Webhook automaticamente na Evolution API para receber mensagens e conexão em tempo real
         safeEvolutionRequest(`${evolutionUrl}/webhook/set/${instanceName}`, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "apikey": evolutionKey
-          },
+          headers: evoHeaders,
           body: JSON.stringify({
             enabled: true,
             url: webhookUrl,
@@ -5483,6 +5502,14 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
       console.error("[Evolution API Error]:", evolutionError.message || evolutionError);
       return res.status(502).json({
         error: `Erro ao comunicar com a Evolution API (${evolutionUrl}): ${evolutionError.message}.`
+      });
+    }
+
+    if (!base64 && !isConnected) {
+      return res.status(400).json({
+        error: "A Evolution API não retornou a imagem do QR Code. Verifique se a URL e a Chave API estão corretas na aba Configurações.",
+        instanceName,
+        evolutionUrl
       });
     }
 
@@ -5541,8 +5568,8 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
     return res.json({ 
       success: true, 
       status: 'QRCODE',
-      qrcodeBase64: base64 || null,
-      isEvolutionLive,
+      qrcodeBase64: base64,
+      isEvolutionLive: true,
       instanceName,
       evolutionUrl
     });
