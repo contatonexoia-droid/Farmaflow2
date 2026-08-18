@@ -487,6 +487,8 @@ class ChatStore {
   public async processWhatsAppMessage(storeId: string, msg: any, instanceName?: string): Promise<{ conversation: ChatConversation; message: ChatMessage } | null> {
     if (!msg) return null;
 
+    const cleanStoreId = typeof storeId === 'string' ? storeId.trim().replace(/^store_/, '') : (storeId || 'default');
+
     // Robust extraction for Evolution API and other providers
     let fromMe = Boolean(msg.key?.fromMe ?? msg.fromMe ?? false);
     const remoteJid = msg.key?.remoteJid || msg.remoteJid || msg.sender || msg.participant || "";
@@ -527,7 +529,7 @@ class ChatStore {
       if (instanceName) {
         query.eq("instance_name", instanceName);
       } else {
-        query.eq("store_id", storeId);
+        query.or(`store_id.eq.${cleanStoreId},store_id.eq.${storeId}`);
       }
       const { data: inst } = await query.limit(1).maybeSingle();
       if (inst) {
@@ -552,8 +554,8 @@ class ChatStore {
     const now = new Date().toISOString();
 
     // Deterministic valid UUIDs for Supabase PK/FK compliance
-    const contactId = stringToUuid(`contact_${phone}_${storeId}`);
-    const convId = stringToUuid(`conv_${phone}_${storeId}`);
+    const contactId = stringToUuid(`contact_${phone}_${cleanStoreId}`);
+    const convId = stringToUuid(`conv_${phone}_${cleanStoreId}`);
     const rawMsgKey = msg.key?.id || `${Date.now()}`;
     const msgId = /^[0-9a-f-]{36}$/i.test(rawMsgKey) ? rawMsgKey : stringToUuid(`msg_${rawMsgKey}_${convId}`);
 
@@ -582,7 +584,7 @@ class ChatStore {
         }
         await supabaseAdmin.from("chat_contacts").insert([{
           id: contactId,
-          store_id: storeId,
+          store_id: cleanStoreId,
           phone_number: phone,
           name: finalContactName,
           created_at: now
@@ -594,7 +596,7 @@ class ChatStore {
     
     const contact: ChatContact = {
       id: contactId,
-      store_id: storeId,
+      store_id: cleanStoreId,
       name: finalContactName,
       phone_number: phone,
       created_at: now

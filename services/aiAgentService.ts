@@ -175,23 +175,32 @@ export class AiAgentService {
    * Valida se a farmácia tem autorização no Super Admin para usar o módulo de IA.
    */
   public async verifyTenantAuthorization(tenantId: string): Promise<any> {
+    if (!tenantId) {
+      throw new Error("ID da drogaria não informado.");
+    }
+
+    // Sanitização segura: remove o prefixo 'store_' caso o identificador venha diretamente da Evolution API (ex: store_nossocatalogo -> nossocatalogo)
+    const sanitizedId = typeof tenantId === 'string' 
+      ? tenantId.trim().replace(/^store_/, '') 
+      : tenantId;
+
     let tenant: any = null;
 
-    // Tenta buscar por ID direto ou por slug
+    // Tenta buscar por ID direto ou por slug (usando o sanitizedId e o tenantId original com fallback)
     const { data: tenantData, error } = await supabaseAdmin
       .from("tenants")
       .select("*")
-      .or(`id.eq.${tenantId},slug.eq.${tenantId}`)
+      .or(`id.eq.${sanitizedId},slug.eq.${sanitizedId},id.eq.${tenantId},slug.eq.${tenantId}`)
       .maybeSingle();
 
     if (!error && tenantData) {
       tenant = tenantData;
     } else {
-      // Fallback: busca por ID isolado
+      // Fallback: busca por slug ou ID isolado
       const { data: fallbackTenant } = await supabaseAdmin
         .from("tenants")
         .select("*")
-        .eq("id", tenantId)
+        .or(`slug.eq.${sanitizedId},id.eq.${sanitizedId}`)
         .maybeSingle();
       tenant = fallbackTenant;
     }
@@ -664,11 +673,15 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
     }
 
     // 1. Validar autorização do tenant no Super Admin
+    const sanitizedId = typeof tenantId === 'string' 
+      ? tenantId.trim().replace(/^store_/, '') 
+      : tenantId;
+
     let tenant: any = null;
     const { data: tenantData } = await supabaseAdmin
       .from("tenants")
       .select("*")
-      .or(`id.eq.${tenantId},slug.eq.${tenantId}`)
+      .or(`id.eq.${sanitizedId},slug.eq.${sanitizedId},id.eq.${tenantId},slug.eq.${tenantId}`)
       .maybeSingle();
 
     if (tenantData) {
@@ -677,7 +690,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       const { data: fallbackTenant } = await supabaseAdmin
         .from("tenants")
         .select("*")
-        .eq("id", tenantId)
+        .or(`slug.eq.${sanitizedId},id.eq.${sanitizedId}`)
         .maybeSingle();
       tenant = fallbackTenant;
     }

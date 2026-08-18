@@ -5885,10 +5885,11 @@ app.get("/api/v1/whatsapp/instances", async (req, res) => {
 // Helper function to handle daily welcome messages for first message of the day
 async function handleDailyWelcomeMessage(storeId: string, conversation: any, instanceName?: string, incomingText?: string) {
   try {
+    const cleanStoreId = typeof storeId === 'string' ? storeId.trim().replace(/^store_/, '') : storeId;
     const { data: tenant } = await supabaseAdmin
       .from("tenants")
       .select("id, name, slug, custom_domain, welcome_message_enabled, welcomemessageenabled, welcome_message_text, welcomemessagetext, welcome_message_format, welcomemessageformat, welcome_message_link, welcomemessagelink")
-      .eq("id", storeId)
+      .or(`id.eq.${cleanStoreId},slug.eq.${cleanStoreId},id.eq.${storeId},slug.eq.${storeId}`)
       .maybeSingle();
 
     if (!tenant) return;
@@ -6090,8 +6091,9 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
     // Log para diagnóstico de payload bruto (solicitado)
     console.log(`[Webhook RAW Payload] Evento: ${event}`, JSON.stringify(req.body, null, 2));
     
-    // Captura prioritária na query ou no corpo
-    const tenantId = req.query.tenantId || req.query.storeId || req.body.tenantId || bodyInstance || data?.instance;
+    // Captura prioritária na query ou no corpo, com sanitização segura do prefixo 'store_'
+    const rawTenantId = req.query.tenantId || req.query.storeId || req.body.tenantId || bodyInstance || data?.instance;
+    const sanitizedTenantId = typeof rawTenantId === 'string' ? rawTenantId.trim().replace(/^store_/, '') : rawTenantId;
     const instanceName = bodyInstance || data?.instance;
     const eventName = event === "MESSAGES_UPSERT" ? "messages.upsert" : event;
     
@@ -6107,16 +6109,18 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
         messages = data;
       }
       
-      let storeId = tenantId || "default";
+      let storeId = sanitizedTenantId || "default";
       
-      if (!tenantId && instanceName) {
+      if (instanceName) {
         try {
           const { data: inst } = await supabaseAdmin
             .from("whatsapp_instances")
             .select("store_id")
             .eq("instance_name", instanceName)
             .maybeSingle();
-          if (inst?.store_id) storeId = inst.store_id;
+          if (inst?.store_id) {
+            storeId = typeof inst.store_id === 'string' ? inst.store_id.replace(/^store_/, '') : inst.store_id;
+          }
         } catch (instErr: any) {
           console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao buscar whatsapp_instances', instErr.message, instErr.stack);
         }
