@@ -295,7 +295,7 @@ export const getTenants = async (): Promise<PharmacyConfig[]> => {
 
       // Fallback para acesso direto (precisa que SQL RLS libere o acesso)
       const support = await checkSchemaSupport();
-      let fields = "id, slug, custom_domain, name, whatsapp, logo, primary_color, secondary_color, accent_color, banner_title, banner_subtitle, is_blocked, is_chat_enabled, license_expiration, cnpj, full_address, corporate_email, manufacturer_logos, enable_smart_banners, smart_banners, coupon_banner_color, minimum_order_value, admin_email, admin_password, notification_sound, notification_volume, departments";
+      let fields = "id, slug, custom_domain, name, whatsapp, logo, primary_color, secondary_color, accent_color, banner_title, banner_subtitle, is_blocked, is_chat_enabled, license_expiration, cnpj, full_address, corporate_email, manufacturer_logos, enable_smart_banners, smart_banners, coupon_banner_color, minimum_order_value, admin_email, admin_password, notification_sound, notification_volume, departments, welcome_message_enabled, welcome_message_text, welcome_message_format, welcome_message_link, is_ai_agent_enabled, ai_agent_config";
       if (support.hasNetworkTenants) {
         fields += ", is_network_master, network_id";
       }

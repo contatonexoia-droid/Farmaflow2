@@ -5882,6 +5882,22 @@ app.get("/api/v1/whatsapp/instances", async (req, res) => {
   }
 });
 
+// Helper to get current or given date formatted as YYYY-MM-DD in America/Sao_Paulo timezone
+function getSaoPauloDateString(dateInput: Date | string = new Date()): string {
+  try {
+    const d = typeof dateInput === 'string' ? new Date(dateInput) : dateInput;
+    if (isNaN(d.getTime())) return '';
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Sao_Paulo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).format(d);
+  } catch (e) {
+    return new Date().toISOString().split('T')[0];
+  }
+}
+
 // Helper function to handle daily welcome messages for first message of the day
 async function handleDailyWelcomeMessage(storeId: string, conversation: any, instanceName?: string, incomingText?: string) {
   try {
@@ -5897,26 +5913,31 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
     const isEnabled = tenant.welcome_message_enabled === true || tenant.welcomemessageenabled === true;
     if (!isEnabled) return;
 
-    const todayStr = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+    // Comparação precisa de virada de dia no fuso horário do Brasil (America/Sao_Paulo)
+    const todayStr = getSaoPauloDateString(new Date()); // YYYY-MM-DD em BRT
     const { data: convData } = await supabaseAdmin
       .from("chat_conversations")
       .select("last_welcome_sent_at")
       .eq("id", conversation.id)
       .maybeSingle();
 
-    const lastWelcomeDate = convData?.last_welcome_sent_at ? new Date(convData.last_welcome_sent_at).toISOString().split('T')[0] : null;
+    const lastWelcomeDate = convData?.last_welcome_sent_at 
+      ? getSaoPauloDateString(convData.last_welcome_sent_at) 
+      : null;
 
-    const isTest = incomingText?.trim().toLowerCase() === '#teste' || incomingText?.trim().toLowerCase() === '#teste-boas-vindas';
+    const isTest = incomingText?.trim().toLowerCase() === '#teste' || 
+                   incomingText?.trim().toLowerCase() === '#teste-boas-vindas' ||
+                   incomingText?.trim().toLowerCase() === '#teste-bv';
 
     if (isTest) {
-      console.log(`[WelcomeMessage] Comando de teste detectado (${incomingText?.trim()}). Limpando registro de envio diário para a conversa ${conversation.id}...`);
-      // Força a limpeza do registro diário atualizando para null
+      console.log(`[WelcomeMessage] Comando de teste detectado (${incomingText?.trim()}). Resetando registro de envio para a conversa ${conversation.id}...`);
       await supabaseAdmin
         .from("chat_conversations")
         .update({ last_welcome_sent_at: null })
         .eq("id", conversation.id);
-    } else if (lastWelcomeDate === todayStr) {
-      return; // Already sent today
+    } else if (lastWelcomeDate && lastWelcomeDate === todayStr) {
+      console.log(`[WelcomeMessage] Boas-vindas diárias já enviadas hoje (${todayStr}) para conversa ${conversation.id}.`);
+      return; // Já enviada hoje no fuso horário brasileiro
     }
 
     const nowIso = new Date().toISOString();
@@ -5925,20 +5946,23 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
       .update({ last_welcome_sent_at: nowIso })
       .eq("id", conversation.id);
 
-    let phone = conversation.contact?.phone_number;
-    if (!phone) {
+    let rawPhone = conversation.contact?.phone_number;
+    if (!rawPhone) {
       const { data: contactData } = await supabaseAdmin
         .from("chat_contacts")
         .select("phone_number")
         .eq("id", conversation.contact_id)
         .maybeSingle();
-      phone = contactData?.phone_number;
+      rawPhone = contactData?.phone_number;
     }
 
-    if (!phone) {
+    if (!rawPhone) {
       console.warn("[WelcomeMessage] Telefone do contato não encontrado para conversa:", conversation.id);
       return;
     }
+
+    const cleanPhone = String(rawPhone).replace(/\D/g, '');
+    if (!cleanPhone) return;
 
     const storeName = tenant.name || "Nossa Farmácia";
     const customText = tenant.welcome_message_text || tenant.welcomemessagetext || "Olá! Seja muito bem-vindo(a) à nossa farmácia! Como podemos te ajudar hoje?";
@@ -5956,15 +5980,38 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
     const format = tenant.welcome_message_format || tenant.welcomemessageformat || "button";
     const evolutionUrl = process.env.EVOLUTION_API_URL?.replace(/\/$/, '');
     const evolutionKey = process.env.EVOLUTION_API_KEY;
-    let targetInstanceName = instanceName || `store_${storeId.replace(/-/g, "")}`;
+    
+    let targetInstanceName = instanceName;
+    if (!targetInstanceName) {
+      const { data: inst } = await supabaseAdmin
+        .from("whatsapp_instances")
+        .select("instance_name")
+        .or(`store_id.eq.${cleanStoreId},store_id.eq.${storeId}`)
+        .limit(1)
+        .maybeSingle();
+      if (inst?.instance_name) {
+        targetInstanceName = inst.instance_name;
+      } else {
+        targetInstanceName = `store_${cleanStoreId.replace(/-/g, "")}`;
+      }
+    }
 
     let displayContent = `${customText}\n\n🛒 Loja Online: ${storeLink}`;
 
     if (evolutionUrl && evolutionKey) {
+      const evolutionHeaders: Record<string, string> = {
+        "Content-Type": "application/json",
+        "apikey": evolutionKey,
+        "apiKey": evolutionKey,
+        "Authorization": `Bearer ${evolutionKey}`
+      };
+
       if (format === 'button') {
-        // Formato para enviar Template Buttons (suporta Botão de URL no Evolution API)
+        let buttonSuccess = false;
+
+        // 1. Tenta envio com sendTemplate (suporte a botões de link do Evolution API)
         const templatePayload = {
-          number: phone,
+          number: cleanPhone,
           options: {
             delay: 1200,
             presence: "composing"
@@ -5982,74 +6029,108 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
           ]
         };
 
-        const textPayload = {
-          number: phone,
-          text: `👋 *${storeName}*\n\n${customText}\n\n🛍️ *Acesse nossa Loja Online:*\n👉 ${storeLink}`,
-          options: { linkPreview: true }
-        };
-
-        let buttonSuccess = false;
-
         try {
-          console.log(`[WelcomeMessage] Tentando enviar template de botão interativo para ${phone} via instância ${targetInstanceName}...`);
+          console.log(`[WelcomeMessage] Tentando enviar template de botão para ${cleanPhone} via ${targetInstanceName}...`);
           const btnRes = await fetch(`${evolutionUrl}/message/sendTemplate/${targetInstanceName}`, {
             method: "POST",
-            headers: { "Content-Type": "application/json", "apikey": evolutionKey },
+            headers: evolutionHeaders,
             body: JSON.stringify(templatePayload)
           });
 
           if (btnRes.ok) {
-            console.log(`[WelcomeMessage] Sucesso ao enviar template de botão para ${phone}.`);
+            console.log(`[WelcomeMessage] Sucesso no envio do template de botão para ${cleanPhone}.`);
             buttonSuccess = true;
           } else {
-            const errText = await btnRes.text().catch(() => "Sem detalhes do corpo da resposta");
-            console.log(`[WelcomeMessage] Evolution API rejeitou o envio de botão (Status ${btnRes.status} ${btnRes.statusText}):`, errText);
+            const errText = await btnRes.text().catch(() => "Sem corpo");
+            console.log(`[WelcomeMessage] sendTemplate recusado (${btnRes.status}):`, errText);
           }
         } catch (btnErr: any) {
-          console.log(`[WelcomeMessage] Exceção na chamada de envio de botão:`, btnErr.message || btnErr);
+          console.log(`[WelcomeMessage] Exceção no sendTemplate:`, btnErr.message || btnErr);
         }
 
-        // Se o botão falhou por qualquer motivo (rejeição da API ou exceção/erro de rede), faz o Fallback de texto obrigatoriamente
+        // 2. Se sendTemplate falhar, tenta sendButton
         if (!buttonSuccess) {
-          console.log(`[WelcomeMessage] Iniciando Fallback Robusto: Enviando como texto formatado com link para ${phone}...`);
+          try {
+            const buttonPayload = {
+              number: cleanPhone,
+              title: `👋 *${storeName}*`,
+              description: customText,
+              footer: storeName,
+              buttons: [
+                {
+                  type: "url",
+                  displayText: "🛒 Acessar Loja Online",
+                  url: storeLink
+                }
+              ]
+            };
+            const bRes = await fetch(`${evolutionUrl}/message/sendButton/${targetInstanceName}`, {
+              method: "POST",
+              headers: evolutionHeaders,
+              body: JSON.stringify(buttonPayload)
+            });
+            if (bRes.ok) {
+              console.log(`[WelcomeMessage] Sucesso no envio via sendButton para ${cleanPhone}.`);
+              buttonSuccess = true;
+            }
+          } catch (_) {}
+        }
+
+        // 3. Se ambos os botões falharem (comportamento padrão do WhatsApp MD em contas pessoais), faz o Fallback com Link Preview
+        if (!buttonSuccess) {
+          console.log(`[WelcomeMessage] Executando Fallback de Texto com Link Preview para ${cleanPhone}...`);
+          const textPayload = {
+            number: cleanPhone,
+            text: `👋 *${storeName}*\n\n${customText}\n\n🛍️ *Acesse nossa Loja Online:*\n👉 ${storeLink}`,
+            options: {
+              delay: 1200,
+              presence: "composing",
+              linkPreview: true
+            }
+          };
+
           try {
             const fbRes = await fetch(`${evolutionUrl}/message/sendText/${targetInstanceName}`, {
               method: "POST",
-              headers: { "Content-Type": "application/json", "apikey": evolutionKey },
+              headers: evolutionHeaders,
               body: JSON.stringify(textPayload)
             });
 
-            if (!fbRes.ok) {
-              const fbErrText = await fbRes.text().catch(() => "Sem detalhes do corpo da resposta");
-              console.error(`[WelcomeMessage] Erro crítico no envio de texto do Fallback (Status ${fbRes.status} ${fbRes.statusText}):`, fbErrText);
+            if (fbRes.ok) {
+              console.log(`[WelcomeMessage] Sucesso no Fallback de texto de boas-vindas para ${cleanPhone}.`);
             } else {
-              console.log(`[WelcomeMessage] Sucesso no envio do Fallback de texto de boas-vindas para ${phone}.`);
+              const fbErrText = await fbRes.text().catch(() => "Sem corpo");
+              console.error(`[WelcomeMessage] Erro no Fallback de texto (${fbRes.status}):`, fbErrText);
             }
           } catch (fbErr: any) {
-            console.error(`[WelcomeMessage] Exceção crítica ao tentar disparar o Fallback de texto:`, fbErr.message || fbErr);
+            console.error(`[WelcomeMessage] Exceção no Fallback de texto:`, fbErr.message || fbErr);
           }
         }
       } else {
         const textPayload = {
-          number: phone,
+          number: cleanPhone,
           text: `👋 *${storeName}*\n\n${customText}\n\n🛍️ *Acesse nossa Loja Online:*\n👉 ${storeLink}`,
-          options: { linkPreview: true }
+          options: {
+            delay: 1200,
+            presence: "composing",
+            linkPreview: true
+          }
         };
         try {
-          console.log(`[WelcomeMessage] Enviando boas-vindas em formato texto padrão para ${phone} via instância ${targetInstanceName}...`);
+          console.log(`[WelcomeMessage] Enviando boas-vindas em formato texto padrão para ${cleanPhone} via ${targetInstanceName}...`);
           const textRes = await fetch(`${evolutionUrl}/message/sendText/${targetInstanceName}`, {
             method: "POST",
-            headers: { "Content-Type": "application/json", "apikey": evolutionKey },
+            headers: evolutionHeaders,
             body: JSON.stringify(textPayload)
           });
-          if (!textRes.ok) {
-            const textErrText = await textRes.text().catch(() => "Sem detalhes do corpo da resposta");
-            console.error(`[WelcomeMessage] Erro ao enviar texto de boas-vindas (Status ${textRes.status} ${textRes.statusText}):`, textErrText);
+          if (textRes.ok) {
+            console.log(`[WelcomeMessage] Sucesso ao enviar texto de boas-vindas para ${cleanPhone}.`);
           } else {
-            console.log(`[WelcomeMessage] Sucesso ao enviar texto de boas-vindas padrão para ${phone}.`);
+            const textErrText = await textRes.text().catch(() => "Sem corpo");
+            console.error(`[WelcomeMessage] Erro ao enviar texto padrão (${textRes.status}):`, textErrText);
           }
         } catch (textErr: any) {
-          console.error(`[WelcomeMessage] Exceção crítica ao enviar texto de boas-vindas padrão:`, textErr.message || textErr);
+          console.error(`[WelcomeMessage] Exceção crítica ao enviar texto padrão:`, textErr.message || textErr);
         }
       }
     }
@@ -6077,7 +6158,7 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
       conversation
     });
 
-    console.log(`[WelcomeMessage] Mensagem de boas-vindas processada com sucesso para ${phone} (${storeId})`);
+    console.log(`[WelcomeMessage] Mensagem de boas-vindas processada com sucesso para ${cleanPhone} (${storeId})`);
   } catch (err: any) {
     console.error("[WelcomeMessage] Erro ao processar mensagem de boas-vindas:", err.message);
   }

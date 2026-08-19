@@ -5,6 +5,8 @@ import {
   closestCorners,
   KeyboardSensor,
   PointerSensor,
+  MouseSensor,
+  TouchSensor,
   useSensor,
   useSensors,
   DragStartEvent,
@@ -149,17 +151,25 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
   const [activeCard, setActiveCard] = useState<any | null>(null);
   const [isUpdating, setIsUpdating] = useState(false);
 
-  // Configuração dos sensores para DnD-Kit com restrição de ativação suave (sem bloquear cliques)
-  const sensors = useSensors(
-    useSensor(PointerSensor, {
-      activationConstraint: {
-        distance: 8, // 8px de movimento antes de iniciar o arrasto
-      },
-    }),
-    useSensor(KeyboardSensor, {
-      coordinateGetter: sortableKeyboardCoordinates,
-    })
-  );
+  // Configuração avançada dos sensores para DnD-Kit (Suporte perfeito para Desktop Mouse e Mobile Touch)
+  const mouseSensor = useSensor(MouseSensor, {
+    activationConstraint: {
+      distance: 8, // 8px de movimento para iniciar no desktop via mouse
+    },
+  });
+
+  const touchSensor = useSensor(TouchSensor, {
+    activationConstraint: {
+      delay: 250, // Pressionar e segurar por 250ms no mobile para diferenciar de scroll vertical
+      tolerance: 6, // Tolerância de até 6px durante o delay
+    },
+  });
+
+  const keyboardSensor = useSensor(KeyboardSensor, {
+    coordinateGetter: sortableKeyboardCoordinates,
+  });
+
+  const sensors = useSensors(mouseSensor, touchSensor, keyboardSensor);
 
   // Filtro geral de conversas
   const filteredConversations = useMemo(() => {

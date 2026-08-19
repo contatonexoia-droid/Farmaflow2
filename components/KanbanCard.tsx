@@ -48,10 +48,11 @@ export const KanbanCard: React.FC<KanbanCardProps> = ({
     disabled: isOverlay
   });
 
-  const style = {
+  const style: React.CSSProperties = {
     transform: CSS.Translate.toString(transform),
     transition: transition || 'transform 200ms ease',
-    opacity: isDragging ? 0.35 : 1
+    opacity: isDragging ? 0.35 : 1,
+    touchAction: 'manipulation'
   };
 
   const contactName = conversation.contact?.name || conversation.contact?.phone_number || 'Cliente';
