@@ -3460,31 +3460,16 @@ async function logIntegration(
  *         description: Produto não encontrado
  *
  */
-app.post("/api/v1/sync/inventory", async (req, res) => {
-  const token =
-    (req.query.token as string) || (req.headers["x-api-key"] as string);
-  const tenantIdQuery = req.query.tenant_id as string;
-
-  if (!token) {
-    return res.status(401).json({ error: "Token não fornecido" });
-  }
-
+app.post(["/api/v1/sync/inventory", "/api/sync/inventory", "/api/v1/desktop-agent/inventory"], async (req, res) => {
   try {
-    let query = supabase
-      .from("tenants")
-      .select("id, cnpj")
-      .eq("integration_token", token);
-    if (tenantIdQuery) {
-      query = query.eq("id", tenantIdQuery);
-    }
+    const { tenant, tenantId, machineId, activationToken } = await resolveTenantForAgent(req);
 
-    const { data: tenant, error: tenantError } = await query.single();
-
-    if (tenantError || !tenant) {
+    if (!tenant || !tenantId) {
       return res.status(401).json({ error: "Token ou Tenant ID inválido" });
     }
 
-    const tenantId = tenant.id;
+    await touchAgentHeartbeat(tenantId, machineId, activationToken);
+
     const { type, ean, internalCode, quantity, price_sale } = req.body;
 
     if (!type || !["SALE", "PURCHASE"].includes(type)) {
@@ -4448,6 +4433,207 @@ app.get("/api/v1/agent/download/:erpType", (req, res) => {
   }
 });
 
+interface AgentTenantResolution {
+  tenant: any | null;
+  tenantId: string | null;
+  machineId: string | null;
+  activationToken: string | null;
+}
+
+async function resolveTenantForAgent(req: express.Request): Promise<AgentTenantResolution> {
+  const body = req.body || {};
+  const query = req.query || {};
+  const headers = req.headers || {};
+
+  // Extrair todos os possíveis tokens / chaves / identificadores enviados pelo Agente Desktop
+  const authHeader = headers['authorization'] ? String(headers['authorization']).replace(/^Bearer\s+/i, '').trim() : '';
+  const headerApiKey = (headers['x-api-key'] || headers['api-key'] || headers['apikey'] || headers['x-token'] || headers['token']) as string;
+  const headerTenantId = (headers['x-tenant-id'] || headers['x-store-id'] || headers['tenant-id'] || headers['store-id'] || headers['x-store-slug']) as string;
+  
+  const bodyToken = (body.token || body.activation_token || body.activationToken) as string;
+  const bodyApiKey = (body.apiKey || body.api_key || body.apikey) as string;
+  const bodyTenantId = (body.tenantId || body.tenant_id || body.storeId || body.store_id || body.slug || body.store_slug || body.pharmacyId) as string;
+
+  const queryToken = (query.token || query.activation_token) as string;
+  const queryApiKey = (query.apiKey || query.api_key || query.apikey) as string;
+  const queryTenantId = (query.tenantId || query.tenant_id || query.storeId || query.store_id || query.slug || query.store_slug) as string;
+
+  const headerMachineId = (headers['x-machine-id'] || headers['machine-id']) as string;
+  const machineId = (body.machineId || body.machine_id || body.machine || body.hostname || query.machineId || query.machine_id || headerMachineId || 'unknown') as string;
+
+  const rawCandidates = [
+    authHeader,
+    headerApiKey,
+    headerTenantId,
+    bodyToken,
+    bodyApiKey,
+    bodyTenantId,
+    queryToken,
+    queryApiKey,
+    queryTenantId
+  ].filter(Boolean).map(c => String(c).trim()).filter(c => c.length > 0);
+
+  // Criar conjunto higienizado de chaves de busca
+  const lookupKeys = new Set<string>();
+  for (const raw of rawCandidates) {
+    lookupKeys.add(raw);
+    const clean = raw.replace(/^store_/, '').replace(/^tenant_/, '').trim();
+    if (clean) lookupKeys.add(clean);
+  }
+
+  let foundTenant: any = null;
+  let matchedToken: string | null = bodyToken || queryToken || null;
+
+  if (lookupKeys.size > 0) {
+    const keyArray = Array.from(lookupKeys);
+    
+    // 1. Busca por integration_token na tabela tenants
+    for (const key of keyArray) {
+      try {
+        const { data: byToken } = await supabaseAdmin
+          .from('tenants')
+          .select('*')
+          .eq('integration_token', key)
+          .maybeSingle();
+        if (byToken) {
+          foundTenant = byToken;
+          break;
+        }
+      } catch (e) {}
+    }
+
+    // 2. Busca por slug na tabela tenants
+    if (!foundTenant) {
+      for (const key of keyArray) {
+        try {
+          const { data: bySlug } = await supabaseAdmin
+            .from('tenants')
+            .select('*')
+            .eq('slug', key)
+            .maybeSingle();
+          if (bySlug) {
+            foundTenant = bySlug;
+            break;
+          }
+        } catch (e) {}
+      }
+    }
+
+    // 3. Busca por id (UUID ou identificador) na tabela tenants
+    if (!foundTenant) {
+      for (const key of keyArray) {
+        try {
+          const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(key);
+          if (isUuid) {
+            const { data: byId } = await supabaseAdmin
+              .from('tenants')
+              .select('*')
+              .eq('id', key)
+              .maybeSingle();
+            if (byId) {
+              foundTenant = byId;
+              break;
+            }
+          }
+        } catch (e) {}
+      }
+    }
+  }
+
+  // 4. Se ainda não encontrou, busca na tabela activation_tokens
+  if (!foundTenant && lookupKeys.size > 0) {
+    for (const key of Array.from(lookupKeys)) {
+      try {
+        const { data: tokenRow } = await supabaseAdmin
+          .from('activation_tokens')
+          .select('tenant_id, token')
+          .eq('token', key)
+          .maybeSingle();
+        if (tokenRow?.tenant_id) {
+          matchedToken = tokenRow.token;
+          const { data: t } = await supabaseAdmin
+            .from('tenants')
+            .select('*')
+            .eq('id', tokenRow.tenant_id)
+            .maybeSingle();
+          if (t) {
+            foundTenant = t;
+            break;
+          }
+        }
+      } catch (e) {}
+    }
+  }
+
+  // 5. Se ainda não encontrou, busca na tabela agent_integrations por activation_token
+  if (!foundTenant && lookupKeys.size > 0) {
+    for (const key of Array.from(lookupKeys)) {
+      try {
+        const { data: agentRow } = await supabaseAdmin
+          .from('agent_integrations')
+          .select('tenant_id, activation_token')
+          .eq('activation_token', key)
+          .maybeSingle();
+        if (agentRow?.tenant_id) {
+          if (!matchedToken && agentRow.activation_token) matchedToken = agentRow.activation_token;
+          const { data: t } = await supabaseAdmin
+            .from('tenants')
+            .select('*')
+            .eq('id', agentRow.tenant_id)
+            .maybeSingle();
+          if (t) {
+            foundTenant = t;
+            break;
+          }
+        }
+      } catch (e) {}
+    }
+  }
+
+  return {
+    tenant: foundTenant,
+    tenantId: foundTenant?.id || null,
+    machineId: machineId && machineId !== 'unknown' ? machineId : null,
+    activationToken: matchedToken
+  };
+}
+
+async function touchAgentHeartbeat(tenantId: string, machineId?: string | null, activationToken?: string | null) {
+  if (!tenantId) return;
+  const now = new Date().toISOString();
+  try {
+    const payload: any = {
+      tenant_id: tenantId,
+      last_seen: now,
+      is_active: true
+    };
+    if (machineId && machineId !== 'unknown') {
+      payload.machine_id = machineId;
+    }
+    if (activationToken) {
+      payload.activation_token = activationToken;
+    }
+
+    await supabaseAdmin
+      .from('agent_integrations')
+      .upsert(payload, { onConflict: 'tenant_id' });
+
+    // Atualiza também na tabela tenants se existirem colunas de rastreamento
+    try {
+      await supabaseAdmin
+        .from('tenants')
+        .update({ 
+          last_seen: now,
+          agent_last_seen: now,
+          updated_at: now
+        })
+        .eq('id', tenantId);
+    } catch (e) {}
+  } catch (err: any) {
+    console.error("[Agent Heartbeat Error]:", err.message || err);
+  }
+}
+
 const validateTokenHandler = async (req: express.Request, res: express.Response) => {
   console.log(`\n[SERVER BACKEND] Recebida requisição de validação em /api/v1/integration/validate-token`);
   try {
@@ -4482,23 +4668,11 @@ const validateTokenHandler = async (req: express.Request, res: express.Response)
 
     const { data: tenant } = await supabaseAdmin
       .from('tenants')
-      .select('erp_type')
+      .select('id, name, slug, erp_type, integration_token')
       .eq('id', tokenData.tenant_id)
       .single();
       
-    try {
-      await supabaseAdmin
-        .from('agent_integrations')
-        .upsert({
-          tenant_id: tokenData.tenant_id,
-          activation_token: token,
-          machine_id: mId,
-          is_active: true,
-          last_seen: new Date().toISOString()
-        }, { onConflict: 'tenant_id' });
-    } catch (e) {
-      console.error("Erro ao registrar agent_integrations (a tabela existe?)", e);
-    }
+    await touchAgentHeartbeat(tokenData.tenant_id, mId, token);
 
     const erpType = tenant?.erp_type || 'siagold';
 
@@ -4514,7 +4688,9 @@ const validateTokenHandler = async (req: express.Request, res: express.Response)
         branchCode: "1",
         viewName: 'VW_INTEGRACAO_FARMAFLOW'
       },
-      apiKey: tokenData.tenant_id
+      apiKey: tenant?.integration_token || tokenData.tenant_id,
+      tenantId: tokenData.tenant_id,
+      tenantSlug: tenant?.slug || null
     });
   } catch (error: any) {
     console.error(`[SERVER BACKEND] Erro interno durante validação do token (500):`, error.message);
@@ -4522,194 +4698,133 @@ const validateTokenHandler = async (req: express.Request, res: express.Response)
   }
 };
 
-app.post("/api/v1/integration/validate-token", validateTokenHandler);
-app.post("/api/v1/agent/validate-token", validateTokenHandler);
-app.post("/api/agent/validate-token", validateTokenHandler);
+app.all(["/api/v1/integration/validate-token", "/api/v1/agent/validate-token", "/api/agent/validate-token", "/api/v1/desktop-agent/validate-token", "/api/desktop-agent/validate-token"], validateTokenHandler);
 
 const handleHeartbeat = async (req: express.Request, res: express.Response) => {
   try {
-    const { token, apiKey, tenantId, tenant_id, machineId, machine_id, machine, hostname } = req.body || {};
-    const headerApiKey = req.headers['x-api-key'] || req.headers['api-key'] || req.headers['apikey'];
-    const activeApiKey = apiKey || tenantId || tenant_id || headerApiKey;
-    const headerMachineId = req.headers['x-machine-id'] || req.headers['machine-id'];
-    const mId = machineId || machine_id || machine || hostname || headerMachineId;
-
-    if (!token && !activeApiKey) {
-      return res.status(400).json({ error: "Token ou API Key não fornecido" });
-    }
-
-    let targetTenantId: string | null = null;
-    let actToken = token ? String(token) : null;
-
-    if (activeApiKey) {
-      const apiKeyStr = String(activeApiKey).trim();
-      const { data: tenantByToken } = await supabaseAdmin
-        .from('tenants')
-        .select('id')
-        .eq('integration_token', apiKeyStr)
-        .maybeSingle();
-
-      if (tenantByToken) {
-        targetTenantId = tenantByToken.id;
-      } else {
-        const { data: tenantById } = await supabaseAdmin
-          .from('tenants')
-          .select('id')
-          .eq('id', apiKeyStr)
-          .maybeSingle();
-        if (tenantById) {
-          targetTenantId = tenantById.id;
-        }
-      }
-    }
-
-    // Se possui token mas não tenantId, busca tenantId em activation_tokens ou agent_integrations
-    if (!targetTenantId && actToken) {
-      const { data: tokenRow } = await supabaseAdmin
-        .from('activation_tokens')
-        .select('tenant_id')
-        .eq('token', actToken)
-        .maybeSingle();
-
-      if (tokenRow?.tenant_id) {
-        targetTenantId = tokenRow.tenant_id;
-      } else {
-        const { data: agentRow } = await supabaseAdmin
-          .from('agent_integrations')
-          .select('tenant_id')
-          .eq('activation_token', actToken)
-          .maybeSingle();
-        if (agentRow?.tenant_id) {
-          targetTenantId = agentRow.tenant_id;
-        }
-      }
-    }
-
+    const { tenant, tenantId, machineId, activationToken } = await resolveTenantForAgent(req);
     const now = new Date().toISOString();
 
-    if (targetTenantId) {
-      const upsertPayload: any = {
-        tenant_id: targetTenantId,
-        last_seen: now,
-        is_active: true
-      };
-      if (actToken) {
-        upsertPayload.activation_token = actToken;
-      }
-      if (mId && mId !== 'unknown') {
-        upsertPayload.machine_id = mId;
-      }
+    if (tenantId) {
+      await touchAgentHeartbeat(tenantId, machineId, activationToken);
+      console.log(`[HEARTBEAT SUCCESS] Heartbeat atualizado para o tenant: "${tenantId}" (Loja: ${tenant?.name || tenant?.slug || 'OK'}, Machine ID: ${machineId || 'mantido'})`);
+      return res.json({ 
+        success: true, 
+        ok: true,
+        tenant_id: tenantId, 
+        tenant_name: tenant?.name || null,
+        machine_id: machineId || null,
+        last_seen: now 
+      });
+    }
 
-      const { error: upsertError } = await supabaseAdmin
-        .from('agent_integrations')
-        .upsert(upsertPayload, { onConflict: 'tenant_id' });
-
-      if (upsertError) {
-        console.error("[HEARTBEAT ERROR]", upsertError);
-        return res.status(500).json({ error: "Erro ao atualizar heartbeat.", details: upsertError.message });
-      }
-
-      console.log(`[HEARTBEAT SUCCESS] Heartbeat atualizado para o tenant: "${targetTenantId}" (Machine ID: ${mId || 'mantido'})`);
-      return res.json({ success: true, tenant_id: targetTenantId, last_seen: now });
-    } else {
-      // Fallback: Atualiza diretamente pelo activation_token
+    // Fallback: Se não encontrou tenant diretamente mas veio um activation_token direto
+    const bodyToken = req.body?.token || req.body?.activation_token || req.query?.token;
+    if (bodyToken) {
+      const actToken = String(bodyToken).trim();
       const updatePayload: any = {
         last_seen: now,
         is_active: true
       };
-      if (mId && mId !== 'unknown') {
-        updatePayload.machine_id = mId;
+      if (machineId && machineId !== 'unknown') {
+        updatePayload.machine_id = machineId;
       }
 
-      const { data: updateData, error: updateError } = await supabaseAdmin
-        .from('agent_integrations')
-        .update(updatePayload)
-        .eq('activation_token', actToken)
-        .select();
+      try {
+        const { data: updateData, error: updateError } = await supabaseAdmin
+          .from('agent_integrations')
+          .update(updatePayload)
+          .eq('activation_token', actToken)
+          .select();
 
-      if (updateError) {
-        console.error("[HEARTBEAT ERROR]", updateError);
-        return res.status(500).json({ error: "Erro ao atualizar heartbeat.", details: updateError.message });
-      }
-
-      console.log(`[HEARTBEAT SUCCESS] Heartbeat atualizado para o token: "${actToken}"`);
-      return res.json({ success: true, last_seen: now });
+        if (!updateError && updateData && updateData.length > 0) {
+          console.log(`[HEARTBEAT SUCCESS] Heartbeat atualizado pelo activation_token: "${actToken}"`);
+          return res.json({ success: true, ok: true, last_seen: now });
+        }
+      } catch (e) {}
     }
+
+    return res.status(404).json({ 
+      error: "Tenant ou Agente Desktop não identificado. Verifique o Token de Ativação ou a API Key da loja.",
+      success: false 
+    });
   } catch (error: any) {
     console.error("[HEARTBEAT EXCEPTION]", error);
-    res.status(500).json({ error: "Erro interno no servidor", details: error.message });
+    return res.status(500).json({ error: "Erro interno no servidor", details: error.message, success: false });
   }
 };
 
-app.post("/api/v1/integration/heartbeat", handleHeartbeat);
-app.post("/api/v1/agent/ping", handleHeartbeat);
-app.post("/api/agent/ping", handleHeartbeat);
-app.post("/api/v1/integration/ping", handleHeartbeat);
-app.post("/api/v1/agent/heartbeat", handleHeartbeat);
-app.post("/api/agent/heartbeat", handleHeartbeat);
+app.all([
+  "/api/v1/integration/heartbeat",
+  "/api/v1/agent/ping",
+  "/api/agent/ping",
+  "/api/v1/integration/ping",
+  "/api/v1/agent/heartbeat",
+  "/api/agent/heartbeat",
+  "/api/v1/desktop-agent/heartbeat",
+  "/api/v1/desktop-agent/ping",
+  "/api/desktop-agent/heartbeat",
+  "/api/desktop-agent/ping",
+  "/api/v1/agent-desktop/ping",
+  "/api/v1/agent-desktop/heartbeat"
+], handleHeartbeat);
 
-app.get("/api/v1/integration/status", async (req, res) => {
+const handleAgentStatus = async (req: express.Request, res: express.Response) => {
   try {
     const { data: integrations, error } = await supabaseAdmin
       .from('agent_integrations')
-      .select('*, tenants!inner(id, name)');
+      .select('*, tenants(id, name, slug)');
       
     if (error) {
+      // Fallback seguro caso haja problema na relação direta de chave estrangeira
+      const { data: rawIntegrations } = await supabaseAdmin
+        .from('agent_integrations')
+        .select('*');
+        
+      if (rawIntegrations) {
+        const tenantIds = rawIntegrations.map(i => i.tenant_id).filter(Boolean);
+        const { data: tenantsList } = await supabaseAdmin
+          .from('tenants')
+          .select('id, name, slug')
+          .in('id', tenantIds);
+          
+        const tenantMap = new Map((tenantsList || []).map(t => [t.id, t]));
+        const formatted = rawIntegrations.map(i => ({
+          ...i,
+          tenants: tenantMap.get(i.tenant_id) || { name: 'Farmácia' }
+        }));
+        return res.json({ data: formatted });
+      }
       return res.status(500).json({ error: error.message });
     }
     
-    res.json({ data: integrations });
+    return res.json({ data: integrations || [] });
   } catch (error: any) {
-    res.status(500).json({ error: "Erro interno no servidor", details: error.message });
+    return res.status(500).json({ error: "Erro interno no servidor", details: error.message });
   }
-});
+};
 
-app.post("/api/v1/integration", async (req, res) => {
+app.all([
+  "/api/v1/integration/status",
+  "/api/v1/agent/status",
+  "/api/v1/desktop-agent/status",
+  "/api/desktop-agent/status"
+], handleAgentStatus);
+
+const handleProductIntegration = async (req: express.Request, res: express.Response) => {
   let tenantId: string | null = null;
   try {
-    const apiKey = req.headers['x-api-key'] || req.headers['api-key'] || req.headers['apikey'] || req.body?.apiKey || req.body?.api_key;
-    
-    if (!apiKey) {
-      return res.status(401).json({ error: "API Key não fornecida" });
+    const { tenant, tenantId: resolvedTenantId, machineId, activationToken } = await resolveTenantForAgent(req);
+
+    if (!tenant || !resolvedTenantId) {
+      return res.status(403).json({ error: "API Key inválida ou tenant não encontrado." });
     }
 
-    // Tenta buscar o tenant primeiro pela integration_token, depois pelo id (slug)
-    const apiKeyStr = String(apiKey).trim();
-    let { data: tenant, error: fetchError } = await supabaseAdmin
-      .from('tenants')
-      .select('*')
-      .eq('integration_token', apiKeyStr)
-      .maybeSingle();
-
-    if (!tenant) {
-      const { data: tenantById, error: fetchByIdError } = await supabaseAdmin
-        .from('tenants')
-        .select('*')
-        .eq('id', apiKeyStr)
-        .maybeSingle();
-      tenant = tenantById;
-      fetchError = fetchByIdError;
-    }
-
-    if (fetchError || !tenant) {
-      return res.status(403).json({ error: "API Key inválida ou tenant não encontrado" });
-    }
-
-    tenantId = tenant.id;
+    tenantId = resolvedTenantId;
     const ignoreErpPrices = tenant.ignore_erp_prices === true || tenant.delivery_settings?.ignore_erp_prices === true;
     
-    // Atualiza heartbeat do agente
-    try {
-      await supabaseAdmin
-        .from('agent_integrations')
-        .upsert({ 
-          tenant_id: tenantId,
-          last_seen: new Date().toISOString(), 
-          is_active: true 
-        }, { onConflict: 'tenant_id' });
-    } catch (e) {
-      console.error("Erro ao atualizar heartbeat do agente", e);
-    }
+    // Atualiza heartbeat do agente imediatamente
+    await touchAgentHeartbeat(tenantId, machineId, activationToken);
 
     let productsBatch = req.body;
     
@@ -4911,7 +5026,15 @@ app.post("/api/v1/integration", async (req, res) => {
     }
     res.status(500).json({ error: "Erro interno no servidor", details: error.message });
   }
-});
+};
+
+app.post([
+  "/api/v1/integration",
+  "/api/v1/desktop-agent/sync",
+  "/api/desktop-agent/sync",
+  "/api/v1/products/sync-erp",
+  "/api/v1/agent/sync"
+], handleProductIntegration);
 
 // =========================================
 // MÓDULO FARMAFLOW CHAT - ROTAS DE BACKEND
@@ -5050,11 +5173,27 @@ async function resolveEvolutionConfig(tenantId: string, inboxId?: string, overri
           .maybeSingle();
 
         if (inboxRow?.whatsapp_instance_id) {
-          const { data: linkedInst } = await supabaseAdmin
-            .from('whatsapp_instances')
-            .select('instance_name')
-            .or(`id.eq.${inboxRow.whatsapp_instance_id},instance_name.eq.${inboxRow.whatsapp_instance_id}`)
-            .maybeSingle();
+          const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(inboxRow.whatsapp_instance_id);
+          let linkedInst: any = null;
+
+          if (isUuid) {
+            const { data } = await supabaseAdmin
+              .from('whatsapp_instances')
+              .select('instance_name')
+              .eq('id', inboxRow.whatsapp_instance_id)
+              .maybeSingle();
+            linkedInst = data;
+          }
+
+          if (!linkedInst) {
+            const { data } = await supabaseAdmin
+              .from('whatsapp_instances')
+              .select('instance_name')
+              .eq('instance_name', inboxRow.whatsapp_instance_id)
+              .maybeSingle();
+            linkedInst = data;
+          }
+
           if (linkedInst?.instance_name) {
             instanceName = linkedInst.instance_name;
           }
@@ -5070,7 +5209,7 @@ async function resolveEvolutionConfig(tenantId: string, inboxId?: string, overri
     }
   }
 
-  // 2. Busca credenciais da Evolution API (tenta por instância específica ou herda do tenant)
+  // 2. Busca credenciais da Evolution API (tenta por instância específica, herda da loja ou do tenant)
   try {
     if (!evolutionUrl || !evolutionKey) {
       // 2.1 Busca por nome da instância específica
@@ -5088,10 +5227,11 @@ async function resolveEvolutionConfig(tenantId: string, inboxId?: string, overri
 
     if (!evolutionUrl || !evolutionKey) {
       // 2.2 Herda as credenciais globais da loja/tenant caso já existam configuradas em outra instância
+      const targetStoreIds = Array.from(new Set([tenantId, cleanStore, `store_${cleanStore}`].filter(Boolean)));
       const { data: instList } = await supabaseAdmin
         .from('whatsapp_instances')
         .select('*')
-        .or(`store_id.eq.${tenantId},store_id.eq.${cleanStore}`)
+        .in('store_id', targetStoreIds)
         .order('updated_at', { ascending: false });
 
       if (instList && instList.length > 0) {
@@ -5101,6 +5241,28 @@ async function resolveEvolutionConfig(tenantId: string, inboxId?: string, overri
         if (withKey && !evolutionKey) evolutionKey = withKey.evolution_key;
         if (withUrl && !evolutionUrl) evolutionUrl = withUrl.evolution_url;
       }
+    }
+
+    if (!evolutionUrl || !evolutionKey) {
+      // 2.3 Fallback para a tabela tenants
+      try {
+        const targetIdentifiers = Array.from(new Set([tenantId, cleanStore, `store_${cleanStore}`].filter(Boolean)));
+        const { data: tenantRows } = await supabaseAdmin
+          .from('tenants')
+          .select('*')
+          .or(`id.in.(${targetIdentifiers.join(',')}),slug.in.(${targetIdentifiers.join(',')})`)
+          .limit(1);
+
+        if (tenantRows && tenantRows.length > 0) {
+          const t = tenantRows[0];
+          if (!evolutionUrl && (t.evolution_url || t.evolution_api_url)) {
+            evolutionUrl = t.evolution_url || t.evolution_api_url;
+          }
+          if (!evolutionKey && (t.evolution_key || t.evolution_api_key || t.evolution_token)) {
+            evolutionKey = t.evolution_key || t.evolution_api_key || t.evolution_token;
+          }
+        }
+      } catch (tErr) {}
     }
   } catch (e) {
     console.warn("[resolveEvolutionConfig] Erro ao buscar dados no Supabase:", e);
@@ -5114,12 +5276,12 @@ async function resolveEvolutionConfig(tenantId: string, inboxId?: string, overri
     evolutionKey = process.env.EVOLUTION_API_KEY || "";
   }
 
-  if (evolutionUrl.includes('seudominio.com') || evolutionUrl.includes('yourdomain.com')) {
+  if (typeof evolutionUrl === 'string' && (evolutionUrl.includes('seudominio.com') || evolutionUrl.includes('yourdomain.com'))) {
     evolutionUrl = DEFAULT_EVOLUTION_URL;
   }
 
   evolutionUrl = normalizeEvolutionUrl(evolutionUrl);
-  if (evolutionKey) evolutionKey = evolutionKey.trim();
+  if (evolutionKey) evolutionKey = String(evolutionKey).trim();
 
   return { evolutionUrl, evolutionKey, instanceName };
 }
@@ -5136,25 +5298,42 @@ app.post("/api/v1/chat/instance/test-evolution", requireChatEnabled, async (req,
     });
 
     if (!evolutionUrl) {
-      return res.status(400).json({ ok: false, error: "URL da Evolution API não informada." });
+      return res.status(200).json({ ok: false, error: "URL da Evolution API não informada." });
     }
 
     if (!evolutionKey) {
-      return res.status(400).json({ ok: false, error: "Chave Global (API Key) da Evolution API não informada." });
+      return res.status(200).json({ ok: false, error: "Chave Global (AUTHENTICATION_API_KEY) da Evolution API não informada." });
     }
 
-    const testRes = await safeEvolutionRequest(`${evolutionUrl}/instance/fetchInstances`, {
-      headers: { "apikey": evolutionKey }
+    const evoHeaders = {
+      "Content-Type": "application/json",
+      "apikey": evolutionKey,
+      "apiKey": evolutionKey,
+      "Authorization": `Bearer ${evolutionKey}`
+    };
+
+    let testRes = await safeEvolutionRequest(`${evolutionUrl}/instance/fetchInstances`, {
+      headers: evoHeaders
     }, 7000);
+
+    // Fallback: se /fetchInstances não existir nesta versão da Evolution, testa /instance/connectionState/${instanceName}
+    if (!testRes.ok && testRes.status === 404 && instanceName) {
+      const fallbackRes = await safeEvolutionRequest(`${evolutionUrl}/instance/connectionState/${instanceName}`, {
+        headers: evoHeaders
+      }, 5000);
+      if (fallbackRes.ok || fallbackRes.status === 404) {
+        testRes = fallbackRes;
+      }
+    }
 
     if (!testRes.ok) {
       if (testRes.status === 401 || testRes.status === 403) {
-        return res.status(401).json({ 
+        return res.status(200).json({ 
           ok: false, 
           error: "Chave de API (AUTHENTICATION_API_KEY) inválida ou não autorizada na Evolution API." 
         });
       }
-      return res.status(testRes.status || 502).json({
+      return res.status(200).json({
         ok: false,
         error: testRes.error || testRes.data?.error || testRes.data?.message || `Servidor da Evolution API inacessível em ${evolutionUrl}. Verifique a URL e a rede.`
       });
@@ -5191,7 +5370,7 @@ app.post("/api/v1/chat/instance/test-evolution", requireChatEnabled, async (req,
       message: "Conexão com a Evolution API estabelecida com sucesso!"
     });
   } catch (error: any) {
-    return res.status(500).json({ ok: false, error: error.message || "Erro ao testar conexão com Evolution API" });
+    return res.status(200).json({ ok: false, error: error.message || "Erro ao testar conexão com Evolution API" });
   }
 });
 
@@ -5209,24 +5388,30 @@ app.post("/api/v1/chat/instance/save-config", requireChatEnabled, async (req, re
     const cleanKey = (evolutionKey || '').trim();
 
     // 1. Procura registro existente por instance_name
-    let { data: existing } = await supabaseAdmin
-      .from('whatsapp_instances')
-      .select('id')
-      .eq('instance_name', targetInstanceName)
-      .maybeSingle();
+    let existing: any = null;
+    try {
+      const { data } = await supabaseAdmin
+        .from('whatsapp_instances')
+        .select('id')
+        .eq('instance_name', targetInstanceName)
+        .maybeSingle();
+      existing = data;
+    } catch (e) {}
 
     // 2. Se não encontrou por instance_name, tenta buscar pelo primeiro registro da loja
     if (!existing) {
-      const { data: storeInstances } = await supabaseAdmin
-        .from('whatsapp_instances')
-        .select('id')
-        .eq('store_id', tenantId)
-        .order('updated_at', { ascending: false })
-        .limit(1);
+      try {
+        const { data: storeInstances } = await supabaseAdmin
+          .from('whatsapp_instances')
+          .select('id')
+          .eq('store_id', tenantId)
+          .order('updated_at', { ascending: false })
+          .limit(1);
 
-      if (storeInstances && storeInstances.length > 0) {
-        existing = storeInstances[0];
-      }
+        if (storeInstances && storeInstances.length > 0) {
+          existing = storeInstances[0];
+        }
+      } catch (e) {}
     }
 
     const updatePayload: any = {
@@ -5242,26 +5427,30 @@ app.post("/api/v1/chat/instance/save-config", requireChatEnabled, async (req, re
 
     let savedId = existing?.id;
 
-    if (existing) {
-      await supabaseAdmin
-        .from('whatsapp_instances')
-        .update(updatePayload)
-        .eq('id', existing.id);
-    } else {
-      const { data: inserted, error: insErr } = await supabaseAdmin
-        .from('whatsapp_instances')
-        .insert({
-          ...updatePayload,
-          evolution_key: cleanKey || null,
-          status: 'DISCONNECTED'
-        })
-        .select('id')
-        .maybeSingle();
+    try {
+      if (existing) {
+        await supabaseAdmin
+          .from('whatsapp_instances')
+          .update(updatePayload)
+          .eq('id', existing.id);
+      } else {
+        const { data: inserted, error: insErr } = await supabaseAdmin
+          .from('whatsapp_instances')
+          .insert({
+            ...updatePayload,
+            evolution_key: cleanKey || null,
+            status: 'DISCONNECTED'
+          })
+          .select('id')
+          .maybeSingle();
 
-      if (insErr) {
-        console.warn("[SaveConfig Insert Warning]:", insErr.message);
+        if (insErr) {
+          console.warn("[SaveConfig Insert Warning]:", insErr.message);
+        }
+        savedId = inserted?.id;
       }
-      savedId = inserted?.id;
+    } catch (dbErr: any) {
+      console.warn("[SaveConfig DB Warning]:", dbErr.message);
     }
 
     // Se inboxId for especificado e a tabela inboxes existir, vincula a instância
