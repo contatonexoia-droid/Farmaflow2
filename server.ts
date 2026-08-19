@@ -6256,28 +6256,67 @@ function getSaoPauloDateString(dateInput: Date | string = new Date()): string {
 async function handleDailyWelcomeMessage(storeId: string, conversation: any, instanceName?: string, incomingText?: string) {
   try {
     const cleanStoreId = typeof storeId === 'string' ? storeId.trim().replace(/^store_/, '') : storeId;
-    const { data: tenant } = await supabaseAdmin
-      .from("tenants")
-      .select("id, name, slug, custom_domain, welcome_message_enabled, welcomemessageenabled, welcome_message_text, welcomemessagetext, welcome_message_format, welcomemessageformat, welcome_message_link, welcomemessagelink")
-      .or(`id.eq.${cleanStoreId},slug.eq.${cleanStoreId},id.eq.${storeId},slug.eq.${storeId}`)
-      .maybeSingle();
+    
+    // Resolução segura do tenant evitando erro de cast de UUID no PostgreSQL
+    let tenant: any = null;
+    const isUuid = /^[0-9a-f-]{36}$/i.test(String(cleanStoreId));
+    if (isUuid) {
+      const { data } = await supabaseAdmin.from("tenants").select("*").eq("id", cleanStoreId).maybeSingle();
+      tenant = data;
+    }
+    if (!tenant) {
+      const { data } = await supabaseAdmin.from("tenants").select("*").eq("slug", cleanStoreId).maybeSingle();
+      tenant = data;
+    }
+    if (!tenant && instanceName) {
+      const cleanInst = instanceName.replace(/^store_/, '').replace(/^inbox_/, '');
+      const { data: byInstSlug } = await supabaseAdmin.from("tenants").select("*").eq("slug", cleanInst).maybeSingle();
+      tenant = byInstSlug;
+      if (!tenant) {
+        const { data: instRow } = await supabaseAdmin
+          .from("whatsapp_instances")
+          .select("store_id")
+          .or(`instance_name.eq.${instanceName},instance_name.eq.${cleanInst}`)
+          .limit(1)
+          .maybeSingle();
+        if (instRow?.store_id) {
+          const instStoreIsUuid = /^[0-9a-f-]{36}$/i.test(instRow.store_id);
+          const { data: t } = instStoreIsUuid
+            ? await supabaseAdmin.from("tenants").select("*").eq("id", instRow.store_id).maybeSingle()
+            : await supabaseAdmin.from("tenants").select("*").eq("slug", instRow.store_id.replace(/^store_/, '')).maybeSingle();
+          tenant = t;
+        }
+      }
+    }
 
-    if (!tenant) return;
+    if (!tenant) {
+      console.warn(`[WelcomeMessage] Tenant não localizado para storeId="${storeId}" ou instanceName="${instanceName}".`);
+      return;
+    }
 
-    const isEnabled = tenant.welcome_message_enabled === true || tenant.welcomemessageenabled === true;
-    if (!isEnabled) return;
+    const isEnabled = Boolean(tenant.welcome_message_enabled ?? tenant.welcomemessageenabled ?? false);
+    console.log(`[WEBHOOK] Verificando Saudação Automática para loja "${tenant.name}" (@${tenant.slug}): ${isEnabled ? 'ATIVADA' : 'DESATIVADA'}`);
+    if (!isEnabled) {
+      console.log(`[WEBHOOK] Saudação automática desativada nas configurações da loja "${tenant.name}".`);
+      return;
+    }
 
     // Comparação precisa de virada de dia no fuso horário do Brasil (America/Sao_Paulo)
     const todayStr = getSaoPauloDateString(new Date()); // YYYY-MM-DD em BRT
-    const { data: convData } = await supabaseAdmin
-      .from("chat_conversations")
-      .select("last_welcome_sent_at")
-      .eq("id", conversation.id)
-      .maybeSingle();
+    let lastWelcomeDate: string | null = null;
+    try {
+      const { data: convData } = await supabaseAdmin
+        .from("chat_conversations")
+        .select("last_welcome_sent_at")
+        .eq("id", conversation.id)
+        .maybeSingle();
 
-    const lastWelcomeDate = convData?.last_welcome_sent_at 
-      ? getSaoPauloDateString(convData.last_welcome_sent_at) 
-      : null;
+      if (convData?.last_welcome_sent_at) {
+        lastWelcomeDate = getSaoPauloDateString(convData.last_welcome_sent_at);
+      }
+    } catch (e: any) {
+      console.warn("[WelcomeMessage] Aviso ao consultar last_welcome_sent_at:", e.message);
+    }
 
     const isTest = incomingText?.trim().toLowerCase() === '#teste' || 
                    incomingText?.trim().toLowerCase() === '#teste-boas-vindas' ||
@@ -6285,29 +6324,37 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
 
     if (isTest) {
       console.log(`[WelcomeMessage] Comando de teste detectado (${incomingText?.trim()}). Resetando registro de envio para a conversa ${conversation.id}...`);
-      await supabaseAdmin
-        .from("chat_conversations")
-        .update({ last_welcome_sent_at: null })
-        .eq("id", conversation.id);
+      try {
+        await supabaseAdmin
+          .from("chat_conversations")
+          .update({ last_welcome_sent_at: null })
+          .eq("id", conversation.id);
+      } catch (_) {}
     } else if (lastWelcomeDate && lastWelcomeDate === todayStr) {
-      console.log(`[WelcomeMessage] Boas-vindas diárias já enviadas hoje (${todayStr}) para conversa ${conversation.id}.`);
+      console.log(`[WEBHOOK] Boas-vindas diárias já enviadas hoje (${todayStr}) para a conversa ${conversation.id}.`);
       return; // Já enviada hoje no fuso horário brasileiro
     }
 
     const nowIso = new Date().toISOString();
-    await supabaseAdmin
-      .from("chat_conversations")
-      .update({ last_welcome_sent_at: nowIso })
-      .eq("id", conversation.id);
+    try {
+      await supabaseAdmin
+        .from("chat_conversations")
+        .update({ last_welcome_sent_at: nowIso })
+        .eq("id", conversation.id);
+    } catch (updateErr: any) {
+      console.warn("[WelcomeMessage] Aviso ao atualizar last_welcome_sent_at:", updateErr.message);
+    }
 
     let rawPhone = conversation.contact?.phone_number;
     if (!rawPhone) {
-      const { data: contactData } = await supabaseAdmin
-        .from("chat_contacts")
-        .select("phone_number")
-        .eq("id", conversation.contact_id)
-        .maybeSingle();
-      rawPhone = contactData?.phone_number;
+      try {
+        const { data: contactData } = await supabaseAdmin
+          .from("chat_contacts")
+          .select("phone_number")
+          .eq("id", conversation.contact_id)
+          .maybeSingle();
+        rawPhone = contactData?.phone_number;
+      } catch (_) {}
     }
 
     if (!rawPhone) {
@@ -6332,25 +6379,31 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
     }
 
     const format = tenant.welcome_message_format || tenant.welcomemessageformat || "button";
-    const evolutionUrl = process.env.EVOLUTION_API_URL?.replace(/\/$/, '');
-    const evolutionKey = process.env.EVOLUTION_API_KEY;
+    const evolutionUrl = normalizeEvolutionUrl(process.env.EVOLUTION_API_URL || DEFAULT_EVOLUTION_URL);
+    const evolutionKey = process.env.EVOLUTION_API_KEY || process.env.EVOLUTION_API_TOKEN || "42964446331920a0f6707328906ed444";
     
     let targetInstanceName = instanceName;
     if (!targetInstanceName) {
-      const { data: inst } = await supabaseAdmin
-        .from("whatsapp_instances")
-        .select("instance_name")
-        .or(`store_id.eq.${cleanStoreId},store_id.eq.${storeId}`)
-        .limit(1)
-        .maybeSingle();
-      if (inst?.instance_name) {
-        targetInstanceName = inst.instance_name;
-      } else {
-        targetInstanceName = `store_${cleanStoreId.replace(/-/g, "")}`;
+      try {
+        const { data: inst } = await supabaseAdmin
+          .from("whatsapp_instances")
+          .select("instance_name")
+          .or(`store_id.eq.${tenant.id},store_id.eq.${tenant.slug}`)
+          .limit(1)
+          .maybeSingle();
+        if (inst?.instance_name) {
+          targetInstanceName = inst.instance_name;
+        } else {
+          targetInstanceName = `store_${(tenant.slug || cleanStoreId).replace(/-/g, "")}`;
+        }
+      } catch (_) {
+        targetInstanceName = `store_${(tenant.slug || cleanStoreId).replace(/-/g, "")}`;
       }
     }
 
     let displayContent = `${customText}\n\n🛒 Loja Online: ${storeLink}`;
+
+    console.log(`[WEBHOOK] Disparando Saudação Automática / Catálogo para ${cleanPhone} via instância "${targetInstanceName}" (Formato: ${format})...`);
 
     if (evolutionUrl && evolutionKey) {
       const evolutionHeaders: Record<string, string> = {
@@ -6499,12 +6552,15 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
       created_at: nowIso
     };
 
-    await supabaseAdmin.from("chat_messages").insert([welcomeMsg]);
-
-    await supabaseAdmin.from("chat_conversations").update({
-      last_message_at: nowIso,
-      last_message_content: displayContent
-    }).eq("id", conversation.id);
+    try {
+      await supabaseAdmin.from("chat_messages").insert([welcomeMsg]);
+      await supabaseAdmin.from("chat_conversations").update({
+        last_message_at: nowIso,
+        last_message_content: displayContent
+      }).eq("id", conversation.id);
+    } catch (dbErr: any) {
+      console.warn("[WelcomeMessage] Erro ao persistir mensagem de boas-vindas no banco:", dbErr.message);
+    }
 
     realtimeHub.broadcastToStore(storeId, "chat_message", {
       conversationId: conversation.id,
@@ -6512,7 +6568,7 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
       conversation
     });
 
-    console.log(`[WelcomeMessage] Mensagem de boas-vindas processada com sucesso para ${cleanPhone} (${storeId})`);
+    console.log(`[WelcomeMessage] Mensagem de boas-vindas finalizada para ${cleanPhone} (Loja: ${tenant.name})`);
   } catch (err: any) {
     console.error("[WelcomeMessage] Erro ao processar mensagem de boas-vindas:", err.message);
   }
@@ -6527,9 +6583,9 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
     console.log(`[Webhook RAW Payload] Evento: ${event}`, JSON.stringify(req.body, null, 2));
     
     // Captura prioritária na query ou no corpo, com sanitização segura do prefixo 'store_'
-    const rawTenantId = req.query.tenantId || req.query.storeId || req.body.tenantId || bodyInstance || data?.instance;
+    const instanceName = bodyInstance || data?.instance || (typeof req.query.instance === 'string' ? req.query.instance : null);
+    const rawTenantId = req.query.tenantId || req.query.storeId || req.body.tenantId || instanceName;
     const sanitizedTenantId = typeof rawTenantId === 'string' ? rawTenantId.trim().replace(/^store_/, '') : rawTenantId;
-    const instanceName = bodyInstance || data?.instance;
     const eventName = event === "MESSAGES_UPSERT" ? "messages.upsert" : event;
     
     if (eventName === "messages.upsert") {
@@ -6544,22 +6600,60 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
         messages = data;
       }
       
+      let resolvedTenant: any = null;
       let storeId = sanitizedTenantId || "default";
       
+      // Resolução em cascata do Tenant associado à instância do WhatsApp
       if (instanceName) {
         try {
-          const { data: inst } = await supabaseAdmin
-            .from("whatsapp_instances")
-            .select("store_id")
-            .eq("instance_name", instanceName)
+          const cleanInst = instanceName.replace(/^store_/, '').replace(/^inbox_/, '');
+          
+          // 1. Busca por slug direto do nome da instância
+          const { data: bySlug } = await supabaseAdmin
+            .from("tenants")
+            .select("*")
+            .eq("slug", cleanInst)
             .maybeSingle();
-          if (inst?.store_id) {
-            storeId = typeof inst.store_id === 'string' ? inst.store_id.replace(/^store_/, '') : inst.store_id;
+            
+          if (bySlug) {
+            resolvedTenant = bySlug;
+          } else {
+            // 2. Busca na tabela whatsapp_instances
+            const { data: inst } = await supabaseAdmin
+              .from("whatsapp_instances")
+              .select("store_id, instance_name")
+              .or(`instance_name.eq.${instanceName},instance_name.eq.${cleanInst},instance_name.eq.store_${cleanInst}`)
+              .limit(1)
+              .maybeSingle();
+              
+            if (inst?.store_id) {
+              const isUuid = /^[0-9a-f-]{36}$/i.test(inst.store_id);
+              const { data: t } = isUuid
+                ? await supabaseAdmin.from("tenants").select("*").eq("id", inst.store_id).maybeSingle()
+                : await supabaseAdmin.from("tenants").select("*").eq("slug", inst.store_id.replace(/^store_/, '')).maybeSingle();
+              if (t) resolvedTenant = t;
+            }
           }
         } catch (instErr: any) {
           console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao buscar whatsapp_instances', instErr.message, instErr.stack);
         }
       }
+
+      if (!resolvedTenant && storeId && storeId !== "default") {
+        try {
+          const isUuid = /^[0-9a-f-]{36}$/i.test(storeId);
+          const { data: t } = isUuid
+            ? await supabaseAdmin.from("tenants").select("*").eq("id", storeId).maybeSingle()
+            : await supabaseAdmin.from("tenants").select("*").eq("slug", storeId).maybeSingle();
+          if (t) resolvedTenant = t;
+        } catch (e) {}
+      }
+
+      if (resolvedTenant?.id) {
+        storeId = resolvedTenant.id;
+      }
+
+      console.log(`[WEBHOOK] Instância identificada: ${instanceName || 'N/A'} | Tenant: ${resolvedTenant?.slug || storeId} (ID: ${storeId}) | Mensagens a processar: ${messages.length}`);
 
       for (const msg of messages) {
         if (!msg) continue;
@@ -6579,6 +6673,8 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                      (msg.message?.audioMessage ? "[Áudio]" : 
                      (msg.message?.documentMessage ? "[Documento]" : 
                      (msg.message?.stickerMessage ? "[Figurinha]" : "[Mensagem WhatsApp]")))));
+
+        console.log(`[WEBHOOK] Mensagem de: ${remoteJid} | fromMe: ${fromMe} | Texto: "${typeof text === 'string' ? text.slice(0, 50) : ''}"`);
 
         try {
           const result = await chatStore.processWhatsAppMessage(storeId, msg, instanceName);

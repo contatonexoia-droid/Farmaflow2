@@ -541,16 +541,12 @@ class ChatStore {
       console.warn("Error fetching whatsapp_instance for fromMe check:", e.message);
     }
 
-    // If pushName is "Evandro" (or matches instance name) and the remote phone is different,
-    // this message is actually sent from our side (or represents the instance owner), so we must treat it as fromMe = true
-    const isOwnerName = pushName.toLowerCase() === "evandro" || 
-                        (instanceNameFromDb && pushName.toLowerCase().includes(instanceNameFromDb.toLowerCase()));
-                        
-    if (isOwnerName && phone !== instancePhoneNumber) {
+    // Apenas considera fromMe se o WhatsApp marcou key.fromMe = true ou se o telefone emissor for o próprio número da instância
+    if (instancePhoneNumber && phone && phone === instancePhoneNumber) {
       fromMe = true;
     }
 
-    console.log('[PAYLOAD EXTRAÍDO COM SUCESSO]:', { phone, text, fromMe, instanceName });
+    console.log('[PAYLOAD EXTRAÍDO COM SUCESSO]:', { phone, pushName, text: typeof text === 'string' ? text.slice(0, 60) : '', fromMe, instanceName });
 
     const now = new Date().toISOString();
 
@@ -570,8 +566,8 @@ class ChatStore {
         .maybeSingle();
 
       if (existingContact) {
-        // Se for uma mensagem enviada por mim ou não tiver pushName novo útil, ou se for o nome do dono, mantenha o nome existente.
-        if (fromMe || !msg.pushName || isOwnerName) {
+        // Se for uma mensagem enviada por mim ou não tiver pushName novo útil, mantenha o nome existente.
+        if (fromMe || !msg.pushName) {
           finalContactName = existingContact.name;
         } else {
           finalContactName = pushName;
@@ -580,7 +576,7 @@ class ChatStore {
           }).eq("id", contactId);
         }
       } else {
-        if (fromMe || isOwnerName) {
+        if (fromMe) {
           finalContactName = phone; // Fallback se o próprio usuário iniciou a conversa
         }
         await supabaseAdmin.from("chat_contacts").insert([{
