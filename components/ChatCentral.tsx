@@ -286,6 +286,65 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
     return { todas, minhas, naoAtribuidas, finalizadas };
   }, [conversations, selectedInboxId, selectedTeamId, userId, localUser]);
 
+  // Contadores dinâmicos de Atendimentos Hoje e Aguardando na Fila (Dashboard rápido)
+  const { atendimentosHoje, aguardandoFila } = useMemo(() => {
+    let hojeCount = 0;
+    let filaCount = 0;
+
+    const isDateToday = (dateStr?: string) => {
+      if (!dateStr) return false;
+      try {
+        const d = new Date(dateStr);
+        if (isNaN(d.getTime())) return false;
+        const today = new Date();
+        return (
+          d.getDate() === today.getDate() &&
+          d.getMonth() === today.getMonth() &&
+          d.getFullYear() === today.getFullYear()
+        );
+      } catch {
+        return false;
+      }
+    };
+
+    conversations.forEach((c: any) => {
+      if (selectedInboxId !== 'all' && c.inbox_id !== selectedInboxId) return;
+      if (selectedTeamId !== 'all' && c.team_id !== selectedTeamId) return;
+
+      const isClosed = c.status === 'CLOSED' || c.kanban_stage === 'CLOSED';
+
+      // Atendimentos que tiveram atividade (mensagens, criação ou atualização) hoje
+      const hasActivityToday =
+        isDateToday(c.last_message_at) ||
+        isDateToday(c.updated_at) ||
+        isDateToday(c.created_at);
+
+      if (hasActivityToday) {
+        hojeCount++;
+      }
+
+      // Aguardando na Fila: conversas abertas/ativas sem atendente atribuído ou em estágio de espera/triagem
+      if (!isClosed) {
+        const isUnassigned = !c.assigned_user_id || c.assigned_user_id === '';
+        const isWaiting =
+          c.status === 'PENDING' ||
+          c.status === 'WAITING' ||
+          c.kanban_stage === 'NEW' ||
+          c.kanban_stage === 'WAITING' ||
+          c.kanban_stage === 'QUEUE';
+
+        if (isUnassigned || isWaiting) {
+          filaCount++;
+        }
+      }
+    });
+
+    return {
+      atendimentosHoje: hojeCount,
+      aguardandoFila: filaCount
+    };
+  }, [conversations, selectedInboxId, selectedTeamId]);
+
   // Lista de conversas estritamente filtrada pelo critério ativo na interface
   const displayedConversations = useMemo(() => {
     return conversations.filter((conv: any) => {
@@ -861,11 +920,11 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
           <div className="mb-4 bg-gray-50 rounded-xl p-3 border border-gray-100 flex items-center justify-between">
             <div>
               <p className="text-[10px] uppercase font-bold text-gray-500 flex items-center gap-1"><BarChart2 className="w-3 h-3"/> Hoje</p>
-              <p className="text-sm font-black text-gray-800">124 Atendimentos</p>
+              <p className="text-sm font-black text-gray-800">{atendimentosHoje} {atendimentosHoje === 1 ? 'Atendimento' : 'Atendimentos'}</p>
             </div>
             <div className="text-right">
               <p className="text-[10px] uppercase font-bold text-orange-500">Na Fila</p>
-              <p className="text-sm font-black text-gray-800">5 Aguardando</p>
+              <p className="text-sm font-black text-gray-800">{aguardandoFila} Aguardando</p>
             </div>
           </div>
           
