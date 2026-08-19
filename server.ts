@@ -5035,23 +5035,45 @@ async function resolveEvolutionConfig(tenantId: string, inboxId?: string, overri
   let evolutionKey = override?.evolutionKey;
   let instanceName = override?.instanceName;
 
-  // Formatação limpa e amigável do nome da instância na Evolution API (sem duplicações)
+  const rawTenant = (tenantId || "principal").replace(/^store_/, '').replace(/^tenant_/, '');
+  const cleanStore = rawTenant.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+
+  // 1. Identificar ou resolver o nome exclusivo da instância
   if (!instanceName) {
-    const rawTenant = (tenantId || "principal").replace(/^store_/, '').replace(/^tenant_/, '');
-    const cleanStore = rawTenant.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-    
     if (inboxId && inboxId !== "default" && !inboxId.includes("default")) {
-      const cleanInbox = inboxId.replace(/^inbox_/, '').replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-      instanceName = `inbox_${cleanInbox}`;
+      // Verifica se a caixa já possui uma instância vinculada
+      try {
+        const { data: inboxRow } = await supabaseAdmin
+          .from('inboxes')
+          .select('whatsapp_instance_id')
+          .eq('id', inboxId)
+          .maybeSingle();
+
+        if (inboxRow?.whatsapp_instance_id) {
+          const { data: linkedInst } = await supabaseAdmin
+            .from('whatsapp_instances')
+            .select('instance_name')
+            .or(`id.eq.${inboxRow.whatsapp_instance_id},instance_name.eq.${inboxRow.whatsapp_instance_id}`)
+            .maybeSingle();
+          if (linkedInst?.instance_name) {
+            instanceName = linkedInst.instance_name;
+          }
+        }
+      } catch (e) {}
+
+      if (!instanceName) {
+        const cleanInbox = inboxId.replace(/^inbox_/, '').replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+        instanceName = `inbox_${cleanInbox}`;
+      }
     } else {
       instanceName = cleanStore ? `store_${cleanStore}` : 'store_principal';
     }
   }
 
-  // Tenta obter do banco de dados (whatsapp_instances)
+  // 2. Busca credenciais da Evolution API (tenta por instância específica ou herda do tenant)
   try {
     if (!evolutionUrl || !evolutionKey) {
-      // 1. Busca primeiro por nome da instância
+      // 2.1 Busca por nome da instância específica
       const { data: byName } = await supabaseAdmin
         .from('whatsapp_instances')
         .select('*')
@@ -5065,30 +5087,26 @@ async function resolveEvolutionConfig(tenantId: string, inboxId?: string, overri
     }
 
     if (!evolutionUrl || !evolutionKey) {
-      // 2. Busca pelas instâncias da loja
+      // 2.2 Herda as credenciais globais da loja/tenant caso já existam configuradas em outra instância
       const { data: instList } = await supabaseAdmin
         .from('whatsapp_instances')
         .select('*')
-        .eq('store_id', tenantId)
+        .or(`store_id.eq.${tenantId},store_id.eq.${cleanStore}`)
         .order('updated_at', { ascending: false });
 
       if (instList && instList.length > 0) {
-        const specific = inboxId ? instList.find(i => i.id === inboxId || i.instance_name === instanceName) : instList[0];
-        const withKey = instList.find(i => i.evolution_key);
-        const withUrl = instList.find(i => i.evolution_url);
-        const target = specific?.evolution_key ? specific : (withKey || withUrl || instList[0]);
+        const withKey = instList.find(i => i.evolution_key && i.evolution_key.trim() !== '');
+        const withUrl = instList.find(i => i.evolution_url && i.evolution_url.trim() !== '');
 
-        if (target) {
-          if (!evolutionUrl && target.evolution_url) evolutionUrl = target.evolution_url;
-          if (!evolutionKey && target.evolution_key) evolutionKey = target.evolution_key;
-        }
+        if (withKey && !evolutionKey) evolutionKey = withKey.evolution_key;
+        if (withUrl && !evolutionUrl) evolutionUrl = withUrl.evolution_url;
       }
     }
   } catch (e) {
     console.warn("[resolveEvolutionConfig] Erro ao buscar dados no Supabase:", e);
   }
 
-  // Fallback para variável de ambiente ou URL padrão
+  // 3. Fallback para variáveis de ambiente ou URL padrão
   if (!evolutionUrl) {
     evolutionUrl = process.env.EVOLUTION_API_URL || DEFAULT_EVOLUTION_URL;
   }
@@ -5096,7 +5114,6 @@ async function resolveEvolutionConfig(tenantId: string, inboxId?: string, overri
     evolutionKey = process.env.EVOLUTION_API_KEY || "";
   }
 
-  // Se tiver valor de placeholder antigo de template, corrige para a URL padrão
   if (evolutionUrl.includes('seudominio.com') || evolutionUrl.includes('yourdomain.com')) {
     evolutionUrl = DEFAULT_EVOLUTION_URL;
   }
@@ -5513,7 +5530,7 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
       });
     }
 
-    // Salvar no banco os dados atualizados
+    // Salvar no banco os dados atualizados e vincular à Caixa de Entrada
     try {
       const updateData: any = {
         store_id: tenantId,
@@ -5537,17 +5554,26 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
         .eq('instance_name', instanceName)
         .maybeSingle();
 
+      let instId = existing?.id;
+
       if (existing) {
         await supabaseAdmin.from('whatsapp_instances').update(updateData).eq('id', existing.id);
       } else {
-        await supabaseAdmin.from('whatsapp_instances').insert(updateData);
+        const { data: inserted } = await supabaseAdmin.from('whatsapp_instances').insert(updateData).select('id').maybeSingle();
+        if (inserted?.id) instId = inserted.id;
       }
 
-      if (inboxId) {
-        const { data: inst } = await supabaseAdmin.from('whatsapp_instances').select('id').eq('instance_name', instanceName).maybeSingle();
-        if (inst) {
-          await supabaseAdmin.from('inboxes').update({ whatsapp_instance_id: inst.id }).eq('id', inboxId);
-        }
+      if (inboxId && instId) {
+        try {
+          await supabaseAdmin.from('inboxes').update({ whatsapp_instance_id: instId }).eq('id', inboxId);
+        } catch (e) {}
+        try {
+          const inboxes = await inboxStore.getInboxes(tenantId);
+          const targetInbox = inboxes.find(i => i.id === inboxId);
+          if (targetInbox) {
+            await inboxStore.updateInbox(inboxId, targetInbox.name, targetInbox.description, instId, targetInbox.channel_type);
+          }
+        } catch (e) {}
       }
     } catch (dbErr: any) {
       console.warn("[WhatsApp DB Warning]:", dbErr.message);
@@ -5604,6 +5630,8 @@ app.get("/api/v1/chat/instance/status", requireChatEnabled, async (req, res) => 
                   const phoneNumber = stateRes.data?.instance?.owner?.split('@')[0] || stateRes.data?.owner?.split('@')[0] || null;
                   
                   const { data: existing } = await supabaseAdmin.from('whatsapp_instances').select('id').eq('instance_name', instanceName).maybeSingle();
+                  let instId = existing?.id;
+
                   if (existing) {
                       await supabaseAdmin.from('whatsapp_instances').update({
                          status: 'CONNECTED',
@@ -5611,13 +5639,22 @@ app.get("/api/v1/chat/instance/status", requireChatEnabled, async (req, res) => 
                          updated_at: new Date().toISOString()
                       }).eq('id', existing.id);
                   } else {
-                      await supabaseAdmin.from('whatsapp_instances').insert({
+                      const { data: inserted } = await supabaseAdmin.from('whatsapp_instances').insert({
                          store_id: tenantId,
                          instance_name: instanceName,
                          status: 'CONNECTED',
                          ...(phoneNumber ? { phone_number: phoneNumber } : {}),
+                         evolution_url: evolutionUrl,
+                         evolution_key: evolutionKey,
                          updated_at: new Date().toISOString()
-                      });
+                      }).select('id').maybeSingle();
+                      if (inserted?.id) instId = inserted.id;
+                  }
+
+                  if (inboxId && instId) {
+                    try {
+                      await supabaseAdmin.from('inboxes').update({ whatsapp_instance_id: instId }).eq('id', inboxId);
+                    } catch (e) {}
                   }
 
                   return res.json({ 
@@ -5767,7 +5804,7 @@ app.post("/api/v1/chat/instance/recreate", requireChatEnabled, async (req, res) 
 
     // 5. Atualiza no banco
     try {
-      await supabaseAdmin.from('whatsapp_instances').upsert({
+      const { data: upserted } = await supabaseAdmin.from('whatsapp_instances').upsert({
         store_id: tenantId,
         instance_name: instanceName,
         evolution_url: evolutionUrl,
@@ -5776,7 +5813,13 @@ app.post("/api/v1/chat/instance/recreate", requireChatEnabled, async (req, res) 
         qrcode_base64: base64 || null,
         phone_number: null,
         updated_at: new Date().toISOString()
-      }, { onConflict: 'instance_name' });
+      }, { onConflict: 'instance_name' }).select('id').maybeSingle();
+
+      if (inboxId && upserted?.id) {
+        try {
+          await supabaseAdmin.from('inboxes').update({ whatsapp_instance_id: upserted.id }).eq('id', inboxId);
+        } catch (e) {}
+      }
     } catch (e) {}
 
     return res.json({
@@ -5798,9 +5841,11 @@ app.post("/api/v1/chat/instance/confirm", requireChatEnabled, async (req, res) =
     const phoneNumber = req.body.phoneNumber || "(11) 98765-4321";
     if (!tenantId) return res.status(400).json({ error: "Tenant ID is required." });
 
-    const instanceName = inboxId ? `inbox_${inboxId.replace(/-/g,"")}` : `store_${tenantId.replace(/-/g,"")}`;
+    const { instanceName, evolutionUrl, evolutionKey } = await resolveEvolutionConfig(tenantId, inboxId, req.body);
 
-    const { data: existing } = await supabaseAdmin.from('whatsapp_instances').select('id').eq('instance_name', instanceName).single();
+    const { data: existing } = await supabaseAdmin.from('whatsapp_instances').select('id').eq('instance_name', instanceName).maybeSingle();
+    let instId = existing?.id;
+
     if (existing) {
       await supabaseAdmin.from('whatsapp_instances').update({
         status: 'CONNECTED',
@@ -5808,16 +5853,25 @@ app.post("/api/v1/chat/instance/confirm", requireChatEnabled, async (req, res) =
         updated_at: new Date().toISOString()
       }).eq('id', existing.id);
     } else {
-      await supabaseAdmin.from('whatsapp_instances').insert({
+      const { data: inserted } = await supabaseAdmin.from('whatsapp_instances').insert({
         store_id: tenantId,
         instance_name: instanceName,
         status: 'CONNECTED',
         phone_number: phoneNumber,
+        evolution_url: evolutionUrl,
+        evolution_key: evolutionKey,
         updated_at: new Date().toISOString()
-      });
+      }).select('id').maybeSingle();
+      if (inserted?.id) instId = inserted.id;
     }
 
-    return res.json({ success: true, status: 'CONNECTED', phoneNumber });
+    if (inboxId && instId) {
+      try {
+        await supabaseAdmin.from('inboxes').update({ whatsapp_instance_id: instId }).eq('id', inboxId);
+      } catch (e) {}
+    }
+
+    return res.json({ success: true, status: 'CONNECTED', phoneNumber, instanceName });
   } catch (error: any) {
     return res.status(500).json({ error: error.message });
   }
@@ -5838,16 +5892,17 @@ app.post("/api/v1/chat/instance/disconnect", requireChatEnabled, async (req, res
       }, 3000).catch(() => {});
     }
 
-    // Update status in supabase
+    // Update status in supabase for this specific instance
     try {
       await supabaseAdmin.from('whatsapp_instances').update({
         status: 'DISCONNECTED',
         phone_number: null,
+        qrcode_base64: null,
         updated_at: new Date().toISOString()
       }).eq('instance_name', instanceName);
     } catch (e) {}
 
-    return res.json({ success: true, status: 'DISCONNECTED' });
+    return res.json({ success: true, status: 'DISCONNECTED', instanceName });
   } catch (error: any) {
     return res.status(500).json({ error: error.message });
   }
@@ -5856,24 +5911,27 @@ app.post("/api/v1/chat/instance/disconnect", requireChatEnabled, async (req, res
 app.get("/api/v1/whatsapp/instances", async (req, res) => {
   try {
     const tenantId = (req.query.tenantId as string) || (req.headers["x-tenant-id"] as string) || "default";
+    const cleanTenantId = tenantId.replace(/^store_/, '').replace(/^tenant_/, '');
+
     const { data, error } = await supabaseAdmin
       .from("whatsapp_instances")
       .select("*")
-      .eq("store_id", tenantId);
+      .or(`store_id.eq.${cleanTenantId},store_id.eq.${tenantId},store_id.eq.store_${cleanTenantId}`)
+      .order('created_at', { ascending: false });
 
     if (!error && data && data.length > 0) {
       return res.json({ data });
     }
 
-    const instanceName = `store_${tenantId.replace(/-/g,"")}`;
+    const instanceName = `store_${cleanTenantId.replace(/[^a-zA-Z0-9]/g,"").toLowerCase()}`;
     return res.json({
       data: [
         {
-          id: `inst_${tenantId}`,
+          id: `inst_${cleanTenantId}`,
           store_id: tenantId,
           instance_name: instanceName,
-          status: "CONNECTED",
-          phone_number: "WhatsApp Principal"
+          status: "DISCONNECTED",
+          phone_number: null
         }
       ]
     });

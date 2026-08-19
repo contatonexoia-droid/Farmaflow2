@@ -2,6 +2,7 @@ import { createClient } from "@supabase/supabase-js";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
+import { inboxStore } from "./inboxStore";
 
 function stringToUuid(str: string): string {
   const hash = crypto.createHash('md5').update(str).digest('hex');
@@ -617,38 +618,52 @@ class ChatStore {
         console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao consultar conversa existente', error.message, error);
       } else {
         convInfo = data;
-        if (convInfo?.inbox_id) {
-          resolvedInboxId = convInfo.inbox_id;
-        }
       }
     } catch (error: any) {
       console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao buscar dados da conversa', error.message, error.stack);
     }
 
-    // Try routing message to specific inbox based on the instanceName we received
-    if (!resolvedInboxId && instanceName) {
+    // 1. Determina a caixa de entrada (inbox_id) baseada prioritariamente na instância do WhatsApp que recebeu a mensagem
+    if (instanceName) {
       try {
         const { data: inst } = await supabaseAdmin
           .from("whatsapp_instances")
-          .select("id")
+          .select("id, instance_name")
           .eq("instance_name", instanceName)
           .maybeSingle();
           
-        if (inst?.id) {
+        if (inst) {
           const { data: inbox } = await supabaseAdmin
             .from("inboxes")
             .select("id")
-            .eq("whatsapp_instance_id", inst.id)
+            .or(`whatsapp_instance_id.eq.${inst.id},whatsapp_instance_id.eq.${inst.instance_name}`)
             .maybeSingle();
             
           if (inbox?.id) {
             resolvedInboxId = inbox.id;
-            console.log(`[ChatStore] Routed conversation ${convId} to inbox ${resolvedInboxId} because of instance ${instanceName}`);
+            console.log(`[ChatStore] Mensagem recebida na instância ${instanceName} vinculada à caixa ${resolvedInboxId}`);
+          }
+        }
+
+        if (!resolvedInboxId) {
+          // Fallback em memória/arquivo para inboxes
+          const inboxes = await inboxStore.getInboxes(storeId);
+          const matched = inboxes.find(i => 
+            i.whatsapp_instance_id === instanceName || 
+            (inst?.id && i.whatsapp_instance_id === inst.id) ||
+            i.id.toLowerCase().includes(instanceName.replace(/^inbox_/, '').toLowerCase())
+          );
+          if (matched) {
+            resolvedInboxId = matched.id;
           }
         }
       } catch (routingErr: any) {
-        console.warn("[ChatStore] Error routing message by instanceName:", routingErr.message);
+        console.warn("[ChatStore] Erro ao rotear mensagem por instanceName:", routingErr.message);
       }
+    }
+
+    if (!resolvedInboxId && convInfo?.inbox_id) {
+      resolvedInboxId = convInfo.inbox_id;
     }
 
     if (!resolvedInboxId) {

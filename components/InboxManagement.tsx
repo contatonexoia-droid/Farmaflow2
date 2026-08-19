@@ -496,35 +496,56 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                     <div className="flex flex-col gap-2 w-full">
                       <div className="flex items-center justify-between">
                         <span className="flex items-center gap-1.5 text-emerald-700 font-bold"><Smartphone className="w-4 h-4" /> WhatsApp Evolution</span>
-                        <span className="text-[10px] bg-emerald-100/60 text-emerald-800 px-2 py-0.5 rounded-md font-semibold">Oficial</span>
+                        <span className="text-[10px] bg-emerald-100/80 text-emerald-900 px-2 py-0.5 rounded-md font-semibold">Exclusivo</span>
                       </div>
                       
                       {(() => {
                         const instance = whatsappInstances.find(i => i.id === inbox.whatsapp_instance_id || i.instance_name === inbox.whatsapp_instance_id);
                         const isConnected = instance?.status === 'CONNECTED';
+                        const instName = instance?.instance_name || `inbox_${inbox.id.replace(/^inbox_/, '').replace(/[^a-zA-Z0-9]/g, "").toLowerCase()}`;
+                        const phone = instance?.phone_number;
+
                         return (
-                          <div className="flex items-center justify-between w-full bg-white p-2 rounded-xl border border-gray-200/80">
-                            <span className="text-[10px] uppercase font-black tracking-wider text-gray-500">Status</span>
-                            {isConnected ? (
-                              <div className="flex items-center gap-2">
-                                <span className="text-xs font-bold text-emerald-600 flex items-center gap-1">
-                                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span> Conectado
+                          <div className="flex flex-col gap-1.5 w-full bg-white p-2.5 rounded-xl border border-gray-200/80 shadow-xs">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10px] uppercase font-black tracking-wider text-gray-400">Instância</span>
+                              <span className="text-[11px] font-mono font-bold text-gray-700 bg-gray-100 px-1.5 py-0.5 rounded truncate max-w-[140px]">
+                                {instName}
+                              </span>
+                            </div>
+
+                            {phone && (
+                              <div className="flex items-center justify-between">
+                                <span className="text-[10px] uppercase font-black tracking-wider text-gray-400">Número</span>
+                                <span className="text-[11px] font-bold text-gray-800">
+                                  {phone}
                                 </span>
+                              </div>
+                            )}
+
+                            <div className="flex items-center justify-between pt-1 border-t border-gray-100 mt-0.5">
+                              <span className="text-[10px] uppercase font-black tracking-wider text-gray-400">Status</span>
+                              {isConnected ? (
+                                <div className="flex items-center gap-2">
+                                  <span className="text-xs font-bold text-emerald-600 flex items-center gap-1">
+                                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span> Conectado
+                                  </span>
+                                  <button
+                                    onClick={() => setConnectInboxId(inbox.id)}
+                                    className="text-[11px] font-bold text-gray-500 hover:text-emerald-700 underline ml-1"
+                                  >
+                                    Gerenciar
+                                  </button>
+                                </div>
+                              ) : (
                                 <button
                                   onClick={() => setConnectInboxId(inbox.id)}
-                                  className="text-[11px] font-bold text-gray-500 hover:text-emerald-700 underline"
+                                  className="text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 shadow-xs"
                                 >
-                                  Gerenciar
+                                  <QrCode className="w-3.5 h-3.5" /> Conectar WhatsApp
                                 </button>
-                              </div>
-                            ) : (
-                              <button
-                                onClick={() => setConnectInboxId(inbox.id)}
-                                className="text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 px-3 py-1 rounded-lg transition-all flex items-center gap-1 shadow-xs"
-                              >
-                                <QrCode className="w-3.5 h-3.5" /> Conectar WhatsApp
-                              </button>
-                            )}
+                              )}
+                            </div>
                           </div>
                         );
                       })()}

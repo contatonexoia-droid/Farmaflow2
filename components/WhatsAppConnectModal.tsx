@@ -103,9 +103,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
       setErrorMessage(null);
       setSuccessMessage(null);
       setTestResult(null);
-      if (!instanceName) {
-        setInstanceName(defaultInstanceName);
-      }
+      setInstanceName(defaultInstanceName);
       fetchInstanceStatus(true);
     } else {
       setIsPolling(false);
