@@ -2,7 +2,7 @@ import { createClient } from "@supabase/supabase-js";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
-import { inboxStore } from "./inboxStore";
+import { inboxStore } from "./inboxStore.js";
 
 function stringToUuid(str: string): string {
   const hash = crypto.createHash('md5').update(str).digest('hex');

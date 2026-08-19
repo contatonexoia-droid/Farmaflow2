@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { supabase } from './supabase.js';
 
 const blobToBase64 = (blob: Blob): Promise<string> => {
   return new Promise((resolve, reject) => {

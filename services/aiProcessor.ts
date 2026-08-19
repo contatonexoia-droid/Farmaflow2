@@ -1,6 +1,6 @@
 import { Product } from '../types';
-import { fetchProductDetailsBatch } from './gemini';
-import { getAiEnrichedProductsCache, updateProductAiFields } from './storage';
+import { fetchProductDetailsBatch } from './gemini.js';
+import { getAiEnrichedProductsCache, updateProductAiFields } from './storage.js';
 
 export interface AiEnrichmentReport {
     processed: number;
