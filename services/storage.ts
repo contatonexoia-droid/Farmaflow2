@@ -597,6 +597,8 @@ export const mapDbProductToApp = (p: any): Product => ({
   videoUri: p.video_uri || p.videouri,
   isFeatured: p.is_featured === true || p.isfeatured === true,
   requires_prescription: p.requires_prescription === true || p.requiresprescription === true || p.requires_prescription === 1 || p.requires_prescription === "true",
+  is_continuous_use: p.is_continuous_use === true || p.iscontinuoususe === true || p.is_continuous_use === 1 || p.is_continuous_use === "true",
+  continuous_use_days: Number(p.continuous_use_days || p.continuoususedays) || undefined,
 });
 
 export const mapDbOrderToApp = (o: any): Order => ({

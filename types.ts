@@ -31,6 +31,8 @@ export interface Product {
   discountQtyPercentage?: number;
   isFeatured?: boolean;
   requires_prescription?: boolean;
+  is_continuous_use?: boolean;
+  continuous_use_days?: number;
 }
 
 export interface CartItem extends Product {

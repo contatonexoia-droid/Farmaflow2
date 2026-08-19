@@ -6599,6 +6599,132 @@ app.post("/api/v1/chat/send", requireChatEnabled, async (req, res) => {
   }
 });
 
+// --- PATIENT CONTEXT & CONTINUOUS USE FORECASTING ENDPOINT ---
+app.get("/api/v1/chat/patient-context", async (req, res) => {
+  try {
+    const rawStoreId = (req.query.storeId as string) || (req.query.tenantId as string) || (req.headers["x-tenant-id"] as string) || "default";
+    const storeId = typeof rawStoreId === 'string' ? rawStoreId.trim().replace(/^store_/, '') : rawStoreId;
+    const rawPhone = (req.query.phone as string) || "";
+    const cleanPhone = String(rawPhone).replace(/\D/g, "");
+
+    if (!cleanPhone) {
+      return res.json({ success: true, contact: null, continuousUse: null, orders: [] });
+    }
+
+    // 1. Fetch Contact & Custom Attributes (uso_continuo, etc.)
+    let contactData: any = null;
+    try {
+      const { data } = await supabaseAdmin
+        .from("contacts")
+        .select("*")
+        .eq("store_id", storeId)
+        .like("phone", `%${cleanPhone}%`)
+        .maybeSingle();
+      contactData = data;
+    } catch (e) {}
+
+    // 2. Fetch Orders for this Customer
+    const { data: ordersData, error: ordersErr } = await supabaseAdmin
+      .from("orders")
+      .select("*")
+      .eq("tenant_id", storeId)
+      .order("created_at", { ascending: false })
+      .limit(50);
+
+    let matchedOrders: any[] = [];
+    if (!ordersErr && Array.isArray(ordersData)) {
+      matchedOrders = ordersData.filter((o: any) => {
+        if (!o.customer || !o.customer.phone) return false;
+        const oPhone = String(o.customer.phone).replace(/\D/g, "");
+        return oPhone === cleanPhone || oPhone.includes(cleanPhone) || cleanPhone.includes(oPhone);
+      }).slice(0, 10);
+    }
+
+    // 3. For each order, fetch items and enrich with order_items / products details
+    const enrichedOrders = await Promise.all(matchedOrders.map(async (order: any) => {
+      let items = Array.isArray(order.items) ? [...order.items] : [];
+
+      // Try relational order_items table as enrichment if available
+      try {
+        const { data: orderItemsRel } = await supabaseAdmin
+          .from("order_items")
+          .select("*, products(*)")
+          .eq("order_id", order.id);
+
+        if (orderItemsRel && orderItemsRel.length > 0) {
+          items = orderItemsRel.map((oi: any) => ({
+            id: oi.product_id || oi.id,
+            name: oi.product_name || oi.products?.name || "Produto",
+            quantity: oi.quantity || 1,
+            price: oi.unit_price || oi.products?.price || 0,
+            category: oi.products?.category || "",
+            presentation: oi.products?.presentation || "",
+            activePrinciple: oi.products?.active_principle || "",
+            is_continuous_use: oi.products?.is_continuous_use,
+            continuous_use_days: oi.products?.continuous_use_days,
+            requires_prescription: oi.products?.requires_prescription
+          }));
+        }
+      } catch (oiErr) {
+        // Fallback to order.items jsonb
+      }
+
+      // Enrich items with products table details if needed
+      const enrichedItems = await Promise.all(items.map(async (item: any) => {
+        let isContinuous = item.is_continuous_use;
+        let durationDays = item.continuous_use_days;
+        let presentation = item.presentation;
+
+        if (item.id) {
+          try {
+            const { data: prod } = await supabaseAdmin
+              .from("products")
+              .select("is_continuous_use, continuous_use_days, presentation, category, active_principle")
+              .eq("id", item.id)
+              .maybeSingle();
+
+            if (prod) {
+              if (prod.is_continuous_use !== undefined && isContinuous === undefined) {
+                isContinuous = prod.is_continuous_use;
+              }
+              if (prod.continuous_use_days && !durationDays) {
+                durationDays = prod.continuous_use_days;
+              }
+              if (prod.presentation && !presentation) {
+                presentation = prod.presentation;
+              }
+              if (prod.category && !item.category) item.category = prod.category;
+              if (prod.active_principle && !item.activePrinciple) item.activePrinciple = prod.active_principle;
+            }
+          } catch (e) {}
+        }
+
+        return {
+          ...item,
+          is_continuous_use: isContinuous,
+          continuous_use_days: durationDays,
+          presentation: presentation || item.presentation
+        };
+      }));
+
+      return {
+        ...order,
+        items: enrichedItems
+      };
+    }));
+
+    return res.json({
+      success: true,
+      contact: contactData,
+      continuousUse: contactData?.custom_attributes?.uso_continuo ? contactData.custom_attributes : null,
+      orders: enrichedOrders
+    });
+  } catch (err: any) {
+    console.error("[PatientContext API] Error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // --- LABELS ENDPOINTS ---
 app.get("/api/v1/chat/labels", async (req, res) => {
   try {

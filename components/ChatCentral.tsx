@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Search, Send, FileText, Image as ImageIcon, Paperclip, User, Users, Clock, ShoppingBag, CreditCard, MessageSquare, Lock, AlertCircle, RefreshCw, Smartphone, ChevronLeft, Info, BarChart2, CheckCircle2, UserPlus, Inbox, MoreVertical, Kanban, LayoutList, Columns, QrCode } from 'lucide-react';
+import { Search, Send, FileText, Image as ImageIcon, Paperclip, User, Users, Clock, ShoppingBag, CreditCard, MessageSquare, Lock, AlertCircle, RefreshCw, Smartphone, ChevronLeft, ChevronDown, ChevronUp, Info, BarChart2, CheckCircle2, UserPlus, Inbox, MoreVertical, Kanban, LayoutList, Columns, QrCode, Pill, Sparkles, Calendar } from 'lucide-react';
 import { ChatTransferModal } from './ChatTransferModal';
 import { AiChatCopilot } from './AiChatCopilot';
 import { ChatKanban } from './ChatKanban';
 import { WhatsAppConnectModal } from './WhatsAppConnectModal';
 import { supabase } from '../services/supabase';
+import { calculateItemDepletionForecast, isProductContinuousUse } from '../utils/pharmaContext';
 
 // Helper to determine active tenant logic for demo
 const DEMO_TENANT_ID = 'tenant-id'; // Assume this for now if not passed
@@ -45,6 +46,13 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   const [customerOrders, setCustomerOrders] = useState<any[]>([]);
   const [continuousUseData, setContinuousUseData] = useState<any>(null);
   const [isFetchingContext, setIsFetchingContext] = useState(false);
+  const [expandedOrderIds, setExpandedOrderIds] = useState<string[]>([]);
+
+  const toggleOrderAccordion = (orderId: string) => {
+    setExpandedOrderIds(prev => 
+      prev.includes(orderId) ? prev.filter(id => id !== orderId) : [...prev, orderId]
+    );
+  };
 
 
   // --- STATES & HANDLERS FOR LABELS & CANNED RESPONSES ---
@@ -633,7 +641,26 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       
       phone = String(phone).replace(/\D/g, ""); // clean non-digits
 
-      // Fetch continuous use from contacts
+      // 1. Tenta a API dedicada de contexto enriquecido com itens e produtos
+      try {
+        const res = await fetch(`/api/v1/chat/patient-context?storeId=${encodeURIComponent(tenantId)}&phone=${encodeURIComponent(phone)}`);
+        if (res.ok) {
+          const json = await res.json();
+          if (json.success) {
+            setContinuousUseData(json.continuousUse || null);
+            const fetchedOrders = json.orders || [];
+            setCustomerOrders(fetchedOrders);
+            if (fetchedOrders.length > 0) {
+              setExpandedOrderIds([String(fetchedOrders[0].id || '0')]);
+            }
+            return;
+          }
+        }
+      } catch (apiErr) {
+        console.warn("API de contexto do paciente falhou, usando fallback direto:", apiErr);
+      }
+
+      // 2. Fallback: Consulta direta Supabase
       const { data: contactsData, error: contactsErr } = await supabase
         .from('contacts')
         .select('*')
@@ -652,10 +679,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
         setContinuousUseData(null);
       }
 
-      // Fetch orders using the jsonb customer->phone matching
-      // Since it's a bit tricky to query jsonb without exact path if the format varies,
-      // we fetch the last 10 orders of the store and filter locally if there's no dedicated column.
-      // A better way is using jsonb arrow operator in Supabase:
+      // Fetch orders
       const { data: ordersData, error: ordersErr } = await supabase
         .from('orders')
         .select('*')
@@ -668,8 +692,11 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
           if (!o.customer || !o.customer.phone) return false;
           const oPhone = String(o.customer.phone).replace(/\D/g, "");
           return oPhone === phone || oPhone.includes(phone) || phone.includes(oPhone);
-        }).slice(0, 3); // top 3
+        }).slice(0, 5); // top 5
         setCustomerOrders(matchedOrders);
+        if (matchedOrders.length > 0) {
+          setExpandedOrderIds([String(matchedOrders[0].id || '0')]);
+        }
       } else {
         setCustomerOrders([]);
       }
@@ -1406,45 +1433,198 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
               {continuousUseData && (
                 <div className="space-y-3">
                   <h3 className="font-black text-xs uppercase tracking-widest text-gray-400 flex items-center gap-2">
-                    <AlertCircle className="w-4 h-4" /> Uso Contínuo
+                    <AlertCircle className="w-4 h-4 text-amber-500" /> Uso Contínuo (Ficha Cadastral)
                   </h3>
-                  <div className="bg-red-50 p-3 rounded-xl border border-red-100">
-                    <p className="font-bold text-gray-800 text-sm">{continuousUseData.medicamento_nome || 'Medicamento'}</p>
+                  <div className="bg-amber-50/70 p-3 rounded-xl border border-amber-200/80 shadow-xs">
+                    <div className="flex items-center justify-between">
+                      <p className="font-bold text-gray-800 text-sm">{continuousUseData.medicamento_nome || 'Medicamento de Uso Contínuo'}</p>
+                      <span className="px-2 py-0.5 bg-amber-100 text-amber-700 text-[10px] font-extrabold rounded-md flex items-center gap-1">
+                        <Pill className="w-3 h-3" /> Cadastrado
+                      </span>
+                    </div>
                     <p className="text-xs text-gray-600 mt-1">
-                      Última compra: {continuousUseData.ultimo_pedido_at ? new Date(continuousUseData.ultimo_pedido_at).toLocaleDateString() : 'N/A'}
+                      Última compra: {continuousUseData.ultimo_pedido_at ? new Date(continuousUseData.ultimo_pedido_at).toLocaleDateString('pt-BR') : 'N/A'}
                     </p>
-                    <p className="text-xs font-bold text-red-600 mt-1">
-                      Intervalo configurado: {continuousUseData.dias_intervalo || 30} dias
+                    <p className="text-xs font-bold text-amber-700 mt-1">
+                      Ciclo de recompra: {continuousUseData.dias_intervalo || 30} dias
                     </p>
-                    <button className="mt-2 w-full py-1.5 bg-white border border-red-200 text-red-600 text-xs font-bold rounded-lg hover:bg-red-50 transition-colors">
-                      Oferecer Reposição
+                    <button 
+                      onClick={() => {
+                        const med = continuousUseData.medicamento_nome || 'seu medicamento de uso contínuo';
+                        setMessageInput(`Olá, ${selectedConversation?.contact?.name || 'Cliente'}! Notamos que o ciclo do seu tratamento com *${med}* está na época de renovação. Deseja que separemos o seu pedido para entrega hoje?`);
+                        setActiveView('CHAT');
+                      }}
+                      className="mt-2 w-full py-1.5 bg-white border border-amber-300 text-amber-800 text-xs font-bold rounded-lg hover:bg-amber-100 transition-colors shadow-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <Sparkles className="w-3.5 h-3.5 text-amber-600" /> Oferecer Reposição
                     </button>
                   </div>
                 </div>
               )}
 
               <div className="space-y-3">
-                <h3 className="font-black text-xs uppercase tracking-widest text-gray-400 flex items-center gap-2">
-                  <ShoppingBag className="w-4 h-4" /> Últimos Pedidos
-                </h3>
+                <div className="flex items-center justify-between">
+                  <h3 className="font-black text-xs uppercase tracking-widest text-gray-400 flex items-center gap-2">
+                    <ShoppingBag className="w-4 h-4 text-emerald-600" /> Últimos Pedidos ({customerOrders.length})
+                  </h3>
+                  {customerOrders.length > 0 && (
+                    <span className="text-[10px] text-gray-400 font-medium">Toque para ver itens</span>
+                  )}
+                </div>
+
                 {isFetchingContext ? (
-                  <p className="text-xs text-gray-400 text-center py-2">Buscando histórico...</p>
+                  <div className="flex flex-col items-center justify-center py-6 gap-2 bg-gray-50 rounded-xl border border-gray-100">
+                    <RefreshCw className="w-5 h-5 text-emerald-500 animate-spin" />
+                    <p className="text-xs text-gray-400">Carregando pedidos e receitas...</p>
+                  </div>
                 ) : customerOrders.length > 0 ? (
-                  customerOrders.map((order: any, idx) => (
-                    <div key={order.id || idx} className="flex justify-between items-center p-2 hover:bg-gray-50 rounded-lg border border-transparent hover:border-gray-100 cursor-pointer transition-colors">
-                      <div>
-                        <p className="text-sm font-bold text-gray-700">Pedido #{order.id?.substring(0,6).toUpperCase()}</p>
-                        <p className="text-[10px] text-gray-400">
-                          {new Date(order.created_at).toLocaleDateString()} - {order.status || 'Finalizado'}
-                        </p>
-                      </div>
-                      <span className="text-sm font-bold text-emerald-600">
-                        R$ {Number(order.total || 0).toFixed(2).replace('.', ',')}
-                      </span>
-                    </div>
-                  ))
+                  <div className="space-y-2.5">
+                    {customerOrders.map((order: any, idx: number) => {
+                      const orderId = String(order.id || idx);
+                      const isExpanded = expandedOrderIds.includes(orderId);
+                      const orderDate = order.created_at || order.date;
+                      const formattedDate = orderDate ? new Date(orderDate).toLocaleDateString('pt-BR') : 'Data recente';
+                      const items: any[] = Array.isArray(order.items) ? order.items : [];
+                      
+                      // Conta se há itens de uso contínuo no pedido
+                      const continuousItemsCount = items.filter(it => isProductContinuousUse(it)).length;
+
+                      return (
+                        <div 
+                          key={orderId} 
+                          className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-xs transition-all hover:border-gray-300"
+                        >
+                          {/* Order Header / Accordion Trigger */}
+                          <div 
+                            onClick={() => toggleOrderAccordion(orderId)}
+                            className="p-3 bg-gray-50/70 hover:bg-gray-100/70 cursor-pointer flex items-center justify-between transition-colors select-none"
+                          >
+                            <div className="flex-1 min-w-0 pr-2">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="text-xs font-black text-gray-800">
+                                  #{order.id ? String(order.id).substring(0, 6).toUpperCase() : `PED-${idx + 1}`}
+                                </span>
+                                <span className="text-[10px] px-1.5 py-0.2 bg-gray-200 text-gray-700 font-bold rounded">
+                                  {formattedDate}
+                                </span>
+                                {continuousItemsCount > 0 && (
+                                  <span className="text-[10px] px-1.5 py-0.2 bg-emerald-100 text-emerald-800 font-bold rounded flex items-center gap-1">
+                                    <Pill className="w-2.5 h-2.5" /> {continuousItemsCount} Uso Contínuo
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-[11px] text-gray-500 mt-0.5 truncate">
+                                {items.length > 0 ? `${items.length} ${items.length === 1 ? 'item' : 'itens'}` : 'Detalhes do pedido'} - <span className="capitalize">{order.status || 'Finalizado'}</span>
+                              </p>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm font-extrabold text-emerald-600 whitespace-nowrap">
+                                R$ {Number(order.total || 0).toFixed(2).replace('.', ',')}
+                              </span>
+                              <div className="p-1 rounded-full text-gray-400 hover:text-gray-600">
+                                {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Accordion Content: Items list with Continuous Use & Forecast */}
+                          {isExpanded && (
+                            <div className="p-3 bg-white border-t border-gray-100 space-y-3">
+                              {items.length > 0 ? (
+                                <div className="space-y-2.5">
+                                  {items.map((item: any, iIdx: number) => {
+                                    const forecast = calculateItemDepletionForecast(orderDate, item);
+                                    const itemQty = Math.max(1, Number(item.quantity) || 1);
+                                    const itemPrice = Number(item.price || item.unit_price || 0);
+
+                                    return (
+                                      <div 
+                                        key={item.id || iIdx}
+                                        className={`p-2.5 rounded-lg border text-xs ${
+                                          forecast.isContinuousUse 
+                                            ? 'bg-emerald-50/40 border-emerald-200/70' 
+                                            : 'bg-gray-50/50 border-gray-100'
+                                        }`}
+                                      >
+                                        {/* Item Title & Price */}
+                                        <div className="flex items-start justify-between gap-2">
+                                          <div className="flex-1">
+                                            <div className="flex items-center gap-1.5 flex-wrap">
+                                              <span className="font-extrabold text-gray-800">
+                                                {itemQty}x {item.name || item.product_name || 'Produto'}
+                                              </span>
+                                              {forecast.isContinuousUse && (
+                                                <span className="px-1.5 py-0.2 bg-emerald-600 text-white text-[9px] font-black uppercase tracking-wider rounded flex items-center gap-0.5 shadow-2xs">
+                                                  <Pill className="w-2.5 h-2.5" /> Uso Contínuo
+                                                </span>
+                                              )}
+                                            </div>
+                                            {item.presentation && (
+                                              <p className="text-[10px] text-gray-500 mt-0.5">{item.presentation}</p>
+                                            )}
+                                          </div>
+                                          <span className="font-bold text-gray-700 whitespace-nowrap">
+                                            R$ {(itemPrice * itemQty).toFixed(2).replace('.', ',')}
+                                          </span>
+                                        </div>
+
+                                        {/* Continuous Use Depletion Forecast Card */}
+                                        {forecast.isContinuousUse && (
+                                          <div className={`mt-2 p-2 rounded-md border flex flex-col gap-1.5 ${
+                                            forecast.urgency === 'OVERDUE'
+                                              ? 'bg-red-50 border-red-200 text-red-800'
+                                              : forecast.urgency === 'URGENT'
+                                                ? 'bg-amber-50 border-amber-200 text-amber-800'
+                                                : forecast.urgency === 'UPCOMING'
+                                                  ? 'bg-blue-50 border-blue-200 text-blue-800'
+                                                  : 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                                          }`}>
+                                            <div className="flex items-center justify-between gap-1">
+                                              <div className="flex items-center gap-1.5 font-bold text-[11px]">
+                                                <Clock className="w-3.5 h-3.5 shrink-0" />
+                                                <span>{forecast.statusText}</span>
+                                              </div>
+                                              <span className="text-[10px] font-semibold opacity-80 whitespace-nowrap">
+                                                Término: {forecast.endDateFormatted}
+                                              </span>
+                                            </div>
+
+                                            <div className="flex items-center justify-between pt-1 border-t border-black/5 gap-2">
+                                              <span className="text-[10px] opacity-75">
+                                                Estimativa: {forecast.durationDays} dias ({itemQty > 1 ? `${itemQty} caixas` : '1 caixa'})
+                                              </span>
+                                              <button 
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  setMessageInput(forecast.suggestedMessage);
+                                                  setActiveView('CHAT');
+                                                }}
+                                                className="px-2 py-0.5 bg-white font-bold text-[10px] rounded shadow-2xs hover:bg-gray-50 transition-colors border border-current shrink-0 cursor-pointer flex items-center gap-1"
+                                              >
+                                                <Sparkles className="w-2.5 h-2.5" /> Oferecer Reposição
+                                              </button>
+                                            </div>
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              ) : (
+                                <p className="text-xs text-gray-400 text-center py-1">Itens não detalhados neste pedido.</p>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 ) : (
-                  <p className="text-xs text-gray-400 text-center py-2">Nenhum pedido encontrado.</p>
+                  <div className="text-center py-6 px-4 bg-gray-50 rounded-xl border border-gray-100">
+                    <ShoppingBag className="w-8 h-8 mx-auto text-gray-300 mb-1" />
+                    <p className="text-xs text-gray-500 font-medium">Nenhum pedido anterior localizado para este telefone.</p>
+                  </div>
                 )}
               </div>
             </div>
