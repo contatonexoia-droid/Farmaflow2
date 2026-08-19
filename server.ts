@@ -4350,9 +4350,12 @@ app.post("/api/v1/agent/generate-token", async (req, res) => {
   }
 });
 
-app.post("/api/v1/agent/activate", async (req, res) => {
+app.all(["/api/v1/agent/activate", "/api/agent/activate", "/api/v1/integration/activate", "/api/v1/desktop-agent/activate"], async (req, res) => {
   try {
-    const { token } = req.body;
+    const { token, machineId, machine_id, machine, hostname } = req.body || {};
+    const headerMachineId = req.headers['x-machine-id'] || req.headers['machine-id'];
+    const mId = machineId || machine_id || machine || hostname || headerMachineId || 'unknown';
+
     if (!token) {
       return res.status(400).json({ error: "Token não fornecido" });
     }
@@ -4361,21 +4364,18 @@ app.post("/api/v1/agent/activate", async (req, res) => {
       .from('activation_tokens')
       .select('*')
       .eq('token', token)
-      .eq('is_used', false)
       .single();
 
     if (fetchError || !tokenData) {
-      return res.status(404).json({ error: "Token inválido ou já utilizado" });
+      return res.status(404).json({ error: "Token inválido ou não encontrado" });
     }
 
-    const { error: updateError } = await supabaseAdmin
+    await supabaseAdmin
       .from('activation_tokens')
       .update({ is_used: true })
       .eq('id', tokenData.id);
 
-    if (updateError) {
-      return res.status(500).json({ error: "Erro ao ativar o token" });
-    }
+    await touchAgentHeartbeat(tokenData.tenant_id, mId, token);
 
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
     const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '';
@@ -4481,6 +4481,8 @@ async function resolveTenantForAgent(req: express.Request): Promise<AgentTenantR
     if (clean) lookupKeys.add(clean);
   }
 
+  console.log(`[DESKTOP AGENT PING] Buscando identificação do tenant. URL: ${req.originalUrl}, Método: ${req.method}, Chaves:`, Array.from(lookupKeys));
+
   let foundTenant: any = null;
   let matchedToken: string | null = bodyToken || queryToken || null;
 
@@ -4565,14 +4567,14 @@ async function resolveTenantForAgent(req: express.Request): Promise<AgentTenantR
     }
   }
 
-  // 5. Se ainda não encontrou, busca na tabela agent_integrations por activation_token
+  // 5. Se ainda não encontrou, busca na tabela agent_integrations por activation_token ou tenant_id
   if (!foundTenant && lookupKeys.size > 0) {
     for (const key of Array.from(lookupKeys)) {
       try {
         const { data: agentRow } = await supabaseAdmin
           .from('agent_integrations')
           .select('tenant_id, activation_token')
-          .eq('activation_token', key)
+          .or(`activation_token.eq.${key},tenant_id.eq.${key}`)
           .maybeSingle();
         if (agentRow?.tenant_id) {
           if (!matchedToken && agentRow.activation_token) matchedToken = agentRow.activation_token;
@@ -4614,38 +4616,66 @@ async function touchAgentHeartbeat(tenantId: string, machineId?: string | null, 
       payload.activation_token = activationToken;
     }
 
-    await supabaseAdmin
+    // 1. Tenta atualizar linha existente em agent_integrations
+    const { data: updatedRows, error: updateErr } = await supabaseAdmin
       .from('agent_integrations')
-      .upsert(payload, { onConflict: 'tenant_id' });
+      .update(payload)
+      .eq('tenant_id', tenantId)
+      .select();
 
-    // Atualiza também na tabela tenants se existirem colunas de rastreamento
+    if (!updateErr && updatedRows && updatedRows.length > 0) {
+      console.log(`[AGENT DB WRITE] Sucesso: atualizado agent_integrations para tenant: "${tenantId}", last_seen: "${now}"`);
+    } else {
+      // 2. Tenta upsert/insert com fallback
+      const { error: upsertErr } = await supabaseAdmin
+        .from('agent_integrations')
+        .upsert(payload, { onConflict: 'tenant_id' });
+      
+      if (upsertErr) {
+        console.warn(`[AGENT DB WRITE] Upsert em agent_integrations falhou (${upsertErr.message}), tentando insert direto...`);
+        const { error: insertErr } = await supabaseAdmin
+          .from('agent_integrations')
+          .insert(payload);
+        if (insertErr) {
+          console.error(`[AGENT DB WRITE ERROR] Falha ao inserir em agent_integrations:`, insertErr.message);
+        } else {
+          console.log(`[AGENT DB WRITE] Sucesso: inserido novo registro em agent_integrations para tenant: "${tenantId}"`);
+        }
+      } else {
+        console.log(`[AGENT DB WRITE] Sucesso: upsert em agent_integrations para tenant: "${tenantId}"`);
+      }
+    }
+
+    // 3. SEMPRE atualizar também na tabela tenants (garantindo sincronia perfeita de leitura)
     try {
       await supabaseAdmin
         .from('tenants')
         .update({ 
           last_seen: now,
           agent_last_seen: now,
+          last_ping_at: now,
           updated_at: now
         })
         .eq('id', tenantId);
-    } catch (e) {}
+      console.log(`[AGENT DB WRITE] Sucesso: sincronizado timestamp na tabela tenants para tenant: "${tenantId}"`);
+    } catch (tErr: any) {
+      console.warn(`[AGENT DB WRITE] Aviso ao atualizar tabela tenants:`, tErr?.message || tErr);
+    }
   } catch (err: any) {
     console.error("[Agent Heartbeat Error]:", err.message || err);
   }
 }
 
 const validateTokenHandler = async (req: express.Request, res: express.Response) => {
-  console.log(`\n[SERVER BACKEND] Recebida requisição de validação em /api/v1/integration/validate-token`);
+  console.log(`\n[DESKTOP AGENT] Recebida requisição de validação em /api/v1/integration/validate-token`);
   try {
     const { token, machineId, machine_id, machine, hostname } = req.body || {};
     const headerMachineId = req.headers['x-machine-id'] || req.headers['machine-id'];
     const mId = machineId || machine_id || machine || hostname || headerMachineId || 'unknown';
 
-    console.log(`- Token recebido: "${token ? token.substring(0, 8) + '...' : 'não fornecido'}"`);
-    console.log(`- Machine ID: "${mId}"`);
+    console.log(`[DESKTOP AGENT] Token recebido: "${token ? token.substring(0, 8) + '...' : 'não fornecido'}", Machine ID: "${mId}"`);
 
     if (!token) {
-      console.warn(`[SERVER BACKEND] Validação recusada: Token não fornecido (400 Bad Request)`);
       return res.status(400).json({ error: "Token não fornecido" });
     }
 
@@ -4656,11 +4686,9 @@ const validateTokenHandler = async (req: express.Request, res: express.Response)
       .single();
 
     if (fetchError || !tokenData) {
-      console.warn(`[SERVER BACKEND] Validação recusada: Token não encontrado no Supabase (404 Not Found)`);
       return res.status(404).json({ error: "Token inválido, inativo ou não encontrado." });
     }
 
-    console.log(`- Marcando token como utilizado...`);
     await supabaseAdmin
       .from('activation_tokens')
       .update({ is_used: true })
@@ -4675,8 +4703,7 @@ const validateTokenHandler = async (req: express.Request, res: express.Response)
     await touchAgentHeartbeat(tokenData.tenant_id, mId, token);
 
     const erpType = tenant?.erp_type || 'siagold';
-
-    console.log(`[SERVER BACKEND] Token validado com sucesso! Tenant ERP: ${erpType}`);
+    console.log(`[DESKTOP AGENT] Token validado com sucesso para tenant: ${tokenData.tenant_id} (${tenant?.name || 'Farmácia'})`);
 
     res.json({
       erpType: erpType.toLowerCase(),
@@ -4693,12 +4720,18 @@ const validateTokenHandler = async (req: express.Request, res: express.Response)
       tenantSlug: tenant?.slug || null
     });
   } catch (error: any) {
-    console.error(`[SERVER BACKEND] Erro interno durante validação do token (500):`, error.message);
+    console.error(`[DESKTOP AGENT] Erro interno durante validação do token (500):`, error.message);
     res.status(500).json({ error: "Erro interno no servidor", details: error.message });
   }
 };
 
-app.all(["/api/v1/integration/validate-token", "/api/v1/agent/validate-token", "/api/agent/validate-token", "/api/v1/desktop-agent/validate-token", "/api/desktop-agent/validate-token"], validateTokenHandler);
+app.all([
+  "/api/v1/integration/validate-token",
+  "/api/v1/agent/validate-token",
+  "/api/agent/validate-token",
+  "/api/v1/desktop-agent/validate-token",
+  "/api/desktop-agent/validate-token"
+], validateTokenHandler);
 
 const handleHeartbeat = async (req: express.Request, res: express.Response) => {
   try {
@@ -4707,7 +4740,7 @@ const handleHeartbeat = async (req: express.Request, res: express.Response) => {
 
     if (tenantId) {
       await touchAgentHeartbeat(tenantId, machineId, activationToken);
-      console.log(`[HEARTBEAT SUCCESS] Heartbeat atualizado para o tenant: "${tenantId}" (Loja: ${tenant?.name || tenant?.slug || 'OK'}, Machine ID: ${machineId || 'mantido'})`);
+      console.log(`[DESKTOP AGENT PING] Recebido ping com sucesso para tenant: "${tenantId}" (Loja: "${tenant?.name || tenant?.slug || 'Farmácia'}", Machine ID: "${machineId || 'Servidor'}")`);
       return res.json({ 
         success: true, 
         ok: true,
@@ -4738,18 +4771,19 @@ const handleHeartbeat = async (req: express.Request, res: express.Response) => {
           .select();
 
         if (!updateError && updateData && updateData.length > 0) {
-          console.log(`[HEARTBEAT SUCCESS] Heartbeat atualizado pelo activation_token: "${actToken}"`);
+          console.log(`[DESKTOP AGENT PING] Heartbeat atualizado pelo activation_token: "${actToken}"`);
           return res.json({ success: true, ok: true, last_seen: now });
         }
       } catch (e) {}
     }
 
+    console.warn(`[DESKTOP AGENT PING REJEITADO] Não foi possível identificar a farmácia na requisição. URL: ${req.originalUrl}, Body:`, req.body);
     return res.status(404).json({ 
       error: "Tenant ou Agente Desktop não identificado. Verifique o Token de Ativação ou a API Key da loja.",
       success: false 
     });
   } catch (error: any) {
-    console.error("[HEARTBEAT EXCEPTION]", error);
+    console.error("[DESKTOP AGENT PING EXCEPTION]", error);
     return res.status(500).json({ error: "Erro interno no servidor", details: error.message, success: false });
   }
 };
@@ -4759,6 +4793,7 @@ app.all([
   "/api/v1/agent/ping",
   "/api/agent/ping",
   "/api/v1/integration/ping",
+  "/api/integration/ping",
   "/api/v1/agent/heartbeat",
   "/api/agent/heartbeat",
   "/api/v1/desktop-agent/heartbeat",
@@ -4766,41 +4801,111 @@ app.all([
   "/api/desktop-agent/heartbeat",
   "/api/desktop-agent/ping",
   "/api/v1/agent-desktop/ping",
-  "/api/v1/agent-desktop/heartbeat"
+  "/api/v1/agent-desktop/heartbeat",
+  "/api/agent-desktop/ping",
+  "/api/agent-desktop/heartbeat",
+  "/api/v1/ping",
+  "/api/ping"
 ], handleHeartbeat);
 
 const handleAgentStatus = async (req: express.Request, res: express.Response) => {
   try {
-    const { data: integrations, error } = await supabaseAdmin
-      .from('agent_integrations')
-      .select('*, tenants(id, name, slug)');
-      
-    if (error) {
-      // Fallback seguro caso haja problema na relação direta de chave estrangeira
-      const { data: rawIntegrations } = await supabaseAdmin
-        .from('agent_integrations')
-        .select('*');
-        
-      if (rawIntegrations) {
-        const tenantIds = rawIntegrations.map(i => i.tenant_id).filter(Boolean);
-        const { data: tenantsList } = await supabaseAdmin
-          .from('tenants')
-          .select('id, name, slug')
-          .in('id', tenantIds);
-          
-        const tenantMap = new Map((tenantsList || []).map(t => [t.id, t]));
-        const formatted = rawIntegrations.map(i => ({
-          ...i,
-          tenants: tenantMap.get(i.tenant_id) || { name: 'Farmácia' }
-        }));
-        return res.json({ data: formatted });
-      }
-      return res.status(500).json({ error: error.message });
+    const filterTenantId = (req.query.tenantId || req.query.tenant_id || req.query.store_id || req.headers['x-tenant-id'] || req.headers['x-store-id']) as string;
+
+    // 1. Busca todos os tenants (ou tenant filtrado)
+    let tenantQuery = supabaseAdmin
+      .from('tenants')
+      .select('id, name, slug, last_seen, agent_last_seen, erp_type, is_active');
+
+    if (filterTenantId) {
+      const cleanFilter = filterTenantId.replace(/^store_/, '').replace(/^tenant_/, '').trim();
+      tenantQuery = tenantQuery.or(`id.eq.${cleanFilter},slug.eq.${cleanFilter}`);
     }
-    
-    return res.json({ data: integrations || [] });
+
+    const { data: tenantsList, error: tenantsError } = await tenantQuery;
+
+    // 2. Busca todos os registros de agent_integrations
+    let agentQuery = supabaseAdmin
+      .from('agent_integrations')
+      .select('*');
+
+    if (filterTenantId) {
+      const cleanFilter = filterTenantId.replace(/^store_/, '').replace(/^tenant_/, '').trim();
+      agentQuery = agentQuery.eq('tenant_id', cleanFilter);
+    }
+
+    const { data: agentRows } = await agentQuery;
+
+    // Mapa de registros de agent_integrations
+    const agentMap = new Map<string, any>();
+    if (agentRows) {
+      for (const row of agentRows) {
+        if (row.tenant_id) {
+          agentMap.set(row.tenant_id, row);
+        }
+      }
+    }
+
+    const finalIntegrations: any[] = [];
+    const processedTenantIds = new Set<string>();
+
+    if (tenantsList && tenantsList.length > 0) {
+      for (const t of tenantsList) {
+        processedTenantIds.add(t.id);
+        const agent = agentMap.get(t.id);
+
+        // Encontra o timestamp mais recente entre agent_integrations e tenants
+        const candidateDates = [
+          agent?.last_seen,
+          t.agent_last_seen,
+          t.last_seen
+        ].filter(Boolean).map((d: any) => new Date(d).getTime()).filter(n => !isNaN(n) && n > 0);
+
+        const latestTimestamp = candidateDates.length > 0
+          ? new Date(Math.max(...candidateDates)).toISOString()
+          : null;
+
+        finalIntegrations.push({
+          id: agent?.id || t.id,
+          tenant_id: t.id,
+          machine_id: agent?.machine_id || 'Servidor Local',
+          is_active: agent?.is_active ?? t.is_active ?? true,
+          last_seen: latestTimestamp,
+          activation_token: agent?.activation_token || null,
+          tenants: {
+            id: t.id,
+            name: t.name,
+            slug: t.slug
+          }
+        });
+      }
+    }
+
+    // Se houver registros em agent_integrations cujo tenant_id não estava na lista de tenants
+    if (agentRows) {
+      for (const agent of agentRows) {
+        if (agent.tenant_id && !processedTenantIds.has(agent.tenant_id)) {
+          finalIntegrations.push({
+            id: agent.id,
+            tenant_id: agent.tenant_id,
+            machine_id: agent.machine_id || 'Servidor Local',
+            is_active: agent.is_active ?? true,
+            last_seen: agent.last_seen || null,
+            activation_token: agent.activation_token || null,
+            tenants: {
+              id: agent.tenant_id,
+              name: 'Farmácia'
+            }
+          });
+        }
+      }
+    }
+
+    console.log(`[DESKTOP AGENT STATUS] Retornando status de ${finalIntegrations.length} integrações/lojas. Filtro: "${filterTenantId || 'todas'}"`);
+    return res.json({ data: finalIntegrations });
   } catch (error: any) {
-    return res.status(500).json({ error: "Erro interno no servidor", details: error.message });
+    console.error("[DESKTOP AGENT STATUS ERROR]", error);
+    return res.status(500).json({ error: "Erro interno no servidor ao obter status dos agentes", details: error.message });
   }
 };
 
@@ -4808,7 +4913,9 @@ app.all([
   "/api/v1/integration/status",
   "/api/v1/agent/status",
   "/api/v1/desktop-agent/status",
-  "/api/desktop-agent/status"
+  "/api/desktop-agent/status",
+  "/api/integration/status",
+  "/api/agent/status"
 ], handleAgentStatus);
 
 const handleProductIntegration = async (req: express.Request, res: express.Response) => {

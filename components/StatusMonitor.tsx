@@ -14,15 +14,23 @@ interface Integration {
   };
 }
 
-export const StatusMonitor: React.FC = () => {
+interface StatusMonitorProps {
+  tenantId?: string;
+}
+
+export const StatusMonitor: React.FC<StatusMonitorProps> = ({ tenantId }) => {
   const [integrations, setIntegrations] = useState<Integration[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
 
   const fetchStatus = async () => {
     try {
       setRefreshing(true);
-      const response = await fetch('/api/v1/integration/status');
+      const url = tenantId 
+        ? `/api/v1/integration/status?tenantId=${encodeURIComponent(tenantId)}` 
+        : '/api/v1/integration/status';
+      const response = await fetch(url);
       if (response.ok) {
         const { data } = await response.json();
         setIntegrations(data || []);
@@ -37,10 +45,10 @@ export const StatusMonitor: React.FC = () => {
 
   useEffect(() => {
     fetchStatus();
-    // Atualiza a cada 30 segundos
-    const interval = setInterval(fetchStatus, 30000);
+    // Atualiza a cada 20 segundos
+    const interval = setInterval(fetchStatus, 20000);
     return () => clearInterval(interval);
-  }, []);
+  }, [tenantId]);
 
   const formatRelativeTime = (lastSeen: string | null): string => {
     if (!lastSeen) return 'Sem sinal registrado';
@@ -103,6 +111,16 @@ export const StatusMonitor: React.FC = () => {
     };
   };
 
+  const filteredIntegrations = integrations.filter(item => {
+    if (!searchTerm.trim()) return true;
+    const term = searchTerm.toLowerCase();
+    const name = (item.tenants?.name || '').toLowerCase();
+    const slug = (item.tenants?.slug || '').toLowerCase();
+    const machine = (item.machine_id || '').toLowerCase();
+    const tenantIdStr = (item.tenant_id || '').toLowerCase();
+    return name.includes(term) || slug.includes(term) || machine.includes(term) || tenantIdStr.includes(term);
+  });
+
   const onlineCount = integrations.filter(i => {
     if (!i.last_seen) return false;
     const diffMin = (Date.now() - new Date(i.last_seen).getTime()) / (1000 * 60);
@@ -136,7 +154,7 @@ export const StatusMonitor: React.FC = () => {
           </div>
         </div>
 
-        <div className="flex items-center gap-3 self-start sm:self-auto">
+        <div className="flex items-center gap-3 self-start sm:self-auto flex-wrap">
           {/* Quick Metrics */}
           <div className="flex items-center gap-2 bg-gray-50 px-3 py-1.5 rounded-xl border border-gray-100 text-xs font-bold">
             <span className="flex items-center gap-1 text-emerald-700">
@@ -155,7 +173,7 @@ export const StatusMonitor: React.FC = () => {
             type="button"
             onClick={fetchStatus}
             disabled={refreshing}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-50 hover:bg-gray-100 text-gray-700 rounded-xl border border-gray-200 text-xs font-bold transition-colors disabled:opacity-50"
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-50 hover:bg-gray-100 text-gray-700 rounded-xl border border-gray-200 text-xs font-bold transition-colors disabled:opacity-50 cursor-pointer"
             title="Atualizar status agora"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin text-emerald-600' : ''}`} />
@@ -163,6 +181,19 @@ export const StatusMonitor: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* Search Filter (if multiple integrations) */}
+      {integrations.length > 2 && (
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            placeholder="Buscar por nome da farmácia, @slug ou machine id..."
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="w-full bg-gray-50 border border-gray-200 rounded-xl px-3.5 py-2 text-xs font-medium text-gray-800 placeholder-gray-400 focus:bg-white focus:border-emerald-500 focus:outline-none transition-colors"
+          />
+        </div>
+      )}
 
       {/* Table */}
       <div className="overflow-x-auto border border-gray-100 rounded-2xl">
@@ -176,16 +207,24 @@ export const StatusMonitor: React.FC = () => {
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-50">
-            {integrations.length === 0 ? (
+            {filteredIntegrations.length === 0 ? (
               <tr>
                 <td colSpan={4} className="py-12 text-center">
                   <AlertCircle className="w-8 h-8 text-gray-300 mx-auto mb-2" />
-                  <p className="text-sm font-semibold text-gray-700">Nenhum Agente Desktop registrado ainda.</p>
-                  <p className="text-xs text-gray-400 mt-1">Gere um token de ativação e instale o aplicativo no computador da farmácia.</p>
+                  <p className="text-sm font-semibold text-gray-700">
+                    {integrations.length === 0 
+                      ? 'Nenhum Agente Desktop registrado ainda.' 
+                      : 'Nenhuma farmácia encontrada para a busca.'}
+                  </p>
+                  <p className="text-xs text-gray-400 mt-1">
+                    {integrations.length === 0 
+                      ? 'Gere um token de ativação e instale o aplicativo no computador da farmácia.' 
+                      : 'Verifique o termo digitado no campo de busca acima.'}
+                  </p>
                 </td>
               </tr>
             ) : (
-              integrations.map((integration) => {
+              filteredIntegrations.map((integration) => {
                 const status = getStatus(integration.last_seen);
                 const relativeTime = formatRelativeTime(integration.last_seen);
                 const fullDate = integration.last_seen ? new Date(integration.last_seen).toLocaleString('pt-BR') : 'Nunca';
