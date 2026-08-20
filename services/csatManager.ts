@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
+import { evolutionApiService } from "./evolutionApiService.js";
 
 const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || "https://nalshjhoiecxooejpiaw.supabase.co";
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_Y2lAqlvDUhdjSNtv80GkJA_SiOgynYy";
@@ -45,26 +46,12 @@ export class CsatManager {
 
       const storeId = order.tenant_id;
       const instanceName = `store_${storeId.replace(/-/g, "")}`;
-      const evolutionUrl = process.env.EVOLUTION_API_URL?.replace(/\/$/, "");
-      const evolutionKey = process.env.EVOLUTION_API_KEY;
-
-      if (!evolutionUrl || !evolutionKey) return;
-
+      
       const csatPromptText = `Olá, ${order.customer_name || "Cliente"}! 🛵💨\n\nSeu pedido na farmácia foi entregue! Por favor, como você avalia nosso atendimento e a entrega?\n\nResponda com uma nota de *1 a 5*:\n\n1️⃣ - Muito Insatisfeito\n2️⃣ - Insatisfeito\n3️⃣ - Neutro\n4️⃣ - Satisfeito\n5️⃣ - Excelente!`;
 
       const targetPhone = order.phone.replace(/\D/g, "");
 
-      await fetch(`${evolutionUrl}/message/sendText/${instanceName}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          apikey: evolutionKey,
-        },
-        body: JSON.stringify({
-          number: targetPhone,
-          text: csatPromptText,
-        }),
-      });
+      await evolutionApiService.sendTextMessage(instanceName, targetPhone, csatPromptText);
 
       console.log(`[CsatManager] CSAT survey sent for order ${orderId} to phone ${order.phone}`);
     } catch (err) {

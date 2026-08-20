@@ -17,6 +17,8 @@ export interface RefillCustomer {
   };
 }
 
+import { evolutionApiService } from "./evolutionApiService.js";
+
 export class ContinuousUseRefillManager {
   private static instance: ContinuousUseRefillManager;
 
@@ -87,17 +89,8 @@ export class ContinuousUseRefillManager {
 
             // Enviar mensagem via Evolution API
             const targetPhone = contact.phone.replace(/\D/g, "");
-            await fetch(`${evolutionUrl}/message/sendText/${instanceName}`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                apikey: evolutionKey,
-              },
-              body: JSON.stringify({
-                number: targetPhone,
-                text: messageText,
-              }),
-            });
+            
+            await evolutionApiService.sendTextMessage(instanceName, targetPhone, messageText);
 
             // Atualizar o timestamp do último lembrete no custom_attributes
             const updatedAttrs = {

@@ -19,6 +19,7 @@ export function getEvolutionConfig() {
 
   const key = (
     process.env.EVOLUTION_API_KEY ||
+    process.env.EVOLUTION_GLOBAL_KEY ||
     process.env.EVOLUTION_API_TOKEN ||
     DEFAULT_EVOLUTION_KEY
   ).trim();
@@ -89,6 +90,29 @@ export class EvolutionApiService {
   }
 
   /**
+   * Obtém a URL e Chave API priorizando a configuração específica da instância no banco,
+   * e usando os valores globais como fallback.
+   */
+  public async getInstanceConfig(instanceName: string): Promise<{ url: string; key: string }> {
+    const globalConfig = getEvolutionConfig();
+    try {
+      const { data: inst } = await supabaseAdmin
+        .from("whatsapp_instances")
+        .select("evolution_url, evolution_key")
+        .eq("instance_name", instanceName.trim())
+        .maybeSingle();
+
+      return {
+        url: inst?.evolution_url?.trim() || globalConfig.url,
+        key: inst?.evolution_key?.trim() || globalConfig.key,
+      };
+    } catch (e: any) {
+      console.warn(`[EvolutionAPI] Erro ao buscar config da instância "${instanceName}":`, e.message);
+      return globalConfig;
+    }
+  }
+
+  /**
    * Envia uma mensagem de texto simples via Evolution API com tratamento completo de erros e logs
    */
   public async sendTextMessage(
@@ -97,8 +121,6 @@ export class EvolutionApiService {
     text: string,
     options?: SendMessageOptions
   ): Promise<{ success: boolean; data?: any; error?: string; status?: number }> {
-    const { url, key } = getEvolutionConfig();
-
     const cleanNumber = String(phoneNumber || "").replace(/\D/g, "");
     if (!cleanNumber) {
       const err = `Número de telefone inválido ou vazio: "${phoneNumber}"`;
@@ -112,6 +134,7 @@ export class EvolutionApiService {
       return { success: false, error: err };
     }
 
+    const { url, key: apiKeyToUse } = await this.getInstanceConfig(instanceName);
     const targetUrl = `${url}/message/sendText/${instanceName.trim()}`;
     const payload = {
       number: cleanNumber,
@@ -125,6 +148,7 @@ export class EvolutionApiService {
     };
 
     console.log(`[EvolutionAPI] Disparando sendText para ${cleanNumber} via instância "${instanceName}" | URL: ${targetUrl}`);
+    console.log(`[EvolutionAPI] Enviando requisição com apikey iniciando em: ${apiKeyToUse ? apiKeyToUse.substring(0, 6) + '...' : 'NULA/INDIFINIDA'}`);
     console.log(`[EvolutionAPI] Payload enviado:`, JSON.stringify(payload, null, 2));
 
     try {
@@ -132,9 +156,7 @@ export class EvolutionApiService {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "apikey": key,
-          "apiKey": key,
-          "Authorization": `Bearer ${key}`
+          "apikey": apiKeyToUse
         },
         body: JSON.stringify(payload)
       });
@@ -188,7 +210,7 @@ export class EvolutionApiService {
     buttonUrl: string,
     footer?: string
   ): Promise<{ success: boolean; data?: any; error?: string; status?: number }> {
-    const { url, key } = getEvolutionConfig();
+    const { url, key: apiKeyToUse } = await this.getInstanceConfig(instanceName);
     const cleanNumber = String(phoneNumber || "").replace(/\D/g, "");
 
     const targetUrl = `${url}/message/sendTemplate/${instanceName.trim()}`;
@@ -212,15 +234,14 @@ export class EvolutionApiService {
     };
 
     console.log(`[EvolutionAPI] Disparando sendTemplate para ${cleanNumber} via instância "${instanceName}" | URL: ${targetUrl}`);
+    console.log(`[EvolutionAPI] Enviando requisição com apikey iniciando em: ${apiKeyToUse ? apiKeyToUse.substring(0, 6) + '...' : 'NULA/INDIFINIDA'}`);
 
     try {
       const response = await fetch(targetUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "apikey": key,
-          "apiKey": key,
-          "Authorization": `Bearer ${key}`
+          "apikey": apiKeyToUse
         },
         body: JSON.stringify(payload)
       });
