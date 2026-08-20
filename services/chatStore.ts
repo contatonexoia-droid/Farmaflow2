@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import { inboxStore } from "./inboxStore.js";
-import { evolutionApiService } from "./evolutionApiService";
+import { evolutionApiService } from "./evolutionApiService.js";
 
 function stringToUuid(str: string): string {
   const hash = crypto.createHash('md5').update(str).digest('hex');
