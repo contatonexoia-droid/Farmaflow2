@@ -863,6 +863,10 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       is_bot_active: nextStatus,
       is_human_controlled: !nextStatus,
       assigned_user_id: nextStatus ? null : selectedConversation.assigned_user_id,
+      assigned_to: nextStatus ? null : selectedConversation.assigned_to,
+      bot_interaction_count: nextStatus ? 0 : selectedConversation.bot_interaction_count,
+      bot_handoff_reason: nextStatus ? null : selectedConversation.bot_handoff_reason,
+      bot_handoff_at: nextStatus ? null : selectedConversation.bot_handoff_at,
       status: nextStatus ? 'bot' : 'human_takeover',
       kanban_stage: nextStatus ? 'BOT' : 'HUMAN'
     };

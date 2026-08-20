@@ -368,7 +368,10 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
       is_bot_active: isTargetBot,
       is_human_controlled: isTargetHuman || !isTargetBot,
       assigned_user_id: isTargetBot ? null : targetConv.assigned_user_id,
-      assigned_to: isTargetBot ? null : targetConv.assigned_to
+      assigned_to: isTargetBot ? null : targetConv.assigned_to,
+      bot_interaction_count: isTargetBot ? 0 : targetConv.bot_interaction_count,
+      bot_handoff_reason: isTargetBot ? null : targetConv.bot_handoff_reason,
+      bot_handoff_at: isTargetBot ? null : targetConv.bot_handoff_at
     };
 
     if (onConversationsChange) {
@@ -399,6 +402,9 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
       is_human_controlled: !nextStatus,
       assigned_user_id: nextStatus ? null : targetConv.assigned_user_id,
       assigned_to: nextStatus ? null : targetConv.assigned_to,
+      bot_interaction_count: nextStatus ? 0 : targetConv.bot_interaction_count,
+      bot_handoff_reason: nextStatus ? null : targetConv.bot_handoff_reason,
+      bot_handoff_at: nextStatus ? null : targetConv.bot_handoff_at,
       kanban_stage: targetStage,
       status: nextStatus ? 'bot' : 'human_takeover'
     };

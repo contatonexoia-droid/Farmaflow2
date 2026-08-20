@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { realtimeHub } from "./realtimeHub.js";
+import { chatStore, sanitizeChatConversationPayload } from "./chatStore.js";
 
 const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || "https://nalshjhoiecxooejpiaw.supabase.co";
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_Y2lAqlvDUhdjSNtv80GkJA_SiOgynYy";
@@ -100,23 +101,28 @@ export class BotHandoffManager {
 
     if (assignedOperator) {
       // Atribuído diretamente a um operador ativo
+      const handoffData: any = {
+        assigned_user_id: assignedOperator.id,
+        status: "human_takeover",
+        kanban_stage: "HUMAN",
+        is_human_controlled: true,
+        is_bot_active: false,
+        bot_handoff_reason: reason,
+        bot_handoff_at: nowIso,
+        updated_at: nowIso
+      };
+
       try {
+        const sanitized = sanitizeChatConversationPayload(handoffData);
         await supabaseAdmin
           .from("chat_conversations")
-          .update({
-            assigned_user_id: assignedOperator.id,
-            status: "human_takeover",
-            kanban_stage: "HUMAN",
-            is_human_controlled: true,
-            is_bot_active: false,
-            bot_handoff_reason: reason,
-            bot_handoff_at: nowIso,
-            updated_at: nowIso
-          })
+          .update(sanitized)
           .eq("id", conversationId);
       } catch (e: any) {
         console.warn("[BotHandoffManager] Erro ao atualizar status no supabase:", e.message);
       }
+
+      await chatStore.updateConversationBotStatus(conversationId, handoffData);
 
       realtimeHub.broadcastToStore(storeId, "conversation_status_changed", {
         conversationId,
@@ -137,23 +143,28 @@ export class BotHandoffManager {
       };
     } else {
       // Nenhum operador disponível no momento: marcar como pendente/unassigned na fila
+      const handoffData: any = {
+        assigned_user_id: null,
+        status: "human_takeover",
+        kanban_stage: "HUMAN",
+        is_human_controlled: true,
+        is_bot_active: false,
+        bot_handoff_reason: reason,
+        bot_handoff_at: nowIso,
+        updated_at: nowIso
+      };
+
       try {
+        const sanitized = sanitizeChatConversationPayload(handoffData);
         await supabaseAdmin
           .from("chat_conversations")
-          .update({
-            assigned_user_id: null,
-            status: "human_takeover",
-            kanban_stage: "HUMAN",
-            is_human_controlled: true,
-            is_bot_active: false,
-            bot_handoff_reason: reason,
-            bot_handoff_at: nowIso,
-            updated_at: nowIso
-          })
+          .update(sanitized)
           .eq("id", conversationId);
       } catch (e: any) {
         console.warn("[BotHandoffManager] Erro ao atualizar status pendente no supabase:", e.message);
       }
+
+      await chatStore.updateConversationBotStatus(conversationId, handoffData);
 
       realtimeHub.broadcastToStore(storeId, "conversation_status_changed", {
         conversationId,
@@ -204,11 +215,21 @@ export class BotHandoffManager {
         updateData.status = "human_takeover";
       }
 
-      await supabaseAdmin
+      // 1. Atualização no banco de dados Supabase/PostgreSQL com payload higienizado
+      const dbPayload = sanitizeChatConversationPayload(updateData);
+      const { error: dbErr } = await supabaseAdmin
         .from("chat_conversations")
-        .update(updateData)
+        .update(dbPayload)
         .eq("id", conversationId);
 
+      if (dbErr) {
+        console.error("[BotHandoffManager] Erro ao persistir toggleBotActive no PostgreSQL:", dbErr.message, dbErr);
+      }
+
+      // 2. Atualização atômica na memória do ChatStore
+      await chatStore.updateConversationBotStatus(conversationId, updateData);
+
+      // 3. Notificação via realtimeHub para todos os clientes conectados
       realtimeHub.broadcastToStore(storeId, "conversation_bot_toggled", {
         conversationId,
         is_bot_active: isBotActive,
@@ -226,6 +247,15 @@ export class BotHandoffManager {
         assigned_user_id: isBotActive ? null : undefined,
         status: updateData.status,
         kanban_stage: isBotActive ? "BOT" : "HUMAN"
+      });
+
+      realtimeHub.broadcastToStore(storeId, "conversation_stage_changed", {
+        conversationId,
+        stage: isBotActive ? "BOT" : "HUMAN",
+        status: updateData.status,
+        is_bot_active: isBotActive,
+        assigned_user_id: isBotActive ? null : undefined,
+        updated_at: nowIso
       });
 
       return true;

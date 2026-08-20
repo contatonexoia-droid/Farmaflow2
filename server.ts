@@ -7191,29 +7191,6 @@ app.post("/api/v1/chat/conversations/:id/labels", async (req, res) => {
   }
 });
 
-app.post("/api/v1/chat/conversations/:id/stage", async (req, res) => {
-  try {
-    const conversationId = req.params.id;
-    const { stage, assignedUserId, storeId } = req.body;
-    const resolvedStoreId = storeId || (req.headers["x-tenant-id"] as string) || "default";
-
-    if (!stage) {
-      return res.status(400).json({ error: "stage é obrigatório" });
-    }
-
-    const updated = await chatStore.updateConversationStage(
-      conversationId,
-      resolvedStoreId,
-      stage,
-      assignedUserId
-    );
-    return res.json({ success: true, data: updated });
-  } catch (err: any) {
-    console.error("[Chat API] Erro ao atualizar estágio da conversa:", err);
-    return res.status(500).json({ error: err.message });
-  }
-});
-
 // --- CANNED RESPONSES ENDPOINTS ---
 app.get("/api/v1/chat/canned-responses", async (req, res) => {
   try {

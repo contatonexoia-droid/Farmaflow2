@@ -83,6 +83,36 @@ export interface CannedResponse {
   created_at: string;
 }
 
+export const VALID_CHAT_CONVERSATION_COLUMNS = new Set([
+  "id",
+  "store_id",
+  "contact_id",
+  "assigned_user_id",
+  "inbox_id",
+  "status",
+  "unread_count",
+  "last_message_at",
+  "created_at",
+  "updated_at",
+  "last_message_content",
+  "last_welcome_sent_at",
+  "kanban_stage",
+  "is_bot_active",
+  "bot_interaction_count",
+  "bot_handoff_reason",
+  "bot_handoff_at"
+]);
+
+export function sanitizeChatConversationPayload(data: Record<string, any>): Record<string, any> {
+  const sanitized: Record<string, any> = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (VALID_CHAT_CONVERSATION_COLUMNS.has(key) && value !== undefined) {
+      sanitized[key] = value;
+    }
+  }
+  return sanitized;
+}
+
 class ChatStore {
   private contacts: ChatContact[] = [];
   private conversations: ChatConversation[] = [];
@@ -498,7 +528,8 @@ class ChatStore {
         convUpdates.bot_handoff_at = now;
       }
 
-      const { error: convErr } = await supabaseAdmin.from("chat_conversations").update(convUpdates).eq("id", conversationId);
+      const sanitizedConvUpdates = sanitizeChatConversationPayload(convUpdates);
+      const { error: convErr } = await supabaseAdmin.from("chat_conversations").update(sanitizedConvUpdates).eq("id", conversationId);
 
       if (convErr) {
         console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao atualizar conversa no addMessage', convErr.message, convErr);
@@ -813,7 +844,8 @@ class ChatStore {
         convUpsertData.bot_handoff_at = now;
       }
 
-      const { error } = await supabaseAdmin.from("chat_conversations").upsert([convUpsertData], { onConflict: "id" });
+      const sanitizedUpsert = sanitizeChatConversationPayload(convUpsertData);
+      const { error } = await supabaseAdmin.from("chat_conversations").upsert([sanitizedUpsert], { onConflict: "id" });
       
       if (error) {
         console.error('[ERRO CRITICO NO BACKGROUND]: Erro na busca ou criação da conversa (chat_conversations)', error.message, error);
@@ -1158,11 +1190,15 @@ class ChatStore {
     }
 
     try {
-      await supabaseAdmin
+      const sanitizedPayload = sanitizeChatConversationPayload(finalUpdates);
+      const { error } = await supabaseAdmin
         .from("chat_conversations")
-        .update(finalUpdates)
+        .update(sanitizedPayload)
         .eq("id", conversationId);
-    } catch (err) {
+      if (error) {
+        console.error("[ChatStore] updateConversationBotStatus Supabase error:", error.message, error);
+      }
+    } catch (err: any) {
       console.warn("[ChatStore] updateConversationBotStatus error:", err);
     }
     const idx = this.conversations.findIndex(c => c.id === conversationId);
@@ -1229,10 +1265,14 @@ class ChatStore {
     }
 
     try {
-      await supabaseAdmin
+      const sanitizedUpdates = sanitizeChatConversationPayload(updates);
+      const { error } = await supabaseAdmin
         .from("chat_conversations")
-        .update(updates)
+        .update(sanitizedUpdates)
         .eq("id", conversationId);
+      if (error) {
+        console.error("[ChatStore] updateConversationStage Supabase error:", error.message, error);
+      }
     } catch (err: any) {
       console.warn("[ChatStore] updateConversationStage Supabase fallback:", err.message);
     }
