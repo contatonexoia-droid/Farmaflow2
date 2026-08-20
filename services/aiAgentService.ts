@@ -272,24 +272,80 @@ export class AiAgentService {
       throw new Error(`Drogaria não encontrada (ID/Slug: ${tenantId}).`);
     }
 
-    // 5. Carregar configurações avançadas do agente (agent_settings) caso existam vinculadas ao UUID do tenant
+    // 5. Carregar configurações avançadas do agente (agent_settings) vinculadas ao UUID, slug ou fallback do tenant
     try {
-      const { data: agentSetting } = await supabaseAdmin
+      const orConditions = [
+        `tenant_id.eq.${tenant.id}`,
+        `store_id.eq.${tenant.id}`,
+        tenant.slug ? `slug.eq.${tenant.slug}` : '',
+        tenant.slug ? `tenant_id.eq.${tenant.slug}` : '',
+        tenant.slug ? `store_id.eq.${tenant.slug}` : '',
+        `tenant_id.eq.nosso-catalogo`,
+        `store_id.eq.nosso-catalogo`,
+        `slug.eq.nosso-catalogo`,
+        `tenant_id.eq.nossocatalogo`,
+        `store_id.eq.nossocatalogo`
+      ].filter(Boolean).join(",");
+
+      let { data: agentSetting } = await supabaseAdmin
         .from("agent_settings")
         .select("*")
-        .or(`tenant_id.eq.${tenant.id},store_id.eq.${tenant.id}`)
+        .or(orConditions)
+        .order("updated_at", { ascending: false })
         .limit(1)
         .maybeSingle();
 
+      // Fallback: se não encontrar por ID/slug, tenta o primeiro registro de agent_settings
+      if (!agentSetting) {
+        const { data: fallbackSettings } = await supabaseAdmin
+          .from("agent_settings")
+          .select("*")
+          .order("created_at", { ascending: true })
+          .limit(1)
+          .maybeSingle();
+        if (fallbackSettings) {
+          agentSetting = fallbackSettings;
+        }
+      }
+
       if (agentSetting) {
+        const resolvedApiKey = (
+          agentSetting.openai_api_key ||
+          agentSetting.api_key ||
+          agentSetting.apikey ||
+          agentSetting.gemini_api_key ||
+          agentSetting.apiKey ||
+          agentSetting.key
+        )?.trim();
+
+        const resolvedProvider = agentSetting.provider || (agentSetting.openai_api_key ? 'openai' : 'gemini');
+
         tenant.ai_agent_config = {
           ...(tenant.ai_agent_config || tenant.aiagentconfig || {}),
           ...agentSetting,
+          apiKey: resolvedApiKey || tenant.ai_agent_config?.apiKey || tenant.ai_agent_config?.openai_api_key,
+          openai_api_key: agentSetting.openai_api_key || agentSetting.api_key || resolvedApiKey,
+          provider: resolvedProvider,
           active: agentSetting.active ?? agentSetting.enabled ?? tenant.ai_agent_config?.active ?? true
         };
+
+        console.log(`[AiAgentService] Configurações de IA carregadas com sucesso para "${tenant.name}" (@${tenant.slug || tenant.id}) - Provedor: ${resolvedProvider}, Chave configurada: ${Boolean(resolvedApiKey || process.env.OPENAI_API_KEY || process.env.GEMINI_API_KEY)}`);
       }
-    } catch (_) {
-      // Ignora se a tabela agent_settings não existir ou não possuir o registro
+    } catch (agentErr: any) {
+      console.warn("[AiAgentService] Aviso ao carregar agent_settings:", agentErr.message);
+    }
+
+    // Validação e log crítico caso a chave da OpenAI não esteja configurada
+    const currentProvider = tenant.ai_agent_config?.provider || 'openai';
+    const currentKey = (
+      tenant.ai_agent_config?.apiKey ||
+      tenant.ai_agent_config?.openai_api_key ||
+      tenant.ai_agent_config?.api_key ||
+      (currentProvider === 'gemini' ? process.env.GEMINI_API_KEY : process.env.OPENAI_API_KEY)
+    )?.trim();
+
+    if ((currentProvider === 'openai' || !currentKey) && !currentKey) {
+      console.error(`[AiAgentService] [ERRO] Chave de API da OpenAI não configurada para o tenant ${tenant.name || tenant.slug || tenant.id}.`);
     }
 
     const isEnabled = tenant.is_ai_agent_enabled === true || tenant.isaiagentenabled === true;
@@ -518,9 +574,17 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
     const fullSystemInstruction = `${basePrompt}${catalogContext}${finalTurnDirective}\n\nLembre-se: Link da Webloja: ${storeLink}`;
 
     const provider = effectiveConfig.provider || 'gemini';
-    const apiKey = effectiveConfig.apiKey?.trim() || (provider === 'gemini' ? process.env.GEMINI_API_KEY : process.env.OPENAI_API_KEY);
+    const apiKey = (
+      effectiveConfig.apiKey?.trim() ||
+      effectiveConfig.openai_api_key?.trim() ||
+      (effectiveConfig as any).api_key?.trim() ||
+      (provider === 'gemini' ? process.env.GEMINI_API_KEY : process.env.OPENAI_API_KEY)
+    )?.trim();
 
     if (!apiKey) {
+      if (provider === 'openai') {
+        console.error(`[AiAgentService] [ERRO] Chave de API da OpenAI não configurada para o tenant ${tenant.name || tenant.slug || tenant.id}.`);
+      }
       const providerLabel = provider === 'gemini' ? 'Google AI Studio (Gemini)' : 'OpenAI (ChatGPT)';
       const keyUrl = provider === 'gemini' ? 'https://aistudio.google.com/app/apikey' : 'https://platform.openai.com/api-keys';
       throw new Error(`Por favor, insira sua Chave de API do ${providerLabel} nas configurações ao lado para ativar as respostas inteligentes. Obtenha sua chave em: ${keyUrl}`);
@@ -601,8 +665,18 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
 
       const conv = await chatStore.getConversationById(conversationId);
       if (conv) {
-        // Se o operador humano já assumiu ou o bot foi silenciado
-        if (conv.is_bot_active === false || (conv.status === "OPEN" && conv.assigned_user_id)) {
+        // Se o operador humano já assumiu ou o bot foi silenciado / transferido
+        const isHumanControlled = 
+          conv.is_human_controlled === true ||
+          conv.is_bot_active === false ||
+          conv.status === "human_takeover" ||
+          conv.status === "HUMAN" ||
+          (conv.status === "OPEN" && Boolean(conv.assigned_user_id || (conv as any).assigned_to)) ||
+          Boolean((conv as any).assigned_to) ||
+          Boolean(conv.assigned_user_id);
+
+        if (isHumanControlled) {
+          console.log(`[AiAgentService] IA pausada para a conversa ${conversationId}: Atendimento humano ativo.`);
           return { handled: false, transferredToHuman: true, reason: "ALREADY_HUMAN_ASSIGNED" };
         }
       }

@@ -35,8 +35,10 @@ export interface ChatConversation {
   inbox_id?: string | null;
   team_id?: string | null;
   assigned_user_id?: string | null;
-  status: "OPEN" | "PENDING" | "CLOSED" | "BOT";
-  kanban_stage?: "NEW" | "BOT" | "WAITING" | "STORE_REDIRECT" | "HUMAN" | "CLOSED";
+  assigned_to?: string | null;
+  is_human_controlled?: boolean;
+  status: "OPEN" | "PENDING" | "CLOSED" | "BOT" | string;
+  kanban_stage?: "NEW" | "BOT" | "WAITING" | "STORE_REDIRECT" | "HUMAN" | "CLOSED" | string;
   last_message_at: string;
   last_message_content: string;
   unread_count?: number;

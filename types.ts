@@ -158,6 +158,8 @@ export interface AiAgentConfig {
   enabled?: boolean;
   provider: 'gemini' | 'openai';
   apiKey?: string;
+  openai_api_key?: string;
+  api_key?: string;
   model?: string;
   systemPrompt?: string;
   storeLink?: string;
@@ -170,6 +172,7 @@ export interface AiAgentConfig {
   transitionToHumanMessage?: string;
   antiAbuseGuardrailsEnabled?: boolean;
   strictStoreLinkEnforcement?: boolean;
+  [key: string]: any;
 }
 
 export interface PharmacyConfig {
