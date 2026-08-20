@@ -179,30 +179,73 @@ export class AiAgentService {
       throw new Error("ID da drogaria não informado.");
     }
 
-    // Sanitização segura: remove o prefixo 'store_' caso o identificador venha diretamente da Evolution API (ex: store_nossocatalogo -> nossocatalogo)
-    const sanitizedId = typeof tenantId === 'string' 
-      ? tenantId.trim().replace(/^store_/, '') 
-      : tenantId;
+    // Sanitização segura: remove prefixos como 'store_', 'inbox_', 'tenant_'
+    const rawId = String(tenantId).trim();
+    const sanitizedId = rawId
+      .replace(/^store_/, '')
+      .replace(/^inbox_/, '')
+      .replace(/^tenant_/, '');
 
     let tenant: any = null;
+    const isUuid = /^[0-9a-f-]{36}$/i.test(sanitizedId) || /^[0-9a-f-]{36}$/i.test(rawId);
 
-    // Tenta buscar por ID direto ou por slug (usando o sanitizedId e o tenantId original com fallback)
-    const { data: tenantData, error } = await supabaseAdmin
-      .from("tenants")
-      .select("*")
-      .or(`id.eq.${sanitizedId},slug.eq.${sanitizedId},id.eq.${tenantId},slug.eq.${tenantId}`)
-      .maybeSingle();
-
-    if (!error && tenantData) {
-      tenant = tenantData;
-    } else {
-      // Fallback: busca por slug ou ID isolado
-      const { data: fallbackTenant } = await supabaseAdmin
+    // 1. Se for UUID, busca diretamente por ID
+    if (isUuid) {
+      const targetUuid = /^[0-9a-f-]{36}$/i.test(sanitizedId) ? sanitizedId : rawId;
+      const { data, error } = await supabaseAdmin
         .from("tenants")
         .select("*")
-        .or(`slug.eq.${sanitizedId},id.eq.${sanitizedId}`)
+        .eq("id", targetUuid)
         .maybeSingle();
-      tenant = fallbackTenant;
+      if (!error && data) {
+        tenant = data;
+      }
+    }
+
+    // 2. Se não for UUID ou não encontrou por ID, busca por slug sanitizado
+    if (!tenant && sanitizedId) {
+      const { data, error } = await supabaseAdmin
+        .from("tenants")
+        .select("*")
+        .eq("slug", sanitizedId)
+        .maybeSingle();
+      if (!error && data) {
+        tenant = data;
+      }
+    }
+
+    // 3. Fallback adicional: busca pelo rawId como slug
+    if (!tenant && rawId && rawId !== sanitizedId) {
+      const { data, error } = await supabaseAdmin
+        .from("tenants")
+        .select("*")
+        .eq("slug", rawId)
+        .maybeSingle();
+      if (!error && data) {
+        tenant = data;
+      }
+    }
+
+    // 4. Fallback por instância do WhatsApp na tabela whatsapp_instances
+    if (!tenant) {
+      try {
+        const { data: inst } = await supabaseAdmin
+          .from("whatsapp_instances")
+          .select("store_id")
+          .or(`instance_name.eq.${rawId},instance_name.eq.${sanitizedId},instance_name.eq.store_${sanitizedId}`)
+          .limit(1)
+          .maybeSingle();
+
+        if (inst?.store_id) {
+          const instStoreIsUuid = /^[0-9a-f-]{36}$/i.test(inst.store_id);
+          const { data: t } = instStoreIsUuid
+            ? await supabaseAdmin.from("tenants").select("*").eq("id", inst.store_id).maybeSingle()
+            : await supabaseAdmin.from("tenants").select("*").eq("slug", inst.store_id.replace(/^store_/, '')).maybeSingle();
+          if (t) tenant = t;
+        }
+      } catch (instErr: any) {
+        console.warn("[AiAgentService] Aviso ao buscar por whatsapp_instances:", instErr.message);
+      }
     }
 
     if (!tenant) {
@@ -503,8 +546,9 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
     reason?: string;
   }> {
     try {
-      // 1. Obter tenant e validar se o módulo de IA está autorizado
+      // 1. Obter tenant e validar se o módulo de IA está autorizado (resolvendo o UUID real)
       const tenant = await this.verifyTenantAuthorization(storeId);
+      const realTenantId = tenant.id || storeId;
       const dbConfig: AiAgentConfig = tenant.ai_agent_config || tenant.aiagentconfig || {};
 
       if (!dbConfig.active && !dbConfig.enabled) {
@@ -515,7 +559,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       const conv = await chatStore.getConversationById(conversationId);
       if (conv) {
         // Se o operador humano já assumiu ou o bot foi silenciado
-        if (conv.is_bot_active === false || conv.status === "OPEN" && conv.assigned_user_id) {
+        if (conv.is_bot_active === false || (conv.status === "OPEN" && conv.assigned_user_id)) {
           return { handled: false, transferredToHuman: true, reason: "ALREADY_HUMAN_ASSIGNED" };
         }
       }
@@ -531,10 +575,42 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       }
       storeLink = storeLink.replace(/\/+$/, '');
 
-      // 4. Verificar Termos Sensíveis de Transbordo Imediato (ex: receita, falar com humano)
+      // 4. Tratamento especial para anexos e documentos (PDFs, receitas médicas, fotos)
+      const isDocumentAttachment = incomingMessage.includes("[Documento]") || incomingMessage === "[Documento]";
+      const isMediaAttachment = incomingMessage === "[Imagem]" || incomingMessage === "[Áudio]" || incomingMessage === "[Vídeo]" || incomingMessage === "[Figurinha]";
+
+      if (isDocumentAttachment || isMediaAttachment) {
+        console.log(`[AiAgentService] Anexo detectado (${incomingMessage}) para conversa ${conversationId}. Registrando e acionando transbordo para conferência humana.`);
+        const attachmentType = isDocumentAttachment ? "documento/receita" : "arquivo";
+        const replyText = `Olá! Recebemos o seu ${attachmentType} com sucesso. 📄\n\nJá encaminhei para a nossa equipe de atendimento para conferência e orçamento. Um de nossos balconistas humanos irá responder em instantes!\n\n🛍️ *Nossa Loja Online:* ${storeLink}`;
+
+        await chatStore.addMessage(realTenantId, conversationId, "BOT", replyText, false, options?.instanceName);
+        await botHandoffManager.triggerHandoff(
+          conversationId, 
+          realTenantId, 
+          isDocumentAttachment ? "DOCUMENT_RECEIVED" : "MEDIA_RECEIVED", 
+          transitionMsg
+        );
+        await chatStore.updateConversationBotStatus(conversationId, {
+          is_bot_active: false,
+          bot_handoff_reason: isDocumentAttachment ? "DOCUMENT_RECEIVED" : "MEDIA_RECEIVED",
+          kanban_stage: "HUMAN",
+          status: "OPEN",
+          bot_handoff_at: new Date().toISOString()
+        });
+
+        return {
+          handled: true,
+          replyText,
+          transferredToHuman: true,
+          reason: isDocumentAttachment ? "DOCUMENT_RECEIVED" : "MEDIA_RECEIVED"
+        };
+      }
+
+      // 5. Verificar Termos Sensíveis de Transbordo Imediato (ex: receita, falar com humano)
       const handoffCheck = await botHandoffManager.processMessageState(
         conversationId,
-        storeId,
+        realTenantId,
         incomingMessage,
         conv?.status || "BOT"
       );
@@ -543,7 +619,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         const transMessage = `${handoffCheck.message || transitionMsg}\n\n🛍️ *Nossa Webloja:* ${storeLink}`;
         
         // Enviar mensagem pelo canal
-        await chatStore.addMessage(storeId, conversationId, "BOT", transMessage, false, options?.instanceName);
+        await chatStore.addMessage(realTenantId, conversationId, "BOT", transMessage, false, options?.instanceName);
         await chatStore.updateConversationBotStatus(conversationId, {
           is_bot_active: false,
           bot_handoff_reason: handoffCheck.handoffReason || "KEYWORD_TRIGGER",
@@ -560,15 +636,15 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         };
       }
 
-      // 5. Verificar Proteção Ativa Anti-Abuso / Prompt Injection
+      // 6. Verificar Proteção Ativa Anti-Abuso / Prompt Injection
       if (dbConfig.antiAbuseGuardrailsEnabled !== false) {
         const abuseCheck = detectAbuseOrPromptInjection(incomingMessage);
         if (abuseCheck.isSuspicious) {
           console.warn(`[AiAgentService] Abuso/Injection bloqueado para conversa ${conversationId}:`, abuseCheck.reason);
           const safeReply = `Olá! Para garantir a sua segurança e o melhor suporte sobre nossos produtos e medicamentos, você pode consultar nosso catálogo completo e valores em nossa Loja Online:\n👉 ${storeLink}\n\n${transitionMsg}`;
 
-          await chatStore.addMessage(storeId, conversationId, "BOT", safeReply, false, options?.instanceName);
-          await botHandoffManager.triggerHandoff(conversationId, storeId, "SECURITY_INJECTION_DETECTED", transitionMsg);
+          await chatStore.addMessage(realTenantId, conversationId, "BOT", safeReply, false, options?.instanceName);
+          await botHandoffManager.triggerHandoff(conversationId, realTenantId, "SECURITY_INJECTION_DETECTED", transitionMsg);
           await chatStore.updateConversationBotStatus(conversationId, {
             is_bot_active: false,
             bot_handoff_reason: "SECURITY_INJECTION_DETECTED",
@@ -584,10 +660,10 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         }
       }
 
-      // 6. Se já tiver atingido o limite de mensagens da sessão
+      // 7. Se já tiver atingido o limite de mensagens da sessão
       if (currentCount >= maxInteractions) {
         console.log(`[AiAgentService] Limite de interações atingido (${currentCount}/${maxInteractions}) para conversa ${conversationId}. Silenciando IA.`);
-        await botHandoffManager.triggerHandoff(conversationId, storeId, "MAX_INTERACTIONS_REACHED", transitionMsg);
+        await botHandoffManager.triggerHandoff(conversationId, realTenantId, "MAX_INTERACTIONS_REACHED", transitionMsg);
         return {
           handled: false,
           transferredToHuman: true,
@@ -595,14 +671,14 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         };
       }
 
-      // 7. Carregar histórico recente da conversa para contexto
+      // 8. Carregar histórico recente da conversa para contexto
       const history = options?.chatHistory || [];
       const nextCount = currentCount + 1;
       const isFinalTurn = nextCount >= maxInteractions;
 
-      // 8. Gerar resposta com a LLM
+      // 9. Gerar resposta com a LLM
       const aiResult = await this.generateReply(
-        storeId,
+        realTenantId,
         incomingMessage,
         history,
         dbConfig
@@ -610,14 +686,14 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
 
       let finalReply = aiResult.reply;
 
-      // 9. Se for a última interação da sessão, realizar transbordo definitivo para humano
+      // 10. Se for a última interação da sessão, realizar transbordo definitivo para humano
       if (isFinalTurn || aiResult.transferredToHuman) {
         if (!finalReply.includes("balconista") && !finalReply.includes("atendente humano")) {
           finalReply = `${finalReply}\n\n${transitionMsg}`;
         }
 
-        await chatStore.addMessage(storeId, conversationId, "BOT", finalReply, false, options?.instanceName);
-        await botHandoffManager.triggerHandoff(conversationId, storeId, "MAX_INTERACTIONS_REACHED", transitionMsg);
+        await chatStore.addMessage(realTenantId, conversationId, "BOT", finalReply, false, options?.instanceName);
+        await botHandoffManager.triggerHandoff(conversationId, realTenantId, "MAX_INTERACTIONS_REACHED", transitionMsg);
         await chatStore.updateConversationBotStatus(conversationId, {
           is_bot_active: false,
           bot_interaction_count: nextCount,
@@ -635,8 +711,8 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         };
       }
 
-      // 10. Interação normal do bot: Enviar mensagem e incrementar contador
-      await chatStore.addMessage(storeId, conversationId, "BOT", finalReply, false, options?.instanceName);
+      // 11. Interação normal do bot: Enviar mensagem e incrementar contador
+      await chatStore.addMessage(realTenantId, conversationId, "BOT", finalReply, false, options?.instanceName);
       await chatStore.updateConversationBotStatus(conversationId, {
         is_bot_active: true,
         bot_interaction_count: nextCount,
@@ -672,32 +748,8 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       throw new Error("Texto base é obrigatório para processamento da IA.");
     }
 
-    // 1. Validar autorização do tenant no Super Admin
-    const sanitizedId = typeof tenantId === 'string' 
-      ? tenantId.trim().replace(/^store_/, '') 
-      : tenantId;
-
-    let tenant: any = null;
-    const { data: tenantData } = await supabaseAdmin
-      .from("tenants")
-      .select("*")
-      .or(`id.eq.${sanitizedId},slug.eq.${sanitizedId},id.eq.${tenantId},slug.eq.${tenantId}`)
-      .maybeSingle();
-
-    if (tenantData) {
-      tenant = tenantData;
-    } else {
-      const { data: fallbackTenant } = await supabaseAdmin
-        .from("tenants")
-        .select("*")
-        .or(`slug.eq.${sanitizedId},id.eq.${sanitizedId}`)
-        .maybeSingle();
-      tenant = fallbackTenant;
-    }
-
-    if (!tenant) {
-      throw new Error(`Drogaria não encontrada (${tenantId}).`);
-    }
+    // 1. Validar autorização do tenant no Super Admin usando resolução robusta
+    const tenant = await this.verifyTenantAuthorization(tenantId);
 
     const isCopilotAllowed = 
       tenant.is_ai_copilot_enabled === true || 

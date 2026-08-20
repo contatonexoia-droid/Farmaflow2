@@ -6649,11 +6649,20 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
         } catch (e) {}
       }
 
+      // Fallback adicional por slug caso a instância contenha o nome da loja
+      if (!resolvedTenant && instanceName) {
+        try {
+          const searchSlug = instanceName.replace(/^store_/, '').replace(/^inbox_/, '');
+          const { data: t } = await supabaseAdmin.from("tenants").select("*").eq("slug", searchSlug).maybeSingle();
+          if (t) resolvedTenant = t;
+        } catch (e) {}
+      }
+
       if (resolvedTenant?.id) {
         storeId = resolvedTenant.id;
       }
 
-      console.log(`[WEBHOOK] Instância identificada: ${instanceName || 'N/A'} | Tenant: ${resolvedTenant?.slug || storeId} (ID: ${storeId}) | Mensagens a processar: ${messages.length}`);
+      console.log(`[WEBHOOK] Instância identificada: ${instanceName || 'N/A'} | Tenant: ${resolvedTenant?.slug || storeId} (UUID: ${storeId}) | Mensagens a processar: ${messages.length}`);
 
       for (const msg of messages) {
         if (!msg) continue;
