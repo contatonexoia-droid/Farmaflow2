@@ -529,11 +529,22 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       if (res.ok) {
         const json = await res.json();
         if (json.data && Array.isArray(json.data)) {
-          let list = json.data.map((c: any) => ({
-            ...c,
-            contact: c.contact || { name: 'Cliente sem nome', phone_number: '' },
-            kanban_stage: c.kanban_stage || (c.status === 'CLOSED' ? 'CLOSED' : c.is_bot_active !== false && (c.status === 'BOT' || !c.status) ? 'BOT' : c.status === 'PENDING' ? 'WAITING' : c.bot_handoff_reason === 'STORE_REDIRECT' ? 'STORE_REDIRECT' : c.assigned_user_id ? 'HUMAN' : 'NEW')
-          }));
+          let list = json.data.map((c: any) => {
+            const isHuman = c.is_human_controlled === true || Boolean(c.assigned_user_id) || Boolean(c.assigned_to) || c.is_bot_active === false || c.status === 'human_takeover' || c.status === 'HUMAN';
+            let stage = c.kanban_stage;
+            if (!stage) {
+              if (c.status === 'CLOSED') stage = 'CLOSED';
+              else if (isHuman) stage = (c.status === 'PENDING' ? 'WAITING' : c.bot_handoff_reason === 'STORE_REDIRECT' ? 'STORE_REDIRECT' : 'HUMAN');
+              else stage = (c.status === 'PENDING' ? 'WAITING' : c.bot_handoff_reason === 'STORE_REDIRECT' ? 'STORE_REDIRECT' : 'BOT');
+            }
+            return {
+              ...c,
+              contact: c.contact || { name: 'Cliente sem nome', phone_number: '' },
+              is_human_controlled: isHuman,
+              is_bot_active: !isHuman && c.is_bot_active !== false,
+              kanban_stage: stage
+            };
+          });
 
           if (isOperador && userId && allowedIds.length > 0) {
             list = list.filter((c: any) => !c.inbox_id || allowedIds.includes(c.inbox_id));
@@ -551,11 +562,22 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
 
       const { data, error } = await query;
       if (!error && data && data.length > 0) {
-        let list = data.map((c: any) => ({
-          ...c,
-          contact: c.contact || { name: 'Cliente sem nome', phone_number: '' },
-          kanban_stage: c.kanban_stage || (c.status === 'CLOSED' ? 'CLOSED' : c.is_bot_active !== false && (c.status === 'BOT' || !c.status) ? 'BOT' : c.status === 'PENDING' ? 'WAITING' : c.bot_handoff_reason === 'STORE_REDIRECT' ? 'STORE_REDIRECT' : c.assigned_user_id ? 'HUMAN' : 'NEW')
-        }));
+        let list = data.map((c: any) => {
+          const isHuman = c.is_human_controlled === true || Boolean(c.assigned_user_id) || Boolean(c.assigned_to) || c.is_bot_active === false || c.status === 'human_takeover' || c.status === 'HUMAN';
+          let stage = c.kanban_stage;
+          if (!stage) {
+            if (c.status === 'CLOSED') stage = 'CLOSED';
+            else if (isHuman) stage = (c.status === 'PENDING' ? 'WAITING' : c.bot_handoff_reason === 'STORE_REDIRECT' ? 'STORE_REDIRECT' : 'HUMAN');
+            else stage = (c.status === 'PENDING' ? 'WAITING' : c.bot_handoff_reason === 'STORE_REDIRECT' ? 'STORE_REDIRECT' : 'BOT');
+          }
+          return {
+            ...c,
+            contact: c.contact || { name: 'Cliente sem nome', phone_number: '' },
+            is_human_controlled: isHuman,
+            is_bot_active: !isHuman && c.is_bot_active !== false,
+            kanban_stage: stage
+          };
+        });
         if (isOperador && userId && allowedIds.length > 0) {
           list = list.filter((c: any) => !c.inbox_id || allowedIds.includes(c.inbox_id));
         }
@@ -564,11 +586,22 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
         const saved = localStorage.getItem(`chat_conversations_${tenantId}`);
         if (saved) {
           try {
-            let list = JSON.parse(saved).map((c: any) => ({
-              ...c,
-              contact: c.contact || { name: 'Cliente sem nome', phone_number: '' },
-              kanban_stage: c.kanban_stage || (c.status === 'CLOSED' ? 'CLOSED' : c.is_bot_active !== false && (c.status === 'BOT' || !c.status) ? 'BOT' : c.status === 'PENDING' ? 'WAITING' : c.bot_handoff_reason === 'STORE_REDIRECT' ? 'STORE_REDIRECT' : c.assigned_user_id ? 'HUMAN' : 'NEW')
-            }));
+            let list = JSON.parse(saved).map((c: any) => {
+              const isHuman = c.is_human_controlled === true || Boolean(c.assigned_user_id) || Boolean(c.assigned_to) || c.is_bot_active === false || c.status === 'human_takeover' || c.status === 'HUMAN';
+              let stage = c.kanban_stage;
+              if (!stage) {
+                if (c.status === 'CLOSED') stage = 'CLOSED';
+                else if (isHuman) stage = (c.status === 'PENDING' ? 'WAITING' : c.bot_handoff_reason === 'STORE_REDIRECT' ? 'STORE_REDIRECT' : 'HUMAN');
+                else stage = (c.status === 'PENDING' ? 'WAITING' : c.bot_handoff_reason === 'STORE_REDIRECT' ? 'STORE_REDIRECT' : 'BOT');
+              }
+              return {
+                ...c,
+                contact: c.contact || { name: 'Cliente sem nome', phone_number: '' },
+                is_human_controlled: isHuman,
+                is_bot_active: !isHuman && c.is_bot_active !== false,
+                kanban_stage: stage
+              };
+            });
             if (isOperador && userId && allowedIds.length > 0) {
               list = list.filter((c: any) => !c.inbox_id || allowedIds.includes(c.inbox_id));
             }
@@ -772,7 +805,14 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
 
   const handleAssumeConversation = () => {
     if (!selectedConversation) return;
-    const updated = { ...selectedConversation, assigned_user_id: 'my-user-id', status: 'OPEN' };
+    const updated = { 
+      ...selectedConversation, 
+      assigned_user_id: userId || 'my-user-id', 
+      is_human_controlled: true,
+      is_bot_active: false,
+      status: 'human_takeover',
+      kanban_stage: 'HUMAN'
+    };
     setSelectedConversation(updated);
     setConversations(conversations.map(c => c.id === updated.id ? updated : c));
   };
@@ -795,14 +835,17 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
     
     if (transferData.userId) {
        updated.assigned_user_id = transferData.userId;
-       updated.status = 'OPEN';
-       // We can also clear inbox if needed, or just change user
+       updated.is_human_controlled = true;
+       updated.is_bot_active = false;
+       updated.status = 'human_takeover';
+       updated.kanban_stage = 'HUMAN';
     }
     
     if (transferData.inboxId) {
        updated.inbox_id = transferData.inboxId;
        updated.assigned_user_id = null; // Send back to queue of that inbox
        updated.status = 'PENDING';
+       updated.kanban_stage = 'WAITING';
     }
 
     setSelectedConversation(updated);
@@ -811,11 +854,18 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
 
   const handleToggleBot = async () => {
     if (!selectedConversation) return;
-    const currentStatus = selectedConversation.is_bot_active !== false;
+    const currentStatus = selectedConversation.is_bot_active !== false && !selectedConversation.is_human_controlled && !selectedConversation.assigned_user_id;
     const nextStatus = !currentStatus;
     
     // Optimistic UI update
-    const updated = { ...selectedConversation, is_bot_active: nextStatus };
+    const updated = { 
+      ...selectedConversation, 
+      is_bot_active: nextStatus,
+      is_human_controlled: !nextStatus,
+      assigned_user_id: nextStatus ? null : selectedConversation.assigned_user_id,
+      status: nextStatus ? 'bot' : 'human_takeover',
+      kanban_stage: nextStatus ? 'BOT' : 'HUMAN'
+    };
     setSelectedConversation(updated);
     setConversations(conversations.map(c => c.id === updated.id ? updated : c));
 

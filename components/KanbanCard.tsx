@@ -59,7 +59,16 @@ export const KanbanCard: React.FC<KanbanCardProps> = ({
   const phoneNumber = conversation.contact?.phone_number || '';
   const lastMessage = conversation.last_message_content || 'Sem mensagens recentes';
   const unreadCount = conversation.unread_count || 0;
-  const isBotActive = conversation.is_bot_active !== false;
+  
+  // Consistência estrita: se for controlado por humano, atribuído a atendente ou bot pausado, não é bot ativo
+  const isHumanControlled = 
+    conversation.is_human_controlled === true || 
+    Boolean(conversation.assigned_user_id) || 
+    Boolean(conversation.assigned_to) || 
+    conversation.is_bot_active === false || 
+    conversation.status === 'human_takeover' || 
+    conversation.status === 'HUMAN';
+  const isBotActive = !isHumanControlled && conversation.is_bot_active !== false;
   const botCount = conversation.bot_interaction_count || 0;
 
   // Format relative time

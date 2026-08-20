@@ -249,20 +249,47 @@ class ChatStore {
       if (!error && data) {
         const conversations = data as any[];
         for (const conv of conversations) {
-          // Normalize legacy conversations where kanban_stage is NULL or undefined
-          if (!conv.kanban_stage || !["NEW", "BOT", "WAITING", "STORE_REDIRECT", "HUMAN", "CLOSED"].includes(conv.kanban_stage)) {
-            if (conv.status === "CLOSED") {
+          // Reconciliação retroativa e estrita entre status, flags humanas e estágios do Kanban
+          const isHumanControlled = 
+            conv.is_human_controlled === true ||
+            Boolean(conv.assigned_user_id) ||
+            Boolean(conv.assigned_to) ||
+            conv.is_bot_active === false ||
+            conv.status === "human_takeover" ||
+            conv.status === "HUMAN";
+
+          if (isHumanControlled) {
+            conv.is_human_controlled = true;
+            conv.is_bot_active = false;
+            if (conv.status === "bot" || conv.status === "BOT" || !conv.status) {
+              conv.status = "human_takeover";
+            }
+            if (conv.status === "CLOSED" || conv.kanban_stage === "CLOSED") {
               conv.kanban_stage = "CLOSED";
-            } else if (conv.is_bot_active !== false && (conv.status === "BOT" || !conv.status)) {
-              conv.kanban_stage = "BOT";
-            } else if (conv.status === "PENDING") {
+            } else if (conv.kanban_stage === "WAITING" || conv.status === "PENDING") {
               conv.kanban_stage = "WAITING";
-            } else if (conv.bot_handoff_reason === "STORE_REDIRECT") {
+            } else if (conv.kanban_stage === "STORE_REDIRECT" || conv.bot_handoff_reason === "STORE_REDIRECT") {
               conv.kanban_stage = "STORE_REDIRECT";
-            } else if (conv.assigned_user_id) {
-              conv.kanban_stage = "HUMAN";
             } else {
+              conv.kanban_stage = "HUMAN";
+            }
+          } else {
+            // Estado IA Atendendo
+            conv.is_human_controlled = false;
+            conv.is_bot_active = true;
+            conv.assigned_user_id = null;
+            conv.assigned_to = null;
+            if (conv.status === "CLOSED" || conv.kanban_stage === "CLOSED") {
+              conv.kanban_stage = "CLOSED";
+            } else if (conv.kanban_stage === "WAITING" || conv.status === "PENDING") {
+              conv.kanban_stage = "WAITING";
+            } else if (conv.kanban_stage === "STORE_REDIRECT" || conv.bot_handoff_reason === "STORE_REDIRECT") {
+              conv.kanban_stage = "STORE_REDIRECT";
+            } else if (conv.kanban_stage === "NEW") {
               conv.kanban_stage = "NEW";
+            } else {
+              conv.kanban_stage = "BOT";
+              conv.status = "bot";
             }
           }
           conv.labels = await this.getConversationLabels(conv.id);
@@ -287,19 +314,45 @@ class ChatStore {
       if (!conv.contact && conv.contact_id) {
         conv.contact = this.contacts.find(c => c.id === conv.contact_id);
       }
-      if (!conv.kanban_stage || !["NEW", "BOT", "WAITING", "STORE_REDIRECT", "HUMAN", "CLOSED"].includes(conv.kanban_stage)) {
-        if (conv.status === "CLOSED") {
+      const isHumanControlled = 
+        conv.is_human_controlled === true ||
+        Boolean(conv.assigned_user_id) ||
+        Boolean(conv.assigned_to) ||
+        conv.is_bot_active === false ||
+        conv.status === "human_takeover" ||
+        conv.status === "HUMAN";
+
+      if (isHumanControlled) {
+        conv.is_human_controlled = true;
+        conv.is_bot_active = false;
+        if (conv.status === "bot" || conv.status === "BOT" || !conv.status) {
+          conv.status = "human_takeover";
+        }
+        if (conv.status === "CLOSED" || conv.kanban_stage === "CLOSED") {
           conv.kanban_stage = "CLOSED";
-        } else if (conv.is_bot_active !== false && (conv.status === "BOT" || !conv.status)) {
-          conv.kanban_stage = "BOT";
-        } else if (conv.status === "PENDING") {
+        } else if (conv.kanban_stage === "WAITING" || conv.status === "PENDING") {
           conv.kanban_stage = "WAITING";
-        } else if (conv.bot_handoff_reason === "STORE_REDIRECT") {
+        } else if (conv.kanban_stage === "STORE_REDIRECT" || conv.bot_handoff_reason === "STORE_REDIRECT") {
           conv.kanban_stage = "STORE_REDIRECT";
-        } else if (conv.assigned_user_id) {
-          conv.kanban_stage = "HUMAN";
         } else {
+          conv.kanban_stage = "HUMAN";
+        }
+      } else {
+        conv.is_human_controlled = false;
+        conv.is_bot_active = true;
+        conv.assigned_user_id = null;
+        conv.assigned_to = null;
+        if (conv.status === "CLOSED" || conv.kanban_stage === "CLOSED") {
+          conv.kanban_stage = "CLOSED";
+        } else if (conv.kanban_stage === "WAITING" || conv.status === "PENDING") {
+          conv.kanban_stage = "WAITING";
+        } else if (conv.kanban_stage === "STORE_REDIRECT" || conv.bot_handoff_reason === "STORE_REDIRECT") {
+          conv.kanban_stage = "STORE_REDIRECT";
+        } else if (conv.kanban_stage === "NEW") {
           conv.kanban_stage = "NEW";
+        } else {
+          conv.kanban_stage = "BOT";
+          conv.status = "bot";
         }
       }
       conv.labels = await this.getConversationLabels(conv.id);
@@ -430,9 +483,22 @@ class ChatStore {
         console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao inserir mensagem no addMessage', error.message, error);
       }
 
-      const { error: convErr } = await supabaseAdmin.from("chat_conversations").update({
-        last_message_at: now
-      }).eq("id", conversationId);
+      const convUpdates: any = {
+        last_message_at: now,
+        last_message_content: content
+      };
+
+      // Se um operador humano enviou mensagem manual externa, assumir controle da conversa atomicamente
+      if (senderType === "USER" && !isPrivate) {
+        convUpdates.is_human_controlled = true;
+        convUpdates.is_bot_active = false;
+        convUpdates.status = "human_takeover";
+        convUpdates.kanban_stage = "HUMAN";
+        convUpdates.bot_handoff_reason = "HUMAN_OPERATOR_MESSAGE";
+        convUpdates.bot_handoff_at = now;
+      }
+
+      const { error: convErr } = await supabaseAdmin.from("chat_conversations").update(convUpdates).eq("id", conversationId);
 
       if (convErr) {
         console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao atualizar conversa no addMessage', convErr.message, convErr);
@@ -460,7 +526,10 @@ class ChatStore {
         store_id: storeId,
         contact_id: defaultContact.id,
         inbox_id: defaultInboxId,
-        status: "OPEN",
+        status: senderType === "USER" && !isPrivate ? "human_takeover" : "OPEN",
+        is_human_controlled: senderType === "USER" && !isPrivate ? true : false,
+        is_bot_active: senderType === "USER" && !isPrivate ? false : true,
+        kanban_stage: senderType === "USER" && !isPrivate ? "HUMAN" : "NEW",
         last_message_at: now,
         last_message_content: content,
         contact: defaultContact,
@@ -470,10 +539,20 @@ class ChatStore {
       this.conversations.push(newConv);
       convIndex = this.conversations.length - 1;
     } else {
+      const prevConv = this.conversations[convIndex];
+      const isHuman = (senderType === "USER" && !isPrivate) ? true : prevConv.is_human_controlled;
       this.conversations[convIndex] = {
-        ...this.conversations[convIndex],
+        ...prevConv,
         last_message_at: now,
-        last_message_content: content
+        last_message_content: content,
+        ...(senderType === "USER" && !isPrivate ? {
+          is_human_controlled: true,
+          is_bot_active: false,
+          status: "human_takeover",
+          kanban_stage: "HUMAN",
+          bot_handoff_reason: "HUMAN_OPERATOR_MESSAGE",
+          bot_handoff_at: now
+        } : {})
       };
     }
 
@@ -702,7 +781,10 @@ class ChatStore {
       store_id: storeId,
       contact_id: contactId,
       inbox_id: resolvedInboxId,
-      status: "OPEN",
+      status: fromMe ? "human_takeover" : (convInfo?.status || "OPEN"),
+      is_human_controlled: fromMe ? true : (convInfo?.is_human_controlled || false),
+      is_bot_active: fromMe ? false : (convInfo?.is_bot_active !== false),
+      kanban_stage: fromMe ? "HUMAN" : (convInfo?.kanban_stage || "NEW"),
       last_message_at: now,
       last_message_content: text,
       unread_count: newUnreadCount,
@@ -712,16 +794,26 @@ class ChatStore {
 
     // 3. Busca ou criação da conversa (chat_conversations)
     try {
-      const { error } = await supabaseAdmin.from("chat_conversations").upsert([{
+      const convUpsertData: any = {
         id: convId,
         store_id: storeId,
         contact_id: contactId,
         inbox_id: resolvedInboxId,
-        status: "OPEN",
         last_message_at: now,
         last_message_content: text,
         unread_count: newUnreadCount
-      }], { onConflict: "id" });
+      };
+
+      if (fromMe) {
+        convUpsertData.is_human_controlled = true;
+        convUpsertData.is_bot_active = false;
+        convUpsertData.status = "human_takeover";
+        convUpsertData.kanban_stage = "HUMAN";
+        convUpsertData.bot_handoff_reason = "HUMAN_OPERATOR_MESSAGE";
+        convUpsertData.bot_handoff_at = now;
+      }
+
+      const { error } = await supabaseAdmin.from("chat_conversations").upsert([convUpsertData], { onConflict: "id" });
       
       if (error) {
         console.error('[ERRO CRITICO NO BACKGROUND]: Erro na busca ou criação da conversa (chat_conversations)', error.message, error);
@@ -966,6 +1058,7 @@ class ChatStore {
   }
 
   public async getConversationById(conversationId: string): Promise<ChatConversation | null> {
+    let conv: any = null;
     try {
       const { data, error } = await supabaseAdmin
         .from("chat_conversations")
@@ -973,33 +1066,101 @@ class ChatStore {
         .eq("id", conversationId)
         .maybeSingle();
       if (!error && data) {
-        return data as ChatConversation;
+        conv = data;
       }
     } catch (err) {
       console.warn("[ChatStore] getConversationById fallback:", err);
     }
-    const found = this.conversations.find(c => c.id === conversationId);
-    return found || null;
+    if (!conv) {
+      conv = this.conversations.find(c => c.id === conversationId) || null;
+    }
+    if (conv) {
+      const isHuman = 
+        conv.is_human_controlled === true ||
+        Boolean(conv.assigned_user_id) ||
+        Boolean(conv.assigned_to) ||
+        conv.is_bot_active === false ||
+        conv.status === "human_takeover" ||
+        conv.status === "HUMAN";
+
+      if (isHuman) {
+        conv.is_human_controlled = true;
+        conv.is_bot_active = false;
+        if (conv.status === "bot" || conv.status === "BOT" || !conv.status) {
+          conv.status = "human_takeover";
+        }
+        if (conv.status === "CLOSED" || conv.kanban_stage === "CLOSED") {
+          conv.kanban_stage = "CLOSED";
+        } else if (conv.kanban_stage === "WAITING" || conv.status === "PENDING") {
+          conv.kanban_stage = "WAITING";
+        } else if (conv.kanban_stage === "STORE_REDIRECT" || conv.bot_handoff_reason === "STORE_REDIRECT") {
+          conv.kanban_stage = "STORE_REDIRECT";
+        } else {
+          conv.kanban_stage = "HUMAN";
+        }
+      } else {
+        conv.is_human_controlled = false;
+        conv.is_bot_active = true;
+        conv.assigned_user_id = null;
+        conv.assigned_to = null;
+        if (conv.status === "CLOSED" || conv.kanban_stage === "CLOSED") {
+          conv.kanban_stage = "CLOSED";
+        } else if (conv.kanban_stage === "WAITING" || conv.status === "PENDING") {
+          conv.kanban_stage = "WAITING";
+        } else if (conv.kanban_stage === "STORE_REDIRECT" || conv.bot_handoff_reason === "STORE_REDIRECT") {
+          conv.kanban_stage = "STORE_REDIRECT";
+        } else if (conv.kanban_stage === "NEW") {
+          conv.kanban_stage = "NEW";
+        } else {
+          conv.kanban_stage = "BOT";
+          conv.status = "bot";
+        }
+      }
+    }
+    return conv as ChatConversation | null;
   }
 
   public async updateConversationBotStatus(
     conversationId: string,
     updates: {
       is_bot_active?: boolean;
+      is_human_controlled?: boolean;
       bot_interaction_count?: number;
-      bot_handoff_reason?: string;
-      bot_handoff_at?: string;
-      status?: "OPEN" | "PENDING" | "CLOSED" | "BOT";
+      bot_handoff_reason?: string | null;
+      bot_handoff_at?: string | null;
+      status?: "OPEN" | "PENDING" | "CLOSED" | "BOT" | "human_takeover" | "bot" | "HUMAN";
       kanban_stage?: "NEW" | "BOT" | "WAITING" | "STORE_REDIRECT" | "HUMAN" | "CLOSED";
       assigned_user_id?: string | null;
+      assigned_to?: string | null;
       last_message_at?: string;
       last_message_content?: string;
     }
   ): Promise<void> {
+    const finalUpdates: any = { ...updates, updated_at: new Date().toISOString() };
+
+    if (updates.is_bot_active === true) {
+      finalUpdates.is_bot_active = true;
+      finalUpdates.is_human_controlled = false;
+      finalUpdates.assigned_user_id = null;
+      finalUpdates.assigned_to = null;
+      finalUpdates.status = "bot";
+      finalUpdates.kanban_stage = "BOT";
+      finalUpdates.bot_interaction_count = 0;
+      finalUpdates.bot_handoff_reason = null;
+      finalUpdates.bot_handoff_at = null;
+    } else if (updates.is_bot_active === false || updates.is_human_controlled === true) {
+      finalUpdates.is_bot_active = false;
+      finalUpdates.is_human_controlled = true;
+      finalUpdates.status = "human_takeover";
+      finalUpdates.kanban_stage = updates.kanban_stage || "HUMAN";
+      finalUpdates.bot_handoff_reason = updates.bot_handoff_reason || "OPERATOR_TAKEOVER";
+      finalUpdates.bot_handoff_at = updates.bot_handoff_at || new Date().toISOString();
+    }
+
     try {
       await supabaseAdmin
         .from("chat_conversations")
-        .update(updates)
+        .update(finalUpdates)
         .eq("id", conversationId);
     } catch (err) {
       console.warn("[ChatStore] updateConversationBotStatus error:", err);
@@ -1008,7 +1169,7 @@ class ChatStore {
     if (idx >= 0) {
       this.conversations[idx] = {
         ...this.conversations[idx],
-        ...updates
+        ...finalUpdates
       };
       this.saveToFile();
     }
@@ -1028,16 +1189,21 @@ class ChatStore {
 
     if (assignedUserId !== undefined) {
       updates.assigned_user_id = assignedUserId;
+      updates.assigned_to = assignedUserId;
     }
 
     switch (targetStage) {
       case "NEW":
         updates.status = "OPEN";
         updates.is_bot_active = false;
+        updates.is_human_controlled = false;
         break;
       case "BOT":
-        updates.status = "BOT";
+        updates.status = "bot";
         updates.is_bot_active = true;
+        updates.is_human_controlled = false;
+        updates.assigned_user_id = null;
+        updates.assigned_to = null;
         updates.bot_interaction_count = 0;
         updates.bot_handoff_reason = null;
         updates.bot_handoff_at = null;
@@ -1050,8 +1216,9 @@ class ChatStore {
         updates.bot_handoff_reason = "STORE_REDIRECT";
         break;
       case "HUMAN":
-        updates.status = "OPEN";
+        updates.status = "human_takeover";
         updates.is_bot_active = false;
+        updates.is_human_controlled = true;
         updates.bot_handoff_reason = "OPERATOR_ASSIGNED_OR_HANDOFF";
         updates.bot_handoff_at = nowIso;
         break;

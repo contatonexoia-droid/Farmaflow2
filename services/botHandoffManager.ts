@@ -105,8 +105,9 @@ export class BotHandoffManager {
           .from("chat_conversations")
           .update({
             assigned_user_id: assignedOperator.id,
-            status: "OPEN",
+            status: "human_takeover",
             kanban_stage: "HUMAN",
+            is_human_controlled: true,
             is_bot_active: false,
             bot_handoff_reason: reason,
             bot_handoff_at: nowIso,
@@ -119,8 +120,9 @@ export class BotHandoffManager {
 
       realtimeHub.broadcastToStore(storeId, "conversation_status_changed", {
         conversationId,
-        status: "OPEN",
+        status: "human_takeover",
         kanban_stage: "HUMAN",
+        is_human_controlled: true,
         is_bot_active: false,
         assigned_user_id: assignedOperator.id,
         bot_handoff_reason: reason
@@ -140,8 +142,9 @@ export class BotHandoffManager {
           .from("chat_conversations")
           .update({
             assigned_user_id: null,
-            status: "PENDING",
+            status: "human_takeover",
             kanban_stage: "HUMAN",
+            is_human_controlled: true,
             is_bot_active: false,
             bot_handoff_reason: reason,
             bot_handoff_at: nowIso,
@@ -154,8 +157,9 @@ export class BotHandoffManager {
 
       realtimeHub.broadcastToStore(storeId, "conversation_status_changed", {
         conversationId,
-        status: "PENDING",
+        status: "human_takeover",
         kanban_stage: "HUMAN",
+        is_human_controlled: true,
         is_bot_active: false,
         assigned_user_id: null,
         bot_handoff_reason: reason
@@ -182,19 +186,22 @@ export class BotHandoffManager {
     try {
       const updateData: any = {
         is_bot_active: isBotActive,
+        is_human_controlled: !isBotActive,
         kanban_stage: isBotActive ? "BOT" : "HUMAN",
         updated_at: nowIso
       };
       if (isBotActive) {
-        // Ao reativar o bot, reseta o contador de interações da sessão
+        // Ao reativar o bot ("Devolver para IA"), limpa atendente e reseta contador
+        updateData.assigned_user_id = null;
+        updateData.assigned_to = null;
         updateData.bot_interaction_count = 0;
         updateData.bot_handoff_reason = null;
         updateData.bot_handoff_at = null;
-        updateData.status = "BOT";
+        updateData.status = "bot";
       } else {
         updateData.bot_handoff_reason = "OPERATOR_TAKEOVER";
         updateData.bot_handoff_at = nowIso;
-        updateData.status = "OPEN";
+        updateData.status = "human_takeover";
       }
 
       await supabaseAdmin
@@ -205,8 +212,20 @@ export class BotHandoffManager {
       realtimeHub.broadcastToStore(storeId, "conversation_bot_toggled", {
         conversationId,
         is_bot_active: isBotActive,
+        is_human_controlled: !isBotActive,
+        assigned_user_id: isBotActive ? null : undefined,
+        status: updateData.status,
         kanban_stage: isBotActive ? "BOT" : "HUMAN",
         bot_interaction_count: isBotActive ? 0 : undefined
+      });
+
+      realtimeHub.broadcastToStore(storeId, "conversation_status_changed", {
+        conversationId,
+        is_bot_active: isBotActive,
+        is_human_controlled: !isBotActive,
+        assigned_user_id: isBotActive ? null : undefined,
+        status: updateData.status,
+        kanban_stage: isBotActive ? "BOT" : "HUMAN"
       });
 
       return true;

@@ -119,16 +119,36 @@ export interface ChatKanbanProps {
   onRefresh?: () => void;
 }
 
-// Determina dinamicamente o estágio correto da conversa
+// Determina dinamicamente o estágio correto da conversa com unificação estrita das regras de IA vs Atendimento Humano
 export function getConversationKanbanStage(conv: any): KanbanStageId {
-  if (conv.kanban_stage && ['NEW', 'BOT', 'WAITING', 'STORE_REDIRECT', 'HUMAN', 'CLOSED'].includes(conv.kanban_stage)) {
-    return conv.kanban_stage as KanbanStageId;
+  if (!conv) return 'NEW';
+  if (conv.status === 'CLOSED' || conv.kanban_stage === 'CLOSED') return 'CLOSED';
+
+  const isHumanControlled = 
+    conv.is_human_controlled === true ||
+    Boolean(conv.assigned_user_id) ||
+    Boolean(conv.assigned_to) ||
+    conv.is_bot_active === false ||
+    conv.status === 'human_takeover' ||
+    conv.status === 'HUMAN';
+
+  if (isHumanControlled) {
+    if (conv.kanban_stage === 'WAITING' || conv.status === 'PENDING') return 'WAITING';
+    if (conv.kanban_stage === 'STORE_REDIRECT' || conv.bot_handoff_reason === 'STORE_REDIRECT') return 'STORE_REDIRECT';
+    return 'HUMAN';
   }
-  if (conv.status === 'CLOSED') return 'CLOSED';
-  if (conv.is_bot_active !== false && (conv.status === 'BOT' || !conv.status || conv.status === 'OPEN')) return 'BOT';
-  if (conv.status === 'PENDING') return 'WAITING';
-  if (conv.bot_handoff_reason === 'STORE_REDIRECT') return 'STORE_REDIRECT';
-  if (conv.status === 'OPEN' && !conv.assigned_user_id && !conv.is_bot_active) return 'NEW';
+
+  // Regra Estrita: Coluna "IA Atendendo" só aceita is_bot_active === true E is_human_controlled === false E assigned_user_id === null
+  if (conv.is_bot_active !== false && !conv.is_human_controlled && !conv.assigned_user_id && !conv.assigned_to) {
+    if (conv.kanban_stage === 'WAITING' || conv.status === 'PENDING') return 'WAITING';
+    if (conv.kanban_stage === 'STORE_REDIRECT' || conv.bot_handoff_reason === 'STORE_REDIRECT') return 'STORE_REDIRECT';
+    if (conv.kanban_stage === 'NEW' && conv.bot_interaction_count === 0 && !conv.last_message_content) return 'NEW';
+    return 'BOT';
+  }
+
+  if (conv.kanban_stage === 'WAITING' || conv.status === 'PENDING') return 'WAITING';
+  if (conv.kanban_stage === 'STORE_REDIRECT' || conv.bot_handoff_reason === 'STORE_REDIRECT') return 'STORE_REDIRECT';
+  if (conv.kanban_stage === 'NEW') return 'NEW';
   return 'HUMAN';
 }
 
@@ -271,11 +291,24 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
     }
 
     // 1. Atualização Otimista na UI
+    const isTargetBot = targetStage === 'BOT';
+    const isTargetHuman = targetStage === 'HUMAN';
     const updatedConv = {
       ...draggedConv,
       kanban_stage: targetStage,
-      status: targetStage === 'CLOSED' ? 'CLOSED' : targetStage === 'WAITING' ? 'PENDING' : targetStage === 'BOT' ? 'BOT' : 'OPEN',
-      is_bot_active: targetStage === 'BOT',
+      status: targetStage === 'CLOSED' 
+        ? 'CLOSED' 
+        : targetStage === 'WAITING' 
+        ? 'PENDING' 
+        : isTargetBot 
+        ? 'bot' 
+        : isTargetHuman 
+        ? 'human_takeover' 
+        : 'OPEN',
+      is_bot_active: isTargetBot,
+      is_human_controlled: isTargetHuman || !isTargetBot,
+      assigned_user_id: isTargetBot ? null : (isTargetHuman && currentUser?.id ? currentUser.id : draggedConv.assigned_user_id),
+      assigned_to: isTargetBot ? null : (isTargetHuman && currentUser?.id ? currentUser.id : draggedConv.assigned_to),
       updated_at: new Date().toISOString()
     };
 
@@ -318,11 +351,24 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
     const targetConv = conversations.find(c => c.id === conversationId);
     if (!targetConv) return;
 
+    const isTargetBot = targetStage === 'BOT';
+    const isTargetHuman = targetStage === 'HUMAN';
     const updatedConv = {
       ...targetConv,
       kanban_stage: targetStage,
-      status: targetStage === 'CLOSED' ? 'CLOSED' : targetStage === 'WAITING' ? 'PENDING' : targetStage === 'BOT' ? 'BOT' : 'OPEN',
-      is_bot_active: targetStage === 'BOT'
+      status: targetStage === 'CLOSED' 
+        ? 'CLOSED' 
+        : targetStage === 'WAITING' 
+        ? 'PENDING' 
+        : isTargetBot 
+        ? 'bot' 
+        : isTargetHuman 
+        ? 'human_takeover' 
+        : 'OPEN',
+      is_bot_active: isTargetBot,
+      is_human_controlled: isTargetHuman || !isTargetBot,
+      assigned_user_id: isTargetBot ? null : targetConv.assigned_user_id,
+      assigned_to: isTargetBot ? null : targetConv.assigned_to
     };
 
     if (onConversationsChange) {
@@ -350,8 +396,11 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
     const updatedConv = {
       ...targetConv,
       is_bot_active: nextStatus,
+      is_human_controlled: !nextStatus,
+      assigned_user_id: nextStatus ? null : targetConv.assigned_user_id,
+      assigned_to: nextStatus ? null : targetConv.assigned_to,
       kanban_stage: targetStage,
-      status: nextStatus ? 'BOT' : 'OPEN'
+      status: nextStatus ? 'bot' : 'human_takeover'
     };
 
     if (onConversationsChange) {
