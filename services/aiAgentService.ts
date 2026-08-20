@@ -4,6 +4,7 @@ import { AiAgentConfig, PharmacyConfig } from "../types.js";
 import { chatStore } from "./chatStore.js";
 import { botHandoffManager } from "./botHandoffManager.js";
 import { realtimeHub } from "./realtimeHub.js";
+import { evolutionApiService } from "./evolutionApiService.js";
 
 const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || "https://nalshjhoiecxooejpiaw.supabase.co";
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_Y2lAqlvDUhdjSNtv80GkJA_SiOgynYy";
@@ -595,6 +596,9 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       }
 
       // 2. Obter conversa atual para inspecionar estado do bot
+      const targetInstanceName = await evolutionApiService.resolveInstanceName(realTenantId, options?.instanceName);
+      console.log(`[AiAgentService] Processando turno da conversa ${conversationId} via instância WhatsApp "${targetInstanceName}"`);
+
       const conv = await chatStore.getConversationById(conversationId);
       if (conv) {
         // Se o operador humano já assumiu ou o bot foi silenciado
@@ -623,7 +627,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         const attachmentType = isDocumentAttachment ? "documento/receita" : "arquivo";
         const replyText = `Olá! Recebemos o seu ${attachmentType} com sucesso. 📄\n\nJá encaminhei para a nossa equipe de atendimento para conferência e orçamento. Um de nossos balconistas humanos irá responder em instantes!\n\n🛍️ *Nossa Loja Online:* ${storeLink}`;
 
-        await chatStore.addMessage(realTenantId, conversationId, "BOT", replyText, false, options?.instanceName);
+        await chatStore.addMessage(realTenantId, conversationId, "BOT", replyText, false, undefined, undefined, targetInstanceName);
         await botHandoffManager.triggerHandoff(
           conversationId, 
           realTenantId, 
@@ -658,7 +662,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         const transMessage = `${handoffCheck.message || transitionMsg}\n\n🛍️ *Nossa Webloja:* ${storeLink}`;
         
         // Enviar mensagem pelo canal
-        await chatStore.addMessage(realTenantId, conversationId, "BOT", transMessage, false, options?.instanceName);
+        await chatStore.addMessage(realTenantId, conversationId, "BOT", transMessage, false, undefined, undefined, targetInstanceName);
         await chatStore.updateConversationBotStatus(conversationId, {
           is_bot_active: false,
           bot_handoff_reason: handoffCheck.handoffReason || "KEYWORD_TRIGGER",
@@ -682,7 +686,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
           console.warn(`[AiAgentService] Abuso/Injection bloqueado para conversa ${conversationId}:`, abuseCheck.reason);
           const safeReply = `Olá! Para garantir a sua segurança e o melhor suporte sobre nossos produtos e medicamentos, você pode consultar nosso catálogo completo e valores em nossa Loja Online:\n👉 ${storeLink}\n\n${transitionMsg}`;
 
-          await chatStore.addMessage(realTenantId, conversationId, "BOT", safeReply, false, options?.instanceName);
+          await chatStore.addMessage(realTenantId, conversationId, "BOT", safeReply, false, undefined, undefined, targetInstanceName);
           await botHandoffManager.triggerHandoff(conversationId, realTenantId, "SECURITY_INJECTION_DETECTED", transitionMsg);
           await chatStore.updateConversationBotStatus(conversationId, {
             is_bot_active: false,
@@ -731,7 +735,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
           finalReply = `${finalReply}\n\n${transitionMsg}`;
         }
 
-        await chatStore.addMessage(realTenantId, conversationId, "BOT", finalReply, false, options?.instanceName);
+        await chatStore.addMessage(realTenantId, conversationId, "BOT", finalReply, false, undefined, undefined, targetInstanceName);
         await botHandoffManager.triggerHandoff(conversationId, realTenantId, "MAX_INTERACTIONS_REACHED", transitionMsg);
         await chatStore.updateConversationBotStatus(conversationId, {
           is_bot_active: false,
@@ -751,7 +755,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       }
 
       // 11. Interação normal do bot: Enviar mensagem e incrementar contador
-      await chatStore.addMessage(realTenantId, conversationId, "BOT", finalReply, false, options?.instanceName);
+      await chatStore.addMessage(realTenantId, conversationId, "BOT", finalReply, false, undefined, undefined, targetInstanceName);
       await chatStore.updateConversationBotStatus(conversationId, {
         is_bot_active: true,
         bot_interaction_count: nextCount,

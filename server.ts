@@ -27,6 +27,7 @@ import { inboxStore } from "./services/inboxStore.js";
 import { chatStore } from "./services/chatStore.js";
 import { teamStore } from "./services/teamStore.js";
 import { aiAgentService } from "./services/aiAgentService.js";
+import { evolutionApiService } from "./services/evolutionApiService.js";
 import QRCode from "qrcode";
 
 
@@ -6422,169 +6423,10 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
     }
 
     const format = tenant.welcome_message_format || tenant.welcomemessageformat || "button";
-    const evolutionUrl = normalizeEvolutionUrl(process.env.EVOLUTION_API_URL || DEFAULT_EVOLUTION_URL);
-    const evolutionKey = process.env.EVOLUTION_API_KEY || process.env.EVOLUTION_API_TOKEN || "42964446331920a0f6707328906ed444";
-    
-    let targetInstanceName = instanceName;
-    if (!targetInstanceName) {
-      try {
-        const { data: inst } = await supabaseAdmin
-          .from("whatsapp_instances")
-          .select("instance_name")
-          .or(`store_id.eq.${tenant.id},store_id.eq.${tenant.slug}`)
-          .limit(1)
-          .maybeSingle();
-        if (inst?.instance_name) {
-          targetInstanceName = inst.instance_name;
-        } else {
-          targetInstanceName = `store_${(tenant.slug || cleanStoreId).replace(/-/g, "")}`;
-        }
-      } catch (_) {
-        targetInstanceName = `store_${(tenant.slug || cleanStoreId).replace(/-/g, "")}`;
-      }
-    }
+    const targetInstanceName = await evolutionApiService.resolveInstanceName(tenant.id, instanceName);
+    const displayContent = `${customText}\n\n🛒 Loja Online: ${storeLink}`;
 
-    let displayContent = `${customText}\n\n🛒 Loja Online: ${storeLink}`;
-
-    console.log(`[WEBHOOK] Disparando Saudação Automática / Catálogo para ${cleanPhone} via instância "${targetInstanceName}" (Formato: ${format})...`);
-
-    if (evolutionUrl && evolutionKey) {
-      const evolutionHeaders: Record<string, string> = {
-        "Content-Type": "application/json",
-        "apikey": evolutionKey,
-        "apiKey": evolutionKey,
-        "Authorization": `Bearer ${evolutionKey}`
-      };
-
-      if (format === 'button') {
-        let buttonSuccess = false;
-
-        // 1. Tenta envio com sendTemplate (suporte a botões de link do Evolution API)
-        const templatePayload = {
-          number: cleanPhone,
-          options: {
-            delay: 1200,
-            presence: "composing"
-          },
-          text: `👋 *${storeName}*\n\n${customText}`,
-          footer: storeName,
-          templateButtons: [
-            {
-              index: 1,
-              urlButton: {
-                displayText: "🛒 Acessar Loja Online",
-                url: storeLink
-              }
-            }
-          ]
-        };
-
-        try {
-          console.log(`[WelcomeMessage] Tentando enviar template de botão para ${cleanPhone} via ${targetInstanceName}...`);
-          const btnRes = await fetch(`${evolutionUrl}/message/sendTemplate/${targetInstanceName}`, {
-            method: "POST",
-            headers: evolutionHeaders,
-            body: JSON.stringify(templatePayload)
-          });
-
-          if (btnRes.ok) {
-            console.log(`[WelcomeMessage] Sucesso no envio do template de botão para ${cleanPhone}.`);
-            buttonSuccess = true;
-          } else {
-            const errText = await btnRes.text().catch(() => "Sem corpo");
-            console.log(`[WelcomeMessage] sendTemplate recusado (${btnRes.status}):`, errText);
-          }
-        } catch (btnErr: any) {
-          console.log(`[WelcomeMessage] Exceção no sendTemplate:`, btnErr.message || btnErr);
-        }
-
-        // 2. Se sendTemplate falhar, tenta sendButton
-        if (!buttonSuccess) {
-          try {
-            const buttonPayload = {
-              number: cleanPhone,
-              title: `👋 *${storeName}*`,
-              description: customText,
-              footer: storeName,
-              buttons: [
-                {
-                  type: "url",
-                  displayText: "🛒 Acessar Loja Online",
-                  url: storeLink
-                }
-              ]
-            };
-            const bRes = await fetch(`${evolutionUrl}/message/sendButton/${targetInstanceName}`, {
-              method: "POST",
-              headers: evolutionHeaders,
-              body: JSON.stringify(buttonPayload)
-            });
-            if (bRes.ok) {
-              console.log(`[WelcomeMessage] Sucesso no envio via sendButton para ${cleanPhone}.`);
-              buttonSuccess = true;
-            }
-          } catch (_) {}
-        }
-
-        // 3. Se ambos os botões falharem (comportamento padrão do WhatsApp MD em contas pessoais), faz o Fallback com Link Preview
-        if (!buttonSuccess) {
-          console.log(`[WelcomeMessage] Executando Fallback de Texto com Link Preview para ${cleanPhone}...`);
-          const textPayload = {
-            number: cleanPhone,
-            text: `👋 *${storeName}*\n\n${customText}\n\n🛍️ *Acesse nossa Loja Online:*\n👉 ${storeLink}`,
-            options: {
-              delay: 1200,
-              presence: "composing",
-              linkPreview: true
-            }
-          };
-
-          try {
-            const fbRes = await fetch(`${evolutionUrl}/message/sendText/${targetInstanceName}`, {
-              method: "POST",
-              headers: evolutionHeaders,
-              body: JSON.stringify(textPayload)
-            });
-
-            if (fbRes.ok) {
-              console.log(`[WelcomeMessage] Sucesso no Fallback de texto de boas-vindas para ${cleanPhone}.`);
-            } else {
-              const fbErrText = await fbRes.text().catch(() => "Sem corpo");
-              console.error(`[WelcomeMessage] Erro no Fallback de texto (${fbRes.status}):`, fbErrText);
-            }
-          } catch (fbErr: any) {
-            console.error(`[WelcomeMessage] Exceção no Fallback de texto:`, fbErr.message || fbErr);
-          }
-        }
-      } else {
-        const textPayload = {
-          number: cleanPhone,
-          text: `👋 *${storeName}*\n\n${customText}\n\n🛍️ *Acesse nossa Loja Online:*\n👉 ${storeLink}`,
-          options: {
-            delay: 1200,
-            presence: "composing",
-            linkPreview: true
-          }
-        };
-        try {
-          console.log(`[WelcomeMessage] Enviando boas-vindas em formato texto padrão para ${cleanPhone} via ${targetInstanceName}...`);
-          const textRes = await fetch(`${evolutionUrl}/message/sendText/${targetInstanceName}`, {
-            method: "POST",
-            headers: evolutionHeaders,
-            body: JSON.stringify(textPayload)
-          });
-          if (textRes.ok) {
-            console.log(`[WelcomeMessage] Sucesso ao enviar texto de boas-vindas para ${cleanPhone}.`);
-          } else {
-            const textErrText = await textRes.text().catch(() => "Sem corpo");
-            console.error(`[WelcomeMessage] Erro ao enviar texto padrão (${textRes.status}):`, textErrText);
-          }
-        } catch (textErr: any) {
-          console.error(`[WelcomeMessage] Exceção crítica ao enviar texto padrão:`, textErr.message || textErr);
-        }
-      }
-    }
-
+    // 1. Persiste a mensagem no banco de dados e atualiza a conversa
     const welcomeMsgId = crypto.randomUUID();
     const welcomeMsg = {
       id: welcomeMsgId,
@@ -6611,7 +6453,51 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
       conversation
     });
 
-    console.log(`[WelcomeMessage] Mensagem de boas-vindas finalizada para ${cleanPhone} (Loja: ${tenant.name})`);
+    // 2. Disparo HTTP para a Evolution API com logs detalhados e tratamento de erros
+    console.log(`[WelcomeMessage] Iniciando disparo HTTP para o WhatsApp do cliente ${cleanPhone} via instância "${targetInstanceName}" (Formato: ${format})...`);
+
+    try {
+      let dispatchSuccess = false;
+
+      if (format === 'button') {
+        const btnResult = await evolutionApiService.sendTemplateButton(
+          targetInstanceName,
+          cleanPhone,
+          storeName,
+          customText,
+          "🛒 Acessar Loja Online",
+          storeLink,
+          storeName
+        );
+
+        if (btnResult.success) {
+          dispatchSuccess = true;
+          console.log(`[WelcomeMessage] ✅ Template de botão enviado com sucesso para ${cleanPhone}`);
+        } else {
+          console.warn(`[WelcomeMessage] Template de botão não aceito pela instância "${targetInstanceName}" (HTTP ${btnResult.status || 'N/A'}: ${btnResult.error}). Acionando Fallback de Texto com Link Preview...`);
+        }
+      }
+
+      if (!dispatchSuccess) {
+        const fallbackText = `👋 *${storeName}*\n\n${customText}\n\n🛍️ *Acesse nossa Loja Online:*\n👉 ${storeLink}`;
+        const textResult = await evolutionApiService.sendTextMessage(
+          targetInstanceName,
+          cleanPhone,
+          fallbackText,
+          { delay: 1200, linkPreview: true }
+        );
+
+        if (textResult.success) {
+          console.log(`[WelcomeMessage] ✅ Mensagem de texto de boas-vindas enviada com sucesso para ${cleanPhone}`);
+        } else {
+          console.error(`[WelcomeMessage] [ERRO EVOLUTION] Falha ao disparar mensagem para o WhatsApp do cliente (${cleanPhone}): HTTP ${textResult.status || 500} - ${textResult.error}`);
+        }
+      }
+    } catch (evoDispatchErr: any) {
+      console.error(`[WelcomeMessage] [ERRO EVOLUTION] Falha ao disparar mensagem para o WhatsApp do cliente (${cleanPhone}): ${evoDispatchErr.message || evoDispatchErr}`);
+    }
+
+    console.log(`[WelcomeMessage] Fluxo de boas-vindas concluído para ${cleanPhone} (Loja: "${tenant.name}", Instância: "${targetInstanceName}")`);
   } catch (err: any) {
     console.error("[WelcomeMessage] Erro ao processar mensagem de boas-vindas:", err.message);
   }
@@ -7054,7 +6940,40 @@ app.post("/api/v1/chat/send", requireChatEnabled, async (req, res) => {
       }
     }
 
-    // Persistir mensagem
+    // Resolve instanceName from conversation's inbox if available
+    let resolvedInstance: string | undefined = undefined;
+    try {
+      const { data: conv } = await supabaseAdmin
+        .from("chat_conversations")
+        .select("inbox_id")
+        .eq("id", conversation_id)
+        .maybeSingle();
+
+      if (conv?.inbox_id) {
+        const { data: inbox } = await supabaseAdmin
+          .from("inboxes")
+          .select("whatsapp_instance_id")
+          .eq("id", conv.inbox_id)
+          .maybeSingle();
+
+        if (inbox?.whatsapp_instance_id) {
+          const { data: inst } = await supabaseAdmin
+            .from("whatsapp_instances")
+            .select("instance_name")
+            .eq("id", inbox.whatsapp_instance_id)
+            .maybeSingle();
+
+          if (inst?.instance_name) {
+            resolvedInstance = inst.instance_name;
+            console.log(`[Chat API] Using specific instance "${resolvedInstance}" for inbox ${conv.inbox_id}`);
+          }
+        }
+      }
+    } catch (resolveErr: any) {
+      console.warn("[Chat API] Warning resolving instance name for conversation:", resolveErr.message);
+    }
+
+    // Persistir mensagem e despachar via Evolution API se não for privada
     const { message, conversation } = await chatStore.addMessage(
       storeId,
       conversation_id,
@@ -7062,7 +6981,8 @@ app.post("/api/v1/chat/send", requireChatEnabled, async (req, res) => {
       content || "",
       Boolean(is_private),
       media_url,
-      media_type
+      media_type,
+      resolvedInstance
     );
 
     // Transmitir via SSE
@@ -7075,67 +6995,6 @@ app.post("/api/v1/chat/send", requireChatEnabled, async (req, res) => {
     if (is_private) {
       console.log(`[Chat API] Nota interna salva para conversa ${conversation_id}.`);
       return res.status(200).json({ success: true, data: message, is_private: true });
-    }
-
-    // Call Evolution API to actually send the message to WhatsApp
-    try {
-      const evolutionUrl = process.env.EVOLUTION_API_URL?.replace(/\/$/, '');
-      const evolutionKey = process.env.EVOLUTION_API_KEY;
-      if (evolutionUrl && evolutionKey) {
-        // Resolve instanceName from conversation's inbox
-        let instanceName = `store_${storeId.replace(/-/g,"")}`; // Fallback default
-        try {
-          const { data: conv } = await supabaseAdmin
-            .from("chat_conversations")
-            .select("inbox_id")
-            .eq("id", conversation_id)
-            .maybeSingle();
-
-          if (conv?.inbox_id) {
-            const { data: inbox } = await supabaseAdmin
-              .from("inboxes")
-              .select("whatsapp_instance_id")
-              .eq("id", conv.inbox_id)
-              .maybeSingle();
-
-            if (inbox?.whatsapp_instance_id) {
-              const { data: inst } = await supabaseAdmin
-                .from("whatsapp_instances")
-                .select("instance_name")
-                .eq("id", inbox.whatsapp_instance_id)
-                .maybeSingle();
-
-              if (inst?.instance_name) {
-                instanceName = inst.instance_name;
-                console.log(`[Chat API] Using specific instance ${instanceName} for inbox ${conv.inbox_id}`);
-              }
-            }
-          }
-        } catch (resolveErr: any) {
-          console.warn("[Chat API] Warning resolving instance name for conversation, using fallback:", resolveErr.message);
-        }
-        // Extrai apenas os numeros de telefone de `contact_<phone>_...` ou `conv_<phone>_...`
-        const phoneMatch = conversation_id.match(/_(.+?)_/);
-        const number = phoneMatch ? phoneMatch[1] : null;
-
-        if (number) {
-          await fetch(`${evolutionUrl}/message/sendText/${instanceName}`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "apikey": evolutionKey
-            },
-            body: JSON.stringify({
-              number: number,
-              text: content
-            })
-          });
-          console.log(`[Chat API] Mensagem enviada via Evolution para ${number}`);
-        }
-      }
-    } catch (evoErr) {
-      console.log("[Chat API] Falha ao enviar para a Evolution API:", evoErr);
-      // We don't block the return because it was saved locally at least.
     }
 
     console.log(`[Chat API] Mensagem de chat salva e processada para conversa ${conversation_id}: ${content}`);
