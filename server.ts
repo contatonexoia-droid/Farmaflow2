@@ -6640,23 +6640,28 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
           const result = await chatStore.processWhatsAppMessage(storeId, msg, instanceName);
 
           if (result && result.conversation) {
+            const conversation = result.conversation;
+
             // 2. Broadcast IMEDIATO via WebSockets/Realtime para que apareça na tela do operador humano
             try {
               realtimeHub.broadcastToStore(storeId, "chat_message", {
-                conversationId: result.conversation.id,
+                conversationId: conversation.id,
                 message: result.message,
-                conversation: result.conversation
+                conversation: conversation
               });
             } catch (wsErr: any) {
               console.warn("[WEBHOOK] Aviso no broadcast realtime da mensagem recebida:", wsErr.message);
             }
 
             if (!fromMe) {
+              // Log de Diagnóstico solicitado
+              console.log(`[Webhook Message] Recebida msg de ${remoteJid}. is_bot_active: ${conversation.is_bot_active}, is_human_controlled: ${conversation.is_human_controlled}`);
+
               // 3. Processamento CSAT isolado
               try {
                 const ratingNum = parseInt(String(text).trim(), 10);
                 if (!isNaN(ratingNum) && ratingNum >= 1 && ratingNum <= 5) {
-                  await csatManager.recordCsatResponse(storeId, result.conversation.id, ratingNum);
+                  await csatManager.recordCsatResponse(storeId, conversation.id, ratingNum);
                 }
               } catch (csatErr: any) {
                 console.warn("[WEBHOOK] Aviso ao processar CSAT:", csatErr.message);
@@ -6664,22 +6669,27 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
 
               // 4. Disparo da Mensagem Automática de Boas-Vindas da Primeira Mensagem do Dia em bloco isolado
               try {
-                await handleDailyWelcomeMessage(storeId, result.conversation, instanceName, text);
+                await handleDailyWelcomeMessage(storeId, conversation, instanceName, text);
               } catch (welcomeErr: any) {
                 console.error('[WEBHOOK] Exceção ao processar boas-vindas diárias:', welcomeErr.message);
               }
 
-              // 5. Processamento Inteligente pelo Agente de Atendimento IA desacoplado em bloco seguro isolado
-              try {
-                const phone = result.conversation.contact?.phone_number || msg.key?.remoteJid?.replace(/@.*$/, '');
-                aiAgentService.processConversationTurn(storeId, result.conversation.id, text, {
-                  instanceName,
-                  phoneNumber: phone
-                }).catch(aiErr => {
-                  console.error('[WEBHOOK - IA ISOLADA] Exceção no processamento do Agente de IA (mensagem mantida no chat):', aiErr.message);
-                });
-              } catch (aiSyncErr: any) {
-                console.error('[WEBHOOK - IA ISOLADA] Erro ao despachar chamada do Agente de IA:', aiSyncErr.message);
+              // 5. Se is_bot_active === true e is_human_controlled === false, force o dispatch imediato para o AiAgentService
+              if (conversation.is_bot_active === true && conversation.is_human_controlled === false) {
+                try {
+                  const phone = conversation.contact?.phone_number || msg.key?.remoteJid?.replace(/@.*$/, '');
+                  console.log(`[WEBHOOK - IA] Forçando dispatch imediato para AiAgentService na conversa ${conversation.id} (${phone})...`);
+                  aiAgentService.processConversationTurn(storeId, conversation.id, text, {
+                    instanceName,
+                    phoneNumber: phone
+                  }).catch(aiErr => {
+                    console.error('[WEBHOOK - IA ISOLADA] Exceção no processamento do Agente de IA (mensagem mantida no chat):', aiErr.message);
+                  });
+                } catch (aiSyncErr: any) {
+                  console.error('[WEBHOOK - IA ISOLADA] Erro ao despachar chamada do Agente de IA:', aiSyncErr.message);
+                }
+              } else {
+                console.log(`[WEBHOOK - IA] Conversa ${conversation.id} não despachada para IA: intervenção humana ativa (is_bot_active: ${conversation.is_bot_active}, is_human_controlled: ${conversation.is_human_controlled})`);
               }
             }
           }

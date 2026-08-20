@@ -648,14 +648,12 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       nextCount: number;
     }
   ): Promise<{ success: boolean; error?: string }> {
-    // 1. Validação Estrita de Envio: Garantir que a conversa NÃO esteja sob controle humano
+    // 1. Validação Estrita de Envio: Garantir que a conversa NÃO esteja sob controle humano (valida exclusivamente colunas de sistema)
     const currentConv = await chatStore.getConversationById(conversationId);
     if (currentConv) {
       const isHuman =
         currentConv.is_human_controlled === true ||
         currentConv.is_bot_active === false ||
-        currentConv.status === "human_takeover" ||
-        currentConv.status === "HUMAN" ||
         Boolean(currentConv.assigned_user_id) ||
         Boolean((currentConv as any).assigned_to);
 
@@ -830,25 +828,24 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       const realTenantId = tenant.id || storeId;
       const dbConfig: AiAgentConfig = tenant.ai_agent_config || tenant.aiagentconfig || {};
 
-      if (!dbConfig.active && !dbConfig.enabled) {
+      if (dbConfig.active === false || dbConfig.enabled === false) {
+        console.log(`[AiAgentService] IA desativada nas configurações da drogaria "${tenant.name}"`);
         return { handled: false, transferredToHuman: false, reason: "AGENT_PAUSED" };
       }
 
       // 2. Obter conversa atual para inspecionar estado do bot
       const conv = await chatStore.getConversationById(conversationId);
       if (conv) {
-        // Se o operador humano já assumiu ou o bot foi silenciado / transferido
+        // Validação Estrita: intervenção humana valida exclusivamente as colunas de sistema da tabela conversations
+        // (is_human_controlled === true, assigned_user_id !== null, is_bot_active === false)
         const isHumanControlled = 
           conv.is_human_controlled === true ||
           conv.is_bot_active === false ||
-          conv.status === "human_takeover" ||
-          conv.status === "HUMAN" ||
-          (conv.status === "OPEN" && Boolean(conv.assigned_user_id || (conv as any).assigned_to)) ||
-          Boolean((conv as any).assigned_to) ||
-          Boolean(conv.assigned_user_id);
+          Boolean(conv.assigned_user_id) ||
+          Boolean((conv as any).assigned_to);
 
         if (isHumanControlled) {
-          console.log(`[AiAgentService] IA pausada para a conversa ${conversationId}: Atendimento humano ativo.`);
+          console.log(`[AiAgentService] IA pausada para a conversa ${conversationId}: Atendimento humano ativo (is_human_controlled: ${conv.is_human_controlled}, is_bot_active: ${conv.is_bot_active}, assigned_user_id: ${conv.assigned_user_id}).`);
           return { handled: false, transferredToHuman: true, reason: "ALREADY_HUMAN_ASSIGNED" };
         }
       }

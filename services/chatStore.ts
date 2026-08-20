@@ -706,14 +706,14 @@ class ChatStore {
       created_at: now
     };
 
-    // 2. Obtenção do inbox_id
+    // 2. Obtenção do inbox_id e estado atual da conversa
     let resolvedInboxId: string | null = null;
     let convInfo: any = null;
 
     try {
       const { data, error } = await supabaseAdmin
         .from("chat_conversations")
-        .select("id, unread_count, inbox_id")
+        .select("*, contact:chat_contacts(*)")
         .eq("id", convId)
         .maybeSingle();
       
@@ -808,20 +808,38 @@ class ChatStore {
     const currentUnreadCount = convInfo?.unread_count || 0;
     const newUnreadCount = fromMe ? 0 : currentUnreadCount + 1;
 
+    // Determina estritamente o estado do BOT vs HUMANO com base exclusivamente nas colunas de sistema:
+    const isHuman = fromMe
+      ? true
+      : convInfo
+      ? (
+          convInfo.is_human_controlled === true ||
+          convInfo.is_bot_active === false ||
+          Boolean(convInfo.assigned_user_id) ||
+          Boolean(convInfo.assigned_to)
+        )
+      : false;
+
+    const isBotActive = !isHuman;
+
     const conv: ChatConversation = {
       id: convId,
       store_id: storeId,
       contact_id: contactId,
       inbox_id: resolvedInboxId,
-      status: fromMe ? "human_takeover" : (convInfo?.status || "OPEN"),
-      is_human_controlled: fromMe ? true : (convInfo?.is_human_controlled || false),
-      is_bot_active: fromMe ? false : (convInfo?.is_bot_active !== false),
-      kanban_stage: fromMe ? "HUMAN" : (convInfo?.kanban_stage || "NEW"),
+      status: fromMe ? "human_takeover" : (convInfo?.status || (isBotActive ? "bot" : "OPEN")),
+      is_human_controlled: isHuman,
+      is_bot_active: isBotActive,
+      kanban_stage: fromMe ? "HUMAN" : (convInfo?.kanban_stage || (isBotActive ? "BOT" : "NEW")),
+      bot_interaction_count: convInfo?.bot_interaction_count || 0,
+      bot_handoff_reason: convInfo?.bot_handoff_reason || null,
+      bot_handoff_at: convInfo?.bot_handoff_at || null,
+      assigned_user_id: isHuman ? convInfo?.assigned_user_id || null : null,
       last_message_at: now,
       last_message_content: text,
       unread_count: newUnreadCount,
       contact: contact,
-      created_at: now
+      created_at: convInfo?.created_at || now
     };
 
     // 3. Busca ou criação da conversa (chat_conversations)
@@ -833,8 +851,19 @@ class ChatStore {
         inbox_id: resolvedInboxId,
         last_message_at: now,
         last_message_content: text,
-        unread_count: newUnreadCount
+        unread_count: newUnreadCount,
+        updated_at: now
       };
+
+      if (!convInfo) {
+        // Se a conversa for nova, inicializa os campos padrão do bot
+        convUpsertData.is_bot_active = !fromMe;
+        convUpsertData.is_human_controlled = fromMe;
+        convUpsertData.status = fromMe ? "human_takeover" : "bot";
+        convUpsertData.kanban_stage = fromMe ? "HUMAN" : "BOT";
+        convUpsertData.bot_interaction_count = 0;
+        convUpsertData.created_at = now;
+      }
 
       if (fromMe) {
         convUpsertData.is_human_controlled = true;
