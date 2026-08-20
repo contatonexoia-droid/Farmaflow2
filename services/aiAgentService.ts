@@ -1,7 +1,7 @@
 import { GoogleGenAI } from "@google/genai";
 import { createClient } from "@supabase/supabase-js";
 import { AiAgentConfig, PharmacyConfig } from "../types.js";
-import { chatStore } from "./chatStore.js";
+import { chatStore, sanitizeChatConversationPayload } from "./chatStore.js";
 import { botHandoffManager } from "./botHandoffManager.js";
 import { realtimeHub } from "./realtimeHub.js";
 import { evolutionApiService } from "./evolutionApiService.js";
@@ -631,6 +631,181 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
   }
 
   /**
+   * Dispara a mensagem do BOT para o WhatsApp, aguarda a confirmação de entrega da API,
+   * grava na tabela chat_messages e atualiza o contador e estado da conversa de forma estrita.
+   */
+  private async dispatchBotReplyAndRecord(
+    realTenantId: string,
+    conversationId: string,
+    targetInstanceName: string,
+    cleanPhone: string | null,
+    replyText: string,
+    params: {
+      isHandoff: boolean;
+      handoffReason?: string;
+      transitionMsg?: string;
+      currentCount: number;
+      nextCount: number;
+    }
+  ): Promise<{ success: boolean; error?: string }> {
+    // 1. Validação Estrita de Envio: Garantir que a conversa NÃO esteja sob controle humano
+    const currentConv = await chatStore.getConversationById(conversationId);
+    if (currentConv) {
+      const isHuman =
+        currentConv.is_human_controlled === true ||
+        currentConv.is_bot_active === false ||
+        currentConv.status === "human_takeover" ||
+        currentConv.status === "HUMAN" ||
+        Boolean(currentConv.assigned_user_id) ||
+        Boolean((currentConv as any).assigned_to);
+
+      if (isHuman) {
+        console.log(`[AiAgentService] Envio abortado para conversa ${conversationId}: conversa assumida por operador humano.`);
+        return { success: false, error: "HUMAN_OPERATOR_ACTIVE" };
+      }
+    }
+
+    if (!cleanPhone || !targetInstanceName) {
+      const err = `Impossível entregar mensagem no WhatsApp: telefone ("${cleanPhone}") ou instância ("${targetInstanceName}") ausente.`;
+      console.error(`[AiAgentService] ❌ ${err}`);
+      return { success: false, error: err };
+    }
+
+    // 2. Disparo na API externa da Evolution API (WhatsApp) com confirmação síncrona
+    console.log(`[AiAgentService] Disparando resposta do BOT para ${cleanPhone} via instância "${targetInstanceName}"...`);
+    const sendResult = await evolutionApiService.sendTextMessage(
+      targetInstanceName,
+      cleanPhone,
+      replyText,
+      {
+        delay: 1000,
+        linkPreview: true
+      }
+    );
+
+    if (!sendResult.success) {
+      console.error(`[AiAgentService] ❌ Falha no envio para o WhatsApp do cliente (${cleanPhone}):`, sendResult.error);
+      return { success: false, error: sendResult.error || "WHATSAPP_DELIVERY_FAILED" };
+    }
+
+    console.log(`[AiAgentService] ✅ Mensagem entregue com sucesso ao WhatsApp de ${cleanPhone}. Gravando no banco de dados e incrementando contador.`);
+
+    // 3. Registra a resposta da IA na tabela messages / chat_messages do Supabase APENAS após confirmação
+    const { message: recordedMsg } = await chatStore.addMessage(
+      realTenantId,
+      conversationId,
+      "BOT",
+      replyText,
+      false,
+      undefined,
+      undefined,
+      targetInstanceName,
+      true // skipWhatsAppDispatch: true (já entregue via Evolution API)
+    );
+
+    const nowIso = new Date().toISOString();
+    const nextCount = params.nextCount;
+
+    // 4. Incremento do Contador de Interações e Atualização Atômica de Estado
+    if (params.isHandoff) {
+      const handoffPayload: any = {
+        bot_interaction_count: nextCount,
+        is_bot_active: false,
+        is_human_controlled: true,
+        kanban_stage: "HUMAN",
+        status: "human_takeover",
+        bot_handoff_reason: params.handoffReason || "MAX_INTERACTIONS_REACHED",
+        bot_handoff_at: nowIso,
+        last_message_at: nowIso,
+        last_message_content: replyText,
+        updated_at: nowIso
+      };
+
+      const sanitized = sanitizeChatConversationPayload(handoffPayload);
+      try {
+        await supabaseAdmin
+          .from("chat_conversations")
+          .update(sanitized)
+          .eq("id", conversationId);
+      } catch (dbErr: any) {
+        console.error("[AiAgentService] Erro ao atualizar chat_conversations no Supabase:", dbErr.message);
+      }
+
+      await botHandoffManager.triggerHandoff(
+        conversationId,
+        realTenantId,
+        params.handoffReason || "MAX_INTERACTIONS_REACHED",
+        params.transitionMsg
+      );
+
+      await chatStore.updateConversationBotStatus(conversationId, handoffPayload);
+
+      realtimeHub.broadcastToStore(realTenantId, "conversation_status_changed", {
+        conversationId,
+        status: "human_takeover",
+        is_bot_active: false,
+        is_human_controlled: true,
+        bot_interaction_count: nextCount,
+        bot_handoff_reason: params.handoffReason || "MAX_INTERACTIONS_REACHED",
+        bot_handoff_at: nowIso,
+        kanban_stage: "HUMAN"
+      });
+
+      realtimeHub.broadcastToStore(realTenantId, "conversation_stage_changed", {
+        conversationId,
+        stage: "HUMAN",
+        status: "human_takeover",
+        is_bot_active: false,
+        updated_at: nowIso
+      });
+    } else {
+      const botActivePayload: any = {
+        bot_interaction_count: nextCount,
+        is_bot_active: true,
+        is_human_controlled: false,
+        assigned_user_id: null,
+        assigned_to: null,
+        kanban_stage: "BOT",
+        status: "bot",
+        bot_handoff_reason: null,
+        bot_handoff_at: null,
+        last_message_at: nowIso,
+        last_message_content: replyText,
+        updated_at: nowIso
+      };
+
+      const sanitized = sanitizeChatConversationPayload(botActivePayload);
+      try {
+        await supabaseAdmin
+          .from("chat_conversations")
+          .update(sanitized)
+          .eq("id", conversationId);
+      } catch (dbErr: any) {
+        console.error("[AiAgentService] Erro ao atualizar chat_conversations no Supabase:", dbErr.message);
+      }
+
+      await chatStore.updateConversationBotStatus(conversationId, botActivePayload);
+
+      realtimeHub.broadcastToStore(realTenantId, "conversation_status_changed", {
+        conversationId,
+        status: "bot",
+        is_bot_active: true,
+        is_human_controlled: false,
+        bot_interaction_count: nextCount,
+        kanban_stage: "BOT"
+      });
+    }
+
+    // 5. Broadcast da mensagem gravada para o chat em tempo real
+    realtimeHub.broadcastToStore(realTenantId, "chat_message", {
+      conversationId,
+      message: recordedMsg
+    });
+
+    return { success: true };
+  }
+
+  /**
    * Processamento completo de turno de conversa do WhatsApp / Chat Central
    * Gerencia contagem de interações, travas anti-abuso, transbordo para humano e disparos
    */
@@ -660,9 +835,6 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       }
 
       // 2. Obter conversa atual para inspecionar estado do bot
-      const targetInstanceName = await evolutionApiService.resolveInstanceName(realTenantId, options?.instanceName);
-      console.log(`[AiAgentService] Processando turno da conversa ${conversationId} via instância WhatsApp "${targetInstanceName}"`);
-
       const conv = await chatStore.getConversationById(conversationId);
       if (conv) {
         // Se o operador humano já assumiu ou o bot foi silenciado / transferido
@@ -680,6 +852,30 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
           return { handled: false, transferredToHuman: true, reason: "ALREADY_HUMAN_ASSIGNED" };
         }
       }
+
+      // Resolver nome da instância e telefone do cliente
+      const targetInstanceName = await evolutionApiService.resolveInstanceName(realTenantId, options?.instanceName);
+      console.log(`[AiAgentService] Processando turno da conversa ${conversationId} via instância WhatsApp "${targetInstanceName}"`);
+
+      let phoneToSend: string | null = options?.phoneNumber || null;
+      if (!phoneToSend && conv?.contact?.phone_number) {
+        phoneToSend = conv.contact.phone_number;
+      }
+      if (!phoneToSend && conv?.contact_id) {
+        try {
+          const { data: contactData } = await supabaseAdmin
+            .from("chat_contacts")
+            .select("phone_number")
+            .eq("id", conv.contact_id)
+            .maybeSingle();
+          if (contactData?.phone_number) phoneToSend = contactData.phone_number;
+        } catch (_) {}
+      }
+      if (!phoneToSend) {
+        const match = conversationId.match(/_(\d{10,15})_/);
+        if (match) phoneToSend = match[1];
+      }
+      const cleanPhone = phoneToSend ? String(phoneToSend).replace(/\D/g, "") : null;
 
       const currentCount = conv?.bot_interaction_count || 0;
       const maxInteractions = Number(dbConfig.maxInteractionsPerSession) || 4;
@@ -701,20 +897,24 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         const attachmentType = isDocumentAttachment ? "documento/receita" : "arquivo";
         const replyText = `Olá! Recebemos o seu ${attachmentType} com sucesso. 📄\n\nJá encaminhei para a nossa equipe de atendimento para conferência e orçamento. Um de nossos balconistas humanos irá responder em instantes!\n\n🛍️ *Nossa Loja Online:* ${storeLink}`;
 
-        await chatStore.addMessage(realTenantId, conversationId, "BOT", replyText, false, undefined, undefined, targetInstanceName);
-        await botHandoffManager.triggerHandoff(
-          conversationId, 
-          realTenantId, 
-          isDocumentAttachment ? "DOCUMENT_RECEIVED" : "MEDIA_RECEIVED", 
-          transitionMsg
+        const dispatchResult = await this.dispatchBotReplyAndRecord(
+          realTenantId,
+          conversationId,
+          targetInstanceName,
+          cleanPhone,
+          replyText,
+          {
+            isHandoff: true,
+            handoffReason: isDocumentAttachment ? "DOCUMENT_RECEIVED" : "MEDIA_RECEIVED",
+            transitionMsg,
+            currentCount,
+            nextCount: currentCount + 1
+          }
         );
-        await chatStore.updateConversationBotStatus(conversationId, {
-          is_bot_active: false,
-          bot_handoff_reason: isDocumentAttachment ? "DOCUMENT_RECEIVED" : "MEDIA_RECEIVED",
-          kanban_stage: "HUMAN",
-          status: "OPEN",
-          bot_handoff_at: new Date().toISOString()
-        });
+
+        if (!dispatchResult.success) {
+          return { handled: false, transferredToHuman: true, reason: dispatchResult.error };
+        }
 
         return {
           handled: true,
@@ -735,15 +935,24 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       if (handoffCheck.isBotActive === false) {
         const transMessage = `${handoffCheck.message || transitionMsg}\n\n🛍️ *Nossa Webloja:* ${storeLink}`;
         
-        // Enviar mensagem pelo canal
-        await chatStore.addMessage(realTenantId, conversationId, "BOT", transMessage, false, undefined, undefined, targetInstanceName);
-        await chatStore.updateConversationBotStatus(conversationId, {
-          is_bot_active: false,
-          bot_handoff_reason: handoffCheck.handoffReason || "KEYWORD_TRIGGER",
-          kanban_stage: "HUMAN",
-          status: "OPEN",
-          bot_handoff_at: new Date().toISOString()
-        });
+        const dispatchResult = await this.dispatchBotReplyAndRecord(
+          realTenantId,
+          conversationId,
+          targetInstanceName,
+          cleanPhone,
+          transMessage,
+          {
+            isHandoff: true,
+            handoffReason: handoffCheck.handoffReason || "KEYWORD_TRIGGER",
+            transitionMsg,
+            currentCount,
+            nextCount: currentCount + 1
+          }
+        );
+
+        if (!dispatchResult.success) {
+          return { handled: false, transferredToHuman: true, reason: dispatchResult.error };
+        }
 
         return {
           handled: true,
@@ -760,13 +969,24 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
           console.warn(`[AiAgentService] Abuso/Injection bloqueado para conversa ${conversationId}:`, abuseCheck.reason);
           const safeReply = `Olá! Para garantir a sua segurança e o melhor suporte sobre nossos produtos e medicamentos, você pode consultar nosso catálogo completo e valores em nossa Loja Online:\n👉 ${storeLink}\n\n${transitionMsg}`;
 
-          await chatStore.addMessage(realTenantId, conversationId, "BOT", safeReply, false, undefined, undefined, targetInstanceName);
-          await botHandoffManager.triggerHandoff(conversationId, realTenantId, "SECURITY_INJECTION_DETECTED", transitionMsg);
-          await chatStore.updateConversationBotStatus(conversationId, {
-            is_bot_active: false,
-            bot_handoff_reason: "SECURITY_INJECTION_DETECTED",
-            bot_handoff_at: new Date().toISOString()
-          });
+          const dispatchResult = await this.dispatchBotReplyAndRecord(
+            realTenantId,
+            conversationId,
+            targetInstanceName,
+            cleanPhone,
+            safeReply,
+            {
+              isHandoff: true,
+              handoffReason: "SECURITY_INJECTION_DETECTED",
+              transitionMsg,
+              currentCount,
+              nextCount: currentCount + 1
+            }
+          );
+
+          if (!dispatchResult.success) {
+            return { handled: false, transferredToHuman: true, reason: dispatchResult.error };
+          }
 
           return {
             handled: true,
@@ -809,16 +1029,24 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
           finalReply = `${finalReply}\n\n${transitionMsg}`;
         }
 
-        await chatStore.addMessage(realTenantId, conversationId, "BOT", finalReply, false, undefined, undefined, targetInstanceName);
-        await botHandoffManager.triggerHandoff(conversationId, realTenantId, "MAX_INTERACTIONS_REACHED", transitionMsg);
-        await chatStore.updateConversationBotStatus(conversationId, {
-          is_bot_active: false,
-          bot_interaction_count: nextCount,
-          bot_handoff_reason: "MAX_INTERACTIONS_REACHED",
-          kanban_stage: "HUMAN",
-          status: "OPEN",
-          bot_handoff_at: new Date().toISOString()
-        });
+        const dispatchResult = await this.dispatchBotReplyAndRecord(
+          realTenantId,
+          conversationId,
+          targetInstanceName,
+          cleanPhone,
+          finalReply,
+          {
+            isHandoff: true,
+            handoffReason: "MAX_INTERACTIONS_REACHED",
+            transitionMsg,
+            currentCount,
+            nextCount
+          }
+        );
+
+        if (!dispatchResult.success) {
+          return { handled: false, transferredToHuman: true, reason: dispatchResult.error };
+        }
 
         return {
           handled: true,
@@ -828,14 +1056,27 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         };
       }
 
-      // 11. Interação normal do bot: Enviar mensagem e incrementar contador
-      await chatStore.addMessage(realTenantId, conversationId, "BOT", finalReply, false, undefined, undefined, targetInstanceName);
-      await chatStore.updateConversationBotStatus(conversationId, {
-        is_bot_active: true,
-        bot_interaction_count: nextCount,
-        kanban_stage: "BOT",
-        status: "BOT"
-      });
+      // 11. Interação normal do bot: Enviar mensagem pelo WhatsApp, confirmar entrega, gravar e incrementar contador
+      const dispatchResult = await this.dispatchBotReplyAndRecord(
+        realTenantId,
+        conversationId,
+        targetInstanceName,
+        cleanPhone,
+        finalReply,
+        {
+          isHandoff: false,
+          currentCount,
+          nextCount
+        }
+      );
+
+      if (!dispatchResult.success) {
+        return {
+          handled: false,
+          transferredToHuman: false,
+          reason: dispatchResult.error
+        };
+      }
 
       return {
         handled: true,

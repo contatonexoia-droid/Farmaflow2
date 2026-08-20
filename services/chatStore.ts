@@ -416,7 +416,8 @@ class ChatStore {
     isPrivate = false,
     mediaUrlOrInstanceName?: string,
     mediaType?: string,
-    explicitInstanceName?: string
+    explicitInstanceName?: string,
+    skipWhatsAppDispatch = false
   ): Promise<{ message: ChatMessage; conversation: ChatConversation }> {
     const now = new Date().toISOString();
     const msgUuid = crypto.randomUUID();
@@ -449,8 +450,8 @@ class ChatStore {
       created_at: now
     };
 
-    // Evolution API Dispatch (for USER/BOT messages, if not private)
-    if ((senderType === "USER" || senderType === "BOT") && !isPrivate) {
+    // Evolution API Dispatch (for USER/BOT messages, if not private and not already dispatched)
+    if ((senderType === "USER" || senderType === "BOT") && !isPrivate && !skipWhatsAppDispatch) {
       try {
         let phoneToSend: string | null = null;
         try {
@@ -1177,9 +1178,9 @@ class ChatStore {
       finalUpdates.assigned_to = null;
       finalUpdates.status = "bot";
       finalUpdates.kanban_stage = "BOT";
-      finalUpdates.bot_interaction_count = 0;
-      finalUpdates.bot_handoff_reason = null;
-      finalUpdates.bot_handoff_at = null;
+      finalUpdates.bot_interaction_count = updates.bot_interaction_count !== undefined ? updates.bot_interaction_count : 0;
+      finalUpdates.bot_handoff_reason = updates.bot_handoff_reason !== undefined ? updates.bot_handoff_reason : null;
+      finalUpdates.bot_handoff_at = updates.bot_handoff_at !== undefined ? updates.bot_handoff_at : null;
     } else if (updates.is_bot_active === false || updates.is_human_controlled === true) {
       finalUpdates.is_bot_active = false;
       finalUpdates.is_human_controlled = true;
@@ -1187,6 +1188,9 @@ class ChatStore {
       finalUpdates.kanban_stage = updates.kanban_stage || "HUMAN";
       finalUpdates.bot_handoff_reason = updates.bot_handoff_reason || "OPERATOR_TAKEOVER";
       finalUpdates.bot_handoff_at = updates.bot_handoff_at || new Date().toISOString();
+      if (updates.bot_interaction_count !== undefined) {
+        finalUpdates.bot_interaction_count = updates.bot_interaction_count;
+      }
     }
 
     try {
