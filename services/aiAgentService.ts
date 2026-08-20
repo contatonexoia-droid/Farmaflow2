@@ -248,6 +248,24 @@ export class AiAgentService {
       }
     }
 
+    // 5. Fallback tolerante para a primeira drogaria cadastrada/ativa caso o tenant não tenha sido localizado
+    if (!tenant) {
+      try {
+        const { data: firstTenant } = await supabaseAdmin
+          .from("tenants")
+          .select("*")
+          .order("created_at", { ascending: true })
+          .limit(1)
+          .maybeSingle();
+        if (firstTenant) {
+          console.warn(`[AiAgentService] [WARN] Tenant não mapeado para "${tenantId}". Usando drogaria fallback: "${firstTenant.name}" (@${firstTenant.slug}, ID: ${firstTenant.id})`);
+          tenant = firstTenant;
+        }
+      } catch (fbErr: any) {
+        console.warn("[AiAgentService] Aviso ao buscar drogaria fallback:", fbErr.message);
+      }
+    }
+
     if (!tenant) {
       throw new Error(`Drogaria não encontrada (ID/Slug: ${tenantId}).`);
     }

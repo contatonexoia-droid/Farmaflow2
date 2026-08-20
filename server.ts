@@ -6612,7 +6612,7 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
           const { data: bySlug } = await supabaseAdmin
             .from("tenants")
             .select("*")
-            .eq("slug", cleanInst)
+            .or(`slug.eq.${cleanInst},slug.eq.${instanceName}`)
             .maybeSingle();
             
           if (bySlug) {
@@ -6658,6 +6658,24 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
         } catch (e) {}
       }
 
+      // Fallback tolerante final: seleciona a primeira drogaria cadastrada se não encontrou o tenant
+      if (!resolvedTenant) {
+        try {
+          const { data: defaultTenant } = await supabaseAdmin
+            .from("tenants")
+            .select("*")
+            .order("created_at", { ascending: true })
+            .limit(1)
+            .maybeSingle();
+          if (defaultTenant) {
+            console.warn(`[WEBHOOK] [WARN] Tenant não mapeado para a instância "${instanceName || storeId}". Usando fallback tenant: "${defaultTenant.name}" (@${defaultTenant.slug}, ID: ${defaultTenant.id})`);
+            resolvedTenant = defaultTenant;
+          }
+        } catch (fbErr: any) {
+          console.warn("[WEBHOOK] Aviso ao buscar fallback tenant padrão:", fbErr.message);
+        }
+      }
+
       if (resolvedTenant?.id) {
         storeId = resolvedTenant.id;
       }
@@ -6686,31 +6704,55 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
         console.log(`[WEBHOOK] Mensagem de: ${remoteJid} | fromMe: ${fromMe} | Texto: "${typeof text === 'string' ? text.slice(0, 50) : ''}"`);
 
         try {
+          // 1. SEMPRE salva primeiro a mensagem no banco de dados e cria/atualiza o contato e a conversa
           const result = await chatStore.processWhatsAppMessage(storeId, msg, instanceName);
 
-          if (result && result.conversation && !fromMe) {
+          if (result && result.conversation) {
+            // 2. Broadcast IMEDIATO via WebSockets/Realtime para que apareça na tela do operador humano
             try {
-              const ratingNum = parseInt(String(text).trim(), 10);
-              if (!isNaN(ratingNum) && ratingNum >= 1 && ratingNum <= 5) {
-                await csatManager.recordCsatResponse(storeId, result.conversation.id, ratingNum);
+              realtimeHub.broadcastToStore(storeId, "chat_message", {
+                conversationId: result.conversation.id,
+                message: result.message,
+                conversation: result.conversation
+              });
+            } catch (wsErr: any) {
+              console.warn("[WEBHOOK] Aviso no broadcast realtime da mensagem recebida:", wsErr.message);
+            }
+
+            if (!fromMe) {
+              // 3. Processamento CSAT isolado
+              try {
+                const ratingNum = parseInt(String(text).trim(), 10);
+                if (!isNaN(ratingNum) && ratingNum >= 1 && ratingNum <= 5) {
+                  await csatManager.recordCsatResponse(storeId, result.conversation.id, ratingNum);
+                }
+              } catch (csatErr: any) {
+                console.warn("[WEBHOOK] Aviso ao processar CSAT:", csatErr.message);
               }
 
-              // Disparo da Mensagem Automática de Boas-Vindas da Primeira Mensagem do Dia
-              await handleDailyWelcomeMessage(storeId, result.conversation, instanceName, text);
+              // 4. Disparo da Mensagem Automática de Boas-Vindas da Primeira Mensagem do Dia em bloco isolado
+              try {
+                await handleDailyWelcomeMessage(storeId, result.conversation, instanceName, text);
+              } catch (welcomeErr: any) {
+                console.error('[WEBHOOK] Exceção ao processar boas-vindas diárias:', welcomeErr.message);
+              }
 
-              // Processamento Inteligente pelo Agente de Atendimento IA (com trava de interações, anti-abuso e transbordo humano)
-              aiAgentService.processConversationTurn(storeId, result.conversation.id, text, {
-                instanceName,
-                phoneNumber: (result.conversation.contact?.phone_number || msg.key?.remoteJid?.replace(/@.*$/, ''))
-              }).catch(aiErr => {
-                console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao processar turno do Agente de IA:', aiErr.message);
-              });
-            } catch (botErr: any) {
-              console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao processar bot handoff / CSAT / Boas-Vindas:', botErr.message, botErr.stack);
+              // 5. Processamento Inteligente pelo Agente de Atendimento IA desacoplado em bloco seguro isolado
+              try {
+                const phone = result.conversation.contact?.phone_number || msg.key?.remoteJid?.replace(/@.*$/, '');
+                aiAgentService.processConversationTurn(storeId, result.conversation.id, text, {
+                  instanceName,
+                  phoneNumber: phone
+                }).catch(aiErr => {
+                  console.error('[WEBHOOK - IA ISOLADA] Exceção no processamento do Agente de IA (mensagem mantida no chat):', aiErr.message);
+                });
+              } catch (aiSyncErr: any) {
+                console.error('[WEBHOOK - IA ISOLADA] Erro ao despachar chamada do Agente de IA:', aiSyncErr.message);
+              }
             }
           }
         } catch (procErr: any) {
-          console.error('[ERRO CRITICO NO BACKGROUND]: Exceção no processamento do webhook:', procErr.message, procErr.stack);
+          console.error('[ERRO CRITICO NO BACKGROUND]: Exceção no processamento e salvamento do chatStore:', procErr.message, procErr.stack);
         }
       }
     } else if (eventName === "connection.update" || event === "CONNECTION_UPDATE") {
