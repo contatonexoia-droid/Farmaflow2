@@ -6255,30 +6255,53 @@ function getSaoPauloDateString(dateInput: Date | string = new Date()): string {
 // Helper function to handle daily welcome messages for first message of the day
 async function handleDailyWelcomeMessage(storeId: string, conversation: any, instanceName?: string, incomingText?: string) {
   try {
-    const cleanStoreId = typeof storeId === 'string' ? storeId.trim().replace(/^store_/, '') : storeId;
+    const rawId = String(storeId || '').trim();
+    const cleanStoreId = rawId.replace(/^store_/, '').replace(/^inbox_/, '').replace(/^tenant_/, '');
+    const cleanInst = instanceName ? instanceName.replace(/^store_/, '').replace(/^inbox_/, '') : '';
     
-    // Resolução segura do tenant evitando erro de cast de UUID no PostgreSQL
+    // Resolução segura e tolerante do tenant aceitando UUID e múltiplos formatos de Slug
     let tenant: any = null;
-    const isUuid = /^[0-9a-f-]{36}$/i.test(String(cleanStoreId));
+    const isUuid = /^[0-9a-f-]{36}$/i.test(cleanStoreId) || /^[0-9a-f-]{36}$/i.test(rawId);
+    
+    // 1. Se for UUID, busca direta por ID
     if (isUuid) {
-      const { data } = await supabaseAdmin.from("tenants").select("*").eq("id", cleanStoreId).maybeSingle();
+      const targetUuid = /^[0-9a-f-]{36}$/i.test(cleanStoreId) ? cleanStoreId : rawId;
+      const { data } = await supabaseAdmin.from("tenants").select("*").eq("id", targetUuid).maybeSingle();
       tenant = data;
     }
+    
+    // 2. Busca por variações tolerantes de slug (ex: 'nosso-catalogo', 'nossocatalogo', 'nosso_catalogo')
     if (!tenant) {
-      const { data } = await supabaseAdmin.from("tenants").select("*").eq("slug", cleanStoreId).maybeSingle();
-      tenant = data;
+      const slugVariants = Array.from(new Set([
+        cleanStoreId,
+        rawId,
+        cleanStoreId.replace(/-/g, ''),
+        cleanStoreId.replace(/_/g, '-'),
+        cleanStoreId.replace(/-/g, '_'),
+        cleanInst,
+        cleanInst.replace(/-/g, ''),
+        cleanInst.replace(/_/g, '-')
+      ].filter(Boolean)));
+
+      for (const s of slugVariants) {
+        const { data } = await supabaseAdmin.from("tenants").select("*").eq("slug", s).maybeSingle();
+        if (data) {
+          tenant = data;
+          break;
+        }
+      }
     }
-    if (!tenant && instanceName) {
-      const cleanInst = instanceName.replace(/^store_/, '').replace(/^inbox_/, '');
-      const { data: byInstSlug } = await supabaseAdmin.from("tenants").select("*").eq("slug", cleanInst).maybeSingle();
-      tenant = byInstSlug;
-      if (!tenant) {
+
+    // 3. Fallback pela tabela whatsapp_instances
+    if (!tenant && (instanceName || cleanStoreId)) {
+      try {
         const { data: instRow } = await supabaseAdmin
           .from("whatsapp_instances")
           .select("store_id")
-          .or(`instance_name.eq.${instanceName},instance_name.eq.${cleanInst}`)
+          .or(`instance_name.eq.${instanceName},instance_name.eq.${cleanInst},instance_name.eq.store_${cleanInst},instance_name.eq.store_${cleanStoreId},instance_name.eq.${cleanStoreId}`)
           .limit(1)
           .maybeSingle();
+
         if (instRow?.store_id) {
           const instStoreIsUuid = /^[0-9a-f-]{36}$/i.test(instRow.store_id);
           const { data: t } = instStoreIsUuid
@@ -6286,6 +6309,26 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
             : await supabaseAdmin.from("tenants").select("*").eq("slug", instRow.store_id.replace(/^store_/, '')).maybeSingle();
           tenant = t;
         }
+      } catch (instErr: any) {
+        console.warn("[WelcomeMessage] Aviso ao consultar whatsapp_instances:", instErr.message);
+      }
+    }
+
+    // 4. Fallback tolerante final para a primeira drogaria cadastrada
+    if (!tenant) {
+      try {
+        const { data: firstTenant } = await supabaseAdmin
+          .from("tenants")
+          .select("*")
+          .order("created_at", { ascending: true })
+          .limit(1)
+          .maybeSingle();
+        if (firstTenant) {
+          console.warn(`[WelcomeMessage] [WARN] Tenant não mapeado para storeId="${storeId}". Usando tenant padrão: "${firstTenant.name}" (@${firstTenant.slug}, ID: ${firstTenant.id})`);
+          tenant = firstTenant;
+        }
+      } catch (fbErr: any) {
+        console.warn("[WelcomeMessage] Aviso ao buscar fallback tenant padrão:", fbErr.message);
       }
     }
 
@@ -6603,62 +6646,64 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
       let resolvedTenant: any = null;
       let storeId = sanitizedTenantId || "default";
       
-      // Resolução em cascata do Tenant associado à instância do WhatsApp
-      if (instanceName) {
-        try {
-          const cleanInst = instanceName.replace(/^store_/, '').replace(/^inbox_/, '');
-          
-          // 1. Busca por slug direto do nome da instância
-          const { data: bySlug } = await supabaseAdmin
-            .from("tenants")
-            .select("*")
-            .or(`slug.eq.${cleanInst},slug.eq.${instanceName}`)
-            .maybeSingle();
-            
+      // Resolução abrangente e tolerante do Tenant associado à requisição
+      const rawStoreParam = String(sanitizedTenantId || instanceName || '').trim();
+      const cleanParam = rawStoreParam.replace(/^store_/, '').replace(/^inbox_/, '').replace(/^tenant_/, '');
+      const cleanInst = instanceName ? instanceName.replace(/^store_/, '').replace(/^inbox_/, '') : '';
+
+      // 1. Se o parâmetro for UUID, busca direta por ID
+      if (/^[0-9a-f-]{36}$/i.test(cleanParam) || /^[0-9a-f-]{36}$/i.test(rawStoreParam)) {
+        const targetUuid = /^[0-9a-f-]{36}$/i.test(cleanParam) ? cleanParam : rawStoreParam;
+        const { data: byId } = await supabaseAdmin.from("tenants").select("*").eq("id", targetUuid).maybeSingle();
+        if (byId) resolvedTenant = byId;
+      }
+
+      // 2. Busca por variações de slug (ex: 'nosso-catalogo', 'nossocatalogo', 'nosso_catalogo')
+      if (!resolvedTenant) {
+        const searchSlugs = Array.from(new Set([
+          cleanParam,
+          rawStoreParam,
+          cleanParam.replace(/-/g, ''),
+          cleanParam.replace(/_/g, '-'),
+          cleanParam.replace(/-/g, '_'),
+          cleanInst,
+          instanceName,
+          cleanInst.replace(/-/g, ''),
+          cleanInst.replace(/_/g, '-')
+        ].filter(Boolean)));
+
+        for (const s of searchSlugs) {
+          const { data: bySlug } = await supabaseAdmin.from("tenants").select("*").eq("slug", s).maybeSingle();
           if (bySlug) {
             resolvedTenant = bySlug;
-          } else {
-            // 2. Busca na tabela whatsapp_instances
-            const { data: inst } = await supabaseAdmin
-              .from("whatsapp_instances")
-              .select("store_id, instance_name")
-              .or(`instance_name.eq.${instanceName},instance_name.eq.${cleanInst},instance_name.eq.store_${cleanInst}`)
-              .limit(1)
-              .maybeSingle();
-              
-            if (inst?.store_id) {
-              const isUuid = /^[0-9a-f-]{36}$/i.test(inst.store_id);
-              const { data: t } = isUuid
-                ? await supabaseAdmin.from("tenants").select("*").eq("id", inst.store_id).maybeSingle()
-                : await supabaseAdmin.from("tenants").select("*").eq("slug", inst.store_id.replace(/^store_/, '')).maybeSingle();
-              if (t) resolvedTenant = t;
-            }
+            break;
           }
-        } catch (instErr: any) {
-          console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao buscar whatsapp_instances', instErr.message, instErr.stack);
         }
       }
 
-      if (!resolvedTenant && storeId && storeId !== "default") {
+      // 3. Busca na tabela whatsapp_instances
+      if (!resolvedTenant && (instanceName || cleanParam)) {
         try {
-          const isUuid = /^[0-9a-f-]{36}$/i.test(storeId);
-          const { data: t } = isUuid
-            ? await supabaseAdmin.from("tenants").select("*").eq("id", storeId).maybeSingle()
-            : await supabaseAdmin.from("tenants").select("*").eq("slug", storeId).maybeSingle();
-          if (t) resolvedTenant = t;
-        } catch (e) {}
+          const { data: inst } = await supabaseAdmin
+            .from("whatsapp_instances")
+            .select("store_id, instance_name")
+            .or(`instance_name.eq.${instanceName},instance_name.eq.${cleanInst},instance_name.eq.store_${cleanInst},instance_name.eq.store_${cleanParam},instance_name.eq.${cleanParam}`)
+            .limit(1)
+            .maybeSingle();
+            
+          if (inst?.store_id) {
+            const isUuid = /^[0-9a-f-]{36}$/i.test(inst.store_id);
+            const { data: t } = isUuid
+              ? await supabaseAdmin.from("tenants").select("*").eq("id", inst.store_id).maybeSingle()
+              : await supabaseAdmin.from("tenants").select("*").eq("slug", inst.store_id.replace(/^store_/, '')).maybeSingle();
+            if (t) resolvedTenant = t;
+          }
+        } catch (instErr: any) {
+          console.error('[WEBHOOK]: Erro ao buscar whatsapp_instances', instErr.message);
+        }
       }
 
-      // Fallback adicional por slug caso a instância contenha o nome da loja
-      if (!resolvedTenant && instanceName) {
-        try {
-          const searchSlug = instanceName.replace(/^store_/, '').replace(/^inbox_/, '');
-          const { data: t } = await supabaseAdmin.from("tenants").select("*").eq("slug", searchSlug).maybeSingle();
-          if (t) resolvedTenant = t;
-        } catch (e) {}
-      }
-
-      // Fallback tolerante final: seleciona a primeira drogaria cadastrada se não encontrou o tenant
+      // 4. Fallback tolerante final: seleciona a primeira drogaria cadastrada se não encontrou o tenant
       if (!resolvedTenant) {
         try {
           const { data: defaultTenant } = await supabaseAdmin
@@ -6676,6 +6721,7 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
         }
       }
 
+      // FORÇA storeId a ser SEMPRE o UUID real do tenant para evitar falhas de cast de UUID nas operações subsequentes
       if (resolvedTenant?.id) {
         storeId = resolvedTenant.id;
       }

@@ -202,37 +202,38 @@ export class AiAgentService {
       }
     }
 
-    // 2. Se não for UUID ou não encontrou por ID, busca por slug sanitizado
-    if (!tenant && sanitizedId) {
-      const { data, error } = await supabaseAdmin
-        .from("tenants")
-        .select("*")
-        .eq("slug", sanitizedId)
-        .maybeSingle();
-      if (!error && data) {
-        tenant = data;
+    // 2. Busca tolerante por múltiplas variações de slug (ex: 'nosso-catalogo', 'nossocatalogo', 'nosso_catalogo')
+    if (!tenant) {
+      const slugVariants = Array.from(new Set([
+        sanitizedId,
+        rawId,
+        sanitizedId.replace(/-/g, ''),
+        sanitizedId.replace(/_/g, '-'),
+        sanitizedId.replace(/-/g, '_'),
+        rawId.replace(/-/g, ''),
+        rawId.replace(/_/g, '-')
+      ].filter(Boolean)));
+
+      for (const s of slugVariants) {
+        const { data, error } = await supabaseAdmin
+          .from("tenants")
+          .select("*")
+          .eq("slug", s)
+          .maybeSingle();
+        if (!error && data) {
+          tenant = data;
+          break;
+        }
       }
     }
 
-    // 3. Fallback adicional: busca pelo rawId como slug
-    if (!tenant && rawId && rawId !== sanitizedId) {
-      const { data, error } = await supabaseAdmin
-        .from("tenants")
-        .select("*")
-        .eq("slug", rawId)
-        .maybeSingle();
-      if (!error && data) {
-        tenant = data;
-      }
-    }
-
-    // 4. Fallback por instância do WhatsApp na tabela whatsapp_instances
+    // 3. Fallback por instância do WhatsApp na tabela whatsapp_instances
     if (!tenant) {
       try {
         const { data: inst } = await supabaseAdmin
           .from("whatsapp_instances")
           .select("store_id")
-          .or(`instance_name.eq.${rawId},instance_name.eq.${sanitizedId},instance_name.eq.store_${sanitizedId}`)
+          .or(`instance_name.eq.${rawId},instance_name.eq.${sanitizedId},instance_name.eq.store_${sanitizedId},instance_name.eq.store_${sanitizedId.replace(/-/g, '')}`)
           .limit(1)
           .maybeSingle();
 
@@ -248,7 +249,7 @@ export class AiAgentService {
       }
     }
 
-    // 5. Fallback tolerante para a primeira drogaria cadastrada/ativa caso o tenant não tenha sido localizado
+    // 4. Fallback tolerante para a primeira drogaria cadastrada/ativa caso o tenant não tenha sido localizado
     if (!tenant) {
       try {
         const { data: firstTenant } = await supabaseAdmin
@@ -268,6 +269,26 @@ export class AiAgentService {
 
     if (!tenant) {
       throw new Error(`Drogaria não encontrada (ID/Slug: ${tenantId}).`);
+    }
+
+    // 5. Carregar configurações avançadas do agente (agent_settings) caso existam vinculadas ao UUID do tenant
+    try {
+      const { data: agentSetting } = await supabaseAdmin
+        .from("agent_settings")
+        .select("*")
+        .or(`tenant_id.eq.${tenant.id},store_id.eq.${tenant.id}`)
+        .limit(1)
+        .maybeSingle();
+
+      if (agentSetting) {
+        tenant.ai_agent_config = {
+          ...(tenant.ai_agent_config || tenant.aiagentconfig || {}),
+          ...agentSetting,
+          active: agentSetting.active ?? agentSetting.enabled ?? tenant.ai_agent_config?.active ?? true
+        };
+      }
+    } catch (_) {
+      // Ignora se a tabela agent_settings não existir ou não possuir o registro
     }
 
     const isEnabled = tenant.is_ai_agent_enabled === true || tenant.isaiagentenabled === true;
