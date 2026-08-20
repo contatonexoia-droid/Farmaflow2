@@ -5799,14 +5799,15 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
           body: JSON.stringify({
             enabled: true,
             url: webhookUrl,
-            webhookByEvents: false,
-            webhook_by_events: false,
+            webhookByEvents: true,
+            webhook_by_events: true,
             events: [
               "MESSAGES_UPSERT",
-              "QRCODE_UPDATED",
+              "MESSAGES_UPDATE",
+              "SEND_MESSAGE",
               "CONNECTION_UPDATE",
-              "CONTACTS_SET",
-              "MESSAGES_UPDATE"
+              "QRCODE_UPDATED",
+              "CONTACTS_SET"
             ]
           })
         }, 3000).catch(() => {});
@@ -6094,8 +6095,16 @@ app.post("/api/v1/chat/instance/recreate", requireChatEnabled, async (req, res) 
       body: JSON.stringify({
         enabled: true,
         url: webhookUrl,
-        webhookByEvents: false,
-        events: ["MESSAGES_UPSERT", "QRCODE_UPDATED", "CONNECTION_UPDATE", "CONTACTS_SET", "MESSAGES_UPDATE"]
+        webhookByEvents: true,
+        webhook_by_events: true,
+        events: [
+          "MESSAGES_UPSERT",
+          "MESSAGES_UPDATE",
+          "SEND_MESSAGE",
+          "CONNECTION_UPDATE",
+          "QRCODE_UPDATED",
+          "CONTACTS_SET"
+        ]
       })
     }, 3000).catch(() => {});
 
@@ -6515,9 +6524,23 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
     const instanceName = bodyInstance || data?.instance || (typeof req.query.instance === 'string' ? req.query.instance : null);
     const rawTenantId = req.query.tenantId || req.query.storeId || req.body.tenantId || instanceName;
     const sanitizedTenantId = typeof rawTenantId === 'string' ? rawTenantId.trim().replace(/^store_/, '') : rawTenantId;
-    const eventName = event === "MESSAGES_UPSERT" ? "messages.upsert" : event;
     
-    if (eventName === "messages.upsert") {
+    const eventName = String(event || "").toLowerCase();
+    const eventNameUpper = String(event || "").toUpperCase();
+    
+    let isMessageEvent = false;
+    if (eventNameUpper === "MESSAGES_UPSERT" || eventName === "messages.upsert" || eventName === "messages-upsert") {
+      isMessageEvent = true;
+    } else if (data?.messages || (data?.message && data.message.key) || data?.key) {
+      isMessageEvent = true;
+      console.log(`[Webhook Event] Evento não é explicitamente MESSAGES_UPSERT, mas contém payload de mensagem. Forçando processamento.`);
+    }
+
+    if (!isMessageEvent) {
+      console.log(`[Webhook Event] Recebido evento: ${event || 'indefinido'}. Ignorando processamento de IA por não ser mensagem.`);
+    }
+
+    if (isMessageEvent) {
       let messages = [];
       if (Array.isArray(data?.messages)) {
         messages = data.messages;
