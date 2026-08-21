@@ -267,7 +267,7 @@ export const mapDbTenantToApp = (t: any): PharmacyConfig => {
     ignore_erp_prices: t.ignore_erp_prices !== undefined ? t.ignore_erp_prices : (t.delivery_settings?.ignore_erp_prices || false),
     welcomeMessageEnabled: t.welcome_message_enabled ?? t.welcomemessageenabled ?? false,
     welcomeMessageText: t.welcome_message_text || t.welcomemessagetext || "Olá! Seja muito bem-vindo(a) à nossa farmácia! Como podemos te ajudar hoje?",
-    welcomeMessageFormat: t.welcome_message_format || t.welcomemessageformat || "button",
+    welcomeMessageFormat: t.welcome_message_format || t.welcome_button_format || t.button_type || t.welcomemessageformat || "button",
     welcomeMessageLink: t.welcome_message_link || t.welcomemessagelink || "",
     isAiAgentEnabled: t.is_ai_agent_enabled === true || t.isaiagentenabled === true,
     aiAgentConfig: t.ai_agent_config || t.aiagentconfig || undefined,

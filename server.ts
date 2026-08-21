@@ -1167,8 +1167,8 @@ app.all(["/api/v1/tenants/:tenantId/settings", "/api/v1/tenants/settings", "/api
     if (body.welcome_message_text !== undefined || body.welcomeMessageText !== undefined) {
       updates.welcome_message_text = String(body.welcome_message_text ?? body.welcomeMessageText ?? "");
     }
-    if (body.welcome_message_format !== undefined || body.welcomeMessageFormat !== undefined) {
-      updates.welcome_message_format = String(body.welcome_message_format ?? body.welcomeMessageFormat ?? "button");
+    if (body.welcome_message_format !== undefined || body.welcomeMessageFormat !== undefined || body.welcome_button_format !== undefined || body.welcomeButtonFormat !== undefined || body.button_type !== undefined) {
+      updates.welcome_message_format = String(body.welcome_message_format ?? body.welcomeMessageFormat ?? body.welcome_button_format ?? body.welcomeButtonFormat ?? body.button_type ?? "button");
     }
     if (body.welcome_message_link !== undefined || body.welcomeMessageLink !== undefined) {
       updates.welcome_message_link = String(body.welcome_message_link ?? body.welcomeMessageLink ?? "");
@@ -6524,7 +6524,16 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
       }
     }
 
-    const format = tenant.welcome_message_format || tenant.welcomemessageformat || "button";
+    const rawFormat = String(
+      tenant.welcome_button_format || 
+      tenant.welcome_message_format || 
+      tenant.button_type || 
+      tenant.welcomebuttonformat || 
+      tenant.welcomemessageformat || 
+      "button"
+    ).trim().toLowerCase();
+
+    const isButtonFormat = rawFormat === 'button' || rawFormat === 'interactive' || rawFormat === 'buttons';
     const targetInstanceName = await evolutionApiService.resolveInstanceName(tenant.id, instanceName);
     const displayContent = `${customText}\n\n🛒 Loja Online: ${storeLink}`;
 
@@ -6556,27 +6565,33 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
     });
 
     // 2. Disparo HTTP para a Evolution API com logs detalhados e tratamento de erros
-    console.log(`[WelcomeMessage] Iniciando disparo HTTP para o WhatsApp do cliente ${cleanPhone} via instância "${targetInstanceName}" (Formato: ${format})...`);
+    console.log(`[WelcomeMessage] Iniciando disparo HTTP para o WhatsApp do cliente ${cleanPhone} via instância "${targetInstanceName}" (Formato Selecionado: "${rawFormat}", isButton: ${isButtonFormat})...`);
 
     try {
       let dispatchSuccess = false;
 
-      if (format === 'button') {
-        const btnResult = await evolutionApiService.sendTemplateButton(
+      if (isButtonFormat) {
+        console.log(`[WelcomeMessage] Disparando botão interativo CTA para ${cleanPhone} via instância "${targetInstanceName}" (Loja: "${storeName}")...`);
+        const btnResult = await evolutionApiService.sendButtons(
           targetInstanceName,
           cleanPhone,
           storeName,
           customText,
-          "🛒 Acessar Loja Online",
-          storeLink,
-          storeName
+          [
+            {
+              type: "url",
+              displayText: "🛒 Acessar Loja Online",
+              url: storeLink
+            }
+          ],
+          storeName || "FarmaFlow"
         );
 
         if (btnResult.success) {
           dispatchSuccess = true;
-          console.log(`[WelcomeMessage] ✅ Template de botão enviado com sucesso para ${cleanPhone}`);
+          console.log(`[WelcomeMessage] ✅ Botão interativo enviado com sucesso para ${cleanPhone}`);
         } else {
-          console.warn(`[WelcomeMessage] Template de botão não aceito pela instância "${targetInstanceName}" (HTTP ${btnResult.status || 'N/A'}: ${btnResult.error}). Acionando Fallback de Texto com Link Preview...`);
+          console.warn(`[WelcomeMessage] Botão interativo não aceito pela instância "${targetInstanceName}" (HTTP ${btnResult.status || 'N/A'}: ${btnResult.error}). Acionando Fallback Elegante de Texto com Link Preview...`);
         }
       }
 
