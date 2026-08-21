@@ -199,50 +199,53 @@ export class EvolutionApiService {
   }
 
   /**
-   * Envia mensagem interativa com botão de URL/Ação via Evolution API (/message/sendButtons)
-   * com suporte ao formato CTA URL e fallback automático para /message/sendTemplate
+   * Envia mensagem interativa CTA URL via Evolution API v2 (/message/sendInteractive/{instance})
+   * Compatível com Evolution API v2.3.7+ para botões de URL/Ação.
+   * Se a Evolution API retornar qualquer status diferente de 200/201 ou falhar,
+   * executa obrigatoriamente o fallback imediato para sendTextMessage com link formatado.
    */
-  public async sendButtons(
+  public async sendInteractive(
     instanceName: string,
     phoneNumber: string,
     title: string,
-    description: string,
-    buttons: Array<{ type?: string; displayText: string; url?: string; id?: string }>,
+    body: string,
+    buttonText: string,
+    buttonUrl: string,
     footer?: string
-  ): Promise<{ success: boolean; data?: any; error?: string; status?: number }> {
+  ): Promise<{ success: boolean; data?: any; error?: string; status?: number; isFallback?: boolean }> {
     const cleanNumber = String(phoneNumber || "").replace(/\D/g, "");
     if (!cleanNumber) {
       const err = `Número de telefone inválido ou vazio: "${phoneNumber}"`;
-      console.error(`[EvolutionAPI] [ERRO EVOLUTION] Falha ao disparar botões interativos: ${err}`);
+      console.error(`[EvolutionAPI] [ERRO EVOLUTION] Falha ao disparar sendInteractive: ${err}`);
       return { success: false, error: err };
     }
 
     if (!instanceName || instanceName.trim() === "" || /^[0-9a-f-]{36}$/i.test(instanceName.trim())) {
       const err = `Nome de instância inválido ou incompatível (UUID): "${instanceName}"`;
-      console.error(`[EvolutionAPI] [ERRO EVOLUTION] Falha ao disparar botões interativos: ${err}`);
+      console.error(`[EvolutionAPI] [ERRO EVOLUTION] Falha ao disparar sendInteractive: ${err}`);
       return { success: false, error: err };
     }
 
     const { url, key: apiKeyToUse } = await this.getInstanceConfig(instanceName);
+    const targetUrl = `${url}/message/sendInteractive/${instanceName.trim()}`;
 
-    // 1. Rota Primária: /message/sendButtons (Formato nativo Evolution API v2 para botões interativos/CTA)
-    const targetUrl = `${url}/message/sendButtons/${instanceName.trim()}`;
-    const buttonPayload = {
+    // Payload oficial no formato CTA URL suportado pela Evolution API v2.3.7+
+    const interactivePayload = {
       number: cleanNumber,
-      title: title || "FarmaFlow",
-      description: description,
-      footer: footer || title || "FarmaFlow",
-      buttons: buttons.map(btn => ({
-        type: btn.type || "url",
-        displayText: btn.displayText,
-        url: btn.url,
-        ...(btn.id ? { id: btn.id } : {})
-      }))
+      options: {
+        type: "cta_url",
+        body: body,
+        footer: footer || title || "FarmaFlow",
+        action: {
+          display_text: buttonText || "🛒 Acessar Loja Online",
+          url: buttonUrl
+        }
+      }
     };
 
-    console.log(`[EvolutionAPI] Disparando sendButtons para ${cleanNumber} via instância "${instanceName}" | URL: ${targetUrl}`);
-    console.log(`[EvolutionAPI] Enviando requisição com apikey iniciando em: ${apiKeyToUse ? apiKeyToUse.substring(0, 6) + '...' : 'NULA/INDIFINIDA'}`);
-    console.log(`[EvolutionAPI] Payload sendButtons:`, JSON.stringify(buttonPayload, null, 2));
+    console.log(`[EvolutionAPI] Disparando sendInteractive (CTA URL) para ${cleanNumber} via instância "${instanceName}" | URL: ${targetUrl}`);
+    console.log(`[EvolutionAPI] Enviando requisição com apikey iniciando em: ${apiKeyToUse ? apiKeyToUse.substring(0, 6) + '...' : 'NULA/INDEFINIDA'}`);
+    console.log(`[EvolutionAPI] Payload sendInteractive:`, JSON.stringify(interactivePayload, null, 2));
 
     try {
       const response = await fetch(targetUrl, {
@@ -251,7 +254,7 @@ export class EvolutionApiService {
           "Content-Type": "application/json",
           "apikey": apiKeyToUse
         },
-        body: JSON.stringify(buttonPayload)
+        body: JSON.stringify(interactivePayload)
       });
 
       const responseText = await response.text();
@@ -262,68 +265,63 @@ export class EvolutionApiService {
         responseJson = { raw: responseText };
       }
 
-      console.log(`[EvolutionAPI] Resposta sendButtons HTTP ${response.status} da instância "${instanceName}":`, responseText);
+      console.log(`[EvolutionAPI] Resposta sendInteractive HTTP ${response.status} da instância "${instanceName}":`, responseText);
 
-      if (response.ok) {
-        console.log(`[EvolutionAPI] ✅ Botões interativos entregues com sucesso à Evolution API para ${cleanNumber}`);
+      if (response.status === 200 || response.status === 201) {
+        console.log(`[EvolutionAPI] ✅ Botão interativo CTA entregue com sucesso à Evolution API para ${cleanNumber}`);
         return { success: true, status: response.status, data: responseJson };
       }
 
-      console.warn(`[EvolutionAPI] sendButtons retornou HTTP ${response.status}. Tentando rota alternativa sendTemplate...`);
+      // Se a Evolution API retornar qualquer status diferente de 200/201
+      console.error(`[EvolutionAPI] Falha no sendInteractive (${response.status}). Executando fallback sendText imediato...`);
     } catch (err: any) {
-      console.warn(`[EvolutionAPI] Exceção de rede em sendButtons (${err.message}). Tentando rota alternativa sendTemplate...`);
+      console.error(`[EvolutionAPI] Falha no sendInteractive (${err.message || err}). Executando fallback sendText imediato...`);
     }
 
-    // 2. Rota Secundária de Fallback: /message/sendTemplate (compatibilidade v1/v2 com templateButtons)
-    try {
-      const templateTargetUrl = `${url}/message/sendTemplate/${instanceName.trim()}`;
-      const templatePayload = {
-        number: cleanNumber,
-        options: {
-          delay: 1200,
-          presence: "composing"
-        },
-        text: `${title ? `👋 *${title}*\n\n` : ""}${description}`,
-        footer: footer || title || "FarmaFlow",
-        templateButtons: buttons.map((b, idx) => ({
-          index: idx + 1,
-          urlButton: {
-            displayText: b.displayText,
-            url: b.url || ""
-          }
-        }))
-      };
+    // Execução real e garantida do Fallback elegante (sendTextMessage)
+    const fallbackFormattedText = `👋 *${title || footer || "FarmaFlow"}*\n\n${body}\n\n🛍️ *Acesse nossa Loja Online:*\n👉 ${buttonUrl}`;
+    console.log(`[EvolutionAPI] Disparando fallback sendText para ${cleanNumber} com link da loja...`);
 
-      console.log(`[EvolutionAPI] Disparando fallback sendTemplate para ${cleanNumber} | URL: ${templateTargetUrl}`);
-      const templateResponse = await fetch(templateTargetUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "apikey": apiKeyToUse
-        },
-        body: JSON.stringify(templatePayload)
-      });
+    const textFallbackResult = await this.sendTextMessage(
+      instanceName,
+      cleanNumber,
+      fallbackFormattedText,
+      { delay: 1200, linkPreview: true }
+    );
 
-      const templateResponseText = await templateResponse.text();
-      console.log(`[EvolutionAPI] Resposta sendTemplate fallback HTTP ${templateResponse.status}:`, templateResponseText);
-
-      if (templateResponse.ok) {
-        return { success: true, status: templateResponse.status, data: templateResponseText };
-      }
-
-      return {
-        success: false,
-        status: templateResponse.status,
-        error: templateResponseText
-      };
-    } catch (fallbackErr: any) {
-      console.error(`[EvolutionAPI] Falha em ambas as rotas de botões interativos (${fallbackErr.message})`);
-      return { success: false, error: fallbackErr.message };
-    }
+    return {
+      ...textFallbackResult,
+      isFallback: true
+    };
   }
 
   /**
-   * Mantém retrocompatibilidade chamando sendButtons internamente
+   * Mantém retrocompatibilidade chamando sendInteractive internamente
+   */
+  public async sendButtons(
+    instanceName: string,
+    phoneNumber: string,
+    title: string,
+    description: string,
+    buttons: Array<{ type?: string; displayText: string; url?: string; id?: string }>,
+    footer?: string
+  ): Promise<{ success: boolean; data?: any; error?: string; status?: number; isFallback?: boolean }> {
+    const firstUrlButton = buttons?.find(b => b.url) || buttons?.[0];
+    const buttonText = firstUrlButton?.displayText || "🛒 Acessar Loja Online";
+    const buttonUrl = firstUrlButton?.url || "";
+    return this.sendInteractive(
+      instanceName,
+      phoneNumber,
+      title,
+      description,
+      buttonText,
+      buttonUrl,
+      footer
+    );
+  }
+
+  /**
+   * Mantém retrocompatibilidade com templates de botões chamando sendInteractive internamente
    */
   public async sendTemplateButton(
     instanceName: string,
@@ -333,19 +331,14 @@ export class EvolutionApiService {
     buttonText: string,
     buttonUrl: string,
     footer?: string
-  ): Promise<{ success: boolean; data?: any; error?: string; status?: number }> {
-    return this.sendButtons(
+  ): Promise<{ success: boolean; data?: any; error?: string; status?: number; isFallback?: boolean }> {
+    return this.sendInteractive(
       instanceName,
       phoneNumber,
       title,
       text,
-      [
-        {
-          type: "url",
-          displayText: buttonText,
-          url: buttonUrl
-        }
-      ],
+      buttonText,
+      buttonUrl,
       footer
     );
   }

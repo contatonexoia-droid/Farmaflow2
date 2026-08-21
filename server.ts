@@ -6537,84 +6537,83 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
     const targetInstanceName = await evolutionApiService.resolveInstanceName(tenant.id, instanceName);
     const displayContent = `${customText}\n\n🛒 Loja Online: ${storeLink}`;
 
-    // 1. Persiste a mensagem no banco de dados e atualiza a conversa
-    const welcomeMsgId = crypto.randomUUID();
-    const welcomeMsg = {
-      id: welcomeMsgId,
-      conversation_id: conversation.id,
-      sender_type: "BOT",
-      content: displayContent,
-      is_private: false,
-      created_at: nowIso
-    };
-
-    try {
-      await supabaseAdmin.from("chat_messages").insert([welcomeMsg]);
-      await supabaseAdmin.from("chat_conversations").update({
-        last_message_at: nowIso,
-        last_message_content: displayContent
-      }).eq("id", conversation.id);
-    } catch (dbErr: any) {
-      console.warn("[WelcomeMessage] Erro ao persistir mensagem de boas-vindas no banco:", dbErr.message);
-    }
-
-    realtimeHub.broadcastToStore(storeId, "chat_message", {
-      conversationId: conversation.id,
-      message: welcomeMsg,
-      conversation
-    });
-
-    // 2. Disparo HTTP para a Evolution API com logs detalhados e tratamento de erros
+    // 1. Disparo HTTP para a Evolution API com logs detalhados e fallback automático
     console.log(`[WelcomeMessage] Iniciando disparo HTTP para o WhatsApp do cliente ${cleanPhone} via instância "${targetInstanceName}" (Formato Selecionado: "${rawFormat}", isButton: ${isButtonFormat})...`);
 
-    try {
-      let dispatchSuccess = false;
+    let dispatchSuccess = false;
+    let dispatchResult: any = null;
 
+    try {
       if (isButtonFormat) {
-        console.log(`[WelcomeMessage] Disparando botão interativo CTA para ${cleanPhone} via instância "${targetInstanceName}" (Loja: "${storeName}")...`);
-        const btnResult = await evolutionApiService.sendButtons(
+        console.log(`[WelcomeMessage] Disparando botão interativo CTA (Evolution v2 /message/sendInteractive) para ${cleanPhone} via instância "${targetInstanceName}" (Loja: "${storeName}")...`);
+        dispatchResult = await evolutionApiService.sendInteractive(
           targetInstanceName,
           cleanPhone,
           storeName,
           customText,
-          [
-            {
-              type: "url",
-              displayText: "🛒 Acessar Loja Online",
-              url: storeLink
-            }
-          ],
+          "🛒 Acessar Loja Online",
+          storeLink,
           storeName || "FarmaFlow"
         );
-
-        if (btnResult.success) {
-          dispatchSuccess = true;
-          console.log(`[WelcomeMessage] ✅ Botão interativo enviado com sucesso para ${cleanPhone}`);
-        } else {
-          console.warn(`[WelcomeMessage] Botão interativo não aceito pela instância "${targetInstanceName}" (HTTP ${btnResult.status || 'N/A'}: ${btnResult.error}). Acionando Fallback Elegante de Texto com Link Preview...`);
-        }
-      }
-
-      if (!dispatchSuccess) {
-        const fallbackText = `👋 *${storeName}*\n\n${customText}\n\n🛍️ *Acesse nossa Loja Online:*\n👉 ${storeLink}`;
-        const textResult = await evolutionApiService.sendTextMessage(
+      } else {
+        const directText = `👋 *${storeName}*\n\n${customText}\n\n🛍️ *Acesse nossa Loja Online:*\n👉 ${storeLink}`;
+        console.log(`[WelcomeMessage] Disparando mensagem de texto com link direto para ${cleanPhone} via instância "${targetInstanceName}"...`);
+        dispatchResult = await evolutionApiService.sendTextMessage(
           targetInstanceName,
           cleanPhone,
-          fallbackText,
+          directText,
           { delay: 1200, linkPreview: true }
         );
-
-        if (textResult.success) {
-          console.log(`[WelcomeMessage] ✅ Mensagem de texto de boas-vindas enviada com sucesso para ${cleanPhone}`);
-        } else {
-          console.error(`[WelcomeMessage] [ERRO EVOLUTION] Falha ao disparar mensagem para o WhatsApp do cliente (${cleanPhone}): HTTP ${textResult.status || 500} - ${textResult.error}`);
-        }
       }
+
+      dispatchSuccess = Boolean(dispatchResult?.success);
     } catch (evoDispatchErr: any) {
-      console.error(`[WelcomeMessage] [ERRO EVOLUTION] Falha ao disparar mensagem para o WhatsApp do cliente (${cleanPhone}): ${evoDispatchErr.message || evoDispatchErr}`);
+      console.error(`[WelcomeMessage] [ERRO EVOLUTION] Falha crítica ao disparar mensagem para o WhatsApp do cliente (${cleanPhone}): ${evoDispatchErr.message || evoDispatchErr}`);
+      dispatchSuccess = false;
     }
 
-    console.log(`[WelcomeMessage] Fluxo de boas-vindas concluído para ${cleanPhone} (Loja: "${tenant.name}", Instância: "${targetInstanceName}")`);
+    // 2. Ordem de Persistência no Banco Local e Broadcast WebSocket:
+    // A mensagem só é registrada e exibida no painel após a confirmação de entrega da Evolution API
+    if (dispatchSuccess) {
+      console.log(`[WelcomeMessage] ✅ Mensagem de boas-vindas entregue com sucesso à Evolution API para ${cleanPhone}. Registrando no banco local...`);
+      const welcomeMsgId = crypto.randomUUID();
+      const welcomeMsg = {
+        id: welcomeMsgId,
+        conversation_id: conversation.id,
+        sender_type: "BOT",
+        content: displayContent,
+        is_private: false,
+        created_at: nowIso
+      };
+
+      try {
+        await supabaseAdmin.from("chat_messages").insert([welcomeMsg]);
+        await supabaseAdmin.from("chat_conversations").update({
+          last_message_at: nowIso,
+          last_message_content: displayContent
+        }).eq("id", conversation.id);
+      } catch (dbErr: any) {
+        console.warn("[WelcomeMessage] Erro ao persistir mensagem de boas-vindas no banco local:", dbErr.message);
+      }
+
+      realtimeHub.broadcastToStore(storeId, "chat_message", {
+        conversationId: conversation.id,
+        message: welcomeMsg,
+        conversation
+      });
+    } else {
+      console.error(`[WelcomeMessage] [ERRO EVOLUTION] Falha no envio para WhatsApp (${cleanPhone}): HTTP ${dispatchResult?.status || 500} - ${dispatchResult?.error || 'Erro desconhecido'}. Não inserindo no chat como entregue.`);
+      
+      // Reseta last_welcome_sent_at para permitir nova tentativa em mensagens futuras
+      try {
+        await supabaseAdmin
+          .from("chat_conversations")
+          .update({ last_welcome_sent_at: null })
+          .eq("id", conversation.id);
+      } catch (_) {}
+    }
+
+    console.log(`[WelcomeMessage] Fluxo de boas-vindas concluído para ${cleanPhone} (Loja: "${tenant.name}", Instância: "${targetInstanceName}", Status: ${dispatchSuccess ? 'ENTREGUE' : 'FALHA'})`);
   } catch (err: any) {
     console.error("[WelcomeMessage] Erro ao processar mensagem de boas-vindas:", err.message);
   }
