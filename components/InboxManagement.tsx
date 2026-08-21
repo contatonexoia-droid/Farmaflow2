@@ -1,11 +1,19 @@
 import React, { useState, useEffect } from 'react';
-import { Inbox, Plus, Settings, Users, X, Check, Trash2, Smartphone, Shield, Loader2, Building2, Globe, MessageSquare, Instagram, MessageCircle, QrCode, RefreshCw, Zap } from 'lucide-react';
+import { Inbox, Plus, Settings, Users, X, Check, Trash2, Smartphone, Shield, Loader2, Building2, Globe, MessageSquare, Instagram, MessageCircle, QrCode, RefreshCw, Zap, Search, CheckSquare, Square, Mail } from 'lucide-react';
 import { supabase } from '../services/supabase';
 import toast, { Toaster } from 'react-hot-toast';
 import { WhatsAppConnectModal } from './WhatsAppConnectModal';
 
 interface InboxManagementProps {
   tenantId: string;
+}
+
+interface CollaboratorProfile {
+  id: string;
+  name: string;
+  email?: string;
+  role: string;
+  is_active?: boolean;
 }
 
 export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) => {
@@ -17,13 +25,15 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
   const [connectInboxId, setConnectInboxId] = useState<string | null>(null);
   const [isGlobalConnectModalOpen, setIsGlobalConnectModalOpen] = useState(false);
   
-  // Managing members and teams
+  // Managing members/access
   const [isMembersModalOpen, setIsMembersModalOpen] = useState(false);
   const [selectedInbox, setSelectedInbox] = useState<any>(null);
   const [team, setTeam] = useState<any[]>([]);
-  const [inboxMembers, setInboxMembers] = useState<string[]>([]); // array of user_ids
+  const [collaborators, setCollaborators] = useState<CollaboratorProfile[]>([]);
+  const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
   const [membersLoading, setMembersLoading] = useState(false);
-  const [savingMember, setSavingMember] = useState<string | null>(null);
+  const [savingAccess, setSavingAccess] = useState(false);
+  const [collaboratorSearch, setCollaboratorSearch] = useState('');
   const [whatsappInstances, setWhatsappInstances] = useState<any[]>([]);
   const [teams, setTeams] = useState<any[]>([]);
   const [selectedTeamIds, setSelectedTeamIds] = useState<string[]>([]);
@@ -327,68 +337,314 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
     localStorage.setItem(`inboxes_${tenantId}`, JSON.stringify(current.filter((i: any) => i.id !== id)));
   };
 
+  const formatRole = (role?: string) => {
+    const r = (role || '').toLowerCase();
+    if (r.includes('admin') || r.includes('matriz')) return 'Admin Matriz';
+    if (r.includes('owner') || r.includes('propriet')) return 'Proprietário';
+    if (r.includes('gerente')) return 'Gerente';
+    if (r.includes('entreg')) return 'Entregador';
+    return 'Operador / Balconista';
+  };
+
   const openMembersModal = async (inbox: any) => {
     setSelectedInbox(inbox);
     setIsMembersModalOpen(true);
     setMembersLoading(true);
+    setCollaborators([]);
+    setSelectedUserIds([]);
+    setCollaboratorSearch('');
+
     try {
-      const res = await fetch(`/api/v1/inboxes/${inbox.id}/members`);
-      if (res.ok) {
-        const json = await res.json();
-        if (json.data) {
-          setInboxMembers(json.data);
-          setMembersLoading(false);
-          return;
+      const departmentId = inbox.id;
+
+      // 1. BUSCA DE DADOS: Buscar todos os colaboradores ativos do tenant atual da tabela 'profiles' (id, name, email, role)
+      let fetchedProfiles: CollaboratorProfile[] = [];
+
+      // Tentativa 1: Buscar diretamente na tabela 'profiles' filtrando por store_id / tenant_id
+      try {
+        const { data: profs, error: pErr } = await supabase
+          .from('profiles')
+          .select('id, name, full_name, email, role, is_active, store_id, tenant_id')
+          .or(`store_id.eq.${tenantId},tenant_id.eq.${tenantId}`);
+
+        if (!pErr && profs && profs.length > 0) {
+          fetchedProfiles = profs.map(p => ({
+            id: p.id,
+            name: p.name || p.full_name || p.email?.split('@')[0] || 'Colaborador',
+            email: p.email || '',
+            role: p.role || 'operador',
+            is_active: p.is_active !== false
+          }));
+        } else {
+          // Filtro simples por store_id
+          const { data: byStore } = await supabase
+            .from('profiles')
+            .select('id, name, full_name, email, role, is_active')
+            .eq('store_id', tenantId);
+
+          if (byStore && byStore.length > 0) {
+            fetchedProfiles = byStore.map(p => ({
+              id: p.id,
+              name: p.name || p.full_name || p.email?.split('@')[0] || 'Colaborador',
+              email: p.email || '',
+              role: p.role || 'operador',
+              is_active: p.is_active !== false
+            }));
+          } else {
+            // Filtro por tenant_id
+            const { data: byTenant } = await supabase
+              .from('profiles')
+              .select('id, name, full_name, email, role, is_active')
+              .eq('tenant_id', tenantId);
+
+            if (byTenant && byTenant.length > 0) {
+              fetchedProfiles = byTenant.map(p => ({
+                id: p.id,
+                name: p.name || p.full_name || p.email?.split('@')[0] || 'Colaborador',
+                email: p.email || '',
+                role: p.role || 'operador',
+                is_active: p.is_active !== false
+              }));
+            } else {
+              // Busca geral em profiles
+              const { data: allProfs } = await supabase
+                .from('profiles')
+                .select('id, name, full_name, email, role, is_active');
+              if (allProfs && allProfs.length > 0) {
+                fetchedProfiles = allProfs.map(p => ({
+                  id: p.id,
+                  name: p.name || p.full_name || p.email?.split('@')[0] || 'Colaborador',
+                  email: p.email || '',
+                  role: p.role || 'operador',
+                  is_active: p.is_active !== false
+                }));
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.warn("[InboxManagement] Profiles table query warning:", e);
+      }
+
+      // Tentativa 2 (Fallback): Buscar via API /api/v1/team/users
+      if (fetchedProfiles.length === 0) {
+        try {
+          const res = await fetch(`/api/v1/team/users?tenantId=${tenantId}`);
+          if (res.ok) {
+            const json = await res.json();
+            if (json.data && json.data.length > 0) {
+              fetchedProfiles = json.data.map((u: any) => ({
+                id: u.id || u.supabase_user_id,
+                name: u.full_name || u.name || 'Colaborador',
+                email: u.email || '',
+                role: u.role || 'operador',
+                is_active: u.is_active !== false
+              }));
+            }
+          }
+        } catch (_) {}
+      }
+
+      // Tentativa 3 (Fallback): Buscar em tenant_users
+      if (fetchedProfiles.length === 0) {
+        try {
+          const { data: tuData } = await supabase
+            .from('tenant_users')
+            .select('*')
+            .eq('tenant_id', tenantId);
+
+          if (tuData && tuData.length > 0) {
+            fetchedProfiles = tuData.map(u => ({
+              id: u.id || u.supabase_user_id,
+              name: u.name || 'Colaborador',
+              email: u.email || '',
+              role: u.role || 'operador',
+              is_active: u.is_active !== false
+            }));
+          }
+        } catch (_) {}
+      }
+
+      // Filtra apenas colaboradores ativos
+      const activeProfiles = fetchedProfiles.filter(p => p.is_active !== false);
+      setCollaborators(activeProfiles);
+
+      // 2. BUSCA DE ACESSOS: Buscar acessos já existentes na tabela 'department_access' onde 'department_id' = departmentId
+      let initialSelectedUserIds: string[] = [];
+
+      try {
+        const { data: accessRows, error: aErr } = await supabase
+          .from('department_access')
+          .select('user_id')
+          .eq('department_id', departmentId);
+
+        if (!aErr && accessRows && accessRows.length > 0) {
+          initialSelectedUserIds = accessRows.map((r: any) => r.user_id).filter(Boolean);
+        }
+      } catch (e) {
+        console.warn("[InboxManagement] department_access fetch warning:", e);
+      }
+
+      // Fallback para inbox_members se department_access não tiver registros
+      if (initialSelectedUserIds.length === 0) {
+        try {
+          const { data: memberRows } = await supabase
+            .from('inbox_members')
+            .select('user_id')
+            .eq('inbox_id', departmentId);
+
+          if (memberRows && memberRows.length > 0) {
+            initialSelectedUserIds = memberRows.map((m: any) => m.user_id).filter(Boolean);
+          }
+        } catch (_) {}
+      }
+
+      // Fallback para endpoint da API
+      if (initialSelectedUserIds.length === 0) {
+        try {
+          const res = await fetch(`/api/v1/inboxes/${departmentId}/members`);
+          if (res.ok) {
+            const json = await res.json();
+            if (json.data && Array.isArray(json.data)) {
+              initialSelectedUserIds = json.data;
+            }
+          }
+        } catch (_) {}
+      }
+
+      // Fallback para cache local
+      if (initialSelectedUserIds.length === 0) {
+        const cached = localStorage.getItem(`department_access_${departmentId}`) || localStorage.getItem(`inbox_members_${departmentId}`);
+        if (cached) {
+          try {
+            initialSelectedUserIds = JSON.parse(cached);
+          } catch (_) {}
         }
       }
 
-      const { data } = await supabase
-        .from('inbox_members')
-        .select('user_id')
-        .eq('inbox_id', inbox.id);
-      
-      setInboxMembers((data || []).map(m => m.user_id));
-    } catch (e) {
-      console.warn("[InboxManagement] Fetch members warning:", e);
-      const savedMembers = localStorage.getItem(`inbox_members_${inbox.id}`);
-      setInboxMembers(savedMembers ? JSON.parse(savedMembers) : []);
+      // 3. Define estado inicial marcando os checkboxes dos colaboradores que já possuem vínculo salvo
+      setSelectedUserIds(initialSelectedUserIds);
+    } catch (err: any) {
+      console.error("[InboxManagement] Erro ao carregar acessos do departamento:", err);
+      toast.error("Erro ao carregar permissões do departamento.");
     } finally {
       setMembersLoading(false);
     }
   };
 
-  const toggleMember = async (userId: string) => {
-    if (!selectedInbox || savingMember) return;
-    setSavingMember(userId);
-    const isMember = inboxMembers.includes(userId);
-    const originalMembers = [...inboxMembers];
-    const newMembers = isMember ? inboxMembers.filter(id => id !== userId) : [...inboxMembers, userId];
-    
-    // Atualização otimista
-    setInboxMembers(newMembers);
+  const handleToggleUserAccess = (userId: string) => {
+    setSelectedUserIds(prev =>
+      prev.includes(userId) ? prev.filter(id => id !== userId) : [...prev, userId]
+    );
+  };
+
+  const handleSelectAllCollaborators = () => {
+    const activeFiltered = collaborators
+      .filter(c =>
+        c.name.toLowerCase().includes(collaboratorSearch.toLowerCase()) ||
+        (c.email && c.email.toLowerCase().includes(collaboratorSearch.toLowerCase())) ||
+        c.role.toLowerCase().includes(collaboratorSearch.toLowerCase())
+      )
+      .map(c => c.id);
+
+    const allSelected = activeFiltered.length > 0 && activeFiltered.every(id => selectedUserIds.includes(id));
+
+    if (allSelected) {
+      setSelectedUserIds(prev => prev.filter(id => !activeFiltered.includes(id)));
+    } else {
+      setSelectedUserIds(prev => Array.from(new Set([...prev, ...activeFiltered])));
+    }
+  };
+
+  const handleSaveDepartmentAccess = async () => {
+    if (!selectedInbox) return;
+    setSavingAccess(true);
+    const departmentId = selectedInbox.id;
 
     try {
-      const res = await fetch(`/api/v1/inboxes/${selectedInbox.id}/members/toggle`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId })
-      });
+      // 1. Remova os acessos antigos do departamento na tabela 'department_access' para o 'department_id'
+      try {
+        const { error: delErr } = await supabase
+          .from('department_access')
+          .delete()
+          .eq('department_id', departmentId);
 
-      const data = await res.json().catch(() => ({}));
-
-      if (!res.ok) {
-        throw new Error(data.error || 'Erro na API ao atualizar membro');
+        if (delErr) {
+          console.warn("[InboxManagement] department_access delete warning:", delErr);
+        }
+      } catch (e) {
+        console.warn("[InboxManagement] department_access delete exception:", e);
       }
 
-      localStorage.setItem(`inbox_members_${selectedInbox.id}`, JSON.stringify(newMembers));
-      toast.success(isMember ? 'Acesso removido com sucesso!' : 'Acesso concedido com sucesso!');
-    } catch (e: any) {
-      console.error("[InboxManagement] Toggle member error:", e);
-      // Reverte estado em caso de falha
-      setInboxMembers(originalMembers);
-      toast.error(e.message || 'Falha ao atualizar permissões');
+      // Remove também de inbox_members para compatibilidade total
+      try {
+        await supabase
+          .from('inbox_members')
+          .delete()
+          .eq('inbox_id', departmentId);
+      } catch (_) {}
+
+      // 2. Insira os novos registros para cada 'user_id' que estiver com o checkbox marcado
+      if (selectedUserIds.length > 0) {
+        const recordsToInsert = selectedUserIds.map(userId => ({
+          department_id: departmentId,
+          user_id: userId,
+          created_at: new Date().toISOString()
+        }));
+
+        try {
+          const { error: insErr } = await supabase
+            .from('department_access')
+            .insert(recordsToInsert);
+
+          if (insErr) {
+            console.warn("[InboxManagement] department_access insert warning:", insErr);
+          }
+        } catch (e) {
+          console.warn("[InboxManagement] department_access insert exception:", e);
+        }
+
+        // Também insere em inbox_members
+        try {
+          await supabase
+            .from('inbox_members')
+            .insert(selectedUserIds.map(userId => ({
+              inbox_id: departmentId,
+              user_id: userId
+            })));
+        } catch (_) {}
+
+        // Sincroniza com o backend Express
+        try {
+          await fetch(`/api/v1/inboxes/${departmentId}/members`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantId },
+            body: JSON.stringify({ userIds: selectedUserIds })
+          });
+        } catch (_) {}
+      } else {
+        // Se nenhum estiver marcado, envia lista vazia para o backend
+        try {
+          await fetch(`/api/v1/inboxes/${departmentId}/members`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantId },
+            body: JSON.stringify({ userIds: [] })
+          });
+        } catch (_) {}
+      }
+
+      // Atualiza cache no localStorage
+      localStorage.setItem(`department_access_${departmentId}`, JSON.stringify(selectedUserIds));
+      localStorage.setItem(`inbox_members_${departmentId}`, JSON.stringify(selectedUserIds));
+
+      // 3. Exiba um toast/alerta de sucesso e feche o modal
+      toast.success('Permissões de acesso salvas com sucesso!');
+      setIsMembersModalOpen(false);
+    } catch (error: any) {
+      console.error("[InboxManagement] Erro ao salvar acessos:", error);
+      toast.error('Erro ao salvar permissões de acesso: ' + (error.message || 'Tente novamente.'));
     } finally {
-      setSavingMember(null);
+      setSavingAccess(false);
     }
   };
 
@@ -703,59 +959,195 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
         </div>
       )}
 
-      {/* Modal Gerenciar Membros */}
+      {/* Modal Gerenciar Membros / Permissões de Acesso */}
       {isMembersModalOpen && selectedInbox && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[200] flex items-center justify-center p-4">
-          <div className="bg-white rounded-[2rem] w-full max-w-md shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200 flex flex-col max-h-[85vh]">
-            <div className="p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50 shrink-0">
-              <div>
-                <h3 className="font-black text-xl text-gray-900">Acesso: {selectedInbox.name}</h3>
-                <p className="text-xs text-gray-500">Quem pode ver e responder chats nesta caixa</p>
+          <div className="bg-white rounded-[2rem] w-full max-w-lg shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200 flex flex-col max-h-[88vh]">
+            {/* Cabeçalho do Modal */}
+            <div className="p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50/80 shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="bg-indigo-100 text-indigo-700 p-2.5 rounded-2xl">
+                  <Users className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-black text-lg text-gray-900 leading-tight">
+                    Acesso: {selectedInbox.name}
+                  </h3>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    Selecione quais colaboradores podem ver e atender conversas neste departamento
+                  </p>
+                </div>
               </div>
-              <button onClick={() => setIsMembersModalOpen(false)} className="text-gray-400 hover:text-gray-600 bg-white p-2 rounded-full shadow-sm"><X size={20}/></button>
+              <button 
+                onClick={() => setIsMembersModalOpen(false)} 
+                className="text-gray-400 hover:text-gray-600 bg-white p-2 rounded-full shadow-xs transition-colors border border-gray-200"
+              >
+                <X size={18} />
+              </button>
             </div>
             
-            <div className="p-4 flex-1 overflow-y-auto space-y-2">
+            {/* Barra de Filtro e Seleção Rápida */}
+            <div className="p-4 border-b border-gray-100 bg-white space-y-3 shrink-0">
+              <div className="relative">
+                <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
+                <input 
+                  type="text" 
+                  value={collaboratorSearch}
+                  onChange={e => setCollaboratorSearch(e.target.value)}
+                  placeholder="Buscar colaborador por nome, e-mail ou cargo..."
+                  className="w-full pl-10 pr-4 py-2.5 bg-gray-50 focus:bg-white border border-gray-200 focus:border-indigo-500 rounded-xl outline-none text-xs font-semibold text-gray-800 transition-all placeholder:text-gray-400"
+                />
+                {collaboratorSearch && (
+                  <button 
+                    onClick={() => setCollaboratorSearch('')}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+
+              {!membersLoading && collaborators.length > 0 && (
+                <div className="flex items-center justify-between px-1 text-xs">
+                  <span className="font-bold text-gray-500">
+                    <span className="text-indigo-600 font-extrabold">{selectedUserIds.length}</span> de {collaborators.length} selecionado(s)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleSelectAllCollaborators}
+                    className="text-indigo-600 hover:text-indigo-800 font-bold hover:underline"
+                  >
+                    {collaborators.every(c => selectedUserIds.includes(c.id)) ? 'Desmarcar Todos' : 'Selecionar Todos'}
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Lista Rolável de Colaboradores */}
+            <div className="p-4 flex-1 overflow-y-auto space-y-2.5 min-h-[220px]">
               {membersLoading ? (
-                <div className="py-8 flex justify-center text-gray-400"><Loader2 className="w-6 h-6 animate-spin" /></div>
+                <div className="py-12 flex flex-col items-center justify-center gap-3 text-gray-400">
+                  <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
+                  <p className="text-xs font-bold text-gray-500">Carregando colaboradores e permissões...</p>
+                </div>
+              ) : collaborators.length === 0 ? (
+                <div className="py-10 text-center flex flex-col items-center justify-center text-gray-400 px-4">
+                  <Shield className="w-10 h-10 mb-2 opacity-30 text-indigo-600" />
+                  <p className="font-bold text-gray-700 text-sm">Nenhum colaborador encontrado</p>
+                  <p className="text-xs text-gray-400 mt-1 max-w-xs">
+                    Cadastre atendentes na aba de Equipe / Colaboradores para conceder acessos a este departamento.
+                  </p>
+                </div>
               ) : (
-                team.map(member => {
-                  const memberUserId = member.supabase_user_id;
-                  const hasAccess = memberUserId ? inboxMembers.includes(memberUserId) : false;
-                  return (
-                    <div 
-                      key={member.id} 
-                      onClick={() => {
-                        if (memberUserId) {
-                          toggleMember(memberUserId);
-                        } else {
-                          toast.error('Este usuário não possui vínculo com uma conta de autenticação (supabase_user_id).');
-                        }
-                      }}
-                      className={`flex items-center justify-between p-3 rounded-xl border-2 ${memberUserId ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'} transition-all ${hasAccess ? 'border-indigo-500 bg-indigo-50' : 'border-gray-100 hover:border-gray-200'}`}
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className={`w-10 h-10 rounded-full flex items-center justify-center ${hasAccess ? 'bg-indigo-200 text-indigo-700' : 'bg-gray-100 text-gray-500'}`}>
-                          {member.full_name?.substring(0,2).toUpperCase() || <Shield className="w-5 h-5"/>}
-                        </div>
-                        <div>
-                          <p className="font-bold text-gray-900 text-sm">{member.full_name}</p>
-                          <p className="text-[10px] uppercase font-black tracking-wider text-gray-500">{member.role}</p>
-                        </div>
-                      </div>
-                      <div className={`w-6 h-6 rounded-md flex items-center justify-center border ${hasAccess ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-gray-300'}`}>
-                         {savingMember === memberUserId ? <Loader2 className="w-4 h-4 animate-spin text-indigo-400" /> : (hasAccess && <Check className="w-4 h-4" />)}
-                      </div>
-                    </div>
+                (() => {
+                  const filtered = collaborators.filter(c => 
+                    c.name.toLowerCase().includes(collaboratorSearch.toLowerCase()) ||
+                    (c.email && c.email.toLowerCase().includes(collaboratorSearch.toLowerCase())) ||
+                    c.role.toLowerCase().includes(collaboratorSearch.toLowerCase())
                   );
-                })
+
+                  if (filtered.length === 0) {
+                    return (
+                      <div className="py-8 text-center text-gray-400 text-xs">
+                        Nenhum colaborador corresponde à busca "{collaboratorSearch}".
+                      </div>
+                    );
+                  }
+
+                  return filtered.map(member => {
+                    const isChecked = selectedUserIds.includes(member.id);
+
+                    return (
+                      <div 
+                        key={member.id} 
+                        onClick={() => handleToggleUserAccess(member.id)}
+                        className={`flex items-center justify-between p-3.5 rounded-2xl border-2 cursor-pointer transition-all ${
+                          isChecked 
+                            ? 'border-indigo-500 bg-indigo-50/70 shadow-xs' 
+                            : 'border-gray-100 hover:border-gray-200 bg-white hover:bg-gray-50/50'
+                        }`}
+                      >
+                        <div className="flex items-center gap-3 min-w-0 pr-2">
+                          {/* Checkbox de seleção */}
+                          <div className={`w-5 h-5 rounded-lg flex items-center justify-center border transition-colors shrink-0 ${
+                            isChecked 
+                              ? 'bg-indigo-600 border-indigo-600 text-white' 
+                              : 'border-gray-300 bg-white'
+                          }`}>
+                            {isChecked && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                          </div>
+
+                          {/* Avatar / Iniciais */}
+                          <div className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold text-xs shrink-0 ${
+                            isChecked 
+                              ? 'bg-indigo-200 text-indigo-800' 
+                              : 'bg-gray-100 text-gray-600'
+                          }`}>
+                            {member.name.substring(0, 2).toUpperCase() || <Shield className="w-4 h-4" />}
+                          </div>
+
+                          {/* Nome e Detalhes */}
+                          <div className="min-w-0">
+                            <p className="font-bold text-gray-900 text-sm truncate">{member.name}</p>
+                            <div className="flex flex-wrap items-center gap-2 mt-0.5">
+                              {member.email && (
+                                <span className="text-xs text-gray-500 truncate max-w-[180px]">
+                                  {member.email}
+                                </span>
+                              )}
+                              <span className={`text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-md ${
+                                member.role.toLowerCase().includes('admin') || member.role.toLowerCase().includes('matriz')
+                                  ? 'bg-purple-100 text-purple-800'
+                                  : member.role.toLowerCase().includes('gerente')
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : 'bg-blue-100 text-blue-800'
+                              }`}>
+                                {formatRole(member.role)}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Status Visual */}
+                        <div className="shrink-0 text-right">
+                          <span className={`text-[11px] font-bold px-2 py-1 rounded-lg ${
+                            isChecked ? 'text-indigo-700 bg-indigo-100/80 font-extrabold' : 'text-gray-400 bg-gray-100'
+                          }`}>
+                            {isChecked ? 'Com Acesso' : 'Sem Acesso'}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  });
+                })()
               )}
             </div>
             
-            <div className="p-4 border-t border-gray-100 bg-gray-50/50">
-               <button onClick={() => setIsMembersModalOpen(false)} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-black uppercase tracking-wider text-xs py-3.5 rounded-xl transition-all shadow-lg">
-                 Salvar Alterações
-               </button>
+            {/* Rodapé com Ações */}
+            <div className="p-4 border-t border-gray-100 bg-gray-50/80 flex items-center gap-3 shrink-0">
+              <button 
+                type="button"
+                onClick={() => setIsMembersModalOpen(false)}
+                disabled={savingAccess}
+                className="flex-1 bg-white hover:bg-gray-100 text-gray-700 font-bold text-xs py-3.5 px-4 rounded-xl border border-gray-200 transition-colors uppercase tracking-wider"
+              >
+                Cancelar
+              </button>
+              <button 
+                type="button"
+                onClick={handleSaveDepartmentAccess} 
+                disabled={savingAccess || membersLoading}
+                className="flex-1 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white font-black uppercase tracking-wider text-xs py-3.5 px-4 rounded-xl flex items-center justify-center gap-2 transition-all shadow-md shadow-indigo-600/20"
+              >
+                {savingAccess ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Salvando...</span>
+                  </>
+                ) : (
+                  <span>SALVAR ALTERAÇÕES</span>
+                )}
+              </button>
             </div>
           </div>
         </div>

@@ -209,13 +209,24 @@ class InboxStore {
 
   public async getMembers(inboxId: string): Promise<string[]> {
     try {
+      // 1. Try department_access first
+      const { data: deptData, error: deptErr } = await supabaseAdmin
+        .from("department_access")
+        .select("user_id")
+        .eq("department_id", inboxId);
+
+      if (!deptErr && deptData && deptData.length > 0) {
+        return deptData.map(m => m.user_id).filter(Boolean);
+      }
+
+      // 2. Try inbox_members
       const { data, error } = await supabaseAdmin
         .from("inbox_members")
         .select("user_id")
         .eq("inbox_id", inboxId);
 
       if (!error && data) {
-        return data.map(m => m.user_id);
+        return data.map(m => m.user_id).filter(Boolean);
       }
     } catch (err) {
       console.warn("[InboxStore] Supabase members query failed:", err);
@@ -224,22 +235,48 @@ class InboxStore {
     return this.members.filter(m => m.inbox_id === inboxId).map(m => m.user_id);
   }
 
+  public async setMembers(inboxId: string, userIds: string[]): Promise<string[]> {
+    const cleanUserIds = Array.from(new Set(userIds.filter(Boolean)));
+
+    // 1. Update department_access table
+    try {
+      await supabaseAdmin.from("department_access").delete().eq("department_id", inboxId);
+      if (cleanUserIds.length > 0) {
+        await supabaseAdmin.from("department_access").insert(
+          cleanUserIds.map(uid => ({ department_id: inboxId, user_id: uid, created_at: new Date().toISOString() }))
+        );
+      }
+    } catch (err) {
+      console.warn("[InboxStore] department_access sync failed:", err);
+    }
+
+    // 2. Update inbox_members table
+    try {
+      await supabaseAdmin.from("inbox_members").delete().eq("inbox_id", inboxId);
+      if (cleanUserIds.length > 0) {
+        await supabaseAdmin.from("inbox_members").insert(
+          cleanUserIds.map(uid => ({ inbox_id: inboxId, user_id: uid }))
+        );
+      }
+    } catch (err) {
+      console.warn("[InboxStore] inbox_members sync failed:", err);
+    }
+
+    // 3. Update in-memory and local file
+    this.members = this.members.filter(m => m.inbox_id !== inboxId);
+    cleanUserIds.forEach(uid => {
+      this.members.push({ inbox_id: inboxId, user_id: uid });
+    });
+    this.saveToFile();
+
+    return cleanUserIds;
+  }
+
   public async toggleMember(inboxId: string, userId: string): Promise<string[]> {
     let current = await this.getMembers(inboxId);
     const exists = current.includes(userId);
-
-    if (exists) {
-      const { error } = await supabaseAdmin.from("inbox_members").delete().match({ inbox_id: inboxId, user_id: userId });
-      if (error) throw new Error(error.message);
-      this.members = this.members.filter(m => !(m.inbox_id === inboxId && m.user_id === userId));
-    } else {
-      const { error } = await supabaseAdmin.from("inbox_members").insert([{ inbox_id: inboxId, user_id: userId }]);
-      if (error) throw new Error(error.message);
-      this.members.push({ inbox_id: inboxId, user_id: userId });
-    }
-
-    this.saveToFile();
-    return this.getMembers(inboxId);
+    const updated = exists ? current.filter(id => id !== userId) : [...current, userId];
+    return this.setMembers(inboxId, updated);
   }
 }
 

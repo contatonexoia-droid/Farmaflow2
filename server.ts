@@ -771,6 +771,32 @@ app.get("/api/v1/inboxes/:id/members", async (req, res) => {
   }
 });
 
+app.post("/api/v1/inboxes/:id/members", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userIds } = req.body;
+    if (!Array.isArray(userIds)) return res.status(400).json({ error: "userIds deve ser um array." });
+
+    const updatedMembers = await inboxStore.setMembers(id, userIds);
+    return res.json({ data: updatedMembers });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.put("/api/v1/inboxes/:id/members", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userIds } = req.body;
+    if (!Array.isArray(userIds)) return res.status(400).json({ error: "userIds deve ser um array." });
+
+    const updatedMembers = await inboxStore.setMembers(id, userIds);
+    return res.json({ data: updatedMembers });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 app.post("/api/v1/inboxes/:id/members/toggle", async (req, res) => {
   try {
     const { id } = req.params;
