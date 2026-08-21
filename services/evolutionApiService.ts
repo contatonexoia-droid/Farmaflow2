@@ -342,6 +342,54 @@ export class EvolutionApiService {
       footer
     );
   }
+
+  /**
+   * Baixa a mídia da mensagem em Base64 através da Evolution API v2 (/chat/getBase64FromMediaMessage)
+   */
+  public async getBase64FromMediaMessage(
+    instanceName: string,
+    message: any
+  ): Promise<string | null> {
+    if (!instanceName || !message) return null;
+    try {
+      const { url, key: apiKeyToUse } = await this.getInstanceConfig(instanceName);
+      const cleanInstance = instanceName.trim();
+      
+      const payload = {
+        message: message,
+        convertToMp4: false
+      };
+
+      const endpoints = [
+        `${url}/chat/getBase64FromMediaMessage/${cleanInstance}`,
+        `${url}/message/getBase64FromMediaMessage/${cleanInstance}`
+      ];
+
+      for (const endpoint of endpoints) {
+        try {
+          const res = await fetch(endpoint, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "apikey": apiKeyToUse
+            },
+            body: JSON.stringify(payload)
+          });
+
+          if (res.ok) {
+            const data = await res.json();
+            const base64Str = data.base64 || data.data?.base64 || data.url;
+            if (base64Str && typeof base64Str === "string") {
+              return base64Str;
+            }
+          }
+        } catch (_) {}
+      }
+    } catch (e: any) {
+      console.warn("[EvolutionAPI] Erro ao buscar base64 da mídia:", e.message);
+    }
+    return null;
+  }
 }
 
 export const evolutionApiService = new EvolutionApiService();

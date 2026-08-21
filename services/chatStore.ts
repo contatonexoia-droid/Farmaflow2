@@ -59,6 +59,9 @@ export interface ChatMessage {
   is_private: boolean;
   media_url?: string;
   media_type?: string;
+  mediaUrl?: string;
+  mediaType?: string;
+  type?: string;
   created_at: string;
 }
 
@@ -399,7 +402,18 @@ class ChatStore {
         .order("created_at", { ascending: true });
 
       if (!error && data) {
-        return data;
+        return data.map((row: any) => {
+          const mediaUrl = row.media_url || row.mediaUrl;
+          const mediaType = row.media_type || row.mediaType || row.type || (mediaUrl ? (mediaUrl.startsWith("data:audio") || /\.(ogg|oga|opus|mp3|wav|m4a)/i.test(mediaUrl) ? "audio" : "image") : "text");
+          return {
+            ...row,
+            media_url: mediaUrl,
+            mediaUrl: mediaUrl,
+            media_type: mediaType,
+            mediaType: mediaType,
+            type: mediaType
+          };
+        });
       }
     } catch (err) {
       console.warn("[ChatStore] Supabase messages query fallback:", err);
@@ -439,6 +453,8 @@ class ChatStore {
       }
     }
 
+    const resolvedType = mediaType || (actualMediaUrl ? (actualMediaUrl.startsWith("data:audio") || /\.(ogg|oga|opus|mp3|wav|m4a)/i.test(actualMediaUrl) ? "audio" : "image") : "text");
+
     const newMsg: ChatMessage = {
       id: msgUuid,
       conversation_id: conversationId,
@@ -446,7 +462,10 @@ class ChatStore {
       content,
       is_private: isPrivate,
       media_url: actualMediaUrl,
-      media_type: mediaType,
+      media_type: resolvedType,
+      mediaUrl: actualMediaUrl,
+      mediaType: resolvedType,
+      type: resolvedType,
       created_at: now
     };
 
@@ -616,17 +635,87 @@ class ChatStore {
 
     const pushName = msg.pushName || msg.verifiedName || phone || "Contato WhatsApp";
     
-    const text = msg.message?.conversation || 
-                 msg.message?.extendedTextMessage?.text || 
-                 msg.message?.imageMessage?.caption || 
-                 msg.message?.videoMessage?.caption || 
-                 msg.text || 
-                 msg.body || 
-                 (msg.message?.imageMessage ? "[Imagem]" : 
-                 (msg.message?.videoMessage ? "[Vídeo]" : 
-                 (msg.message?.audioMessage ? "[Áudio]" : 
-                 (msg.message?.documentMessage ? "[Documento]" : 
-                 (msg.message?.stickerMessage ? "[Figurinha]" : "[Mensagem WhatsApp]")))));
+    // Extração estruturada de Mídia e Texto (Evolution API v2)
+    const rawMsg = msg.message || msg.data?.message || msg.data || {};
+    let extractedMediaType = "text";
+    let extractedMediaUrl: string | undefined = undefined;
+    let text = "";
+
+    if (rawMsg.imageMessage || msg.messageType === "imageMessage" || msg.type === "image") {
+      extractedMediaType = "image";
+      const img = rawMsg.imageMessage || {};
+      text = img.caption || msg.caption || msg.text || msg.body || "[Imagem]";
+      
+      const rawMedia = img.base64 || img.url || img.mediaUrl || msg.base64 || msg.mediaUrl || msg.url || "";
+      if (rawMedia && typeof rawMedia === "string") {
+        if (!rawMedia.startsWith("http") && !rawMedia.startsWith("data:")) {
+          const mime = img.mimetype || "image/jpeg";
+          extractedMediaUrl = `data:${mime};base64,${rawMedia}`;
+        } else {
+          extractedMediaUrl = rawMedia;
+        }
+      }
+    } else if (rawMsg.audioMessage || msg.messageType === "audioMessage" || msg.type === "audio") {
+      extractedMediaType = "audio";
+      const aud = rawMsg.audioMessage || {};
+      text = "[Áudio]";
+      
+      const rawMedia = aud.base64 || aud.url || aud.mediaUrl || msg.base64 || msg.mediaUrl || msg.url || "";
+      if (rawMedia && typeof rawMedia === "string") {
+        if (!rawMedia.startsWith("http") && !rawMedia.startsWith("data:")) {
+          const mime = aud.mimetype || "audio/ogg; codecs=opus";
+          extractedMediaUrl = `data:${mime};base64,${rawMedia}`;
+        } else {
+          extractedMediaUrl = rawMedia;
+        }
+      }
+    } else if (rawMsg.videoMessage || msg.messageType === "videoMessage" || msg.type === "video") {
+      extractedMediaType = "video";
+      const vid = rawMsg.videoMessage || {};
+      text = vid.caption || "[Vídeo]";
+      const rawMedia = vid.base64 || vid.url || vid.mediaUrl || msg.base64 || msg.mediaUrl || "";
+      if (rawMedia && typeof rawMedia === "string") {
+        if (!rawMedia.startsWith("http") && !rawMedia.startsWith("data:")) {
+          const mime = vid.mimetype || "video/mp4";
+          extractedMediaUrl = `data:${mime};base64,${rawMedia}`;
+        } else {
+          extractedMediaUrl = rawMedia;
+        }
+      }
+    } else if (rawMsg.documentMessage || msg.messageType === "documentMessage" || msg.type === "document") {
+      extractedMediaType = "document";
+      const doc = rawMsg.documentMessage || {};
+      text = doc.fileName || doc.title || "[Documento]";
+      const rawMedia = doc.base64 || doc.url || doc.mediaUrl || msg.base64 || msg.mediaUrl || "";
+      if (rawMedia && typeof rawMedia === "string") {
+        if (!rawMedia.startsWith("http") && !rawMedia.startsWith("data:")) {
+          const mime = doc.mimetype || "application/pdf";
+          extractedMediaUrl = `data:${mime};base64,${rawMedia}`;
+        } else {
+          extractedMediaUrl = rawMedia;
+        }
+      }
+    } else if (rawMsg.stickerMessage || msg.messageType === "stickerMessage" || msg.type === "sticker") {
+      extractedMediaType = "sticker";
+      const stk = rawMsg.stickerMessage || {};
+      text = "[Figurinha]";
+      const rawMedia = stk.base64 || stk.url || stk.mediaUrl || msg.base64 || msg.mediaUrl || "";
+      if (rawMedia && typeof rawMedia === "string") {
+        if (!rawMedia.startsWith("http") && !rawMedia.startsWith("data:")) {
+          const mime = stk.mimetype || "image/webp";
+          extractedMediaUrl = `data:${mime};base64,${rawMedia}`;
+        } else {
+          extractedMediaUrl = rawMedia;
+        }
+      }
+    } else {
+      extractedMediaType = "text";
+      text = rawMsg.conversation || 
+             rawMsg.extendedTextMessage?.text || 
+             msg.text || 
+             msg.body || 
+             "[Mensagem WhatsApp]";
+    }
 
     // Robust self-message / owner-message check to avoid contact name pollution
     let instancePhoneNumber = "";
@@ -886,11 +975,38 @@ class ChatStore {
 
     // 4. Inserção da mensagem (chat_messages)
     const senderType = fromMe ? "USER" : "CUSTOMER";
+
+    // Se for mídia (imagem ou áudio) e ainda não tiver URL/Base64, busca via Evolution API v2
+    if ((extractedMediaType === "image" || extractedMediaType === "audio" || extractedMediaType === "video" || extractedMediaType === "document") && !extractedMediaUrl) {
+      const targetInst = instanceName || instanceNameFromDb;
+      if (targetInst) {
+        try {
+          const fetchedMedia = await evolutionApiService.getBase64FromMediaMessage(targetInst, msg);
+          if (fetchedMedia) {
+            if (!fetchedMedia.startsWith("http") && !fetchedMedia.startsWith("data:")) {
+              const defaultMime = extractedMediaType === "audio" ? "audio/ogg; codecs=opus" : "image/jpeg";
+              extractedMediaUrl = `data:${defaultMime};base64,${fetchedMedia}`;
+            } else {
+              extractedMediaUrl = fetchedMedia;
+            }
+            console.log(`[ChatStore] ✅ Mídia (${extractedMediaType}) obtida com sucesso via Evolution API (${targetInst})!`);
+          }
+        } catch (mediaErr: any) {
+          console.warn("[ChatStore] Aviso ao buscar mídia na Evolution API:", mediaErr.message);
+        }
+      }
+    }
+
     const newMsg: ChatMessage = {
       id: msgId,
       conversation_id: convId,
       sender_type: senderType,
       content: text,
+      media_url: extractedMediaUrl,
+      media_type: extractedMediaType,
+      mediaUrl: extractedMediaUrl,
+      mediaType: extractedMediaType,
+      type: extractedMediaType,
       is_private: false,
       created_at: now
     };
@@ -901,6 +1017,8 @@ class ChatStore {
         conversation_id: convId,
         sender_type: senderType,
         content: text,
+        media_url: extractedMediaUrl || null,
+        media_type: extractedMediaType || "text",
         is_private: false,
         created_at: now
       }]);

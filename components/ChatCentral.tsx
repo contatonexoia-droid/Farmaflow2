@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Search, Send, FileText, Image as ImageIcon, Paperclip, User, Users, Clock, ShoppingBag, CreditCard, MessageSquare, Lock, AlertCircle, RefreshCw, Smartphone, ChevronLeft, ChevronDown, ChevronUp, Info, BarChart2, CheckCircle2, UserPlus, Inbox, MoreVertical, Kanban, LayoutList, Columns, QrCode, Pill, Sparkles, Calendar } from 'lucide-react';
+import { Search, Send, FileText, Image as ImageIcon, Paperclip, User, Users, Clock, ShoppingBag, CreditCard, MessageSquare, Lock, AlertCircle, RefreshCw, Smartphone, ChevronLeft, ChevronDown, ChevronUp, Info, BarChart2, CheckCircle2, UserPlus, Inbox, MoreVertical, Kanban, LayoutList, Columns, QrCode, Pill, Sparkles, Calendar, X, Download } from 'lucide-react';
 import { ChatTransferModal } from './ChatTransferModal';
 import { AiChatCopilot } from './AiChatCopilot';
 import { ChatKanban } from './ChatKanban';
@@ -23,6 +23,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   const [messages, setMessages] = useState<any[]>([]);
   const [messageInput, setMessageInput] = useState('');
   const [isPrivateNote, setIsPrivateNote] = useState(false);
+  const [selectedImagePreview, setSelectedImagePreview] = useState<string | null>(null);
   const [filter, setFilter] = useState('todas'); // minhas, nao_atribuidas, todas, finalizadas
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedInboxId, setSelectedInboxId] = useState('all');
@@ -1388,27 +1389,109 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
 
             {/* Messages */}
             <div className="flex-1 overflow-y-auto p-4 space-y-4">
-              {messages.map((msg, index) => (
-                <div key={`${msg.id || 'msg'}_${index}`} className={`flex ${msg.sender_type === 'CUSTOMER' ? 'justify-start' : 'justify-end'}`}>
-                  <div className={`max-w-[85%] md:max-w-[70%] p-3 rounded-2xl shadow-sm relative ${
-                    msg.is_private 
-                      ? 'bg-[#fff9c4] border border-[#fbc02d] text-gray-800 rounded-tr-none' 
-                      : msg.sender_type === 'CUSTOMER' 
-                        ? 'bg-white text-gray-800 rounded-tl-none' 
-                        : 'bg-[#dcf8c6] text-gray-800 rounded-tr-none'
-                  }`}>
-                    {msg.is_private && (
-                      <div className="flex items-center gap-1 text-[10px] font-black text-[#f57f17] uppercase mb-1">
-                        <Lock className="w-3 h-3" /> Nota Interna
-                      </div>
-                    )}
-                    <p className="text-sm">{msg.content}</p>
-                    <span className="text-[10px] text-gray-500 block text-right mt-1">
-                      {msg.created_at ? new Date(msg.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' }) : ''}
-                    </span>
+              {messages.map((msg, index) => {
+                const mediaUrl = msg.mediaUrl || msg.media_url || msg.url || msg.file_url;
+                const msgType = (msg.type || msg.mediaType || msg.media_type || '').toLowerCase();
+                
+                const isImage = msgType === 'image' || 
+                  (mediaUrl && (mediaUrl.startsWith('data:image') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)($|\?)/i.test(mediaUrl))) ||
+                  (!msgType && msg.content === '[Imagem]' && mediaUrl);
+                  
+                const isAudio = msgType === 'audio' || 
+                  (mediaUrl && (mediaUrl.startsWith('data:audio') || /\.(ogg|oga|opus|mp3|wav|m4a|aac)($|\?)/i.test(mediaUrl))) ||
+                  (!msgType && msg.content === '[Áudio]' && mediaUrl);
+
+                const isVideo = msgType === 'video' || (mediaUrl && (mediaUrl.startsWith('data:video') || /\.(mp4|webm|mov)($|\?)/i.test(mediaUrl)));
+                const isDocument = msgType === 'document' || (mediaUrl && /\.(pdf|doc|docx|xls|xlsx|txt)($|\?)/i.test(mediaUrl));
+
+                return (
+                  <div key={`${msg.id || 'msg'}_${index}`} className={`flex ${msg.sender_type === 'CUSTOMER' ? 'justify-start' : 'justify-end'}`}>
+                    <div className={`max-w-[85%] md:max-w-[70%] p-3 rounded-2xl shadow-sm relative ${
+                      msg.is_private 
+                        ? 'bg-[#fff9c4] border border-[#fbc02d] text-gray-800 rounded-tr-none' 
+                        : msg.sender_type === 'CUSTOMER' 
+                          ? 'bg-white text-gray-800 rounded-tl-none' 
+                          : 'bg-[#dcf8c6] text-gray-800 rounded-tr-none'
+                    }`}>
+                      {msg.is_private && (
+                        <div className="flex items-center gap-1 text-[10px] font-black text-[#f57f17] uppercase mb-1">
+                          <Lock className="w-3 h-3" /> Nota Interna
+                        </div>
+                      )}
+
+                      {/* Renderização Condicional de Mídia / Texto */}
+                      {isImage ? (
+                        mediaUrl ? (
+                          <div className="my-1">
+                            <img 
+                              src={mediaUrl} 
+                              alt="Imagem" 
+                              className="max-w-xs max-h-72 rounded-lg cursor-pointer object-cover hover:opacity-95 transition-opacity border border-black/10 shadow-sm"
+                              onClick={() => setSelectedImagePreview(mediaUrl)} 
+                            />
+                            {msg.content && msg.content !== '[Imagem]' && (
+                              <p className="text-sm mt-1.5 whitespace-pre-wrap">{msg.content}</p>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-1.5 text-sm italic text-gray-600 my-1 bg-black/5 p-2 rounded-lg">
+                            <ImageIcon className="w-4 h-4 text-emerald-600 shrink-0" />
+                            <span>{msg.content || '[Imagem]'}</span>
+                          </div>
+                        )
+                      ) : isAudio ? (
+                        mediaUrl ? (
+                          <div className="my-1">
+                            <audio 
+                              controls 
+                              src={mediaUrl} 
+                              className="my-1 max-w-full rounded-lg"
+                              preload="metadata"
+                            />
+                            {msg.content && msg.content !== '[Áudio]' && (
+                              <p className="text-xs text-gray-500 mt-1 italic">{msg.content}</p>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-1.5 text-sm italic text-gray-600 my-1 bg-black/5 p-2 rounded-lg">
+                            <Smartphone className="w-4 h-4 text-emerald-600 shrink-0" />
+                            <span>{msg.content || '[Áudio]'}</span>
+                          </div>
+                        )
+                      ) : isVideo ? (
+                        mediaUrl ? (
+                          <div className="my-1">
+                            <video controls src={mediaUrl} className="max-w-xs max-h-72 rounded-lg my-1 shadow-sm" />
+                            {msg.content && msg.content !== '[Vídeo]' && (
+                              <p className="text-sm mt-1.5 whitespace-pre-wrap">{msg.content}</p>
+                            )}
+                          </div>
+                        ) : (
+                          <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                        )
+                      ) : isDocument ? (
+                        mediaUrl ? (
+                          <div className="my-1">
+                            <a href={mediaUrl} target="_blank" rel="noreferrer" className="flex items-center gap-2 p-2.5 bg-emerald-50 text-emerald-800 rounded-lg hover:bg-emerald-100 transition-colors text-xs font-bold border border-emerald-200">
+                              <FileText className="w-4 h-4 text-emerald-600 shrink-0" />
+                              <span className="truncate">{msg.content && msg.content !== '[Documento]' ? msg.content : 'Visualizar / Baixar Documento'}</span>
+                              <Download className="w-3.5 h-3.5 ml-auto shrink-0" />
+                            </a>
+                          </div>
+                        ) : (
+                          <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                        )
+                      ) : (
+                        <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                      )}
+
+                      <span className="text-[10px] text-gray-500 block text-right mt-1">
+                        {msg.created_at ? new Date(msg.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' }) : ''}
+                      </span>
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
               <div ref={messagesEndRef} />
             </div>
 
@@ -1767,6 +1850,29 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
         }}
         tenantId={tenantId}
       />
+
+      {/* Modal de Pré-visualização de Imagem / Lightbox */}
+      {selectedImagePreview && (
+        <div 
+          className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-4 backdrop-blur-xs animate-in fade-in duration-150"
+          onClick={() => setSelectedImagePreview(null)}
+        >
+          <div className="relative max-w-4xl max-h-[90vh] flex flex-col items-center" onClick={(e) => e.stopPropagation()}>
+            <button 
+              onClick={() => setSelectedImagePreview(null)}
+              className="absolute -top-10 right-0 text-white hover:text-gray-300 p-2 rounded-full bg-black/60 transition-colors shadow-lg cursor-pointer"
+              title="Fechar"
+            >
+              <X className="w-6 h-6" />
+            </button>
+            <img 
+              src={selectedImagePreview} 
+              alt="Visualização da Imagem" 
+              className="max-w-full max-h-[85vh] object-contain rounded-xl shadow-2xl border border-white/20" 
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 };
