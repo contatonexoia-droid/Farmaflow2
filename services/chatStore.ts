@@ -641,17 +641,31 @@ class ChatStore {
     let extractedMediaUrl: string | undefined = undefined;
     let text = "";
 
+    // Helper para verificar se a URL é consumível diretamente pelo navegador sem headers/criptografia
+    const isValidDirectMedia = (urlStr?: string) => {
+      if (!urlStr || typeof urlStr !== 'string') return false;
+      if (urlStr.startsWith('data:image/') || urlStr.startsWith('data:audio/') || urlStr.startsWith('data:video/') || urlStr.startsWith('data:application/')) return true;
+      // URLs externas públicas acessíveis diretamente (ex: Supabase Storage, S3, Cloudinary)
+      if (urlStr.startsWith('http://') || urlStr.startsWith('https://')) {
+        const isInternalWhatsApp = urlStr.includes('whatsapp.net') || urlStr.includes('whatsapp.com') || urlStr.includes('localhost') || urlStr.includes('127.0.0.1');
+        return !isInternalWhatsApp;
+      }
+      return false;
+    };
+
     if (rawMsg.imageMessage || msg.messageType === "imageMessage" || msg.type === "image") {
       extractedMediaType = "image";
       const img = rawMsg.imageMessage || {};
       text = img.caption || msg.caption || msg.text || msg.body || "[Imagem]";
       
-      const rawMedia = img.base64 || img.url || img.mediaUrl || msg.base64 || msg.mediaUrl || msg.url || "";
+      const rawMedia = img.base64 || msg.base64 || img.url || img.mediaUrl || msg.mediaUrl || msg.url || "";
       if (rawMedia && typeof rawMedia === "string") {
-        if (!rawMedia.startsWith("http") && !rawMedia.startsWith("data:")) {
+        if (rawMedia.startsWith("data:image/")) {
+          extractedMediaUrl = rawMedia;
+        } else if (!rawMedia.startsWith("http") && rawMedia.length > 50) {
           const mime = img.mimetype || "image/jpeg";
-          extractedMediaUrl = `data:${mime};base64,${rawMedia}`;
-        } else {
+          extractedMediaUrl = `data:${mime};base64,${rawMedia.replace(/\s/g, '')}`;
+        } else if (isValidDirectMedia(rawMedia)) {
           extractedMediaUrl = rawMedia;
         }
       }
@@ -660,12 +674,14 @@ class ChatStore {
       const aud = rawMsg.audioMessage || {};
       text = "[Áudio]";
       
-      const rawMedia = aud.base64 || aud.url || aud.mediaUrl || msg.base64 || msg.mediaUrl || msg.url || "";
+      const rawMedia = aud.base64 || msg.base64 || aud.url || aud.mediaUrl || msg.mediaUrl || msg.url || "";
       if (rawMedia && typeof rawMedia === "string") {
-        if (!rawMedia.startsWith("http") && !rawMedia.startsWith("data:")) {
+        if (rawMedia.startsWith("data:audio/")) {
+          extractedMediaUrl = rawMedia;
+        } else if (!rawMedia.startsWith("http") && rawMedia.length > 50) {
           const mime = aud.mimetype || "audio/ogg; codecs=opus";
-          extractedMediaUrl = `data:${mime};base64,${rawMedia}`;
-        } else {
+          extractedMediaUrl = `data:${mime};base64,${rawMedia.replace(/\s/g, '')}`;
+        } else if (isValidDirectMedia(rawMedia)) {
           extractedMediaUrl = rawMedia;
         }
       }
@@ -673,12 +689,14 @@ class ChatStore {
       extractedMediaType = "video";
       const vid = rawMsg.videoMessage || {};
       text = vid.caption || "[Vídeo]";
-      const rawMedia = vid.base64 || vid.url || vid.mediaUrl || msg.base64 || msg.mediaUrl || "";
+      const rawMedia = vid.base64 || msg.base64 || vid.url || vid.mediaUrl || msg.mediaUrl || "";
       if (rawMedia && typeof rawMedia === "string") {
-        if (!rawMedia.startsWith("http") && !rawMedia.startsWith("data:")) {
+        if (rawMedia.startsWith("data:video/")) {
+          extractedMediaUrl = rawMedia;
+        } else if (!rawMedia.startsWith("http") && rawMedia.length > 50) {
           const mime = vid.mimetype || "video/mp4";
-          extractedMediaUrl = `data:${mime};base64,${rawMedia}`;
-        } else {
+          extractedMediaUrl = `data:${mime};base64,${rawMedia.replace(/\s/g, '')}`;
+        } else if (isValidDirectMedia(rawMedia)) {
           extractedMediaUrl = rawMedia;
         }
       }
@@ -686,12 +704,14 @@ class ChatStore {
       extractedMediaType = "document";
       const doc = rawMsg.documentMessage || {};
       text = doc.fileName || doc.title || "[Documento]";
-      const rawMedia = doc.base64 || doc.url || doc.mediaUrl || msg.base64 || msg.mediaUrl || "";
+      const rawMedia = doc.base64 || msg.base64 || doc.url || doc.mediaUrl || msg.mediaUrl || "";
       if (rawMedia && typeof rawMedia === "string") {
-        if (!rawMedia.startsWith("http") && !rawMedia.startsWith("data:")) {
+        if (rawMedia.startsWith("data:application/")) {
+          extractedMediaUrl = rawMedia;
+        } else if (!rawMedia.startsWith("http") && rawMedia.length > 50) {
           const mime = doc.mimetype || "application/pdf";
-          extractedMediaUrl = `data:${mime};base64,${rawMedia}`;
-        } else {
+          extractedMediaUrl = `data:${mime};base64,${rawMedia.replace(/\s/g, '')}`;
+        } else if (isValidDirectMedia(rawMedia)) {
           extractedMediaUrl = rawMedia;
         }
       }
@@ -699,12 +719,14 @@ class ChatStore {
       extractedMediaType = "sticker";
       const stk = rawMsg.stickerMessage || {};
       text = "[Figurinha]";
-      const rawMedia = stk.base64 || stk.url || stk.mediaUrl || msg.base64 || msg.mediaUrl || "";
+      const rawMedia = stk.base64 || msg.base64 || stk.url || stk.mediaUrl || msg.mediaUrl || "";
       if (rawMedia && typeof rawMedia === "string") {
-        if (!rawMedia.startsWith("http") && !rawMedia.startsWith("data:")) {
+        if (rawMedia.startsWith("data:image/")) {
+          extractedMediaUrl = rawMedia;
+        } else if (!rawMedia.startsWith("http") && rawMedia.length > 50) {
           const mime = stk.mimetype || "image/webp";
-          extractedMediaUrl = `data:${mime};base64,${rawMedia}`;
-        } else {
+          extractedMediaUrl = `data:${mime};base64,${rawMedia.replace(/\s/g, '')}`;
+        } else if (isValidDirectMedia(rawMedia)) {
           extractedMediaUrl = rawMedia;
         }
       }
@@ -976,20 +998,19 @@ class ChatStore {
     // 4. Inserção da mensagem (chat_messages)
     const senderType = fromMe ? "USER" : "CUSTOMER";
 
-    // Se for mídia (imagem ou áudio) e ainda não tiver URL/Base64, busca via Evolution API v2
-    if ((extractedMediaType === "image" || extractedMediaType === "audio" || extractedMediaType === "video" || extractedMediaType === "document") && !extractedMediaUrl) {
+    // Se for mídia (imagem, áudio, vídeo, documento, figurinha) e não tiver uma Data URI válida ou URL pública consumível
+    const hasValidDirectMedia = isValidDirectMedia(extractedMediaUrl);
+    if ((extractedMediaType === "image" || extractedMediaType === "audio" || extractedMediaType === "video" || extractedMediaType === "document" || extractedMediaType === "sticker") && !hasValidDirectMedia) {
       const targetInst = instanceName || instanceNameFromDb;
       if (targetInst) {
         try {
+          console.log(`[ChatStore] ⏳ Baixando mídia (${extractedMediaType}) em Base64 via Evolution API (instância: ${targetInst})...`);
           const fetchedMedia = await evolutionApiService.getBase64FromMediaMessage(targetInst, msg);
           if (fetchedMedia) {
-            if (!fetchedMedia.startsWith("http") && !fetchedMedia.startsWith("data:")) {
-              const defaultMime = extractedMediaType === "audio" ? "audio/ogg; codecs=opus" : "image/jpeg";
-              extractedMediaUrl = `data:${defaultMime};base64,${fetchedMedia}`;
-            } else {
-              extractedMediaUrl = fetchedMedia;
-            }
-            console.log(`[ChatStore] ✅ Mídia (${extractedMediaType}) obtida com sucesso via Evolution API (${targetInst})!`);
+            extractedMediaUrl = fetchedMedia;
+            console.log(`[ChatStore] ✅ Mídia (${extractedMediaType}) convertida com sucesso para Data URI (tamanho: ${extractedMediaUrl.length} chars)!`);
+          } else {
+            console.warn(`[ChatStore] ⚠️ Evolution API não retornou base64 para mídia (${extractedMediaType}).`);
           }
         } catch (mediaErr: any) {
           console.warn("[ChatStore] Aviso ao buscar mídia na Evolution API:", mediaErr.message);

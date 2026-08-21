@@ -1390,19 +1390,22 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
             {/* Messages */}
             <div className="flex-1 overflow-y-auto p-4 space-y-4">
               {messages.map((msg, index) => {
-                const mediaUrl = msg.mediaUrl || msg.media_url || msg.url || msg.file_url;
+                const rawUrl = msg.mediaUrl || msg.media_url || msg.url || msg.file_url;
+                const isInternalWhatsApp = typeof rawUrl === 'string' && (rawUrl.includes('whatsapp.net') || rawUrl.includes('whatsapp.com'));
+                // Mídia utilizável diretamente: Data URI ou URL pública que não seja do mmg.whatsapp.net
+                const mediaUrl = isInternalWhatsApp ? undefined : rawUrl;
                 const msgType = (msg.type || msg.mediaType || msg.media_type || '').toLowerCase();
                 
                 const isImage = msgType === 'image' || 
-                  (mediaUrl && (mediaUrl.startsWith('data:image') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)($|\?)/i.test(mediaUrl))) ||
-                  (!msgType && msg.content === '[Imagem]' && mediaUrl);
+                  (rawUrl && (rawUrl.startsWith('data:image') || /\.(jpg|jpeg|png|webp|gif|bmp|svg)($|\?)/i.test(rawUrl))) ||
+                  (!msgType && msg.content === '[Imagem]');
                   
                 const isAudio = msgType === 'audio' || 
-                  (mediaUrl && (mediaUrl.startsWith('data:audio') || /\.(ogg|oga|opus|mp3|wav|m4a|aac)($|\?)/i.test(mediaUrl))) ||
-                  (!msgType && msg.content === '[Áudio]' && mediaUrl);
+                  (rawUrl && (rawUrl.startsWith('data:audio') || /\.(ogg|oga|opus|mp3|wav|m4a|aac)($|\?)/i.test(rawUrl))) ||
+                  (!msgType && msg.content === '[Áudio]');
 
-                const isVideo = msgType === 'video' || (mediaUrl && (mediaUrl.startsWith('data:video') || /\.(mp4|webm|mov)($|\?)/i.test(mediaUrl)));
-                const isDocument = msgType === 'document' || (mediaUrl && /\.(pdf|doc|docx|xls|xlsx|txt)($|\?)/i.test(mediaUrl));
+                const isVideo = msgType === 'video' || (rawUrl && (rawUrl.startsWith('data:video') || /\.(mp4|webm|mov)($|\?)/i.test(rawUrl)));
+                const isDocument = msgType === 'document' || (rawUrl && /\.(pdf|doc|docx|xls|xlsx|txt)($|\?)/i.test(rawUrl));
 
                 return (
                   <div key={`${msg.id || 'msg'}_${index}`} className={`flex ${msg.sender_type === 'CUSTOMER' ? 'justify-start' : 'justify-end'}`}>
@@ -1425,10 +1428,20 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                           <div className="my-1">
                             <img 
                               src={mediaUrl} 
-                              alt="Imagem" 
+                              alt="Imagem da Conversa" 
                               className="max-w-xs max-h-72 rounded-lg cursor-pointer object-cover hover:opacity-95 transition-opacity border border-black/10 shadow-sm"
-                              onClick={() => setSelectedImagePreview(mediaUrl)} 
+                              onClick={() => setSelectedImagePreview(mediaUrl)}
+                              onError={(e) => {
+                                // Se falhar ao renderizar a imagem, oculta a tag quebrada e mostra o indicador amigável
+                                e.currentTarget.style.display = 'none';
+                                const fallback = e.currentTarget.nextElementSibling as HTMLElement;
+                                if (fallback) fallback.style.display = 'flex';
+                              }}
                             />
+                            <div style={{ display: 'none' }} className="items-center gap-1.5 text-sm italic text-gray-600 my-1 bg-black/5 p-2 rounded-lg">
+                              <ImageIcon className="w-4 h-4 text-emerald-600 shrink-0" />
+                              <span>{msg.content || '[Imagem]'}</span>
+                            </div>
                             {msg.content && msg.content !== '[Imagem]' && (
                               <p className="text-sm mt-1.5 whitespace-pre-wrap">{msg.content}</p>
                             )}
@@ -1436,7 +1449,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                         ) : (
                           <div className="flex items-center gap-1.5 text-sm italic text-gray-600 my-1 bg-black/5 p-2 rounded-lg">
                             <ImageIcon className="w-4 h-4 text-emerald-600 shrink-0" />
-                            <span>{msg.content || '[Imagem]'}</span>
+                            <span>{msg.content || '[Imagem Recebida]'}</span>
                           </div>
                         )
                       ) : isAudio ? (
@@ -1455,7 +1468,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                         ) : (
                           <div className="flex items-center gap-1.5 text-sm italic text-gray-600 my-1 bg-black/5 p-2 rounded-lg">
                             <Smartphone className="w-4 h-4 text-emerald-600 shrink-0" />
-                            <span>{msg.content || '[Áudio]'}</span>
+                            <span>{msg.content || '[Áudio Recebido]'}</span>
                           </div>
                         )
                       ) : isVideo ? (

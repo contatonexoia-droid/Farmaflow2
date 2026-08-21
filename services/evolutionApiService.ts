@@ -345,6 +345,7 @@ export class EvolutionApiService {
 
   /**
    * Baixa a mídia da mensagem em Base64 através da Evolution API v2 (/chat/getBase64FromMediaMessage)
+   * e garante o retorno de uma Data URI completa e válida (data:mime;base64,...)
    */
   public async getBase64FromMediaMessage(
     instanceName: string,
@@ -355,10 +356,33 @@ export class EvolutionApiService {
       const { url, key: apiKeyToUse } = await this.getInstanceConfig(instanceName);
       const cleanInstance = instanceName.trim();
       
-      const payload = {
-        message: message,
-        convertToMp4: false
-      };
+      // Detecta mimetype da mensagem original se disponível
+      const rawMsg = message.message || message.data?.message || message.data || {};
+      const detectedMime = 
+        rawMsg.imageMessage?.mimetype || 
+        rawMsg.audioMessage?.mimetype || 
+        rawMsg.videoMessage?.mimetype || 
+        rawMsg.documentMessage?.mimetype || 
+        rawMsg.stickerMessage?.mimetype || 
+        message.mimetype || 
+        (message.messageType === "audioMessage" ? "audio/ogg; codecs=opus" : 
+         message.messageType === "imageMessage" ? "image/jpeg" : 
+         message.messageType === "videoMessage" ? "video/mp4" : "image/jpeg");
+
+      // Formas de payload suportadas pela Evolution API v2
+      const payloadsToTry = [
+        {
+          message: message,
+          convertToMp4: false
+        },
+        {
+          message: {
+            key: message.key || message.data?.key,
+            message: message.message || message.data?.message || message
+          },
+          convertToMp4: false
+        }
+      ];
 
       const endpoints = [
         `${url}/chat/getBase64FromMediaMessage/${cleanInstance}`,
@@ -366,24 +390,37 @@ export class EvolutionApiService {
       ];
 
       for (const endpoint of endpoints) {
-        try {
-          const res = await fetch(endpoint, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "apikey": apiKeyToUse
-            },
-            body: JSON.stringify(payload)
-          });
+        for (const payload of payloadsToTry) {
+          try {
+            const res = await fetch(endpoint, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "apikey": apiKeyToUse
+              },
+              body: JSON.stringify(payload)
+            });
 
-          if (res.ok) {
-            const data = await res.json();
-            const base64Str = data.base64 || data.data?.base64 || data.url;
-            if (base64Str && typeof base64Str === "string") {
-              return base64Str;
+            if (res.ok) {
+              const data = await res.json();
+              let rawBase64 = data.base64 || data.data?.base64 || (typeof data.data === "string" && data.data.length > 50 ? data.data : null) || data.url;
+              const returnedMime = data.mimetype || data.data?.mimetype || detectedMime;
+
+              if (rawBase64 && typeof rawBase64 === "string") {
+                // Se já for uma Data URI completa
+                if (rawBase64.startsWith("data:")) {
+                  return rawBase64;
+                }
+                
+                // Se for base64 puro, limpa espaços/newlines e monta a Data URI completa
+                const cleanBase64 = rawBase64.replace(/\s/g, '');
+                return `data:${returnedMime};base64,${cleanBase64}`;
+              }
             }
+          } catch (fetchErr: any) {
+            // Continua para o próximo endpoint/payload
           }
-        } catch (_) {}
+        }
       }
     } catch (e: any) {
       console.warn("[EvolutionAPI] Erro ao buscar base64 da mídia:", e.message);
