@@ -1112,6 +1112,99 @@ app.post("/api/v1/tenants/:tenantId/payment-gateways", checkTenantAccess, async 
   }
 });
 
+// ============================================================================
+// TENANT SETTINGS & WELCOME MESSAGE ENDPOINTS
+// ============================================================================
+app.all(["/api/v1/tenants/:tenantId/settings", "/api/v1/tenants/settings", "/api/v1/agent/settings"], async (req, res) => {
+  if (req.method !== "PATCH" && req.method !== "PUT" && req.method !== "GET" && req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  try {
+    const rawTenantId = req.params.tenantId || req.body?.tenantId || req.body?.storeId || req.query?.tenantId || req.headers["x-tenant-id"];
+    
+    if (!rawTenantId && req.method === "GET") {
+      return res.status(400).json({ error: "tenantId é obrigatório." });
+    }
+
+    // Resolving target tenant by id or slug
+    let targetTenant: any = null;
+    if (rawTenantId) {
+      const cleanId = String(rawTenantId).trim();
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanId);
+      if (isUuid) {
+        const { data } = await supabaseAdmin.from("tenants").select("*").eq("id", cleanId).maybeSingle();
+        targetTenant = data;
+      }
+      if (!targetTenant) {
+        const cleanSlug = cleanId.replace(/^store_/, '');
+        const { data } = await supabaseAdmin.from("tenants").select("*").eq("slug", cleanSlug).maybeSingle();
+        targetTenant = data;
+      }
+    }
+
+    if (!targetTenant) {
+      // Fallback: get the first active tenant
+      const { data } = await supabaseAdmin.from("tenants").select("*").limit(1).maybeSingle();
+      targetTenant = data;
+    }
+
+    if (!targetTenant) {
+      return res.status(404).json({ error: "Tenant não encontrado." });
+    }
+
+    if (req.method === "GET") {
+      return res.json({ success: true, data: targetTenant });
+    }
+
+    // Update settings payload
+    const body = req.body || {};
+    const updates: Record<string, any> = {};
+
+    if (body.welcome_message_enabled !== undefined || body.welcomeMessageEnabled !== undefined) {
+      updates.welcome_message_enabled = Boolean(body.welcome_message_enabled ?? body.welcomeMessageEnabled);
+    }
+    if (body.welcome_message_text !== undefined || body.welcomeMessageText !== undefined) {
+      updates.welcome_message_text = String(body.welcome_message_text ?? body.welcomeMessageText ?? "");
+    }
+    if (body.welcome_message_format !== undefined || body.welcomeMessageFormat !== undefined) {
+      updates.welcome_message_format = String(body.welcome_message_format ?? body.welcomeMessageFormat ?? "button");
+    }
+    if (body.welcome_message_link !== undefined || body.welcomeMessageLink !== undefined) {
+      updates.welcome_message_link = String(body.welcome_message_link ?? body.welcomeMessageLink ?? "");
+    }
+    if (body.is_ai_agent_enabled !== undefined || body.isAiAgentEnabled !== undefined) {
+      updates.is_ai_agent_enabled = Boolean(body.is_ai_agent_enabled ?? body.isAiAgentEnabled);
+    }
+    if (body.ai_agent_config !== undefined || body.aiAgentConfig !== undefined) {
+      updates.ai_agent_config = body.ai_agent_config ?? body.aiAgentConfig;
+    }
+
+    console.log(`[TenantSettings] Atualizando configurações para tenant "${targetTenant.name}" (${targetTenant.id}):`, updates);
+
+    const { data: updated, error } = await supabaseAdmin
+      .from("tenants")
+      .update(updates)
+      .eq("id", targetTenant.id)
+      .select()
+      .maybeSingle();
+
+    if (error) {
+      console.error("[TenantSettings] Erro ao atualizar tenant no Supabase:", error);
+      throw error;
+    }
+
+    return res.json({
+      success: true,
+      message: "Configurações atualizadas com sucesso",
+      data: updated || { ...targetTenant, ...updates }
+    });
+  } catch (err: any) {
+    console.error("[TenantSettings] Exceção ao processar configurações:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // Mercado Pago Backend Integration & Checkout Preferencing
 app.post("/api/v1/store/:tenantId/mercadopago/preference", async (req, res) => {
   try {
