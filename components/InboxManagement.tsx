@@ -10,6 +10,8 @@ interface InboxManagementProps {
 
 interface CollaboratorProfile {
   id: string;
+  tenant_user_id: string;
+  supabase_user_id?: string;
   name: string;
   email?: string;
   role: string;
@@ -381,23 +383,31 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
 
     try {
       const departmentId = inbox.id;
+      const activeTenantId = tenantId || inbox.store_id || inbox.tenant_id || localStorage.getItem('ff_tenant_id') || localStorage.getItem('farmaflow_current_tenant_id') || '';
 
       // 1. CONSULTA DE COLABORADORES: Buscar na tabela 'tenant_users' com tenant_id
       let fetchedCollaborators: CollaboratorProfile[] = [];
       let hadAnyError = false;
 
       try {
-        const { data: tuData, error: tuErr } = await supabase
+        let tuQuery = supabase
           .from('tenant_users')
-          .select('id, supabase_user_id, name, email, role, tenant_id')
-          .eq('tenant_id', tenantId);
+          .select('id, supabase_user_id, name, email, role, tenant_id');
+
+        if (activeTenantId) {
+          tuQuery = tuQuery.eq('tenant_id', activeTenantId);
+        }
+
+        const { data: tuData, error: tuErr } = await tuQuery;
 
         if (tuErr) {
           console.error('Erro Supabase tenant_users:', tuErr);
           hadAnyError = true;
         } else if (tuData && Array.isArray(tuData) && tuData.length > 0) {
           fetchedCollaborators = tuData.map(u => ({
-            id: u.id || u.supabase_user_id,
+            id: u.supabase_user_id || u.id,
+            tenant_user_id: u.id,
+            supabase_user_id: u.supabase_user_id || '',
             name: u.name || u.email?.split('@')[0] || 'Colaborador',
             email: u.email || '',
             role: u.role || 'operador',
@@ -413,12 +423,14 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
       if (fetchedCollaborators.length === 0) {
         try {
           const headers = await getAuthHeaders();
-          const res = await fetch(`/api/v1/team/users?tenantId=${tenantId}`, { headers });
+          const res = await fetch(`/api/v1/team/users?tenantId=${activeTenantId}`, { headers });
           if (res.ok) {
             const json = await res.json();
             if (json.data && Array.isArray(json.data) && json.data.length > 0) {
               fetchedCollaborators = json.data.map((u: any) => ({
-                id: u.id || u.supabase_user_id,
+                id: u.supabase_user_id || u.id,
+                tenant_user_id: u.id,
+                supabase_user_id: u.supabase_user_id || '',
                 name: u.full_name || u.name || 'Colaborador',
                 email: u.email || '',
                 role: u.role || 'operador',
@@ -450,13 +462,27 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
       let initialSelectedUserIds: string[] = [];
 
       try {
-        const { data: accessRows, error: aErr } = await supabase
+        let accessQuery = supabase
           .from('department_access')
-          .select('user_id')
+          .select('user_id, tenant_id')
           .eq('department_id', departmentId);
 
+        if (activeTenantId) {
+          accessQuery = accessQuery.eq('tenant_id', activeTenantId);
+        }
+
+        const { data: accessRows, error: aErr } = await accessQuery;
+
         if (!aErr && accessRows && accessRows.length > 0) {
-          initialSelectedUserIds = accessRows.map((r: any) => r.user_id).filter(Boolean);
+          const savedUserIds = accessRows.map((r: any) => r.user_id).filter(Boolean);
+          // Mapeia para o ID usado na UI (preferência por supabase_user_id / id)
+          initialSelectedUserIds = activeCollaborators
+            .filter(c =>
+              savedUserIds.includes(c.id) ||
+              (c.supabase_user_id && savedUserIds.includes(c.supabase_user_id)) ||
+              (c.tenant_user_id && savedUserIds.includes(c.tenant_user_id))
+            )
+            .map(c => c.id);
         }
       } catch (e) {
         console.warn("[InboxManagement] department_access fetch warning:", e);
@@ -471,7 +497,14 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
             .eq('inbox_id', departmentId);
 
           if (memberRows && memberRows.length > 0) {
-            initialSelectedUserIds = memberRows.map((m: any) => m.user_id).filter(Boolean);
+            const savedMemberIds = memberRows.map((m: any) => m.user_id).filter(Boolean);
+            initialSelectedUserIds = activeCollaborators
+              .filter(c =>
+                savedMemberIds.includes(c.id) ||
+                (c.supabase_user_id && savedMemberIds.includes(c.supabase_user_id)) ||
+                (c.tenant_user_id && savedMemberIds.includes(c.tenant_user_id))
+              )
+              .map(c => c.id);
           }
         } catch (_) {}
       }
@@ -484,7 +517,13 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
           if (res.ok) {
             const json = await res.json();
             if (json.data && Array.isArray(json.data)) {
-              initialSelectedUserIds = json.data;
+              initialSelectedUserIds = activeCollaborators
+                .filter(c =>
+                  json.data.includes(c.id) ||
+                  (c.supabase_user_id && json.data.includes(c.supabase_user_id)) ||
+                  (c.tenant_user_id && json.data.includes(c.tenant_user_id))
+                )
+                .map(c => c.id);
             }
           }
         } catch (_) {}
@@ -495,7 +534,16 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
         const cached = localStorage.getItem(`department_access_${departmentId}`) || localStorage.getItem(`inbox_members_${departmentId}`);
         if (cached) {
           try {
-            initialSelectedUserIds = JSON.parse(cached);
+            const parsed = JSON.parse(cached);
+            if (Array.isArray(parsed)) {
+              initialSelectedUserIds = activeCollaborators
+                .filter(c =>
+                  parsed.includes(c.id) ||
+                  (c.supabase_user_id && parsed.includes(c.supabase_user_id)) ||
+                  (c.tenant_user_id && parsed.includes(c.tenant_user_id))
+                )
+                .map(c => c.id);
+            }
           } catch (_) {}
         }
       }
@@ -539,14 +587,21 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
     if (!selectedInbox) return;
     setSavingAccess(true);
     const departmentId = selectedInbox.id;
+    const activeTenantId = tenantId || selectedInbox.store_id || selectedInbox.tenant_id || localStorage.getItem('ff_tenant_id') || localStorage.getItem('farmaflow_current_tenant_id') || '';
 
     try {
       // 1. Remova os acessos antigos do departamento na tabela 'department_access' para o 'department_id'
       try {
-        const { error: delErr } = await supabase
+        let delQuery = supabase
           .from('department_access')
           .delete()
           .eq('department_id', departmentId);
+
+        if (activeTenantId) {
+          delQuery = delQuery.eq('tenant_id', activeTenantId);
+        }
+
+        const { error: delErr } = await delQuery;
 
         if (delErr) {
           console.warn("[InboxManagement] department_access delete warning:", delErr);
@@ -563,14 +618,23 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
           .eq('inbox_id', departmentId);
       } catch (_) {}
 
-      // 2. Insira os novos registros contendo department_id, user_id e tenant_id
+      // 2. Insira os novos registros contendo department_id, user_id consistente e tenant_id ativo
       if (selectedUserIds.length > 0) {
-        const recordsToInsert = selectedUserIds.map(userId => ({
-          department_id: departmentId,
-          user_id: userId,
-          tenant_id: tenantId,
-          created_at: new Date().toISOString()
-        }));
+        const recordsToInsert = selectedUserIds.map(selectedId => {
+          const colab = collaborators.find(c =>
+            c.id === selectedId ||
+            c.tenant_user_id === selectedId ||
+            c.supabase_user_id === selectedId
+          );
+          // Preferência por supabase_user_id se disponível no sistema Supabase Auth, caso contrário tenant_users.id
+          const finalUserId = colab?.supabase_user_id || colab?.tenant_user_id || colab?.id || selectedId;
+          return {
+            department_id: departmentId,
+            user_id: finalUserId,
+            tenant_id: activeTenantId,
+            created_at: new Date().toISOString()
+          };
+        });
 
         try {
           const { error: insErr } = await supabase
@@ -584,13 +648,13 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
           console.warn("[InboxManagement] department_access insert exception:", e);
         }
 
-        // Também insere em inbox_members
+        // Também insere em inbox_members para total retrocompatibilidade
         try {
           await supabase
             .from('inbox_members')
-            .insert(selectedUserIds.map(userId => ({
+            .insert(recordsToInsert.map(r => ({
               inbox_id: departmentId,
-              user_id: userId
+              user_id: r.user_id
             })));
         } catch (_) {}
 
@@ -600,7 +664,7 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
           await fetch(`/api/v1/inboxes/${departmentId}/members`, {
             method: 'POST',
             headers,
-            body: JSON.stringify({ userIds: selectedUserIds })
+            body: JSON.stringify({ userIds: recordsToInsert.map(r => r.user_id) })
           });
         } catch (_) {}
       } else {

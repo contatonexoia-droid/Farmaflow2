@@ -37,8 +37,8 @@ export interface ChatConversation {
   assigned_user_id?: string | null;
   assigned_to?: string | null;
   is_human_controlled?: boolean;
-  status: "OPEN" | "PENDING" | "CLOSED" | "BOT" | string;
-  kanban_stage?: "NEW" | "BOT" | "WAITING" | "STORE_REDIRECT" | "HUMAN" | "CLOSED" | string;
+  status: "OPEN" | "PENDING" | "finalizado" | "BOT" | string;
+  kanban_stage?: "novos_triagem" | "ia_atendendo" | "aguardando_pagamento" | "em_atendimento" | "finalizado" | string;
   last_message_at: string;
   last_message_content: string;
   unread_count?: number;
@@ -289,7 +289,7 @@ class ChatStore {
             Boolean(conv.assigned_to) ||
             conv.is_bot_active === false ||
             conv.status === "human_takeover" ||
-            conv.status === "HUMAN";
+            conv.status === "em_atendimento";
 
           if (isHumanControlled) {
             conv.is_human_controlled = true;
@@ -297,14 +297,14 @@ class ChatStore {
             if (conv.status === "bot" || conv.status === "BOT" || !conv.status) {
               conv.status = "human_takeover";
             }
-            if (conv.status === "CLOSED" || conv.kanban_stage === "CLOSED") {
-              conv.kanban_stage = "CLOSED";
-            } else if (conv.kanban_stage === "WAITING" || conv.status === "PENDING") {
-              conv.kanban_stage = "WAITING";
-            } else if (conv.kanban_stage === "STORE_REDIRECT" || conv.bot_handoff_reason === "STORE_REDIRECT") {
-              conv.kanban_stage = "STORE_REDIRECT";
+            if (conv.status === "finalizado" || conv.kanban_stage === "finalizado") {
+              conv.kanban_stage = "finalizado";
+            } else if (conv.kanban_stage === "aguardando_pagamento" || conv.status === "PENDING") {
+              conv.kanban_stage = "aguardando_pagamento";
+            } else if (conv.kanban_stage === "aguardando_pagamento" || conv.bot_handoff_reason === "aguardando_pagamento") {
+              conv.kanban_stage = "aguardando_pagamento";
             } else {
-              conv.kanban_stage = "HUMAN";
+              conv.kanban_stage = "em_atendimento";
             }
           } else {
             // Estado IA Atendendo
@@ -312,16 +312,16 @@ class ChatStore {
             conv.is_bot_active = true;
             conv.assigned_user_id = null;
             conv.assigned_to = null;
-            if (conv.status === "CLOSED" || conv.kanban_stage === "CLOSED") {
-              conv.kanban_stage = "CLOSED";
-            } else if (conv.kanban_stage === "WAITING" || conv.status === "PENDING") {
-              conv.kanban_stage = "WAITING";
-            } else if (conv.kanban_stage === "STORE_REDIRECT" || conv.bot_handoff_reason === "STORE_REDIRECT") {
-              conv.kanban_stage = "STORE_REDIRECT";
-            } else if (conv.kanban_stage === "NEW") {
-              conv.kanban_stage = "NEW";
+            if (conv.status === "finalizado" || conv.kanban_stage === "finalizado") {
+              conv.kanban_stage = "finalizado";
+            } else if (conv.kanban_stage === "aguardando_pagamento" || conv.status === "PENDING") {
+              conv.kanban_stage = "aguardando_pagamento";
+            } else if (conv.kanban_stage === "aguardando_pagamento" || conv.bot_handoff_reason === "aguardando_pagamento") {
+              conv.kanban_stage = "aguardando_pagamento";
+            } else if (conv.kanban_stage === "novos_triagem") {
+              conv.kanban_stage = "novos_triagem";
             } else {
-              conv.kanban_stage = "BOT";
+              conv.kanban_stage = "ia_atendendo";
               conv.status = "bot";
             }
           }
@@ -353,7 +353,7 @@ class ChatStore {
         Boolean(conv.assigned_to) ||
         conv.is_bot_active === false ||
         conv.status === "human_takeover" ||
-        conv.status === "HUMAN";
+        conv.status === "em_atendimento";
 
       if (isHumanControlled) {
         conv.is_human_controlled = true;
@@ -361,30 +361,30 @@ class ChatStore {
         if (conv.status === "bot" || conv.status === "BOT" || !conv.status) {
           conv.status = "human_takeover";
         }
-        if (conv.status === "CLOSED" || conv.kanban_stage === "CLOSED") {
-          conv.kanban_stage = "CLOSED";
-        } else if (conv.kanban_stage === "WAITING" || conv.status === "PENDING") {
-          conv.kanban_stage = "WAITING";
-        } else if (conv.kanban_stage === "STORE_REDIRECT" || conv.bot_handoff_reason === "STORE_REDIRECT") {
-          conv.kanban_stage = "STORE_REDIRECT";
+        if (conv.status === "finalizado" || conv.kanban_stage === "finalizado") {
+          conv.kanban_stage = "finalizado";
+        } else if (conv.kanban_stage === "aguardando_pagamento" || conv.status === "PENDING") {
+          conv.kanban_stage = "aguardando_pagamento";
+        } else if (conv.kanban_stage === "aguardando_pagamento" || conv.bot_handoff_reason === "aguardando_pagamento") {
+          conv.kanban_stage = "aguardando_pagamento";
         } else {
-          conv.kanban_stage = "HUMAN";
+          conv.kanban_stage = "em_atendimento";
         }
       } else {
         conv.is_human_controlled = false;
         conv.is_bot_active = true;
         conv.assigned_user_id = null;
         conv.assigned_to = null;
-        if (conv.status === "CLOSED" || conv.kanban_stage === "CLOSED") {
-          conv.kanban_stage = "CLOSED";
-        } else if (conv.kanban_stage === "WAITING" || conv.status === "PENDING") {
-          conv.kanban_stage = "WAITING";
-        } else if (conv.kanban_stage === "STORE_REDIRECT" || conv.bot_handoff_reason === "STORE_REDIRECT") {
-          conv.kanban_stage = "STORE_REDIRECT";
-        } else if (conv.kanban_stage === "NEW") {
-          conv.kanban_stage = "NEW";
+        if (conv.status === "finalizado" || conv.kanban_stage === "finalizado") {
+          conv.kanban_stage = "finalizado";
+        } else if (conv.kanban_stage === "aguardando_pagamento" || conv.status === "PENDING") {
+          conv.kanban_stage = "aguardando_pagamento";
+        } else if (conv.kanban_stage === "aguardando_pagamento" || conv.bot_handoff_reason === "aguardando_pagamento") {
+          conv.kanban_stage = "aguardando_pagamento";
+        } else if (conv.kanban_stage === "novos_triagem") {
+          conv.kanban_stage = "novos_triagem";
         } else {
-          conv.kanban_stage = "BOT";
+          conv.kanban_stage = "ia_atendendo";
           conv.status = "bot";
         }
       }
@@ -543,7 +543,7 @@ class ChatStore {
         convUpdates.is_human_controlled = true;
         convUpdates.is_bot_active = false;
         convUpdates.status = "human_takeover";
-        convUpdates.kanban_stage = "HUMAN";
+        convUpdates.kanban_stage = "em_atendimento";
         convUpdates.bot_handoff_reason = "HUMAN_OPERATOR_MESSAGE";
         convUpdates.bot_handoff_at = now;
       }
@@ -580,7 +580,7 @@ class ChatStore {
         status: senderType === "USER" && !isPrivate ? "human_takeover" : "OPEN",
         is_human_controlled: senderType === "USER" && !isPrivate ? true : false,
         is_bot_active: senderType === "USER" && !isPrivate ? false : true,
-        kanban_stage: senderType === "USER" && !isPrivate ? "HUMAN" : "NEW",
+        kanban_stage: senderType === "USER" && !isPrivate ? "em_atendimento" : "novos_triagem",
         last_message_at: now,
         last_message_content: content,
         contact: defaultContact,
@@ -600,7 +600,7 @@ class ChatStore {
           is_human_controlled: true,
           is_bot_active: false,
           status: "human_takeover",
-          kanban_stage: "HUMAN",
+          kanban_stage: "em_atendimento",
           bot_handoff_reason: "HUMAN_OPERATOR_MESSAGE",
           bot_handoff_at: now
         } : {})
@@ -941,7 +941,7 @@ class ChatStore {
       status: fromMe ? "human_takeover" : (convInfo?.status || (isBotActive ? "bot" : "OPEN")),
       is_human_controlled: isHuman,
       is_bot_active: isBotActive,
-      kanban_stage: fromMe ? "HUMAN" : (convInfo?.kanban_stage || (isBotActive ? "BOT" : "NEW")),
+      kanban_stage: fromMe ? "em_atendimento" : (convInfo?.kanban_stage || (isBotActive ? "ia_atendendo" : "novos_triagem")),
       bot_interaction_count: convInfo?.bot_interaction_count || 0,
       bot_handoff_reason: convInfo?.bot_handoff_reason || null,
       bot_handoff_at: convInfo?.bot_handoff_at || null,
@@ -971,7 +971,7 @@ class ChatStore {
         convUpsertData.is_bot_active = !fromMe;
         convUpsertData.is_human_controlled = fromMe;
         convUpsertData.status = fromMe ? "human_takeover" : "bot";
-        convUpsertData.kanban_stage = fromMe ? "HUMAN" : "BOT";
+        convUpsertData.kanban_stage = fromMe ? "em_atendimento" : "BOT";
         convUpsertData.bot_interaction_count = 0;
         convUpsertData.created_at = now;
       }
@@ -980,7 +980,7 @@ class ChatStore {
         convUpsertData.is_human_controlled = true;
         convUpsertData.is_bot_active = false;
         convUpsertData.status = "human_takeover";
-        convUpsertData.kanban_stage = "HUMAN";
+        convUpsertData.kanban_stage = "em_atendimento";
         convUpsertData.bot_handoff_reason = "HUMAN_OPERATOR_MESSAGE";
         convUpsertData.bot_handoff_at = now;
       }
@@ -1282,7 +1282,7 @@ class ChatStore {
         Boolean(conv.assigned_to) ||
         conv.is_bot_active === false ||
         conv.status === "human_takeover" ||
-        conv.status === "HUMAN";
+        conv.status === "em_atendimento";
 
       if (isHuman) {
         conv.is_human_controlled = true;
@@ -1290,30 +1290,30 @@ class ChatStore {
         if (conv.status === "bot" || conv.status === "BOT" || !conv.status) {
           conv.status = "human_takeover";
         }
-        if (conv.status === "CLOSED" || conv.kanban_stage === "CLOSED") {
-          conv.kanban_stage = "CLOSED";
-        } else if (conv.kanban_stage === "WAITING" || conv.status === "PENDING") {
-          conv.kanban_stage = "WAITING";
-        } else if (conv.kanban_stage === "STORE_REDIRECT" || conv.bot_handoff_reason === "STORE_REDIRECT") {
-          conv.kanban_stage = "STORE_REDIRECT";
+        if (conv.status === "finalizado" || conv.kanban_stage === "finalizado") {
+          conv.kanban_stage = "finalizado";
+        } else if (conv.kanban_stage === "aguardando_pagamento" || conv.status === "PENDING") {
+          conv.kanban_stage = "aguardando_pagamento";
+        } else if (conv.kanban_stage === "aguardando_pagamento" || conv.bot_handoff_reason === "aguardando_pagamento") {
+          conv.kanban_stage = "aguardando_pagamento";
         } else {
-          conv.kanban_stage = "HUMAN";
+          conv.kanban_stage = "em_atendimento";
         }
       } else {
         conv.is_human_controlled = false;
         conv.is_bot_active = true;
         conv.assigned_user_id = null;
         conv.assigned_to = null;
-        if (conv.status === "CLOSED" || conv.kanban_stage === "CLOSED") {
-          conv.kanban_stage = "CLOSED";
-        } else if (conv.kanban_stage === "WAITING" || conv.status === "PENDING") {
-          conv.kanban_stage = "WAITING";
-        } else if (conv.kanban_stage === "STORE_REDIRECT" || conv.bot_handoff_reason === "STORE_REDIRECT") {
-          conv.kanban_stage = "STORE_REDIRECT";
-        } else if (conv.kanban_stage === "NEW") {
-          conv.kanban_stage = "NEW";
+        if (conv.status === "finalizado" || conv.kanban_stage === "finalizado") {
+          conv.kanban_stage = "finalizado";
+        } else if (conv.kanban_stage === "aguardando_pagamento" || conv.status === "PENDING") {
+          conv.kanban_stage = "aguardando_pagamento";
+        } else if (conv.kanban_stage === "aguardando_pagamento" || conv.bot_handoff_reason === "aguardando_pagamento") {
+          conv.kanban_stage = "aguardando_pagamento";
+        } else if (conv.kanban_stage === "novos_triagem") {
+          conv.kanban_stage = "novos_triagem";
         } else {
-          conv.kanban_stage = "BOT";
+          conv.kanban_stage = "ia_atendendo";
           conv.status = "bot";
         }
       }
@@ -1329,8 +1329,8 @@ class ChatStore {
       bot_interaction_count?: number;
       bot_handoff_reason?: string | null;
       bot_handoff_at?: string | null;
-      status?: "OPEN" | "PENDING" | "CLOSED" | "BOT" | "human_takeover" | "bot" | "HUMAN";
-      kanban_stage?: "NEW" | "BOT" | "WAITING" | "STORE_REDIRECT" | "HUMAN" | "CLOSED";
+      status?: "OPEN" | "PENDING" | "finalizado" | "BOT" | "human_takeover" | "bot" | "em_atendimento";
+      kanban_stage?: "novos_triagem" | "ia_atendendo" | "aguardando_pagamento" | "em_atendimento" | "finalizado";
       assigned_user_id?: string | null;
       assigned_to?: string | null;
       last_message_at?: string;
@@ -1345,7 +1345,7 @@ class ChatStore {
       finalUpdates.assigned_user_id = null;
       finalUpdates.assigned_to = null;
       finalUpdates.status = "bot";
-      finalUpdates.kanban_stage = "BOT";
+      finalUpdates.kanban_stage = "ia_atendendo";
       finalUpdates.bot_interaction_count = updates.bot_interaction_count !== undefined ? updates.bot_interaction_count : 0;
       finalUpdates.bot_handoff_reason = updates.bot_handoff_reason !== undefined ? updates.bot_handoff_reason : null;
       finalUpdates.bot_handoff_at = updates.bot_handoff_at !== undefined ? updates.bot_handoff_at : null;
@@ -1353,7 +1353,7 @@ class ChatStore {
       finalUpdates.is_bot_active = false;
       finalUpdates.is_human_controlled = true;
       finalUpdates.status = "human_takeover";
-      finalUpdates.kanban_stage = updates.kanban_stage || "HUMAN";
+      finalUpdates.kanban_stage = updates.kanban_stage || "em_atendimento";
       finalUpdates.bot_handoff_reason = updates.bot_handoff_reason || "OPERATOR_TAKEOVER";
       finalUpdates.bot_handoff_at = updates.bot_handoff_at || new Date().toISOString();
       if (updates.bot_interaction_count !== undefined) {
@@ -1386,12 +1386,30 @@ class ChatStore {
   public async updateConversationStage(
     conversationId: string,
     storeId: string,
-    targetStage: "NEW" | "BOT" | "WAITING" | "STORE_REDIRECT" | "HUMAN" | "CLOSED",
+    targetStage: string,
     assignedUserId?: string | null
   ): Promise<ChatConversation | null> {
     const nowIso = new Date().toISOString();
+    
+    // Normalização estrita do estágio para o novo padrão de delivery
+    let normalizedStage = "novos_triagem";
+    const s = String(targetStage || "").toLowerCase().trim();
+    if (s === "novos_clientes" || s === "novos_triagem" || s === "new" || s === "open") {
+      normalizedStage = "novos_triagem";
+    } else if (s === "ia_atendendo" || s === "bot") {
+      normalizedStage = "ia_atendendo";
+    } else if (s === "atendimento_humano" || s === "em_atendimento" || s === "human" || s === "human_takeover") {
+      normalizedStage = "em_atendimento";
+    } else if (s === "enviado_webloja" || s === "aguardando_resposta" || s === "aguardando_pagamento" || s === "store_redirect" || s === "waiting" || s === "pending") {
+      normalizedStage = "aguardando_pagamento";
+    } else if (s === "em_separacao" || s === "saiu_entrega" || s === "separacao" || s === "delivery") {
+      normalizedStage = "saiu_entrega";
+    } else if (s === "finalizado" || s === "concluido" || s === "concluida" || s === "closed") {
+      normalizedStage = "finalizado";
+    }
+
     const updates: any = {
-      kanban_stage: targetStage,
+      kanban_stage: normalizedStage,
       updated_at: nowIso
     };
 
@@ -1400,13 +1418,15 @@ class ChatStore {
       updates.assigned_to = assignedUserId;
     }
 
-    switch (targetStage) {
-      case "NEW":
+    switch (normalizedStage) {
+      case "novos_triagem":
         updates.status = "OPEN";
         updates.is_bot_active = false;
         updates.is_human_controlled = false;
+        updates.assigned_user_id = null;
+        updates.assigned_to = null;
         break;
-      case "BOT":
+      case "ia_atendendo":
         updates.status = "bot";
         updates.is_bot_active = true;
         updates.is_human_controlled = false;
@@ -1416,21 +1436,20 @@ class ChatStore {
         updates.bot_handoff_reason = null;
         updates.bot_handoff_at = null;
         break;
-      case "WAITING":
-        updates.status = "PENDING";
-        break;
-      case "STORE_REDIRECT":
-        updates.status = "OPEN";
-        updates.bot_handoff_reason = "STORE_REDIRECT";
-        break;
-      case "HUMAN":
+      case "em_atendimento":
         updates.status = "human_takeover";
         updates.is_bot_active = false;
         updates.is_human_controlled = true;
         updates.bot_handoff_reason = "OPERATOR_ASSIGNED_OR_HANDOFF";
         updates.bot_handoff_at = nowIso;
         break;
-      case "CLOSED":
+      case "aguardando_pagamento":
+        updates.status = "PENDING";
+        break;
+      case "saiu_entrega":
+        updates.status = "OPEN";
+        break;
+      case "finalizado":
         updates.status = "CLOSED";
         updates.is_bot_active = false;
         break;

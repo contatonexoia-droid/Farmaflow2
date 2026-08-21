@@ -248,7 +248,26 @@ export interface PharmacyStats {
   lastUpdated: string;
 }
 
-export type KanbanStageId = 'NEW' | 'BOT' | 'WAITING' | 'STORE_REDIRECT' | 'HUMAN' | 'CLOSED';
+export type KanbanStageId = 
+  | 'novos_triagem' 
+  | 'ia_atendendo'
+  | 'em_atendimento' 
+  | 'aguardando_pagamento' 
+  | 'saiu_entrega' 
+  | 'finalizado'
+  // Retrocompatibilidade para estágios anteriores e legados
+  | 'NEW' 
+  | 'BOT' 
+  | 'WAITING' 
+  | 'STORE_REDIRECT' 
+  | 'HUMAN' 
+  | 'CLOSED'
+  | 'novos_clientes' 
+  | 'atendimento_humano' 
+  | 'enviado_webloja' 
+  | 'aguardando_resposta' 
+  | 'em_separacao' 
+  | 'concluido';
 
 export interface KanbanColumnConfig {
   id: KanbanStageId;

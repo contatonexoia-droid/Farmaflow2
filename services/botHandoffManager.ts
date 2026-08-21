@@ -104,7 +104,7 @@ export class BotHandoffManager {
       const handoffData: any = {
         assigned_user_id: assignedOperator.id,
         status: "human_takeover",
-        kanban_stage: "HUMAN",
+        kanban_stage: "em_atendimento",
         is_human_controlled: true,
         is_bot_active: false,
         bot_handoff_reason: reason,
@@ -127,7 +127,7 @@ export class BotHandoffManager {
       realtimeHub.broadcastToStore(storeId, "conversation_status_changed", {
         conversationId,
         status: "human_takeover",
-        kanban_stage: "HUMAN",
+        kanban_stage: "em_atendimento",
         is_human_controlled: true,
         is_bot_active: false,
         assigned_user_id: assignedOperator.id,
@@ -146,7 +146,7 @@ export class BotHandoffManager {
       const handoffData: any = {
         assigned_user_id: null,
         status: "human_takeover",
-        kanban_stage: "HUMAN",
+        kanban_stage: "em_atendimento",
         is_human_controlled: true,
         is_bot_active: false,
         bot_handoff_reason: reason,
@@ -169,7 +169,7 @@ export class BotHandoffManager {
       realtimeHub.broadcastToStore(storeId, "conversation_status_changed", {
         conversationId,
         status: "human_takeover",
-        kanban_stage: "HUMAN",
+        kanban_stage: "em_atendimento",
         is_human_controlled: true,
         is_bot_active: false,
         assigned_user_id: null,
@@ -198,7 +198,7 @@ export class BotHandoffManager {
       const updateData: any = {
         is_bot_active: isBotActive,
         is_human_controlled: !isBotActive,
-        kanban_stage: isBotActive ? "BOT" : "HUMAN",
+        kanban_stage: isBotActive ? "ia_atendendo" : "em_atendimento",
         updated_at: nowIso
       };
       if (isBotActive) {
@@ -236,7 +236,7 @@ export class BotHandoffManager {
         is_human_controlled: !isBotActive,
         assigned_user_id: isBotActive ? null : undefined,
         status: updateData.status,
-        kanban_stage: isBotActive ? "BOT" : "HUMAN",
+        kanban_stage: isBotActive ? "ia_atendendo" : "em_atendimento",
         bot_interaction_count: isBotActive ? 0 : undefined
       });
 
@@ -246,7 +246,7 @@ export class BotHandoffManager {
         is_human_controlled: !isBotActive,
         assigned_user_id: isBotActive ? null : undefined,
         status: updateData.status,
-        kanban_stage: isBotActive ? "BOT" : "HUMAN"
+        kanban_stage: isBotActive ? "ia_atendendo" : "em_atendimento"
       });
 
       realtimeHub.broadcastToStore(storeId, "conversation_stage_changed", {

@@ -10,7 +10,10 @@ import {
   CheckCircle2,
   Sparkles,
   Inbox,
-  Plus
+  Plus,
+  Truck,
+  CreditCard,
+  PackageCheck
 } from 'lucide-react';
 import { KanbanColumnConfig, KanbanStageId } from '../types';
 import { KanbanCard } from './KanbanCard';
@@ -58,11 +61,14 @@ export const KanbanColumn: React.FC<KanbanColumnProps> = ({
       case 'Bot':
         return <Bot size={16} className="text-purple-600" />;
       case 'Clock':
+      case 'CreditCard':
         return <Clock size={16} className="text-amber-600" />;
+      case 'Truck':
+      case 'PackageCheck':
       case 'ShoppingBag':
-        return <ShoppingBag size={16} className="text-emerald-600" />;
+        return <Truck size={16} className="text-emerald-600" />;
       case 'UserCheck':
-        return <UserCheck size={16} className="text-rose-600" />;
+        return <UserCheck size={16} className="text-purple-600" />;
       case 'CheckCircle2':
         return <CheckCircle2 size={16} className="text-slate-600" />;
       default:

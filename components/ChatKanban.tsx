@@ -30,18 +30,22 @@ import {
   MessageSquare,
   Sparkles,
   Phone,
-  Tag
+  Tag,
+  Truck,
+  CreditCard,
+  PackageCheck
 } from 'lucide-react';
 import { KanbanColumnConfig, KanbanStageId } from '../types';
 import { KanbanColumn } from './KanbanColumn';
 import { KanbanCard } from './KanbanCard';
+import { supabase } from '../services/supabase';
 
-// Definição das colunas padrão do Kanban FarmaFlow
+// Definição das 6 colunas padrão do fluxo simplificado de delivery FarmaFlow
 export const DEFAULT_KANBAN_COLUMNS: KanbanColumnConfig[] = [
   {
-    id: 'NEW',
-    title: 'Novos Clientes',
-    subtitle: 'Triagem & Primeiro contato',
+    id: 'novos_triagem',
+    title: 'Novos / Triagem',
+    subtitle: 'Entrada & Boas-Vindas automáticas',
     color: '#3b82f6',
     badgeBg: 'bg-blue-50',
     badgeText: 'text-blue-700',
@@ -50,9 +54,9 @@ export const DEFAULT_KANBAN_COLUMNS: KanbanColumnConfig[] = [
     order: 1
   },
   {
-    id: 'BOT',
+    id: 'ia_atendendo',
     title: 'IA Atendendo',
-    subtitle: 'Respostas automáticas inteligentes',
+    subtitle: 'Agente de IA interagindo',
     color: '#8b5cf6',
     badgeBg: 'bg-purple-50',
     badgeText: 'text-purple-700',
@@ -61,42 +65,42 @@ export const DEFAULT_KANBAN_COLUMNS: KanbanColumnConfig[] = [
     order: 2
   },
   {
-    id: 'WAITING',
-    title: 'Aguardando Resposta',
-    subtitle: 'Esperando retorno do cliente',
-    color: '#f59e0b',
-    badgeBg: 'bg-amber-50',
-    badgeText: 'text-amber-700',
-    borderColor: 'border-amber-200',
-    iconName: 'Clock',
-    order: 3
-  },
-  {
-    id: 'STORE_REDIRECT',
-    title: 'Enviado p/ Webloja',
-    subtitle: 'Com link do catálogo e checkout',
-    color: '#10b981',
-    badgeBg: 'bg-emerald-50',
-    badgeText: 'text-emerald-700',
-    borderColor: 'border-emerald-200',
-    iconName: 'ShoppingBag',
-    order: 4
-  },
-  {
-    id: 'HUMAN',
-    title: 'Atendimento Humano',
-    subtitle: 'Balconistas & Farmacêuticos',
+    id: 'em_atendimento',
+    title: 'Em Atendimento',
+    subtitle: 'Balcão / Atendimento Humano',
     color: '#f43f5e',
     badgeBg: 'bg-rose-50',
     badgeText: 'text-rose-700',
     borderColor: 'border-rose-200',
     iconName: 'UserCheck',
+    order: 3
+  },
+  {
+    id: 'aguardando_pagamento',
+    title: 'Aguardando Pagamento',
+    subtitle: 'PIX ou Link Webloja enviado',
+    color: '#f59e0b',
+    badgeBg: 'bg-amber-50',
+    badgeText: 'text-amber-700',
+    borderColor: 'border-amber-200',
+    iconName: 'Clock',
+    order: 4
+  },
+  {
+    id: 'saiu_entrega',
+    title: 'Em Separação / Delivery',
+    subtitle: 'Separação e motoboy em rota',
+    color: '#10b981',
+    badgeBg: 'bg-emerald-50',
+    badgeText: 'text-emerald-700',
+    borderColor: 'border-emerald-200',
+    iconName: 'Truck',
     order: 5
   },
   {
-    id: 'CLOSED',
+    id: 'finalizado',
     title: 'Finalizados',
-    subtitle: 'Atendimentos concluídos',
+    subtitle: 'Entrega concluída e encerrado',
     color: '#64748b',
     badgeBg: 'bg-slate-50',
     badgeText: 'text-slate-700',
@@ -119,10 +123,107 @@ export interface ChatKanbanProps {
   onRefresh?: () => void;
 }
 
-// Determina dinamicamente o estágio correto da conversa com unificação estrita das regras de IA vs Atendimento Humano
+/**
+ * Função de mapeamento e normalização com total retrocompatibilidade
+ * para estágios legados, mensagens do webhook e agentes de IA.
+ */
+export function normalizeKanbanStage(stageOrStatus: string | undefined | null, conv?: any): KanbanStageId {
+  if (!stageOrStatus) {
+    if (conv) {
+      if (conv.status === 'CLOSED' || conv.status === 'finalizado') return 'finalizado';
+      if (conv.status === 'PENDING' || conv.status === 'WAITING') return 'aguardando_pagamento';
+      if (conv.bot_handoff_reason === 'STORE_REDIRECT') return 'aguardando_pagamento';
+      const isHuman =
+        conv.is_human_controlled === true ||
+        Boolean(conv.assigned_user_id) ||
+        Boolean(conv.assigned_to) ||
+        conv.is_bot_active === false ||
+        conv.status === 'human_takeover' ||
+        conv.status === 'HUMAN';
+      if (isHuman) return 'em_atendimento';
+      if (conv.is_bot_active === true) return 'ia_atendendo';
+    }
+    return 'novos_triagem';
+  }
+
+  const s = String(stageOrStatus).toLowerCase().trim();
+
+  // 1. 'novos_clientes' ou 'novos_triagem' -> 'novos_triagem'
+  if (
+    s === 'novos_clientes' ||
+    s === 'novos_triagem' ||
+    s === 'new' ||
+    s === 'open'
+  ) {
+    return 'novos_triagem';
+  }
+
+  // 1.5. 'ia_atendendo' -> 'ia_atendendo'
+  if (
+    s === 'ia_atendendo' ||
+    s === 'bot'
+  ) {
+    return 'ia_atendendo';
+  }
+
+  // 2. 'atendimento_humano' -> 'em_atendimento'
+  if (
+    s === 'atendimento_humano' ||
+    s === 'em_atendimento' ||
+    s === 'human' ||
+    s === 'human_takeover'
+  ) {
+    return 'em_atendimento';
+  }
+
+  // 3. 'enviado_webloja' ou 'aguardando_resposta' -> 'aguardando_pagamento'
+  if (
+    s === 'enviado_webloja' ||
+    s === 'aguardando_resposta' ||
+    s === 'aguardando_pagamento' ||
+    s === 'store_redirect' ||
+    s === 'waiting' ||
+    s === 'pending'
+  ) {
+    return 'aguardando_pagamento';
+  }
+
+  // 4. 'em_separacao' ou 'saiu_entrega' -> 'saiu_entrega'
+  if (
+    s === 'em_separacao' ||
+    s === 'saiu_entrega' ||
+    s === 'separacao' ||
+    s === 'delivery'
+  ) {
+    return 'saiu_entrega';
+  }
+
+  // 5. 'finalizado' ou 'concluido' -> 'finalizado'
+  if (
+    s === 'finalizado' ||
+    s === 'concluido' ||
+    s === 'concluida' ||
+    s === 'closed'
+  ) {
+    return 'finalizado';
+  }
+
+  return 'novos_triagem';
+}
+
+/**
+ * Determina dinamicamente o estágio correto da conversa aplicando as regras de delivery FarmaFlow
+ */
 export function getConversationKanbanStage(conv: any): KanbanStageId {
-  if (!conv) return 'NEW';
-  if (conv.status === 'CLOSED' || conv.kanban_stage === 'CLOSED') return 'CLOSED';
+  if (!conv) return 'novos_triagem';
+
+  if (conv.kanban_stage) {
+    return normalizeKanbanStage(conv.kanban_stage, conv);
+  }
+
+  if (conv.status === 'CLOSED' || conv.status === 'finalizado') return 'finalizado';
+  if (conv.status === 'PENDING' || conv.status === 'WAITING') return 'aguardando_pagamento';
+  if (conv.bot_handoff_reason === 'STORE_REDIRECT') return 'aguardando_pagamento';
 
   const isHumanControlled = 
     conv.is_human_controlled === true ||
@@ -133,23 +234,14 @@ export function getConversationKanbanStage(conv: any): KanbanStageId {
     conv.status === 'HUMAN';
 
   if (isHumanControlled) {
-    if (conv.kanban_stage === 'WAITING' || conv.status === 'PENDING') return 'WAITING';
-    if (conv.kanban_stage === 'STORE_REDIRECT' || conv.bot_handoff_reason === 'STORE_REDIRECT') return 'STORE_REDIRECT';
-    return 'HUMAN';
+    return 'em_atendimento';
   }
 
-  // Regra Estrita: Coluna "IA Atendendo" só aceita is_bot_active === true E is_human_controlled === false E assigned_user_id === null
-  if (conv.is_bot_active !== false && !conv.is_human_controlled && !conv.assigned_user_id && !conv.assigned_to) {
-    if (conv.kanban_stage === 'WAITING' || conv.status === 'PENDING') return 'WAITING';
-    if (conv.kanban_stage === 'STORE_REDIRECT' || conv.bot_handoff_reason === 'STORE_REDIRECT') return 'STORE_REDIRECT';
-    if (conv.kanban_stage === 'NEW' && conv.bot_interaction_count === 0 && !conv.last_message_content) return 'NEW';
-    return 'BOT';
+  if (conv.is_bot_active === true) {
+    return 'ia_atendendo';
   }
 
-  if (conv.kanban_stage === 'WAITING' || conv.status === 'PENDING') return 'WAITING';
-  if (conv.kanban_stage === 'STORE_REDIRECT' || conv.bot_handoff_reason === 'STORE_REDIRECT') return 'STORE_REDIRECT';
-  if (conv.kanban_stage === 'NEW') return 'NEW';
-  return 'HUMAN';
+  return 'novos_triagem';
 }
 
 export const ChatKanban: React.FC<ChatKanbanProps> = ({
@@ -165,11 +257,20 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
   onRefresh
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedInboxId, setSelectedInboxId] = useState('all');
+  const isOperador = (userRole || '').toLowerCase() === 'operador';
+  const [selectedInboxId, setSelectedInboxId] = useState(() => (inboxes.length === 1 ? inboxes[0].id : 'all'));
   const [selectedTeamId, setSelectedTeamId] = useState('all');
   const [selectedTagId, setSelectedTagId] = useState('all');
   const [activeCard, setActiveCard] = useState<any | null>(null);
   const [isUpdating, setIsUpdating] = useState(false);
+
+  useEffect(() => {
+    if (inboxes.length === 1) {
+      setSelectedInboxId(inboxes[0].id);
+    } else if (isOperador && inboxes.length > 1 && selectedInboxId === 'all') {
+      setSelectedInboxId(inboxes[0].id);
+    }
+  }, [inboxes, isOperador]);
 
   // Configuração avançada dos sensores para DnD-Kit (Suporte perfeito para Desktop Mouse e Mobile Touch)
   const mouseSensor = useSensor(MouseSensor, {
@@ -215,34 +316,38 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
     });
   }, [conversations, selectedInboxId, selectedTeamId, selectedTagId, searchQuery]);
 
-  // Agrupamento de conversas por coluna do Kanban
+  // Agrupamento de conversas pelas 6 colunas do Kanban
   const columnConversations = useMemo(() => {
     const map: Record<KanbanStageId, any[]> = {
-      NEW: [],
-      BOT: [],
-      WAITING: [],
-      STORE_REDIRECT: [],
-      HUMAN: [],
-      CLOSED: []
-    };
+      novos_triagem: [],
+      ia_atendendo: [],
+      em_atendimento: [],
+      aguardando_pagamento: [],
+      saiu_entrega: [],
+      finalizado: []
+    } as any;
 
     filteredConversations.forEach(conv => {
       const stage = getConversationKanbanStage(conv);
-      if (map[stage]) {
+      if (stage === 'saiu_entrega' || stage === 'em_separacao' as any) {
+        map.saiu_entrega.push(conv);
+      } else if (map[stage]) {
         map[stage].push(conv);
       } else {
-        map.HUMAN.push(conv);
+        map.novos_triagem.push(conv);
       }
     });
 
     // Ordenar cada coluna pela data da última mensagem (mais recentes no topo)
     Object.keys(map).forEach((k) => {
       const key = k as KanbanStageId;
-      map[key].sort((a, b) => {
-        const tA = new Date(a.last_message_at || a.created_at || 0).getTime();
-        const tB = new Date(b.last_message_at || b.created_at || 0).getTime();
-        return tB - tA;
-      });
+      if (Array.isArray(map[key])) {
+        map[key].sort((a, b) => {
+          const tA = new Date(a.last_message_at || a.created_at || 0).getTime();
+          const tB = new Date(b.last_message_at || b.created_at || 0).getTime();
+          return tB - tA;
+        });
+      }
     });
 
     return map;
@@ -290,25 +395,28 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
       return;
     }
 
-    // 1. Atualização Otimista na UI
-    const isTargetBot = targetStage === 'BOT';
-    const isTargetHuman = targetStage === 'HUMAN';
+    // 1. Atualização Otimista na UI com as novas etapas de delivery
+    const isTargetBot = targetStage === 'novos_triagem' || targetStage === 'ia_atendendo';
+    const isTargetHumano = targetStage === 'em_atendimento';
+    const isTargetFinalizado = targetStage === 'finalizado';
+    const isTargetAguardando = targetStage === 'aguardando_pagamento';
+
     const updatedConv = {
       ...draggedConv,
       kanban_stage: targetStage,
-      status: targetStage === 'CLOSED' 
-        ? 'CLOSED' 
-        : targetStage === 'WAITING' 
-        ? 'PENDING' 
-        : isTargetBot 
-        ? 'bot' 
-        : isTargetHuman 
-        ? 'human_takeover' 
+      status: isTargetFinalizado
+        ? 'CLOSED'
+        : isTargetAguardando
+        ? 'PENDING'
+        : isTargetHumano
+        ? 'human_takeover'
+        : isTargetBot
+        ? 'bot'
         : 'OPEN',
       is_bot_active: isTargetBot,
-      is_human_controlled: isTargetHuman || !isTargetBot,
-      assigned_user_id: isTargetBot ? null : (isTargetHuman && currentUser?.id ? currentUser.id : draggedConv.assigned_user_id),
-      assigned_to: isTargetBot ? null : (isTargetHuman && currentUser?.id ? currentUser.id : draggedConv.assigned_to),
+      is_human_controlled: isTargetHumano || !isTargetBot,
+      assigned_user_id: isTargetBot ? null : (isTargetHumano && currentUser?.id ? currentUser.id : draggedConv.assigned_user_id),
+      assigned_to: isTargetBot ? null : (isTargetHumano && currentUser?.id ? currentUser.id : draggedConv.assigned_to),
       updated_at: new Date().toISOString()
     };
 
@@ -317,7 +425,7 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
       onConversationsChange(nextConversations);
     }
 
-    // 2. Persistência no Backend & Supabase
+    // 2. Persistência no Backend & Supabase (gravando a chave oficial do novo fluxo)
     try {
       setIsUpdating(true);
       const res = await fetch(`/api/v1/chat/conversations/${activeId}/stage`, {
@@ -326,9 +434,35 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
         body: JSON.stringify({
           storeId: tenantId,
           stage: targetStage,
-          assignedUserId: targetStage === 'HUMAN' && currentUser?.id ? currentUser.id : undefined
+          kanban_stage: targetStage,
+          assignedUserId: isTargetHumano && currentUser?.id ? currentUser.id : undefined
         })
       });
+
+      // Fallback direto Supabase
+      try {
+        const payload: Record<string, any> = {
+          kanban_stage: targetStage,
+          status: updatedConv.status,
+          is_bot_active: updatedConv.is_bot_active,
+          is_human_controlled: updatedConv.is_human_controlled,
+          updated_at: new Date().toISOString()
+        };
+        if (updatedConv.assigned_user_id !== undefined) {
+          payload.assigned_user_id = updatedConv.assigned_user_id;
+        }
+
+        const { error } = await supabase
+          .from('chat_conversations')
+          .update(payload)
+          .eq('id', activeId);
+
+        if (error) {
+          console.error("Erro detalhado do Supabase:", error.message, error.details, error.hint);
+        }
+      } catch (err: any) {
+        console.error("Exceção Fallback Supabase:", err.message);
+      }
 
       if (!res.ok) {
         console.warn('Erro ao atualizar estágio no servidor. Revertendo...');
@@ -351,22 +485,25 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
     const targetConv = conversations.find(c => c.id === conversationId);
     if (!targetConv) return;
 
-    const isTargetBot = targetStage === 'BOT';
-    const isTargetHuman = targetStage === 'HUMAN';
+    const isTargetBot = targetStage === 'novos_triagem' || targetStage === 'ia_atendendo';
+    const isTargetHumano = targetStage === 'em_atendimento';
+    const isTargetFinalizado = targetStage === 'finalizado';
+    const isTargetAguardando = targetStage === 'aguardando_pagamento';
+
     const updatedConv = {
       ...targetConv,
       kanban_stage: targetStage,
-      status: targetStage === 'CLOSED' 
-        ? 'CLOSED' 
-        : targetStage === 'WAITING' 
-        ? 'PENDING' 
-        : isTargetBot 
-        ? 'bot' 
-        : isTargetHuman 
-        ? 'human_takeover' 
+      status: isTargetFinalizado
+        ? 'CLOSED'
+        : isTargetAguardando
+        ? 'PENDING'
+        : isTargetHumano
+        ? 'human_takeover'
+        : isTargetBot
+        ? 'bot'
         : 'OPEN',
       is_bot_active: isTargetBot,
-      is_human_controlled: isTargetHuman || !isTargetBot,
+      is_human_controlled: isTargetHumano || !isTargetBot,
       assigned_user_id: isTargetBot ? null : targetConv.assigned_user_id,
       assigned_to: isTargetBot ? null : targetConv.assigned_to,
       bot_interaction_count: isTargetBot ? 0 : targetConv.bot_interaction_count,
@@ -382,8 +519,28 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
       await fetch(`/api/v1/chat/conversations/${conversationId}/stage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ storeId: tenantId, stage: targetStage })
+        body: JSON.stringify({ storeId: tenantId, stage: targetStage, kanban_stage: targetStage })
       });
+
+      // Fallback Supabase
+      try {
+        const { error } = await supabase
+          .from('chat_conversations')
+          .update({
+            kanban_stage: targetStage,
+            status: updatedConv.status,
+            is_bot_active: updatedConv.is_bot_active,
+            is_human_controlled: updatedConv.is_human_controlled,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', conversationId);
+
+        if (error) {
+          console.error("Erro detalhado do Supabase:", error.message, error.details, error.hint);
+        }
+      } catch (err: any) {
+        console.error("Exceção Fallback Supabase:", err.message);
+      }
     } catch (e) {
       console.error('Erro ao atualizar estágio:', e);
     }
@@ -395,7 +552,7 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
     const targetConv = conversations.find(c => c.id === conversationId);
     if (!targetConv) return;
 
-    const targetStage: KanbanStageId = nextStatus ? 'BOT' : 'HUMAN';
+    const targetStage: KanbanStageId = nextStatus ? 'ia_atendendo' : 'em_atendimento';
     const updatedConv = {
       ...targetConv,
       is_bot_active: nextStatus,
@@ -419,17 +576,38 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ storeId: tenantId, isBotActive: nextStatus })
       });
+
+      try {
+        const { error } = await supabase
+          .from('chat_conversations')
+          .update({
+            is_bot_active: nextStatus,
+            is_human_controlled: !nextStatus,
+            kanban_stage: targetStage,
+            status: updatedConv.status,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', conversationId);
+
+        if (error) {
+          console.error("Erro detalhado do Supabase:", error.message, error.details, error.hint);
+        }
+      } catch (err: any) {
+        console.error("Exceção Fallback Supabase:", err.message);
+      }
     } catch (e) {
       console.error('Erro ao alterar bot:', e);
     }
   };
 
-  // Totais rápidos para métricas
+  // Totais rápidos para métricas das 6 etapas de delivery
   const totalCount = filteredConversations.length;
-  const botCount = columnConversations.BOT.length;
-  const humanCount = columnConversations.HUMAN.length;
-  const newCount = columnConversations.NEW.length;
-  const waitingCount = columnConversations.WAITING.length;
+  const triagemCount = columnConversations.novos_triagem?.length || 0;
+  const iaCount = columnConversations.ia_atendendo?.length || 0;
+  const atendimentoCount = columnConversations.em_atendimento?.length || 0;
+  const pagamentoCount = columnConversations.aguardando_pagamento?.length || 0;
+  const deliveryCount = columnConversations.saiu_entrega?.length || 0;
+  const finalizadoCount = columnConversations.finalizado?.length || 0;
 
   return (
     <div className="flex flex-col h-full bg-slate-100/70 select-none overflow-hidden">
@@ -443,7 +621,7 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
             </div>
             <div>
               <h2 className="font-black text-gray-900 text-base leading-tight flex items-center gap-2">
-                <span>Quadro Kanban de Atendimento</span>
+                <span>Fluxo Delivery Farmácia</span>
                 {isUpdating && (
                   <span className="text-[10px] text-purple-600 font-semibold animate-pulse flex items-center gap-1">
                     <RefreshCw size={10} className="animate-spin" /> Salvando...
@@ -451,7 +629,7 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
                 )}
               </h2>
               <p className="text-xs text-gray-500 font-medium">
-                Arraste os cards entre as colunas para gerenciar o fluxo
+                Arraste os cards pelas 6 etapas do fluxo de entrega
               </p>
             </div>
           </div>
@@ -462,20 +640,30 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
               <span>Total:</span>
               <span className="font-mono text-purple-700">{totalCount}</span>
             </span>
+            <span className="px-2.5 py-1 bg-blue-50 text-blue-700 text-xs font-black rounded-xl flex items-center gap-1.5 border border-blue-200">
+              <Users size={12} />
+              <span>Triagem:</span>
+              <span className="font-mono">{triagemCount}</span>
+            </span>
             <span className="px-2.5 py-1 bg-purple-50 text-purple-700 text-xs font-black rounded-xl flex items-center gap-1.5 border border-purple-200">
               <Bot size={12} />
               <span>IA:</span>
-              <span className="font-mono">{botCount}</span>
+              <span className="font-mono">{iaCount}</span>
             </span>
             <span className="px-2.5 py-1 bg-rose-50 text-rose-700 text-xs font-black rounded-xl flex items-center gap-1.5 border border-rose-200">
               <UserCheck size={12} />
               <span>Balcão:</span>
-              <span className="font-mono">{humanCount}</span>
+              <span className="font-mono">{atendimentoCount}</span>
             </span>
             <span className="px-2.5 py-1 bg-amber-50 text-amber-700 text-xs font-black rounded-xl flex items-center gap-1.5 border border-amber-200">
               <Clock size={12} />
-              <span>Aguardando:</span>
-              <span className="font-mono">{waitingCount}</span>
+              <span>Pagamento:</span>
+              <span className="font-mono">{pagamentoCount}</span>
+            </span>
+            <span className="px-2.5 py-1 bg-emerald-50 text-emerald-700 text-xs font-black rounded-xl flex items-center gap-1.5 border border-emerald-200">
+              <Truck size={12} />
+              <span>Delivery:</span>
+              <span className="font-mono">{deliveryCount}</span>
             </span>
           </div>
         </div>
@@ -503,20 +691,24 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
           </div>
 
           {/* Inbox Filter */}
-          {inboxes.length > 0 && (
+          {inboxes.length === 1 ? (
+            <div className="py-1.5 px-3 bg-purple-50 border border-purple-200 text-purple-800 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-2xs">
+              <span>Setor: {inboxes[0].name}</span>
+            </div>
+          ) : inboxes.length > 1 ? (
             <select
               value={selectedInboxId}
               onChange={(e) => setSelectedInboxId(e.target.value)}
               className="py-1.5 px-3 bg-gray-50 border border-gray-200 rounded-xl text-xs font-bold text-gray-700 outline-none focus:border-purple-500 cursor-pointer"
             >
-              <option value="all">Todas as Caixas</option>
+              {!isOperador && <option value="all">Todas as Caixas</option>}
               {inboxes.map((inbox) => (
                 <option key={inbox.id} value={inbox.id}>
                   {inbox.name}
                 </option>
               ))}
             </select>
-          )}
+          ) : null}
 
           {/* Team Filter */}
           {teams.length > 0 && (
@@ -563,7 +755,7 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
         </div>
       </div>
 
-      {/* Main Kanban DnD Canvas */}
+      {/* Main Kanban DnD Canvas - 5 Colunas */}
       <div className="flex-1 overflow-x-auto overflow-y-hidden p-4 md:p-6">
         <DndContext
           sensors={sensors}
@@ -600,3 +792,4 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
     </div>
   );
 };
+

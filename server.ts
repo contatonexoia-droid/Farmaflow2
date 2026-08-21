@@ -6616,8 +6616,15 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
         await supabaseAdmin.from("chat_messages").insert([welcomeMsg]);
         await supabaseAdmin.from("chat_conversations").update({
           last_message_at: nowIso,
-          last_message_content: displayContent
+          last_message_content: displayContent,
+          kanban_stage: 'ia_atendendo',
+          is_bot_active: true,
+          status: 'bot'
         }).eq("id", conversation.id);
+        
+        conversation.kanban_stage = 'ia_atendendo';
+        conversation.is_bot_active = true;
+        conversation.status = 'bot';
       } catch (dbErr: any) {
         console.warn("[WelcomeMessage] Erro ao persistir mensagem de boas-vindas no banco local:", dbErr.message);
       }
@@ -7766,7 +7773,11 @@ app.all("/api/v1/chat/conversations/:id/stage", async (req, res) => {
       return res.status(400).json({ error: "conversationId e stage são obrigatórios." });
     }
 
-    const validStages = ["NEW", "BOT", "WAITING", "STORE_REDIRECT", "HUMAN", "CLOSED"];
+    const validStages = [
+      "novos_triagem", "em_atendimento", "aguardando_pagamento", "saiu_entrega", "finalizado",
+      "NEW", "BOT", "WAITING", "STORE_REDIRECT", "HUMAN", "CLOSED",
+      "novos_clientes", "ia_atendendo", "atendimento_humano", "enviado_webloja", "aguardando_resposta", "em_separacao", "concluido"
+    ];
     if (!validStages.includes(stage)) {
       return res.status(400).json({ error: `Estágio inválido: ${stage}. Válidos: ${validStages.join(", ")}` });
     }

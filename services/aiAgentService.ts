@@ -710,7 +710,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         bot_interaction_count: nextCount,
         is_bot_active: false,
         is_human_controlled: true,
-        kanban_stage: "HUMAN",
+        kanban_stage: "em_atendimento",
         status: "human_takeover",
         bot_handoff_reason: params.handoffReason || "MAX_INTERACTIONS_REACHED",
         bot_handoff_at: nowIso,
@@ -746,7 +746,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         bot_interaction_count: nextCount,
         bot_handoff_reason: params.handoffReason || "MAX_INTERACTIONS_REACHED",
         bot_handoff_at: nowIso,
-        kanban_stage: "HUMAN"
+        kanban_stage: "em_atendimento"
       });
 
       realtimeHub.broadcastToStore(realTenantId, "conversation_stage_changed", {
@@ -763,7 +763,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         is_human_controlled: false,
         assigned_user_id: null,
         assigned_to: null,
-        kanban_stage: "BOT",
+        kanban_stage: "ia_atendendo",
         status: "bot",
         bot_handoff_reason: null,
         bot_handoff_at: null,
@@ -790,7 +790,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         is_bot_active: true,
         is_human_controlled: false,
         bot_interaction_count: nextCount,
-        kanban_stage: "BOT"
+        kanban_stage: "ia_atendendo"
       });
     }
 

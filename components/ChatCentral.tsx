@@ -186,9 +186,27 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
     const fetchUser = async () => {
       const { data: { user } } = await supabase.auth.getUser();
       if (user) {
-        setLocalUser(user);
+        let extraData: any = {};
+        try {
+          const { data: tu } = await supabase
+            .from('tenant_users')
+            .select('id, supabase_user_id, role, tenant_id')
+            .or(`supabase_user_id.eq.${user.id},id.eq.${user.id},email.eq.${user.email}`)
+            .limit(1)
+            .maybeSingle();
+          if (tu) {
+            extraData = tu;
+          }
+        } catch (_) {}
+
+        setLocalUser({
+          ...user,
+          supabase_user_id: extraData.supabase_user_id || user.id,
+          tenant_user_id: extraData.id,
+          tenant_id: extraData.tenant_id
+        });
         if (!localRole) {
-          setLocalRole((user.user_metadata?.role || '').toLowerCase());
+          setLocalRole((extraData.role || user.user_metadata?.role || '').toLowerCase());
         }
       }
     };
@@ -350,8 +368,12 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   const displayedConversations = useMemo(() => {
     return conversations.filter((conv: any) => {
       // 1. Permissão de Operador por Caixa de Entrada
-      if (isOperador && userId && allowedInboxIds.length > 0 && conv.inbox_id) {
-        if (!allowedInboxIds.includes(conv.inbox_id)) return false;
+      if (isOperador) {
+        if (allowedInboxIds.length === 1) {
+          if (conv.inbox_id && conv.inbox_id !== allowedInboxIds[0]) return false;
+        } else if (allowedInboxIds.length > 1 && conv.inbox_id) {
+          if (!allowedInboxIds.includes(conv.inbox_id)) return false;
+        }
       }
 
       // 2. Filtro de Caixa de Entrada selecionada
@@ -451,55 +473,106 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
 
   const fetchInboxes = async () => {
     try {
-      let allowedIds: string[] = [];
-      if (isOperador && userId) {
-        const { data: memberRows } = await supabase
-          .from('inbox_members')
-          .select('inbox_id')
-          .eq('user_id', userId);
-        if (memberRows) {
-          allowedIds = memberRows.map((r: any) => r.inbox_id);
-          setAllowedInboxIds(allowedIds);
+      const currentTenantId = tenantId || localUser?.tenant_id || currentUser?.tenant_id || localStorage.getItem('ff_tenant_id') || localStorage.getItem('farmaflow_current_tenant_id') || '';
+      let allowedDeptIds: string[] = [];
+
+      if (isOperador) {
+        const userObj = localUser || currentUser;
+        const uid = userObj?.id;
+        const subUid = userObj?.supabase_user_id;
+
+        try {
+          let deptQuery = supabase
+            .from('department_access')
+            .select('department_id, user_id, tenant_id');
+
+          if (currentTenantId) {
+            deptQuery = deptQuery.eq('tenant_id', currentTenantId);
+          }
+
+          if (uid && subUid && uid !== subUid) {
+            deptQuery = deptQuery.or(`user_id.eq.${uid},user_id.eq.${subUid}`);
+          } else if (uid) {
+            deptQuery = deptQuery.eq('user_id', uid);
+          } else if (subUid) {
+            deptQuery = deptQuery.eq('user_id', subUid);
+          }
+
+          const { data: deptRows, error: deptErr } = await deptQuery;
+          if (!deptErr && deptRows && deptRows.length > 0) {
+            allowedDeptIds = Array.from(new Set(deptRows.map((r: any) => r.department_id).filter(Boolean)));
+          }
+        } catch (err) {
+          console.warn("[ChatCentral] Erro ao buscar department_access:", err);
         }
+
+        // Fallback para inbox_members se department_access não retornar nada
+        if (allowedDeptIds.length === 0 && (uid || subUid)) {
+          try {
+            let memberQuery = supabase
+              .from('inbox_members')
+              .select('inbox_id, user_id');
+
+            if (uid && subUid && uid !== subUid) {
+              memberQuery = memberQuery.or(`user_id.eq.${uid},user_id.eq.${subUid}`);
+            } else if (uid) {
+              memberQuery = memberQuery.eq('user_id', uid);
+            }
+            const { data: memberRows } = await memberQuery;
+            if (memberRows && memberRows.length > 0) {
+              allowedDeptIds = Array.from(new Set(memberRows.map((r: any) => r.inbox_id).filter(Boolean)));
+            }
+          } catch (_) {}
+        }
+
+        setAllowedInboxIds(allowedDeptIds);
       }
 
+      let allInboxes: any[] = [];
       const queryParams = userId ? `&userId=${userId}&role=${cleanRole}` : '';
-      const res = await fetch(`/api/v1/inboxes?storeId=${tenantId}${queryParams}`);
+      const res = await fetch(`/api/v1/inboxes?storeId=${currentTenantId || tenantId}${queryParams}`);
       if (res.ok) {
         const json = await res.json();
         if (json.data && json.data.length > 0) {
-          let list = json.data;
-          if (isOperador && userId && allowedIds.length > 0) {
-            list = list.filter((i: any) => allowedIds.includes(i.id));
-          }
-          setInboxes(list);
-          return;
+          allInboxes = json.data;
         }
       }
 
-      const { data, error } = await supabase
-        .from('inboxes')
-        .select('*')
-        .eq('store_id', tenantId);
-        
-      if (!error && data && data.length > 0) {
-        let list = data;
-        if (isOperador && userId && allowedIds.length > 0) {
-          list = list.filter((i: any) => allowedIds.includes(i.id));
-        }
-        setInboxes(list);
-      } else {
-        const saved = localStorage.getItem(`inboxes_${tenantId}`);
-        if (saved) {
-          try {
-            let list = JSON.parse(saved);
-            if (isOperador && userId && allowedIds.length > 0) {
-              list = list.filter((i: any) => allowedIds.includes(i.id));
-            }
-            setInboxes(list);
-          } catch (_) {}
+      if (allInboxes.length === 0) {
+        const { data, error } = await supabase
+          .from('inboxes')
+          .select('*')
+          .eq('store_id', currentTenantId || tenantId);
+
+        if (!error && data && data.length > 0) {
+          allInboxes = data;
         } else {
-          setInboxes([{ id: `inbox_default_${tenantId}`, name: 'Geral / Atendimento', store_id: tenantId }]);
+          const saved = localStorage.getItem(`inboxes_${currentTenantId || tenantId}`);
+          if (saved) {
+            try {
+              allInboxes = JSON.parse(saved);
+            } catch (_) {}
+          } else {
+            allInboxes = [{ id: `inbox_default_${currentTenantId || tenantId}`, name: 'Geral / Atendimento', store_id: currentTenantId || tenantId }];
+          }
+        }
+      }
+
+      let list = allInboxes;
+      if (isOperador) {
+        if (allowedDeptIds.length > 0) {
+          list = allInboxes.filter((i: any) => allowedDeptIds.includes(i.id));
+        }
+      }
+
+      setInboxes(list);
+
+      // Se o operador tiver apenas 1 caixa associada, selecione-a automaticamente e restrinja a busca
+      if (isOperador && list.length === 1) {
+        setSelectedInboxId(list[0].id);
+      } else if (isOperador && list.length > 1) {
+        if (selectedInboxId === 'all' || !list.some(i => i.id === selectedInboxId)) {
+          setSelectedInboxId(list[0].id);
         }
       }
     } catch (e) {
@@ -513,20 +586,63 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
 
   const fetchConversations = async () => {
     try {
+      const currentTenantId = tenantId || localUser?.tenant_id || currentUser?.tenant_id || localStorage.getItem('ff_tenant_id') || localStorage.getItem('farmaflow_current_tenant_id') || '';
       let allowedIds = allowedInboxIds;
-      if (isOperador && userId && allowedIds.length === 0) {
-        const { data: memberRows } = await supabase
-          .from('inbox_members')
-          .select('inbox_id')
-          .eq('user_id', userId);
-        if (memberRows) {
-          allowedIds = memberRows.map((r: any) => r.inbox_id);
-          setAllowedInboxIds(allowedIds);
+
+      if (isOperador && allowedIds.length === 0) {
+        const userObj = localUser || currentUser;
+        const uid = userObj?.id;
+        const subUid = userObj?.supabase_user_id;
+
+        try {
+          let deptQuery = supabase
+            .from('department_access')
+            .select('department_id, user_id, tenant_id');
+
+          if (currentTenantId) {
+            deptQuery = deptQuery.eq('tenant_id', currentTenantId);
+          }
+
+          if (uid && subUid && uid !== subUid) {
+            deptQuery = deptQuery.or(`user_id.eq.${uid},user_id.eq.${subUid}`);
+          } else if (uid) {
+            deptQuery = deptQuery.eq('user_id', uid);
+          } else if (subUid) {
+            deptQuery = deptQuery.eq('user_id', subUid);
+          }
+
+          const { data: deptRows } = await deptQuery;
+          if (deptRows && deptRows.length > 0) {
+            allowedIds = Array.from(new Set(deptRows.map((r: any) => r.department_id).filter(Boolean)));
+            setAllowedInboxIds(allowedIds);
+          }
+        } catch (_) {}
+
+        if (allowedIds.length === 0 && (uid || subUid)) {
+          try {
+            let memberQuery = supabase
+              .from('inbox_members')
+              .select('inbox_id, user_id');
+
+            if (uid && subUid && uid !== subUid) {
+              memberQuery = memberQuery.or(`user_id.eq.${uid},user_id.eq.${subUid}`);
+            } else if (uid) {
+              memberQuery = memberQuery.eq('user_id', uid);
+            }
+            const { data: memberRows } = await memberQuery;
+            if (memberRows && memberRows.length > 0) {
+              allowedIds = Array.from(new Set(memberRows.map((r: any) => r.inbox_id).filter(Boolean)));
+              setAllowedInboxIds(allowedIds);
+            }
+          } catch (_) {}
         }
       }
 
+      // Se o operador tiver apenas 1 caixa associada, selecione-a e restrinja a busca exclusivamente a esse department_id
+      const targetInboxParam = (isOperador && allowedIds.length === 1) ? allowedIds[0] : (selectedInboxId !== 'all' ? selectedInboxId : 'all');
       const queryParams = userId ? `&userId=${userId}&role=${cleanRole}` : '';
-      const res = await fetch(`/api/v1/chat/conversations?tenantId=${tenantId}&inboxId=all${queryParams}`);
+
+      const res = await fetch(`/api/v1/chat/conversations?tenantId=${currentTenantId || tenantId}&inboxId=${targetInboxParam}${queryParams}`);
       if (res.ok) {
         const json = await res.json();
         if (json.data && Array.isArray(json.data)) {
@@ -547,7 +663,9 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
             };
           });
 
-          if (isOperador && userId && allowedIds.length > 0) {
+          if (isOperador && allowedIds.length === 1) {
+            list = list.filter((c: any) => c.inbox_id === allowedIds[0]);
+          } else if (isOperador && allowedIds.length > 1) {
             list = list.filter((c: any) => !c.inbox_id || allowedIds.includes(c.inbox_id));
           }
           setConversations(list);
@@ -558,8 +676,12 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       let query = supabase
         .from('chat_conversations')
         .select('*, contact:chat_contacts(name, phone_number)')
-        .eq('store_id', tenantId)
+        .eq('store_id', currentTenantId || tenantId)
         .order('last_message_at', { ascending: false });
+
+      if (isOperador && allowedIds.length === 1) {
+        query = query.eq('inbox_id', allowedIds[0]);
+      }
 
       const { data, error } = await query;
       if (!error && data && data.length > 0) {
@@ -579,12 +701,14 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
             kanban_stage: stage
           };
         });
-        if (isOperador && userId && allowedIds.length > 0) {
+        if (isOperador && allowedIds.length === 1) {
+          list = list.filter((c: any) => c.inbox_id === allowedIds[0]);
+        } else if (isOperador && allowedIds.length > 1) {
           list = list.filter((c: any) => !c.inbox_id || allowedIds.includes(c.inbox_id));
         }
         setConversations(list);
       } else {
-        const saved = localStorage.getItem(`chat_conversations_${tenantId}`);
+        const saved = localStorage.getItem(`chat_conversations_${currentTenantId || tenantId}`);
         if (saved) {
           try {
             let list = JSON.parse(saved).map((c: any) => {
@@ -603,7 +727,9 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                 kanban_stage: stage
               };
             });
-            if (isOperador && userId && allowedIds.length > 0) {
+            if (isOperador && allowedIds.length === 1) {
+              list = list.filter((c: any) => c.inbox_id === allowedIds[0]);
+            } else if (isOperador && allowedIds.length > 1) {
               list = list.filter((c: any) => !c.inbox_id || allowedIds.includes(c.inbox_id));
             }
             setConversations(list);
@@ -812,7 +938,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       is_human_controlled: true,
       is_bot_active: false,
       status: 'human_takeover',
-      kanban_stage: 'HUMAN'
+      kanban_stage: 'em_atendimento'
     };
     setSelectedConversation(updated);
     setConversations(conversations.map(c => c.id === updated.id ? updated : c));
@@ -839,14 +965,14 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
        updated.is_human_controlled = true;
        updated.is_bot_active = false;
        updated.status = 'human_takeover';
-       updated.kanban_stage = 'HUMAN';
+       updated.kanban_stage = 'em_atendimento';
     }
     
     if (transferData.inboxId) {
        updated.inbox_id = transferData.inboxId;
        updated.assigned_user_id = null; // Send back to queue of that inbox
-       updated.status = 'PENDING';
-       updated.kanban_stage = 'WAITING';
+       updated.status = 'OPEN';
+       updated.kanban_stage = 'novos_triagem';
     }
 
     setSelectedConversation(updated);
@@ -869,7 +995,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       bot_handoff_reason: nextStatus ? null : selectedConversation.bot_handoff_reason,
       bot_handoff_at: nextStatus ? null : selectedConversation.bot_handoff_at,
       status: nextStatus ? 'bot' : 'human_takeover',
-      kanban_stage: nextStatus ? 'BOT' : 'HUMAN'
+      kanban_stage: nextStatus ? 'novos_triagem' : 'em_atendimento'
     };
     setSelectedConversation(updated);
     setConversations(conversations.map(c => c.id === updated.id ? updated : c));
@@ -887,7 +1013,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
 
   const handleCloseConversation = () => {
     if (!selectedConversation) return;
-    const updated = { ...selectedConversation, status: 'CLOSED' };
+    const updated = { ...selectedConversation, status: 'CLOSED', kanban_stage: 'finalizado' };
     setSelectedConversation(null);
     setConversations(conversations.map(c => c.id === updated.id ? updated : c));
     setActiveView('LIST');
