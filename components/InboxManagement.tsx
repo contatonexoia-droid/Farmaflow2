@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Inbox, Plus, Settings, Users, X, Check, Trash2, Smartphone, Shield, Loader2, Building2, Globe, MessageSquare, Instagram, MessageCircle, QrCode, RefreshCw, Zap, Search, CheckSquare, Square, Mail } from 'lucide-react';
+import { Inbox, Plus, Settings, Users, X, Check, Trash2, Smartphone, Shield, Loader2, Building2, Globe, MessageSquare, Instagram, MessageCircle, QrCode, RefreshCw, Zap, Search, CheckSquare, Square, Mail, AlertCircle, RotateCcw } from 'lucide-react';
 import { supabase } from '../services/supabase';
 import toast, { Toaster } from 'react-hot-toast';
 import { WhatsAppConnectModal } from './WhatsAppConnectModal';
@@ -34,6 +34,7 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
   const [membersLoading, setMembersLoading] = useState(false);
   const [savingAccess, setSavingAccess] = useState(false);
   const [collaboratorSearch, setCollaboratorSearch] = useState('');
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [whatsappInstances, setWhatsappInstances] = useState<any[]>([]);
   const [teams, setTeams] = useState<any[]>([]);
   const [selectedTeamIds, setSelectedTeamIds] = useState<string[]>([]);
@@ -142,10 +143,35 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
     }
   };
 
+  const getAuthHeaders = async () => {
+    let token = '';
+    try {
+      const { data } = await supabase.auth.getSession();
+      token = data?.session?.access_token || '';
+    } catch (_) {}
+
+    if (!token) {
+      const saved = localStorage.getItem('ff_session');
+      if (saved) {
+        try {
+          const parsed = JSON.parse(saved);
+          token = parsed.access_token || parsed.token || '';
+        } catch (_) {}
+      }
+    }
+
+    return {
+      'Content-Type': 'application/json',
+      'x-tenant-id': tenantId,
+      ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+    };
+  };
+
   const fetchTeam = async () => {
     try {
-      // 1. Try server endpoint
-      const res = await fetch(`/api/v1/team/users?tenantId=${tenantId}`);
+      // 1. Try server endpoint with authentication headers
+      const headers = await getAuthHeaders();
+      const res = await fetch(`/api/v1/team/users?tenantId=${tenantId}`, { headers });
       if (res.ok) {
         const json = await res.json();
         if (json.data && json.data.length > 0) {
@@ -154,25 +180,23 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
         }
       }
 
-      // 2. Try tenant_users table
+      // 2. Query tenant_users table directly
       const { data: tenantUsers, error: tuErr } = await supabase
         .from('tenant_users')
-        .select('*')
+        .select('id, supabase_user_id, name, email, role, tenant_id')
         .eq('tenant_id', tenantId);
 
-      if (!tuErr && tenantUsers && tenantUsers.length > 0) {
-        setTeam(tenantUsers.map(u => ({ id: u.id, supabase_user_id: u.supabase_user_id, full_name: u.name, role: u.role, is_active: u.is_active !== false })));
-        return;
-      }
-
-      // 3. Safe try profiles table without throwing unhandled error
-      const { data: profiles, error: pErr } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('store_id', tenantId);
-
-      if (!pErr && profiles) {
-        setTeam(profiles);
+      if (tuErr) {
+        console.error('Erro Supabase tenant_users:', tuErr);
+      } else if (tenantUsers && tenantUsers.length > 0) {
+        setTeam(tenantUsers.map(u => ({
+          id: u.id || u.supabase_user_id,
+          supabase_user_id: u.supabase_user_id || u.id,
+          full_name: u.name || u.email?.split('@')[0] || 'Colaborador',
+          email: u.email || '',
+          role: u.role || 'operador',
+          is_active: true
+        })));
         return;
       }
 
@@ -350,6 +374,7 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
     setSelectedInbox(inbox);
     setIsMembersModalOpen(true);
     setMembersLoading(true);
+    setLoadError(null);
     setCollaborators([]);
     setSelectedUserIds([]);
     setCollaboratorSearch('');
@@ -357,83 +382,42 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
     try {
       const departmentId = inbox.id;
 
-      // 1. BUSCA DE DADOS: Buscar todos os colaboradores ativos do tenant atual da tabela 'profiles' (id, name, email, role)
-      let fetchedProfiles: CollaboratorProfile[] = [];
+      // 1. CONSULTA DE COLABORADORES: Buscar na tabela 'tenant_users' com tenant_id
+      let fetchedCollaborators: CollaboratorProfile[] = [];
+      let hadAnyError = false;
 
-      // Tentativa 1: Buscar diretamente na tabela 'profiles' filtrando por store_id / tenant_id
       try {
-        const { data: profs, error: pErr } = await supabase
-          .from('profiles')
-          .select('id, name, full_name, email, role, is_active, store_id, tenant_id')
-          .or(`store_id.eq.${tenantId},tenant_id.eq.${tenantId}`);
+        const { data: tuData, error: tuErr } = await supabase
+          .from('tenant_users')
+          .select('id, supabase_user_id, name, email, role, tenant_id')
+          .eq('tenant_id', tenantId);
 
-        if (!pErr && profs && profs.length > 0) {
-          fetchedProfiles = profs.map(p => ({
-            id: p.id,
-            name: p.name || p.full_name || p.email?.split('@')[0] || 'Colaborador',
-            email: p.email || '',
-            role: p.role || 'operador',
-            is_active: p.is_active !== false
+        if (tuErr) {
+          console.error('Erro Supabase tenant_users:', tuErr);
+          hadAnyError = true;
+        } else if (tuData && Array.isArray(tuData) && tuData.length > 0) {
+          fetchedCollaborators = tuData.map(u => ({
+            id: u.id || u.supabase_user_id,
+            name: u.name || u.email?.split('@')[0] || 'Colaborador',
+            email: u.email || '',
+            role: u.role || 'operador',
+            is_active: true
           }));
-        } else {
-          // Filtro simples por store_id
-          const { data: byStore } = await supabase
-            .from('profiles')
-            .select('id, name, full_name, email, role, is_active')
-            .eq('store_id', tenantId);
-
-          if (byStore && byStore.length > 0) {
-            fetchedProfiles = byStore.map(p => ({
-              id: p.id,
-              name: p.name || p.full_name || p.email?.split('@')[0] || 'Colaborador',
-              email: p.email || '',
-              role: p.role || 'operador',
-              is_active: p.is_active !== false
-            }));
-          } else {
-            // Filtro por tenant_id
-            const { data: byTenant } = await supabase
-              .from('profiles')
-              .select('id, name, full_name, email, role, is_active')
-              .eq('tenant_id', tenantId);
-
-            if (byTenant && byTenant.length > 0) {
-              fetchedProfiles = byTenant.map(p => ({
-                id: p.id,
-                name: p.name || p.full_name || p.email?.split('@')[0] || 'Colaborador',
-                email: p.email || '',
-                role: p.role || 'operador',
-                is_active: p.is_active !== false
-              }));
-            } else {
-              // Busca geral em profiles
-              const { data: allProfs } = await supabase
-                .from('profiles')
-                .select('id, name, full_name, email, role, is_active');
-              if (allProfs && allProfs.length > 0) {
-                fetchedProfiles = allProfs.map(p => ({
-                  id: p.id,
-                  name: p.name || p.full_name || p.email?.split('@')[0] || 'Colaborador',
-                  email: p.email || '',
-                  role: p.role || 'operador',
-                  is_active: p.is_active !== false
-                }));
-              }
-            }
-          }
         }
-      } catch (e) {
-        console.warn("[InboxManagement] Profiles table query warning:", e);
+      } catch (e: any) {
+        console.error('Erro Supabase tenant_users:', e);
+        hadAnyError = true;
       }
 
-      // Tentativa 2 (Fallback): Buscar via API /api/v1/team/users
-      if (fetchedProfiles.length === 0) {
+      // Fallback: Buscar via API /api/v1/team/users com JWT nos headers
+      if (fetchedCollaborators.length === 0) {
         try {
-          const res = await fetch(`/api/v1/team/users?tenantId=${tenantId}`);
+          const headers = await getAuthHeaders();
+          const res = await fetch(`/api/v1/team/users?tenantId=${tenantId}`, { headers });
           if (res.ok) {
             const json = await res.json();
-            if (json.data && json.data.length > 0) {
-              fetchedProfiles = json.data.map((u: any) => ({
+            if (json.data && Array.isArray(json.data) && json.data.length > 0) {
+              fetchedCollaborators = json.data.map((u: any) => ({
                 id: u.id || u.supabase_user_id,
                 name: u.full_name || u.name || 'Colaborador',
                 email: u.email || '',
@@ -441,33 +425,26 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                 is_active: u.is_active !== false
               }));
             }
+          } else {
+            console.warn('[InboxManagement] Fallback /api/v1/team/users status:', res.status);
+            if (res.status === 401 || res.status === 403 || res.status >= 500) {
+              hadAnyError = true;
+            }
           }
-        } catch (_) {}
-      }
-
-      // Tentativa 3 (Fallback): Buscar em tenant_users
-      if (fetchedProfiles.length === 0) {
-        try {
-          const { data: tuData } = await supabase
-            .from('tenant_users')
-            .select('*')
-            .eq('tenant_id', tenantId);
-
-          if (tuData && tuData.length > 0) {
-            fetchedProfiles = tuData.map(u => ({
-              id: u.id || u.supabase_user_id,
-              name: u.name || 'Colaborador',
-              email: u.email || '',
-              role: u.role || 'operador',
-              is_active: u.is_active !== false
-            }));
-          }
-        } catch (_) {}
+        } catch (apiErr) {
+          console.warn('[InboxManagement] API /api/v1/team/users error:', apiErr);
+          hadAnyError = true;
+        }
       }
 
       // Filtra apenas colaboradores ativos
-      const activeProfiles = fetchedProfiles.filter(p => p.is_active !== false);
-      setCollaborators(activeProfiles);
+      const activeCollaborators = fetchedCollaborators.filter(p => p.is_active !== false);
+      setCollaborators(activeCollaborators);
+
+      // Se houve erro e a lista terminou vazia, exibir aviso com botão de tentar novamente
+      if (activeCollaborators.length === 0 && hadAnyError) {
+        setLoadError("Não foi possível carregar a lista de colaboradores de tenant_users. Verifique a conexão.");
+      }
 
       // 2. BUSCA DE ACESSOS: Buscar acessos já existentes na tabela 'department_access' onde 'department_id' = departmentId
       let initialSelectedUserIds: string[] = [];
@@ -502,7 +479,8 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
       // Fallback para endpoint da API
       if (initialSelectedUserIds.length === 0) {
         try {
-          const res = await fetch(`/api/v1/inboxes/${departmentId}/members`);
+          const headers = await getAuthHeaders();
+          const res = await fetch(`/api/v1/inboxes/${departmentId}/members`, { headers });
           if (res.ok) {
             const json = await res.json();
             if (json.data && Array.isArray(json.data)) {
@@ -526,6 +504,7 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
       setSelectedUserIds(initialSelectedUserIds);
     } catch (err: any) {
       console.error("[InboxManagement] Erro ao carregar acessos do departamento:", err);
+      setLoadError("Erro ao comunicar com o banco de dados. Verifique a conexão.");
       toast.error("Erro ao carregar permissões do departamento.");
     } finally {
       setMembersLoading(false);
@@ -584,11 +563,12 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
           .eq('inbox_id', departmentId);
       } catch (_) {}
 
-      // 2. Insira os novos registros para cada 'user_id' que estiver com o checkbox marcado
+      // 2. Insira os novos registros contendo department_id, user_id e tenant_id
       if (selectedUserIds.length > 0) {
         const recordsToInsert = selectedUserIds.map(userId => ({
           department_id: departmentId,
           user_id: userId,
+          tenant_id: tenantId,
           created_at: new Date().toISOString()
         }));
 
@@ -616,18 +596,20 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
 
         // Sincroniza com o backend Express
         try {
+          const headers = await getAuthHeaders();
           await fetch(`/api/v1/inboxes/${departmentId}/members`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantId },
+            headers,
             body: JSON.stringify({ userIds: selectedUserIds })
           });
         } catch (_) {}
       } else {
         // Se nenhum estiver marcado, envia lista vazia para o backend
         try {
+          const headers = await getAuthHeaders();
           await fetch(`/api/v1/inboxes/${departmentId}/members`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantId },
+            headers,
             body: JSON.stringify({ userIds: [] })
           });
         } catch (_) {}
@@ -1029,6 +1011,24 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                 <div className="py-12 flex flex-col items-center justify-center gap-3 text-gray-400">
                   <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
                   <p className="text-xs font-bold text-gray-500">Carregando colaboradores e permissões...</p>
+                </div>
+              ) : loadError ? (
+                <div className="py-8 text-center flex flex-col items-center justify-center px-4 bg-amber-50/70 border border-amber-200/80 rounded-2xl">
+                  <div className="w-12 h-12 rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center mb-2.5 shadow-xs">
+                    <AlertCircle className="w-6 h-6" />
+                  </div>
+                  <p className="font-black text-gray-900 text-sm">Erro ao carregar colaboradores</p>
+                  <p className="text-xs text-gray-600 mt-1 max-w-xs mb-4 leading-relaxed">
+                    {loadError}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => openMembersModal(selectedInbox)}
+                    className="inline-flex items-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl shadow-md shadow-indigo-600/20 transition-all cursor-pointer"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Tentar Novamente</span>
+                  </button>
                 </div>
               ) : collaborators.length === 0 ? (
                 <div className="py-10 text-center flex flex-col items-center justify-center text-gray-400 px-4">
