@@ -154,6 +154,10 @@ export function resolveConversationKanbanStage(conv: any): string {
     return "saiu_entrega";
   }
 
+  if (conv.is_bot_active === true || conv.status === "bot" || conv.status === "BOT" || conv.status === "ia_atendendo") {
+    return "ia_atendendo";
+  }
+
   const isHumanControlled = 
     conv.is_human_controlled === true ||
     Boolean(conv.assigned_user_id) ||
@@ -164,10 +168,6 @@ export function resolveConversationKanbanStage(conv: any): string {
 
   if (isHumanControlled) {
     return "em_atendimento";
-  }
-
-  if (conv.is_bot_active === true || conv.status === "bot" || conv.status === "BOT" || conv.status === "ia_atendendo") {
-    return "ia_atendendo";
   }
 
   return "novos_triagem";
@@ -343,40 +343,43 @@ class ChatStore {
           conv.kanban_stage = resolvedStage;
           conv.stage = resolvedStage;
 
-          const isHumanControlled = 
-            conv.is_human_controlled === true ||
-            Boolean(conv.assigned_user_id) ||
-            Boolean(conv.assigned_to) ||
-            conv.status === "human_takeover" ||
-            conv.status === "em_atendimento" ||
-            resolvedStage === "em_atendimento";
-
-          if (isHumanControlled) {
-            conv.is_human_controlled = true;
-            conv.is_bot_active = false;
-            if (conv.status === "bot" || conv.status === "BOT" || !conv.status) {
-              conv.status = "human_takeover";
-            }
-          } else if (resolvedStage === "ia_atendendo") {
+          if (resolvedStage === "ia_atendendo") {
+            // Preservação estrita do estágio de IA: mantém bot ativo
             conv.is_human_controlled = false;
             conv.is_bot_active = true;
             conv.assigned_user_id = null;
             conv.assigned_to = null;
-            if (!conv.status || conv.status === "OPEN") {
+            if (!conv.status || conv.status === "OPEN" || conv.status === "human_takeover") {
               conv.status = "bot";
             }
-          } else if (resolvedStage === "finalizado") {
-            conv.is_bot_active = false;
-            conv.status = "CLOSED";
-          } else if (resolvedStage === "aguardando_pagamento") {
-            if (!conv.status) conv.status = "PENDING";
-          } else if (resolvedStage === "saiu_entrega") {
-            conv.is_bot_active = false;
-            if (!conv.status) conv.status = "OPEN";
-          } else if (resolvedStage === "novos_triagem") {
-            conv.is_bot_active = false;
-            conv.is_human_controlled = false;
-            if (!conv.status) conv.status = "OPEN";
+          } else {
+            const isHumanControlled = 
+              conv.is_human_controlled === true ||
+              Boolean(conv.assigned_user_id) ||
+              Boolean(conv.assigned_to) ||
+              conv.status === "human_takeover" ||
+              conv.status === "em_atendimento" ||
+              resolvedStage === "em_atendimento";
+
+            if (isHumanControlled) {
+              conv.is_human_controlled = true;
+              conv.is_bot_active = false;
+              if (conv.status === "bot" || conv.status === "BOT" || !conv.status) {
+                conv.status = "human_takeover";
+              }
+            } else if (resolvedStage === "finalizado") {
+              conv.is_bot_active = false;
+              conv.status = "CLOSED";
+            } else if (resolvedStage === "aguardando_pagamento") {
+              if (!conv.status) conv.status = "PENDING";
+            } else if (resolvedStage === "saiu_entrega") {
+              conv.is_bot_active = false;
+              if (!conv.status) conv.status = "OPEN";
+            } else if (resolvedStage === "novos_triagem") {
+              conv.is_bot_active = false;
+              conv.is_human_controlled = false;
+              if (!conv.status) conv.status = "OPEN";
+            }
           }
 
           conv.labels = await this.getConversationLabels(conv.id);
@@ -405,40 +408,42 @@ class ChatStore {
       conv.kanban_stage = resolvedStage;
       conv.stage = resolvedStage;
 
-      const isHumanControlled = 
-        conv.is_human_controlled === true ||
-        Boolean(conv.assigned_user_id) ||
-        Boolean(conv.assigned_to) ||
-        conv.status === "human_takeover" ||
-        conv.status === "em_atendimento" ||
-        resolvedStage === "em_atendimento";
-
-      if (isHumanControlled) {
-        conv.is_human_controlled = true;
-        conv.is_bot_active = false;
-        if (conv.status === "bot" || conv.status === "BOT" || !conv.status) {
-          conv.status = "human_takeover";
-        }
-      } else if (resolvedStage === "ia_atendendo") {
+      if (resolvedStage === "ia_atendendo") {
         conv.is_human_controlled = false;
         conv.is_bot_active = true;
         conv.assigned_user_id = null;
         conv.assigned_to = null;
-        if (!conv.status || conv.status === "OPEN") {
+        if (!conv.status || conv.status === "OPEN" || conv.status === "human_takeover") {
           conv.status = "bot";
         }
-      } else if (resolvedStage === "finalizado") {
-        conv.is_bot_active = false;
-        conv.status = "CLOSED";
-      } else if (resolvedStage === "aguardando_pagamento") {
-        if (!conv.status) conv.status = "PENDING";
-      } else if (resolvedStage === "saiu_entrega") {
-        conv.is_bot_active = false;
-        if (!conv.status) conv.status = "OPEN";
-      } else if (resolvedStage === "novos_triagem") {
-        conv.is_bot_active = false;
-        conv.is_human_controlled = false;
-        if (!conv.status) conv.status = "OPEN";
+      } else {
+        const isHumanControlled = 
+          conv.is_human_controlled === true ||
+          Boolean(conv.assigned_user_id) ||
+          Boolean(conv.assigned_to) ||
+          conv.status === "human_takeover" ||
+          conv.status === "em_atendimento" ||
+          resolvedStage === "em_atendimento";
+
+        if (isHumanControlled) {
+          conv.is_human_controlled = true;
+          conv.is_bot_active = false;
+          if (conv.status === "bot" || conv.status === "BOT" || !conv.status) {
+            conv.status = "human_takeover";
+          }
+        } else if (resolvedStage === "finalizado") {
+          conv.is_bot_active = false;
+          conv.status = "CLOSED";
+        } else if (resolvedStage === "aguardando_pagamento") {
+          if (!conv.status) conv.status = "PENDING";
+        } else if (resolvedStage === "saiu_entrega") {
+          conv.is_bot_active = false;
+          if (!conv.status) conv.status = "OPEN";
+        } else if (resolvedStage === "novos_triagem") {
+          conv.is_bot_active = false;
+          conv.is_human_controlled = false;
+          if (!conv.status) conv.status = "OPEN";
+        }
       }
 
       conv.labels = await this.getConversationLabels(conv.id);
@@ -972,32 +977,65 @@ class ChatStore {
     const currentUnreadCount = convInfo?.unread_count || 0;
     const newUnreadCount = fromMe ? 0 : currentUnreadCount + 1;
 
-    // Determina estritamente o estado do BOT vs HUMANO com base exclusivamente nas colunas de sistema:
-    const isHuman = fromMe
-      ? true
-      : convInfo
-      ? (
-          convInfo.is_human_controlled === true ||
-          convInfo.is_bot_active === false ||
-          Boolean(convInfo.assigned_user_id) ||
-          Boolean(convInfo.assigned_to)
-        )
-      : false;
+    // Resolve o estágio atual da conversa
+    const existingStage = convInfo ? resolveConversationKanbanStage(convInfo) : null;
+    
+    // Identifica se a conversa está atualmente no fluxo de IA
+    const isCurrentlyInIaStage = existingStage === "ia_atendendo" || (convInfo && (convInfo.is_bot_active === true || convInfo.status === "bot" || convInfo.status === "BOT"));
 
-    const isBotActive = !isHuman;
+    let isBotActive = false;
+    let isHuman = false;
+    let finalStage = "novos_triagem";
+    let finalStatus = "OPEN";
+
+    if (fromMe) {
+      // Mensagem enviada pelo operador humano no WhatsApp: assume atendimento humano
+      isHuman = true;
+      isBotActive = false;
+      finalStage = "em_atendimento";
+      finalStatus = "human_takeover";
+    } else if (!convInfo) {
+      // Nova conversa de cliente: inicia no estágio de IA com bot ativo
+      isBotActive = true;
+      isHuman = false;
+      finalStage = "ia_atendendo";
+      finalStatus = "bot";
+    } else if (isCurrentlyInIaStage) {
+      // PRESERVAÇÃO DO ESTÁGIO DA IA: Mensagem recebida do cliente com card em ia_atendendo ou bot ativo
+      // NÃO altera o kanban_stage para em_atendimento
+      // NÃO altera is_bot_active para false
+      isBotActive = true;
+      isHuman = false;
+      finalStage = "ia_atendendo";
+      finalStatus = "bot";
+    } else {
+      // Conversa já existente em outro estágio (ex: em_atendimento com operador atribuído, novos_triagem, etc)
+      finalStage = existingStage || "novos_triagem";
+      const hasHumanAssigned = Boolean(convInfo.assigned_user_id) || Boolean(convInfo.assigned_to) || convInfo.is_human_controlled === true || finalStage === "em_atendimento";
+      if (hasHumanAssigned) {
+        isHuman = true;
+        isBotActive = false;
+        finalStatus = "human_takeover";
+      } else {
+        isHuman = false;
+        isBotActive = false;
+        finalStatus = convInfo.status || "OPEN";
+      }
+    }
 
     const conv: ChatConversation = {
       id: convId,
       store_id: storeId,
       contact_id: contactId,
       inbox_id: resolvedInboxId,
-      status: fromMe ? "human_takeover" : (convInfo?.status || (isBotActive ? "bot" : "OPEN")),
+      status: finalStatus,
       is_human_controlled: isHuman,
       is_bot_active: isBotActive,
-      kanban_stage: fromMe ? "em_atendimento" : (convInfo?.kanban_stage || (isBotActive ? "ia_atendendo" : "novos_triagem")),
+      kanban_stage: finalStage,
+      stage: finalStage,
       bot_interaction_count: convInfo?.bot_interaction_count || 0,
-      bot_handoff_reason: convInfo?.bot_handoff_reason || null,
-      bot_handoff_at: convInfo?.bot_handoff_at || null,
+      bot_handoff_reason: fromMe ? "HUMAN_OPERATOR_MESSAGE" : (isCurrentlyInIaStage ? null : convInfo?.bot_handoff_reason || null),
+      bot_handoff_at: fromMe ? now : (isCurrentlyInIaStage ? null : convInfo?.bot_handoff_at || null),
       assigned_user_id: isHuman ? convInfo?.assigned_user_id || null : null,
       last_message_at: now,
       last_message_content: text,
@@ -1024,18 +1062,24 @@ class ChatStore {
         convUpsertData.is_bot_active = !fromMe;
         convUpsertData.is_human_controlled = fromMe;
         convUpsertData.status = fromMe ? "human_takeover" : "bot";
-        convUpsertData.kanban_stage = fromMe ? "em_atendimento" : "BOT";
+        convUpsertData.kanban_stage = fromMe ? "em_atendimento" : "ia_atendendo";
         convUpsertData.bot_interaction_count = 0;
         convUpsertData.created_at = now;
-      }
-
-      if (fromMe) {
+      } else if (fromMe) {
         convUpsertData.is_human_controlled = true;
         convUpsertData.is_bot_active = false;
         convUpsertData.status = "human_takeover";
         convUpsertData.kanban_stage = "em_atendimento";
         convUpsertData.bot_handoff_reason = "HUMAN_OPERATOR_MESSAGE";
         convUpsertData.bot_handoff_at = now;
+      } else if (isCurrentlyInIaStage) {
+        // Preserva explicitamente o bot ativo no banco de dados e mantém em ia_atendendo
+        convUpsertData.is_bot_active = true;
+        convUpsertData.is_human_controlled = false;
+        convUpsertData.status = "bot";
+        convUpsertData.kanban_stage = "ia_atendendo";
+        convUpsertData.assigned_user_id = null;
+        convUpsertData.assigned_to = null;
       }
 
       const sanitizedUpsert = sanitizeChatConversationPayload(convUpsertData);
@@ -1333,40 +1377,42 @@ class ChatStore {
       conv.kanban_stage = resolvedStage;
       conv.stage = resolvedStage;
 
-      const isHuman = 
-        conv.is_human_controlled === true ||
-        Boolean(conv.assigned_user_id) ||
-        Boolean(conv.assigned_to) ||
-        conv.status === "human_takeover" ||
-        conv.status === "em_atendimento" ||
-        resolvedStage === "em_atendimento";
-
-      if (isHuman) {
-        conv.is_human_controlled = true;
-        conv.is_bot_active = false;
-        if (conv.status === "bot" || conv.status === "BOT" || !conv.status) {
-          conv.status = "human_takeover";
-        }
-      } else if (resolvedStage === "ia_atendendo") {
+      if (resolvedStage === "ia_atendendo") {
         conv.is_human_controlled = false;
         conv.is_bot_active = true;
         conv.assigned_user_id = null;
         conv.assigned_to = null;
-        if (!conv.status || conv.status === "OPEN") {
+        if (!conv.status || conv.status === "OPEN" || conv.status === "human_takeover") {
           conv.status = "bot";
         }
-      } else if (resolvedStage === "finalizado") {
-        conv.is_bot_active = false;
-        conv.status = "CLOSED";
-      } else if (resolvedStage === "aguardando_pagamento") {
-        if (!conv.status) conv.status = "PENDING";
-      } else if (resolvedStage === "saiu_entrega") {
-        conv.is_bot_active = false;
-        if (!conv.status) conv.status = "OPEN";
-      } else if (resolvedStage === "novos_triagem") {
-        conv.is_bot_active = false;
-        conv.is_human_controlled = false;
-        if (!conv.status) conv.status = "OPEN";
+      } else {
+        const isHuman = 
+          conv.is_human_controlled === true ||
+          Boolean(conv.assigned_user_id) ||
+          Boolean(conv.assigned_to) ||
+          conv.status === "human_takeover" ||
+          conv.status === "em_atendimento" ||
+          resolvedStage === "em_atendimento";
+
+        if (isHuman) {
+          conv.is_human_controlled = true;
+          conv.is_bot_active = false;
+          if (conv.status === "bot" || conv.status === "BOT" || !conv.status) {
+            conv.status = "human_takeover";
+          }
+        } else if (resolvedStage === "finalizado") {
+          conv.is_bot_active = false;
+          conv.status = "CLOSED";
+        } else if (resolvedStage === "aguardando_pagamento") {
+          if (!conv.status) conv.status = "PENDING";
+        } else if (resolvedStage === "saiu_entrega") {
+          conv.is_bot_active = false;
+          if (!conv.status) conv.status = "OPEN";
+        } else if (resolvedStage === "novos_triagem") {
+          conv.is_bot_active = false;
+          conv.is_human_controlled = false;
+          if (!conv.status) conv.status = "OPEN";
+        }
       }
     }
     return conv as ChatConversation | null;

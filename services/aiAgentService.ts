@@ -648,16 +648,18 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       nextCount: number;
     }
   ): Promise<{ success: boolean; error?: string }> {
-    // 1. Validação Estrita de Envio: Garantir que a conversa NÃO esteja sob controle humano (valida exclusivamente colunas de sistema)
+    // 1. Validação Estrita de Envio: Garantir que a conversa NÃO esteja sob controle humano
     const currentConv = await chatStore.getConversationById(conversationId);
     if (currentConv) {
-      const isHuman =
+      const isStageIa = currentConv.kanban_stage === "ia_atendendo" || currentConv.stage === "ia_atendendo";
+      const hasAssignedOperator = Boolean(currentConv.assigned_user_id) || Boolean((currentConv as any).assigned_to);
+      const isHuman = !isStageIa && (
         currentConv.is_human_controlled === true ||
         currentConv.is_bot_active === false ||
-        Boolean(currentConv.assigned_user_id) ||
-        Boolean((currentConv as any).assigned_to);
+        hasAssignedOperator
+      );
 
-      if (isHuman) {
+      if (isHuman || hasAssignedOperator) {
         console.log(`[AiAgentService] Envio abortado para conversa ${conversationId}: conversa assumida por operador humano.`);
         return { success: false, error: "HUMAN_OPERATOR_ACTIVE" };
       }
@@ -836,15 +838,17 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       // 2. Obter conversa atual para inspecionar estado do bot
       const conv = await chatStore.getConversationById(conversationId);
       if (conv) {
-        // Validação Estrita: intervenção humana valida exclusivamente as colunas de sistema da tabela conversations
-        // (is_human_controlled === true, assigned_user_id !== null, is_bot_active === false)
-        const isHumanControlled = 
-          conv.is_human_controlled === true ||
-          conv.is_bot_active === false ||
-          Boolean(conv.assigned_user_id) ||
-          Boolean((conv as any).assigned_to);
+        const isStageIa = conv.kanban_stage === "ia_atendendo" || conv.stage === "ia_atendendo";
+        const hasAssignedOperator = Boolean(conv.assigned_user_id) || Boolean((conv as any).assigned_to);
 
-        if (isHumanControlled) {
+        const isHumanControlled = 
+          !isStageIa && (
+            conv.is_human_controlled === true ||
+            conv.is_bot_active === false ||
+            hasAssignedOperator
+          );
+
+        if (isHumanControlled || hasAssignedOperator) {
           console.log(`[AiAgentService] IA pausada para a conversa ${conversationId}: Atendimento humano ativo (is_human_controlled: ${conv.is_human_controlled}, is_bot_active: ${conv.is_bot_active}, assigned_user_id: ${conv.assigned_user_id}).`);
           return { handled: false, transferredToHuman: true, reason: "ALREADY_HUMAN_ASSIGNED" };
         }

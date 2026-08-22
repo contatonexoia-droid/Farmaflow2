@@ -6907,8 +6907,9 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                 console.error('[WEBHOOK] Exceção ao processar boas-vindas diárias:', welcomeErr.message);
               }
 
-              // 5. Se is_bot_active === true e is_human_controlled === false, force o dispatch imediato para o AiAgentService
-              if (conversation.is_bot_active === true && conversation.is_human_controlled === false) {
+              // 5. Se is_bot_active === true (ou estágio 'ia_atendendo') e is_human_controlled === false, force o dispatch imediato para o AiAgentService
+              const shouldDispatchToAi = (conversation.is_bot_active === true || conversation.kanban_stage === "ia_atendendo") && conversation.is_human_controlled !== true && !conversation.assigned_user_id;
+              if (shouldDispatchToAi) {
                 try {
                   const phone = conversation.contact?.phone_number || msg.key?.remoteJid?.replace(/@.*$/, '');
                   console.log(`[WEBHOOK - IA] Forçando dispatch imediato para AiAgentService na conversa ${conversation.id} (${phone})...`);
@@ -6922,7 +6923,7 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                   console.error('[WEBHOOK - IA ISOLADA] Erro ao despachar chamada do Agente de IA:', aiSyncErr.message);
                 }
               } else {
-                console.log(`[WEBHOOK - IA] Conversa ${conversation.id} não despachada para IA: intervenção humana ativa (is_bot_active: ${conversation.is_bot_active}, is_human_controlled: ${conversation.is_human_controlled})`);
+                console.log(`[WEBHOOK - IA] Conversa ${conversation.id} não despachada para IA: intervenção humana ativa (is_bot_active: ${conversation.is_bot_active}, is_human_controlled: ${conversation.is_human_controlled}, stage: ${conversation.kanban_stage})`);
               }
             }
           }
