@@ -117,7 +117,10 @@ import {
   Laptop,
   MessageSquare,
   FileText,
-  Lock, MessageSquareShare, Zap
+  Lock, MessageSquareShare, Zap,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Menu
 } from "lucide-react";
 
 
@@ -588,6 +591,9 @@ const App: React.FC = () => {
   });
 
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
+    return localStorage.getItem("ff_sidebar_collapsed") === "true";
+  });
   const [isLoading, setIsLoading] = useState(true);
 
   const [currentTenant, setCurrentTenant] = useState<PharmacyConfig | null>(
@@ -3463,7 +3469,7 @@ const App: React.FC = () => {
       )}
 
       <main
-        className={`w-full ${view === ViewMode.CATALOG ? "max-w-full px-0 py-0" : view === ViewMode.ADMIN_PHARMACY ? "max-w-[1920px] px-4 sm:px-6 lg:px-8 py-10" : "max-w-7xl px-4 sm:px-6 lg:px-8 py-10"} mx-auto ${view === ViewMode.ADMIN_PHARMACY ? "flex flex-col md:flex-row gap-4 md:gap-8 overflow-x-hidden relative" : ""}`}
+        className={`w-full ${view === ViewMode.CATALOG ? "max-w-full px-0 py-0" : view === ViewMode.ADMIN_PHARMACY ? "max-w-[1920px] px-4 sm:px-6 lg:px-8 py-10" : "max-w-7xl px-4 sm:px-6 lg:px-8 py-10"} mx-auto ${view === ViewMode.ADMIN_PHARMACY ? "flex flex-col md:flex-row gap-4 md:gap-8 overflow-x-hidden relative transition-all duration-300 ease-in-out" : ""}`}
       >
         <Suspense fallback={<LoadingFallback />}>
           {view === ViewMode.LOGIN && <Login onLogin={handleLogin} />}
@@ -3500,9 +3506,56 @@ const App: React.FC = () => {
           )}
           {view === ViewMode.ADMIN_PHARMACY && currentTenant && (
             <>
-              <aside className="hidden md:flex w-80 shrink-0 flex-col bg-white rounded-[1.5rem] border border-gray-100 p-4 h-fit sticky top-8">
-                {isMatrixAdmin && networkTenants.length > 1 && (
-                  <div className="mb-4 pb-4 border-b border-gray-100">
+              {/* DESKTOP SIDEBAR WITH COLLAPSIBLE TOGGLE & TOOLTIPS */}
+              <aside 
+                className={`hidden md:flex flex-col bg-white rounded-[1.5rem] border border-gray-100 p-3 h-fit sticky top-8 transition-all duration-300 ease-in-out shrink-0 select-none shadow-xs ${
+                  isSidebarCollapsed ? "w-20" : "w-72 lg:w-80"
+                }`}
+              >
+                {/* Header with Brand / Unit and Collapse Toggle Button */}
+                <div className={`flex items-center pb-3 mb-2 border-b border-gray-100 ${isSidebarCollapsed ? "justify-center" : "justify-between px-2"}`}>
+                  {!isSidebarCollapsed ? (
+                    <div className="flex items-center gap-2 overflow-hidden">
+                      <div 
+                        className="w-7 h-7 rounded-xl flex items-center justify-center text-white font-black text-xs shrink-0 shadow-xs"
+                        style={{ backgroundColor: currentTenant.primaryColor || "#059669" }}
+                      >
+                        {currentTenant.name ? currentTenant.name.charAt(0).toUpperCase() : "F"}
+                      </div>
+                      <div className="min-w-0">
+                        <h4 className="text-xs font-black text-gray-900 truncate leading-tight">
+                          {currentTenant.name || "Painel FarmaFlow"}
+                        </h4>
+                        <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider block truncate">
+                          Gestão & Chat
+                        </span>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <button
+                    onClick={() => {
+                      setIsSidebarCollapsed(prev => {
+                        const next = !prev;
+                        localStorage.setItem("ff_sidebar_collapsed", String(next));
+                        return next;
+                      });
+                    }}
+                    title={isSidebarCollapsed ? "Expandir Menu Lateral" : "Recolher Menu Lateral"}
+                    className="p-2 rounded-xl text-gray-400 hover:text-gray-700 hover:bg-gray-100 active:scale-95 transition-all flex items-center justify-center shrink-0"
+                    aria-label={isSidebarCollapsed ? "Expandir Menu" : "Recolher Menu"}
+                  >
+                    {isSidebarCollapsed ? (
+                      <PanelLeftOpen size={18} className="text-gray-600 animate-in fade-in" />
+                    ) : (
+                      <PanelLeftClose size={18} className="text-gray-400 hover:text-gray-700" />
+                    )}
+                  </button>
+                </div>
+
+                {/* Tenant Selector (quando expandido) */}
+                {isMatrixAdmin && networkTenants.length > 1 && !isSidebarCollapsed && (
+                  <div className="mb-3 pb-3 border-b border-gray-100 animate-in fade-in duration-200">
                     <label className="text-[10px] font-black uppercase tracking-wider text-gray-400 block mb-1.5 px-2">
                       Unidade Ativa
                     </label>
@@ -3517,203 +3570,404 @@ const App: React.FC = () => {
                     />
                   </div>
                 )}
-                {isFullAccess && (
+
+                {/* NAVIGATION ITEMS */}
+                <div className="space-y-1.5">
+                  {isFullAccess && (
+                    <button
+                      onClick={() => setAdminTab("dashboard")}
+                      title={isSidebarCollapsed ? "Dashboard" : undefined}
+                      className={`group relative w-full flex items-center rounded-2xl font-bold text-[14px] transition-all ${
+                        isSidebarCollapsed 
+                          ? "justify-center p-3.5" 
+                          : "gap-3 px-4 py-3.5"
+                      } ${adminTab === "dashboard" ? "bg-brand text-brand-contrast shadow-sm" : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"}`}
+                      style={
+                        adminTab === "dashboard"
+                          ? { backgroundColor: currentTenant.primaryColor }
+                          : {}
+                      }
+                    >
+                      <ShoppingCart size={19} className="shrink-0" />
+                      {!isSidebarCollapsed && <span className="truncate">Dashboard</span>}
+                      {isSidebarCollapsed && (
+                        <div className="fixed left-24 z-50 pointer-events-none hidden group-hover:flex items-center px-3 py-1.5 bg-gray-900 text-white text-xs font-bold rounded-xl shadow-lg whitespace-nowrap animate-in fade-in zoom-in-95 duration-150">
+                          Dashboard
+                        </div>
+                      )}
+                    </button>
+                  )}
+
                   <button
-                    onClick={() => setAdminTab("dashboard")}
-                    className={`flex items-center gap-3 px-4 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "dashboard" ? "bg-brand text-brand-contrast shadow-md" : "text-gray-500 hover:bg-gray-100"}`}
+                    onClick={() => setAdminTab("orders")}
+                    title={isSidebarCollapsed ? "Pedidos" : undefined}
+                    className={`group relative w-full flex items-center rounded-2xl font-bold text-[14px] transition-all ${
+                      isSidebarCollapsed 
+                        ? "justify-center p-3.5" 
+                        : "gap-3 px-4 py-3.5"
+                    } ${adminTab === "orders" ? "bg-brand text-brand-contrast shadow-sm" : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"}`}
                     style={
-                      adminTab === "dashboard"
+                      adminTab === "orders"
                         ? { backgroundColor: currentTenant.primaryColor }
                         : {}
                     }
                   >
-                    <ShoppingCart size={18} />
-                    Dashboard
+                    <ShoppingCart size={19} className="shrink-0" />
+                    {!isSidebarCollapsed && <span className="truncate">Pedidos</span>}
+                    {isSidebarCollapsed && (
+                      <div className="fixed left-24 z-50 pointer-events-none hidden group-hover:flex items-center px-3 py-1.5 bg-gray-900 text-white text-xs font-bold rounded-xl shadow-lg whitespace-nowrap animate-in fade-in zoom-in-95 duration-150">
+                        Pedidos
+                      </div>
+                    )}
                   </button>
-                )}
-                <button
-                  onClick={() => setAdminTab("orders")}
-                  className={`flex items-center gap-3 px-4 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "orders" ? "bg-brand text-brand-contrast shadow-md" : "text-gray-500 hover:bg-gray-100"}`}
-                  style={
-                    adminTab === "orders"
-                      ? { backgroundColor: currentTenant.primaryColor }
-                      : {}
-                  }
-                >
-                  <ShoppingCart size={18} />
-                  Pedidos
-                </button>
-                <button
-                  onClick={() => setAdminTab("prescriptions")}
-                  className={`flex items-center gap-3 px-4 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "prescriptions" ? "bg-brand text-brand-contrast shadow-md" : "text-gray-500 hover:bg-gray-100"}`}
-                  style={
-                    adminTab === "prescriptions"
-                      ? { backgroundColor: currentTenant.primaryColor }
-                      : {}
-                  }
-                >
-                  <FileText size={18} />
-                  Validação de Receitas
-                </button>
-                {!isDeliverer && (
+
                   <button
-                    onClick={() => setAdminTab("products")}
-                    className={`flex items-center gap-3 px-4 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "products" ? "bg-brand text-brand-contrast shadow-md" : "text-gray-500 hover:bg-gray-100"}`}
+                    onClick={() => setAdminTab("prescriptions")}
+                    title={isSidebarCollapsed ? "Validação de Receitas" : undefined}
+                    className={`group relative w-full flex items-center rounded-2xl font-bold text-[14px] transition-all ${
+                      isSidebarCollapsed 
+                        ? "justify-center p-3.5" 
+                        : "gap-3 px-4 py-3.5"
+                    } ${adminTab === "prescriptions" ? "bg-brand text-brand-contrast shadow-sm" : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"}`}
                     style={
-                      adminTab === "products"
+                      adminTab === "prescriptions"
                         ? { backgroundColor: currentTenant.primaryColor }
                         : {}
                     }
                   >
-                    <Package size={18} />
-                    Produtos
+                    <FileText size={19} className="shrink-0" />
+                    {!isSidebarCollapsed && <span className="truncate">Validação de Receitas</span>}
+                    {isSidebarCollapsed && (
+                      <div className="fixed left-24 z-50 pointer-events-none hidden group-hover:flex items-center px-3 py-1.5 bg-gray-900 text-white text-xs font-bold rounded-xl shadow-lg whitespace-nowrap animate-in fade-in zoom-in-95 duration-150">
+                        Validação de Receitas
+                      </div>
+                    )}
                   </button>
-                )}
-                {isFullAccess && (
-                  <>
+
+                  {!isDeliverer && (
                     <button
-                      onClick={() => setAdminTab("promotions")}
-                      className={`flex items-center gap-3 px-4 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "promotions" ? "bg-brand text-brand-contrast shadow-md" : "text-gray-500 hover:bg-gray-100"}`}
+                      onClick={() => setAdminTab("products")}
+                      title={isSidebarCollapsed ? "Produtos" : undefined}
+                      className={`group relative w-full flex items-center rounded-2xl font-bold text-[14px] transition-all ${
+                        isSidebarCollapsed 
+                          ? "justify-center p-3.5" 
+                          : "gap-3 px-4 py-3.5"
+                      } ${adminTab === "products" ? "bg-brand text-brand-contrast shadow-sm" : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"}`}
                       style={
-                        adminTab === "promotions"
+                        adminTab === "products"
                           ? { backgroundColor: currentTenant.primaryColor }
                           : {}
                       }
                     >
-                      <Tag size={18} />
-                      Promoções
+                      <Package size={19} className="shrink-0" />
+                      {!isSidebarCollapsed && <span className="truncate">Produtos</span>}
+                      {isSidebarCollapsed && (
+                        <div className="fixed left-24 z-50 pointer-events-none hidden group-hover:flex items-center px-3 py-1.5 bg-gray-900 text-white text-xs font-bold rounded-xl shadow-lg whitespace-nowrap animate-in fade-in zoom-in-95 duration-150">
+                          Produtos
+                        </div>
+                      )}
                     </button>
-                    <button
-                      onClick={() => setAdminTab("coupons")}
-                      className={`flex items-center gap-3 px-4 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "coupons" ? "bg-brand text-brand-contrast shadow-md" : "text-gray-500 hover:bg-gray-100"}`}
-                      style={
-                        adminTab === "coupons"
-                          ? { backgroundColor: currentTenant.primaryColor }
-                          : {}
-                      }
-                    >
-                      <Tag size={18} />
-                      Cupons
-                    </button>
-                    <button
-                      onClick={() => setAdminTab("history")}
-                      className={`flex items-center gap-3 px-4 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "history" ? "bg-brand text-brand-contrast shadow-md" : "text-gray-500 hover:bg-gray-100"}`}
-                      style={
-                        adminTab === "history"
-                          ? { backgroundColor: currentTenant.primaryColor }
-                          : {}
-                      }
-                    >
-                      <History size={18} />
-                      Histórico 24h
-                    </button>
-                    <button
-                      onClick={() => setAdminTab("team")}
-                      className={`flex items-center gap-3 px-4 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "team" ? "bg-brand text-brand-contrast shadow-md" : "text-gray-500 hover:bg-gray-100"}`}
-                      style={
-                        adminTab === "team"
-                          ? { backgroundColor: currentTenant.primaryColor }
-                          : {}
-                      }
-                    >
-                      <Users size={18} />
-                      Equipe
-                    </button>
-                                        <button
-                      onClick={() => setAdminTab("inboxes")}
-                      className={`flex items-center gap-3 px-4 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "inboxes" ? "bg-brand text-brand-contrast shadow-md" : "text-gray-500 hover:bg-gray-100"}`}
-                      style={adminTab === "inboxes" ? { backgroundColor: currentTenant.primaryColor } : {}}
-                    >
-                      <Inbox size={18} />
-                      Departamentos
-                      {!currentTenant?.isChatEnabled && <Lock size={14} className="ml-auto opacity-50" />}
-                    </button>
-                    <button
-                      onClick={() => setAdminTab("analytics")}
-                      className={`flex items-center gap-3 px-4 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "analytics" ? "bg-brand text-brand-contrast shadow-md" : "text-gray-500 hover:bg-gray-100"}`}
-                      style={
-                        adminTab === "analytics"
-                          ? { backgroundColor: currentTenant.primaryColor }
-                          : {}
-                      }
-                    >
-                      <TrendingUp size={18} />
-                      Monitoramento
-                    </button>
-                    <button
-                      onClick={() => setAdminTab("settings")}
-                      className={`flex items-center gap-3 px-4 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "settings" ? "bg-brand text-brand-contrast shadow-md" : "text-gray-500 hover:bg-gray-100"}`}
-                      style={
-                        adminTab === "settings"
-                          ? { backgroundColor: currentTenant.primaryColor }
-                          : {}
-                      }
-                    >
-                      <Settings size={18} />
-                      Configurações
-                    </button>
-                  </>
-                )}
-                {!isDeliverer && (
-                  <>
-                    <button
-                      onClick={() => setAdminTab("desktop")}
-                      className={`flex items-center gap-3 px-4 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "desktop" ? "bg-brand text-brand-contrast shadow-md" : "text-gray-500 hover:bg-gray-100"}`}
-                      style={
-                        adminTab === "desktop"
-                          ? { backgroundColor: currentTenant.primaryColor }
-                          : {}
-                      }
-                    >
-                      <Laptop size={18} />
-                      Baixar Aplicativo para PC
-                    </button>
-                                        <button
-                      onClick={() => setAdminTab("chat")}
-                      className={`flex items-center gap-3 px-4 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "chat" ? "bg-brand text-brand-contrast shadow-md" : "text-gray-500 hover:bg-gray-100"}`}
-                      style={
-                        adminTab === "chat"
-                          ? { backgroundColor: currentTenant.primaryColor }
-                          : {}
-                      }
-                    >
-                      <MessageSquare size={18} />
-                      Central de Chat
-                      {!currentTenant?.isChatEnabled && <Lock size={14} className="ml-auto opacity-50" />}
-                    </button>
-                    <button
-                      onClick={() => setAdminTab("manual")}
-                      className={`flex items-center gap-3 px-4 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "manual" ? "bg-brand text-brand-contrast shadow-md" : "text-gray-500 hover:bg-gray-100"}`}
-                      style={
-                        adminTab === "manual"
-                          ? { backgroundColor: currentTenant.primaryColor }
-                          : {}
-                      }
-                    >
-                      <BookOpen size={18} />
-                      Manual
-                    </button>
-                  </>
-                )}
-                <div className="my-3 border-t border-gray-100"></div>
-                <button
-                  onClick={() => handleViewChange(ViewMode.CATALOG)}
-                  className="flex items-center gap-3 px-4 py-4 rounded-2xl font-bold text-[15px] text-gray-500 hover:bg-gray-100"
-                >
-                  <Store size={18} />
-                  Ver Loja
-                </button>
-                {session.type === "SUPER_ADMIN" && (
+                  )}
+
+                  {isFullAccess && (
+                    <>
+                      <button
+                        onClick={() => setAdminTab("promotions")}
+                        title={isSidebarCollapsed ? "Promoções" : undefined}
+                        className={`group relative w-full flex items-center rounded-2xl font-bold text-[14px] transition-all ${
+                          isSidebarCollapsed 
+                            ? "justify-center p-3.5" 
+                            : "gap-3 px-4 py-3.5"
+                        } ${adminTab === "promotions" ? "bg-brand text-brand-contrast shadow-sm" : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"}`}
+                        style={
+                          adminTab === "promotions"
+                            ? { backgroundColor: currentTenant.primaryColor }
+                            : {}
+                        }
+                      >
+                        <Tag size={19} className="shrink-0" />
+                        {!isSidebarCollapsed && <span className="truncate">Promoções</span>}
+                        {isSidebarCollapsed && (
+                          <div className="fixed left-24 z-50 pointer-events-none hidden group-hover:flex items-center px-3 py-1.5 bg-gray-900 text-white text-xs font-bold rounded-xl shadow-lg whitespace-nowrap animate-in fade-in zoom-in-95 duration-150">
+                            Promoções
+                          </div>
+                        )}
+                      </button>
+
+                      <button
+                        onClick={() => setAdminTab("coupons")}
+                        title={isSidebarCollapsed ? "Cupons" : undefined}
+                        className={`group relative w-full flex items-center rounded-2xl font-bold text-[14px] transition-all ${
+                          isSidebarCollapsed 
+                            ? "justify-center p-3.5" 
+                            : "gap-3 px-4 py-3.5"
+                        } ${adminTab === "coupons" ? "bg-brand text-brand-contrast shadow-sm" : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"}`}
+                        style={
+                          adminTab === "coupons"
+                            ? { backgroundColor: currentTenant.primaryColor }
+                            : {}
+                        }
+                      >
+                        <Tag size={19} className="shrink-0" />
+                        {!isSidebarCollapsed && <span className="truncate">Cupons</span>}
+                        {isSidebarCollapsed && (
+                          <div className="fixed left-24 z-50 pointer-events-none hidden group-hover:flex items-center px-3 py-1.5 bg-gray-900 text-white text-xs font-bold rounded-xl shadow-lg whitespace-nowrap animate-in fade-in zoom-in-95 duration-150">
+                            Cupons
+                          </div>
+                        )}
+                      </button>
+
+                      <button
+                        onClick={() => setAdminTab("history")}
+                        title={isSidebarCollapsed ? "Histórico 24h" : undefined}
+                        className={`group relative w-full flex items-center rounded-2xl font-bold text-[14px] transition-all ${
+                          isSidebarCollapsed 
+                            ? "justify-center p-3.5" 
+                            : "gap-3 px-4 py-3.5"
+                        } ${adminTab === "history" ? "bg-brand text-brand-contrast shadow-sm" : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"}`}
+                        style={
+                          adminTab === "history"
+                            ? { backgroundColor: currentTenant.primaryColor }
+                            : {}
+                        }
+                      >
+                        <History size={19} className="shrink-0" />
+                        {!isSidebarCollapsed && <span className="truncate">Histórico 24h</span>}
+                        {isSidebarCollapsed && (
+                          <div className="fixed left-24 z-50 pointer-events-none hidden group-hover:flex items-center px-3 py-1.5 bg-gray-900 text-white text-xs font-bold rounded-xl shadow-lg whitespace-nowrap animate-in fade-in zoom-in-95 duration-150">
+                            Histórico 24h
+                          </div>
+                        )}
+                      </button>
+
+                      <button
+                        onClick={() => setAdminTab("team")}
+                        title={isSidebarCollapsed ? "Equipe" : undefined}
+                        className={`group relative w-full flex items-center rounded-2xl font-bold text-[14px] transition-all ${
+                          isSidebarCollapsed 
+                            ? "justify-center p-3.5" 
+                            : "gap-3 px-4 py-3.5"
+                        } ${adminTab === "team" ? "bg-brand text-brand-contrast shadow-sm" : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"}`}
+                        style={
+                          adminTab === "team"
+                            ? { backgroundColor: currentTenant.primaryColor }
+                            : {}
+                        }
+                      >
+                        <Users size={19} className="shrink-0" />
+                        {!isSidebarCollapsed && <span className="truncate">Equipe</span>}
+                        {isSidebarCollapsed && (
+                          <div className="fixed left-24 z-50 pointer-events-none hidden group-hover:flex items-center px-3 py-1.5 bg-gray-900 text-white text-xs font-bold rounded-xl shadow-lg whitespace-nowrap animate-in fade-in zoom-in-95 duration-150">
+                            Equipe
+                          </div>
+                        )}
+                      </button>
+
+                      <button
+                        onClick={() => setAdminTab("inboxes")}
+                        title={isSidebarCollapsed ? "Departamentos" : undefined}
+                        className={`group relative w-full flex items-center rounded-2xl font-bold text-[14px] transition-all ${
+                          isSidebarCollapsed 
+                            ? "justify-center p-3.5" 
+                            : "gap-3 px-4 py-3.5"
+                        } ${adminTab === "inboxes" ? "bg-brand text-brand-contrast shadow-sm" : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"}`}
+                        style={adminTab === "inboxes" ? { backgroundColor: currentTenant.primaryColor } : {}}
+                      >
+                        <Inbox size={19} className="shrink-0" />
+                        {!isSidebarCollapsed && (
+                          <>
+                            <span className="truncate">Departamentos</span>
+                            {!currentTenant?.isChatEnabled && <Lock size={14} className="ml-auto opacity-50 shrink-0" />}
+                          </>
+                        )}
+                        {isSidebarCollapsed && (
+                          <div className="fixed left-24 z-50 pointer-events-none hidden group-hover:flex items-center px-3 py-1.5 bg-gray-900 text-white text-xs font-bold rounded-xl shadow-lg whitespace-nowrap animate-in fade-in zoom-in-95 duration-150">
+                            Departamentos {!currentTenant?.isChatEnabled && "(Bloqueado)"}
+                          </div>
+                        )}
+                      </button>
+
+                      <button
+                        onClick={() => setAdminTab("analytics")}
+                        title={isSidebarCollapsed ? "Monitoramento" : undefined}
+                        className={`group relative w-full flex items-center rounded-2xl font-bold text-[14px] transition-all ${
+                          isSidebarCollapsed 
+                            ? "justify-center p-3.5" 
+                            : "gap-3 px-4 py-3.5"
+                        } ${adminTab === "analytics" ? "bg-brand text-brand-contrast shadow-sm" : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"}`}
+                        style={
+                          adminTab === "analytics"
+                            ? { backgroundColor: currentTenant.primaryColor }
+                            : {}
+                        }
+                      >
+                        <TrendingUp size={19} className="shrink-0" />
+                        {!isSidebarCollapsed && <span className="truncate">Monitoramento</span>}
+                        {isSidebarCollapsed && (
+                          <div className="fixed left-24 z-50 pointer-events-none hidden group-hover:flex items-center px-3 py-1.5 bg-gray-900 text-white text-xs font-bold rounded-xl shadow-lg whitespace-nowrap animate-in fade-in zoom-in-95 duration-150">
+                            Monitoramento
+                          </div>
+                        )}
+                      </button>
+
+                      <button
+                        onClick={() => setAdminTab("settings")}
+                        title={isSidebarCollapsed ? "Configurações" : undefined}
+                        className={`group relative w-full flex items-center rounded-2xl font-bold text-[14px] transition-all ${
+                          isSidebarCollapsed 
+                            ? "justify-center p-3.5" 
+                            : "gap-3 px-4 py-3.5"
+                        } ${adminTab === "settings" ? "bg-brand text-brand-contrast shadow-sm" : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"}`}
+                        style={
+                          adminTab === "settings"
+                            ? { backgroundColor: currentTenant.primaryColor }
+                            : {}
+                        }
+                      >
+                        <Settings size={19} className="shrink-0" />
+                        {!isSidebarCollapsed && <span className="truncate">Configurações</span>}
+                        {isSidebarCollapsed && (
+                          <div className="fixed left-24 z-50 pointer-events-none hidden group-hover:flex items-center px-3 py-1.5 bg-gray-900 text-white text-xs font-bold rounded-xl shadow-lg whitespace-nowrap animate-in fade-in zoom-in-95 duration-150">
+                            Configurações
+                          </div>
+                        )}
+                      </button>
+                    </>
+                  )}
+
+                  {!isDeliverer && (
+                    <>
+                      <button
+                        onClick={() => setAdminTab("desktop")}
+                        title={isSidebarCollapsed ? "Aplicativo PC" : undefined}
+                        className={`group relative w-full flex items-center rounded-2xl font-bold text-[14px] transition-all ${
+                          isSidebarCollapsed 
+                            ? "justify-center p-3.5" 
+                            : "gap-3 px-4 py-3.5"
+                        } ${adminTab === "desktop" ? "bg-brand text-brand-contrast shadow-sm" : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"}`}
+                        style={
+                          adminTab === "desktop"
+                            ? { backgroundColor: currentTenant.primaryColor }
+                            : {}
+                        }
+                      >
+                        <Laptop size={19} className="shrink-0" />
+                        {!isSidebarCollapsed && <span className="truncate">Aplicativo PC</span>}
+                        {isSidebarCollapsed && (
+                          <div className="fixed left-24 z-50 pointer-events-none hidden group-hover:flex items-center px-3 py-1.5 bg-gray-900 text-white text-xs font-bold rounded-xl shadow-lg whitespace-nowrap animate-in fade-in zoom-in-95 duration-150">
+                            Aplicativo PC
+                          </div>
+                        )}
+                      </button>
+
+                      <button
+                        onClick={() => setAdminTab("chat")}
+                        title={isSidebarCollapsed ? "Central de Chat" : undefined}
+                        className={`group relative w-full flex items-center rounded-2xl font-bold text-[14px] transition-all ${
+                          isSidebarCollapsed 
+                            ? "justify-center p-3.5" 
+                            : "gap-3 px-4 py-3.5"
+                        } ${adminTab === "chat" ? "bg-brand text-brand-contrast shadow-sm" : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"}`}
+                        style={
+                          adminTab === "chat"
+                            ? { backgroundColor: currentTenant.primaryColor }
+                            : {}
+                        }
+                      >
+                        <MessageSquare size={19} className="shrink-0" />
+                        {!isSidebarCollapsed && (
+                          <>
+                            <span className="truncate">Central de Chat</span>
+                            {!currentTenant?.isChatEnabled && <Lock size={14} className="ml-auto opacity-50 shrink-0" />}
+                          </>
+                        )}
+                        {isSidebarCollapsed && (
+                          <div className="fixed left-24 z-50 pointer-events-none hidden group-hover:flex items-center px-3 py-1.5 bg-gray-900 text-white text-xs font-bold rounded-xl shadow-lg whitespace-nowrap animate-in fade-in zoom-in-95 duration-150">
+                            Central de Chat {!currentTenant?.isChatEnabled && "(Bloqueado)"}
+                          </div>
+                        )}
+                      </button>
+
+                      <button
+                        onClick={() => setAdminTab("manual")}
+                        title={isSidebarCollapsed ? "Manual de Uso" : undefined}
+                        className={`group relative w-full flex items-center rounded-2xl font-bold text-[14px] transition-all ${
+                          isSidebarCollapsed 
+                            ? "justify-center p-3.5" 
+                            : "gap-3 px-4 py-3.5"
+                        } ${adminTab === "manual" ? "bg-brand text-brand-contrast shadow-sm" : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"}`}
+                        style={
+                          adminTab === "manual"
+                            ? { backgroundColor: currentTenant.primaryColor }
+                            : {}
+                        }
+                      >
+                        <BookOpen size={19} className="shrink-0" />
+                        {!isSidebarCollapsed && <span className="truncate">Manual</span>}
+                        {isSidebarCollapsed && (
+                          <div className="fixed left-24 z-50 pointer-events-none hidden group-hover:flex items-center px-3 py-1.5 bg-gray-900 text-white text-xs font-bold rounded-xl shadow-lg whitespace-nowrap animate-in fade-in zoom-in-95 duration-150">
+                            Manual
+                          </div>
+                        )}
+                      </button>
+                    </>
+                  )}
+
+                  <div className="my-2 border-t border-gray-100"></div>
+
                   <button
-                    onClick={() => handleViewChange(ViewMode.ADMIN_SUPER)}
-                    className="flex items-center gap-3 px-4 py-3 rounded-xl font-bold text-[13px] text-gray-500 hover:bg-gray-100 mt-1"
+                    onClick={() => handleViewChange(ViewMode.CATALOG)}
+                    title={isSidebarCollapsed ? "Ver Loja Online" : undefined}
+                    className={`group relative w-full flex items-center rounded-2xl font-bold text-[14px] text-gray-500 hover:bg-gray-50 hover:text-gray-900 transition-all ${
+                      isSidebarCollapsed ? "justify-center p-3.5" : "gap-3 px-4 py-3.5"
+                    }`}
                   >
-                    <ArrowLeft size={18} />
-                    Voltar Portal
+                    <Store size={19} className="shrink-0" />
+                    {!isSidebarCollapsed && <span className="truncate">Ver Loja</span>}
+                    {isSidebarCollapsed && (
+                      <div className="fixed left-24 z-50 pointer-events-none hidden group-hover:flex items-center px-3 py-1.5 bg-gray-900 text-white text-xs font-bold rounded-xl shadow-lg whitespace-nowrap animate-in fade-in zoom-in-95 duration-150">
+                        Ver Loja Online
+                      </div>
+                    )}
                   </button>
-                )}
+
+                  {session.type === "SUPER_ADMIN" && (
+                    <button
+                      onClick={() => handleViewChange(ViewMode.ADMIN_SUPER)}
+                      title={isSidebarCollapsed ? "Voltar ao Portal" : undefined}
+                      className={`group relative w-full flex items-center rounded-2xl font-bold text-[13px] text-gray-500 hover:bg-gray-50 hover:text-gray-900 transition-all ${
+                        isSidebarCollapsed ? "justify-center p-3.5" : "gap-3 px-4 py-3"
+                      }`}
+                    >
+                      <ArrowLeft size={18} className="shrink-0" />
+                      {!isSidebarCollapsed && <span className="truncate">Voltar Portal</span>}
+                      {isSidebarCollapsed && (
+                        <div className="fixed left-24 z-50 pointer-events-none hidden group-hover:flex items-center px-3 py-1.5 bg-gray-900 text-white text-xs font-bold rounded-xl shadow-lg whitespace-nowrap animate-in fade-in zoom-in-95 duration-150">
+                          Voltar ao Portal
+                        </div>
+                      )}
+                    </button>
+                  )}
+                </div>
               </aside>
-              <div className="flex-1 min-w-0">
+
+              {/* MAIN CONTENT AREA (Dynamically expands when sidebar is collapsed) */}
+              <div className="flex-1 min-w-0 transition-all duration-300 ease-in-out">
+                {/* Floating expand button for convenient quick access if desired */}
+                {isSidebarCollapsed && (
+                  <div className="hidden md:flex items-center mb-3">
+                    <button
+                      onClick={() => {
+                        setIsSidebarCollapsed(false);
+                        localStorage.setItem("ff_sidebar_collapsed", "false");
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-gray-50 text-gray-600 hover:text-gray-900 rounded-xl border border-gray-200 text-xs font-bold shadow-2xs transition-all active:scale-95"
+                    >
+                      <PanelLeftOpen size={14} className="text-emerald-600" />
+                      <span>Expandir Menu Lateral</span>
+                    </button>
+                  </div>
+                )}
                 {licenseDays >= 0 && licenseDays <= 2 && (
                   <div className="mb-8 p-6 bg-amber-50 border-2 border-amber-200 rounded-[2.5rem] flex items-center justify-between animate-in slide-in-from-top-4">
                     <div className="flex items-center gap-4">
