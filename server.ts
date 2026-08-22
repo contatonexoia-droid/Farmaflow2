@@ -4771,8 +4771,6 @@ async function touchAgentHeartbeat(tenantId: string, machineId?: string | null, 
       await supabaseAdmin
         .from('tenants')
         .update({ 
-          last_seen: now,
-          agent_last_seen: now,
           last_ping_at: now,
           updated_at: now
         })
@@ -4935,7 +4933,7 @@ const handleAgentStatus = async (req: express.Request, res: express.Response) =>
     // 1. Busca todos os tenants (ou tenant filtrado)
     let tenantQuery = supabaseAdmin
       .from('tenants')
-      .select('id, name, slug, last_seen, agent_last_seen, erp_type, is_active');
+      .select('id, name, slug, erp_type, is_active, last_ping_at, updated_at');
 
     if (filterTenantId) {
       const cleanFilter = filterTenantId.replace(/^store_/, '').replace(/^tenant_/, '').trim();
@@ -4977,8 +4975,8 @@ const handleAgentStatus = async (req: express.Request, res: express.Response) =>
         // Encontra o timestamp mais recente entre agent_integrations e tenants
         const candidateDates = [
           agent?.last_seen,
-          t.agent_last_seen,
-          t.last_seen
+          t.last_ping_at,
+          t.updated_at
         ].filter(Boolean).map((d: any) => new Date(d).getTime()).filter(n => !isNaN(n) && n > 0);
 
         const latestTimestamp = candidateDates.length > 0
