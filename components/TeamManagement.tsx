@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Users, UserPlus, Shield, CheckCircle, Trash2, Edit3, X, Loader2, Search, Building2 } from 'lucide-react';
+import { Users, UserPlus, Shield, CheckCircle, Trash2, Edit3, X, Loader2, Search, Building2, AlertTriangle } from 'lucide-react';
+import toast, { Toaster } from 'react-hot-toast';
 import { supabase } from '../services/supabase';
+import { deleteTeamMember } from '../services/storage';
 
 interface TeamManagementProps {
   tenantId: string;
@@ -50,6 +52,11 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ tenantId, sessio
   const [formLoading, setFormLoading] = useState(false);
   const [error, setError] = useState('');
   
+  // Estado para exclusão definitiva de membro da equipe
+  const [userToDelete, setUserToDelete] = useState<any | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
   const [loadingAuth, setLoadingAuth] = useState(true);
   const [user, setUser] = useState<any>(null);
 
@@ -103,9 +110,6 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ tenantId, sessio
       const res = await fetch(`/api/v1/team/users?tenantId=${tenantId}`, { headers });
       if (res.ok) {
         const json = await res.json();
-        
-        // Profiles table might not contain email (it's in auth.users). 
-        // We'd typically join or use an Edge Function. But we simulate it here:
         setTeam(json.data || []);
       }
     } catch (e) {
@@ -178,12 +182,42 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ tenantId, sessio
     }
   };
 
+  const handleDeleteClick = (userProfile: any) => {
+    setUserToDelete(userProfile);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!userToDelete) return;
+    const targetUserId = userToDelete.id;
+    setIsDeleting(true);
+    setDeletingId(targetUserId);
+
+    try {
+      // 1. Executa exclusão no serviço / Supabase
+      await deleteTeamMember(targetUserId, tenantId);
+
+      // 2. Remove imediatamente do estado local (React state) sem necessidade de F5
+      setTeam(prevTeam => prevTeam.filter(member => member.id !== targetUserId));
+
+      // 3. Exibe toast de sucesso
+      toast.success("Usuário excluído com sucesso");
+      setUserToDelete(null);
+    } catch (err: any) {
+      console.error("Erro ao excluir usuário:", err);
+      toast.error(err.message || "Erro ao excluir usuário.");
+    } finally {
+      setIsDeleting(false);
+      setDeletingId(null);
+    }
+  };
+
   const filteredTeam = team.filter(t => 
     t.full_name?.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
   return (
     <div className="animate-in fade-in duration-300 pb-10">
+      <Toaster position="top-right" />
       <div className="flex border-b border-gray-100 mb-8 overflow-x-auto hide-scrollbar">
         <button
           onClick={() => setActiveTab('users')}
@@ -275,12 +309,25 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ tenantId, sessio
                       <td className="py-4 px-6 text-xs text-gray-500">
                          {new Date(t.created_at).toLocaleDateString()}
                       </td>
-                      <td className="py-4 px-6 text-right space-x-2">
+                      <td className="py-4 px-6 text-right space-x-2 whitespace-nowrap">
                         <button 
                           onClick={() => handleToggleActive(t)} 
-                          className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-sm ${t.is_active ? 'bg-red-50 text-red-600 hover:bg-red-100' : 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100'}`}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-sm ${t.is_active ? 'bg-gray-100 text-gray-700 hover:bg-gray-200' : 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100'}`}
                         >
                            {t.is_active ? 'Desativar Acesso' : 'Reativar'}
+                        </button>
+                        <button 
+                          onClick={() => handleDeleteClick(t)} 
+                          disabled={deletingId === t.id}
+                          className="px-3 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-sm bg-red-50 text-red-600 hover:bg-red-100 border border-red-200 inline-flex items-center gap-1.5 disabled:opacity-50"
+                          title="Excluir Colaborador Definitivamente"
+                        >
+                          {deletingId === t.id ? (
+                            <Loader2 size={13} className="animate-spin" />
+                          ) : (
+                            <Trash2 size={13} />
+                          )}
+                          <span>Excluir</span>
                         </button>
                       </td>
                     </tr>
@@ -350,6 +397,68 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ tenantId, sessio
           </div>
         </div>
       )}
+
+      {/* Modal de Confirmação de Exclusão Definitiva */}
+      {userToDelete && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[220] flex items-center justify-center p-4">
+          <div className="bg-white rounded-[2rem] w-full max-w-md shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200 flex flex-col">
+            <div className="p-6 border-b border-red-100 bg-red-50 flex items-center gap-3">
+              <div className="p-2.5 bg-red-100 text-red-600 rounded-xl">
+                <AlertTriangle size={22} />
+              </div>
+              <div>
+                <h3 className="font-black text-lg text-gray-900">Excluir Colaborador</h3>
+                <p className="text-xs text-red-600 font-medium">Ação irreversível</p>
+              </div>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <p className="text-sm text-gray-700 font-medium leading-relaxed">
+                Tem certeza que deseja excluir definitivamente este usuário? Esta ação não pode ser desfeita.
+              </p>
+
+              <div className="p-4 bg-gray-50 rounded-2xl border border-gray-100 space-y-1.5">
+                <div className="font-bold text-sm text-gray-900">{userToDelete.full_name}</div>
+                {userToDelete.email && (
+                  <div className="text-xs text-gray-500 font-mono">{userToDelete.email}</div>
+                )}
+                <div className="text-xs text-gray-500">
+                  Função: <span className="font-semibold text-gray-700 capitalize">{userToDelete.role || 'Operador'}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="p-6 border-t border-gray-100 bg-gray-50/50 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setUserToDelete(null)}
+                disabled={isDeleting}
+                className="px-5 py-2.5 rounded-xl border border-gray-200 text-gray-700 font-bold text-sm hover:bg-gray-100 transition-colors disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDelete}
+                disabled={isDeleting}
+                className="px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-sm flex items-center gap-2 transition-colors shadow-lg shadow-red-600/20 disabled:opacity-50"
+              >
+                {isDeleting ? (
+                  <>
+                    <Loader2 size={16} className="animate-spin" />
+                    <span>Excluindo...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 size={16} />
+                    <span>Excluir Definitivamente</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
         </>
       ) : (
         <TeamsSettings tenantId={tenantId} />
@@ -357,3 +466,4 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ tenantId, sessio
     </div>
   );
 };
+

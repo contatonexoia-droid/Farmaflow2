@@ -626,6 +626,64 @@ app.patch("/api/v1/team/users/:id", checkTenantAccess, async (req, res) => {
   }
 });
 
+app.delete("/api/v1/team/users/:id", checkTenantAccess, async (req, res) => {
+  try {
+    const userId = req.params.id;
+    const tenantId = (req.headers["x-tenant-id"] || req.query.tenantId) as string;
+
+    // 1. Busca dados do usuário para identificar vínculos
+    const { data: userRecord } = await supabaseAdmin
+      .from("tenant_users")
+      .select("id, supabase_user_id, tenant_id")
+      .eq("id", userId)
+      .maybeSingle();
+
+    // 2. Remove o registro da tabela tenant_users
+    let deleteQuery = supabaseAdmin.from("tenant_users").delete().eq("id", userId);
+    if (tenantId) {
+      deleteQuery = deleteQuery.eq("tenant_id", tenantId);
+    }
+    const { error: deleteError } = await deleteQuery;
+    if (deleteError) {
+      console.error("[Team API] Erro ao excluir de tenant_users:", deleteError);
+      return res.status(400).json({ error: deleteError.message || "Erro ao excluir membro da equipe no banco de dados." });
+    }
+
+    // 3. Limpeza de vínculos em equipes e caixas de entrada
+    try {
+      await supabaseAdmin.from("chat_inbox_members").delete().eq("user_id", userId);
+      await supabaseAdmin.from("chat_team_members").delete().eq("user_id", userId);
+      if (userRecord?.supabase_user_id) {
+        await supabaseAdmin.from("chat_inbox_members").delete().eq("user_id", userRecord.supabase_user_id);
+        await supabaseAdmin.from("chat_team_members").delete().eq("user_id", userRecord.supabase_user_id);
+      }
+    } catch (cleanupErr: any) {
+      console.warn("[Team API] Limpeza secundária de vínculos (aviso):", cleanupErr?.message);
+    }
+
+    // 4. Se tiver supabase_user_id e não pertencer a outras lojas, remove do Auth
+    if (userRecord?.supabase_user_id) {
+      try {
+        const { count } = await supabaseAdmin
+          .from("tenant_users")
+          .select("id", { count: "exact", head: true })
+          .eq("supabase_user_id", userRecord.supabase_user_id);
+
+        if (!count || count === 0) {
+          await supabaseAdmin.auth.admin.deleteUser(userRecord.supabase_user_id);
+        }
+      } catch (authErr: any) {
+        console.warn("[Team API] Aviso ao remover do Supabase Auth:", authErr?.message);
+      }
+    }
+
+    return res.json({ success: true, message: "Usuário excluído com sucesso." });
+  } catch (e: any) {
+    console.error("[Team API] Erro na exclusão de usuário:", e);
+    return res.status(500).json({ error: e.message || "Erro interno ao excluir usuário." });
+  }
+});
+
 // =========================================
 // MÓDULO DE EQUIPES (TEAMS)
 // =========================================

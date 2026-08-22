@@ -2105,3 +2105,57 @@ export const testAiAgent = async (
   return data;
 };
 
+export const deleteTeamMember = async (userId: string, tenantId?: string): Promise<{ success: boolean }> => {
+  try {
+    let token = '';
+    const saved = typeof window !== 'undefined' ? localStorage.getItem('ff_session') : null;
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        token = parsed.access_token;
+      } catch (e) {}
+    }
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...(tenantId ? { 'x-tenant-id': tenantId } : {}),
+      ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+    };
+
+    const res = await fetch(`/api/v1/team/users/${userId}${tenantId ? `?tenantId=${tenantId}` : ''}`, {
+      method: 'DELETE',
+      headers
+    });
+
+    if (res.ok) {
+      return { success: true };
+    }
+
+    const errorData = await res.json().catch(() => null);
+    console.warn("[deleteTeamMember] API retornou status não-ok:", res.status, errorData);
+  } catch (apiErr) {
+    console.warn("[deleteTeamMember] Erro na requisição de API, tentando fallback direto no Supabase:", apiErr);
+  }
+
+  // Fallback direto no Supabase caso a API não esteja acessível
+  try {
+    let query = supabase.from('tenant_users').delete().eq('id', userId);
+    if (tenantId) {
+      query = query.eq('tenant_id', tenantId);
+    }
+    const { error } = await query;
+    if (error) {
+      // Tenta fallback na tabela profiles se existir
+      const { error: profileErr } = await supabase.from('profiles').delete().eq('id', userId);
+      if (profileErr) {
+        throw new Error(error.message || profileErr.message || "Erro ao excluir membro da equipe no banco de dados.");
+      }
+    }
+    return { success: true };
+  } catch (sbErr: any) {
+    console.error("[deleteTeamMember] Falha no Supabase fallback:", sbErr);
+    throw new Error(sbErr.message || "Erro ao excluir membro da equipe no Supabase.");
+  }
+};
+
+
