@@ -455,53 +455,48 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
     // 2. Persistência no Backend & Supabase (gravando a chave oficial do novo fluxo)
     try {
       setIsUpdating(true);
-      const res = await fetch(`/api/v1/chat/conversations/${activeId}/stage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          storeId: tenantId,
-          stage: targetStage,
-          kanban_stage: targetStage,
-          is_bot_active: updatedConv.is_bot_active,
-          assignedUserId: isTargetHumano && currentUser?.id ? currentUser.id : undefined
-        })
-      });
 
-      // Fallback direto Supabase
-      try {
-        const payload: Record<string, any> = {
-          kanban_stage: targetStage,
-          status: updatedConv.status,
-          is_bot_active: updatedConv.is_bot_active,
-          is_human_controlled: updatedConv.is_human_controlled,
-          updated_at: new Date().toISOString()
-        };
-        if (updatedConv.assigned_user_id !== undefined) {
-          payload.assigned_user_id = updatedConv.assigned_user_id;
-        }
-
-        const { error } = await supabase
-          .from('chat_conversations')
-          .update(payload)
-          .eq('id', activeId);
-
-        if (error) {
-          console.error("Erro detalhado do Supabase:", error.message, error.details, error.hint);
-        }
-      } catch (err: any) {
-        console.error("Exceção Fallback Supabase:", err.message);
+      const payload: Record<string, any> = {
+        kanban_stage: targetStage,
+        status: updatedConv.status,
+        is_bot_active: updatedConv.is_bot_active,
+        is_human_controlled: updatedConv.is_human_controlled,
+        updated_at: new Date().toISOString()
+      };
+      if (updatedConv.assigned_user_id !== undefined) {
+        payload.assigned_user_id = updatedConv.assigned_user_id;
       }
 
-      if (!res.ok) {
-        console.warn('Erro ao atualizar estágio no servidor. Revertendo...');
-        toast.error('Falha ao mover card. Tente novamente.');
-        if (onConversationsChange) {
-          onConversationsChange(previousConversations);
+      // 1. Atualiza o banco Supabase (Operação Principal)
+      const { error: dbError } = await supabase
+        .from('chat_conversations')
+        .update(payload)
+        .eq('id', activeId);
+
+      if (dbError) throw dbError; // Apenas erros do Supabase revertem o Kanban
+
+      // 2. Dispara automações externas (Operação Secundária isolada)
+      try {
+        const res = await fetch(`/api/v1/chat/conversations/${activeId}/stage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            storeId: tenantId,
+            stage: targetStage,
+            kanban_stage: targetStage,
+            is_bot_active: updatedConv.is_bot_active,
+            assignedUserId: isTargetHumano && currentUser?.id ? currentUser.id : undefined
+          })
+        });
+        if (!res.ok) {
+          console.warn(`Aviso: Falha ao disparar automação do estágio (Status ${res.status}), mas a movimentação foi mantida.`);
         }
+      } catch (apiErr) {
+        console.warn("Aviso: Falha ao disparar automação do estágio, mas a movimentação no Kanban foi mantida:", apiErr);
       }
     } catch (e) {
-      console.error('Erro de conexão ao mover card do Kanban:', e);
-      toast.error('Erro de conexão. Card revertido.');
+      console.error('Erro no banco de dados ao mover card do Kanban:', e);
+      toast.error('Erro ao mover card. Alteração revertida.');
       if (onConversationsChange) {
         onConversationsChange(previousConversations);
       }
@@ -559,44 +554,41 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
     }
 
     try {
-      const res = await fetch(`/api/v1/chat/conversations/${conversationId}/stage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          storeId: tenantId, 
-          stage: targetStage, 
+      // 1. Atualiza o banco Supabase (Operação Principal)
+      const { error: dbError } = await supabase
+        .from('chat_conversations')
+        .update({
           kanban_stage: targetStage,
-          is_bot_active: isTargetBot
+          status: updatedConv.status,
+          is_bot_active: updatedConv.is_bot_active,
+          is_human_controlled: updatedConv.is_human_controlled,
+          updated_at: new Date().toISOString()
         })
-      });
+        .eq('id', conversationId);
 
-      // Fallback Supabase
+      if (dbError) throw dbError; // Apenas erros do banco revertem o Kanban
+
+      // 2. Dispara automações externas (Operação Secundária isolada)
       try {
-        const { error } = await supabase
-          .from('chat_conversations')
-          .update({
+        const res = await fetch(`/api/v1/chat/conversations/${conversationId}/stage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            storeId: tenantId, 
+            stage: targetStage, 
             kanban_stage: targetStage,
-            status: updatedConv.status,
-            is_bot_active: updatedConv.is_bot_active,
-            is_human_controlled: updatedConv.is_human_controlled,
-            updated_at: new Date().toISOString()
+            is_bot_active: isTargetBot
           })
-          .eq('id', conversationId);
-
-        if (error) {
-          console.error("Erro detalhado do Supabase:", error.message, error.details, error.hint);
+        });
+        if (!res.ok) {
+          console.warn(`Aviso: Falha ao disparar automação (Status ${res.status}). A movimentação foi mantida.`);
         }
-      } catch (err: any) {
-        console.error("Exceção Fallback Supabase:", err.message);
-      }
-
-      if (!res.ok) {
-        toast.error('Falha ao mover card. Tente novamente.');
-        if (onConversationsChange) onConversationsChange(previousConversations);
+      } catch (apiErr) {
+        console.warn("Aviso: Falha ao disparar automação externa. A movimentação no Kanban foi mantida:", apiErr);
       }
     } catch (e) {
-      console.error('Erro ao atualizar estágio:', e);
-      toast.error('Erro de conexão. Card revertido.');
+      console.error('Erro ao atualizar estágio no banco:', e);
+      toast.error('Falha ao atualizar o card no banco. Revertendo...');
       if (onConversationsChange) onConversationsChange(previousConversations);
     } finally {
       setLockedConversations(prev => {
