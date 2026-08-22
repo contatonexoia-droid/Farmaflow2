@@ -14,6 +14,7 @@ import {
   DragEndEvent,
 } from '@dnd-kit/core';
 import { arrayMove, sortableKeyboardCoordinates } from '@dnd-kit/sortable';
+import { toast } from 'react-hot-toast';
 import {
   Kanban,
   Search,
@@ -264,6 +265,21 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
   const [activeCard, setActiveCard] = useState<any | null>(null);
   const [isUpdating, setIsUpdating] = useState(false);
 
+  // Controle de Optimistic UI para evitar flickering/race-conditions do Realtime
+  const [lockedConversations, setLockedConversations] = useState<Set<string>>(new Set());
+  const [optimisticState, setOptimisticState] = useState<any[]>([]);
+
+  const effectiveConversations = useMemo(() => {
+    if (lockedConversations.size === 0) return conversations;
+    return conversations.map(c => {
+      if (lockedConversations.has(c.id)) {
+        const opt = optimisticState.find(optC => optC.id === c.id);
+        if (opt) return opt;
+      }
+      return c;
+    });
+  }, [conversations, lockedConversations, optimisticState]);
+
   useEffect(() => {
     if (inboxes.length === 1) {
       setSelectedInboxId(inboxes[0].id);
@@ -294,7 +310,7 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
 
   // Filtro geral de conversas
   const filteredConversations = useMemo(() => {
-    return conversations.filter(conv => {
+    return effectiveConversations.filter(conv => {
       // Filtro por Caixa de Entrada
       if (selectedInboxId !== 'all' && conv.inbox_id !== selectedInboxId) return false;
       // Filtro por Time
@@ -329,8 +345,10 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
 
     filteredConversations.forEach(conv => {
       const stage = getConversationKanbanStage(conv);
-      if (stage === 'saiu_entrega' || stage === 'em_separacao' as any) {
+      if (stage === 'saiu_entrega' || stage === 'em_separacao' as any || stage === 'delivery' as any) {
         map.saiu_entrega.push(conv);
+      } else if (stage === 'novos_triagem' || stage === 'novos_clientes' as any || stage === 'NEW' as any) {
+        map.novos_triagem.push(conv);
       } else if (map[stage]) {
         map[stage].push(conv);
       } else {
@@ -420,6 +438,15 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
       updated_at: new Date().toISOString()
     };
 
+    const previousConversations = [...conversations];
+    
+    // Atualiza estado otimista interno
+    setOptimisticState(prev => {
+      const filtered = prev.filter(p => p.id !== activeId);
+      return [...filtered, updatedConv];
+    });
+    setLockedConversations(prev => new Set(prev).add(activeId));
+
     const nextConversations = conversations.map(c => c.id === activeId ? updatedConv : c);
     if (onConversationsChange) {
       onConversationsChange(nextConversations);
@@ -435,6 +462,7 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
           storeId: tenantId,
           stage: targetStage,
           kanban_stage: targetStage,
+          is_bot_active: updatedConv.is_bot_active,
           assignedUserId: isTargetHumano && currentUser?.id ? currentUser.id : undefined
         })
       });
@@ -466,17 +494,25 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
 
       if (!res.ok) {
         console.warn('Erro ao atualizar estágio no servidor. Revertendo...');
+        toast.error('Falha ao mover card. Tente novamente.');
         if (onConversationsChange) {
-          onConversationsChange(conversations);
+          onConversationsChange(previousConversations);
         }
       }
     } catch (e) {
       console.error('Erro de conexão ao mover card do Kanban:', e);
+      toast.error('Erro de conexão. Card revertido.');
       if (onConversationsChange) {
-        onConversationsChange(conversations);
+        onConversationsChange(previousConversations);
       }
     } finally {
       setIsUpdating(false);
+      // Libera o card para voltar a receber atualizações via Realtime
+      setLockedConversations(prev => {
+        const n = new Set(prev);
+        n.delete(activeId);
+        return n;
+      });
     }
   };
 
@@ -511,15 +547,27 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
       bot_handoff_at: isTargetBot ? null : targetConv.bot_handoff_at
     };
 
+    const previousConversations = [...conversations];
+    setOptimisticState(prev => {
+      const filtered = prev.filter(p => p.id !== conversationId);
+      return [...filtered, updatedConv];
+    });
+    setLockedConversations(prev => new Set(prev).add(conversationId));
+
     if (onConversationsChange) {
       onConversationsChange(conversations.map(c => c.id === conversationId ? updatedConv : c));
     }
 
     try {
-      await fetch(`/api/v1/chat/conversations/${conversationId}/stage`, {
+      const res = await fetch(`/api/v1/chat/conversations/${conversationId}/stage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ storeId: tenantId, stage: targetStage, kanban_stage: targetStage })
+        body: JSON.stringify({
+          storeId: tenantId, 
+          stage: targetStage, 
+          kanban_stage: targetStage,
+          is_bot_active: isTargetBot
+        })
       });
 
       // Fallback Supabase
@@ -541,8 +589,21 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
       } catch (err: any) {
         console.error("Exceção Fallback Supabase:", err.message);
       }
+
+      if (!res.ok) {
+        toast.error('Falha ao mover card. Tente novamente.');
+        if (onConversationsChange) onConversationsChange(previousConversations);
+      }
     } catch (e) {
       console.error('Erro ao atualizar estágio:', e);
+      toast.error('Erro de conexão. Card revertido.');
+      if (onConversationsChange) onConversationsChange(previousConversations);
+    } finally {
+      setLockedConversations(prev => {
+        const n = new Set(prev);
+        n.delete(conversationId);
+        return n;
+      });
     }
   };
 

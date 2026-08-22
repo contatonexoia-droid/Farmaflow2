@@ -1448,6 +1448,7 @@ class ChatStore {
         break;
       case "saiu_entrega":
         updates.status = "OPEN";
+        updates.is_bot_active = false;
         break;
       case "finalizado":
         updates.status = "CLOSED";
