@@ -30,27 +30,21 @@ export class BotHandoffManager {
 
   // Termos sensíveis para transbordo imediato para o farmacêutico / atendente humano
   private sensitiveKeywords = [
-    "atendente",
     "falar com humano",
     "falar com atendente",
     "falar com pessoa",
-    "farmaceutico",
-    "farmacêutico",
-    "balconista",
-    "receita",
+    "falar com balconista",
+    "falar com farmacêutico",
+    "falar com farmaceutico",
+    "chamar atendente",
+    "chamar humano",
+    "atendente humano",
+    "passar para atendente",
+    "transferir para atendente",
+    "quero falar com uma pessoa",
     "remédio controlado",
     "remedio controlado",
-    "tarja preta",
-    "antibiótico",
-    "antibiotico",
-    "duvida",
-    "dúvida",
-    "atendimento",
-    "urgente",
-    "emergencia",
-    "emergência",
-    "prescrição",
-    "prescricao"
+    "tarja preta"
   ];
 
   /**

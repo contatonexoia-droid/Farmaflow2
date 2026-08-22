@@ -979,14 +979,31 @@ class ChatStore {
 
     // 1. PRESERVAÇÃO TOTAL DO ESTÁGIO:
     // Para conversas existentes, mantém rigorosamente o estágio e status atuais do banco de dados.
-    // O kanban_stage NÃO deve ser alterado por mensagens recebidas de cliente.
+    // O kanban_stage NÃO deve ser alterado por mensagens recebidas de cliente ou ecos de mensagens do bot.
     let finalStage = convInfo ? (convInfo.kanban_stage || convInfo.stage || resolveConversationKanbanStage(convInfo)) : (fromMe ? "em_atendimento" : "ia_atendendo");
     let isBotActive = convInfo ? (convInfo.is_bot_active ?? (finalStage === "ia_atendendo")) : (!fromMe);
     let isHuman = convInfo ? (convInfo.is_human_controlled ?? (finalStage === "em_atendimento" || Boolean(convInfo.assigned_user_id))) : (fromMe);
     let finalStatus = convInfo ? (convInfo.status || (isBotActive ? "bot" : (isHuman ? "human_takeover" : "OPEN"))) : (fromMe ? "human_takeover" : "bot");
 
+    // Verifica se a mensagem atual que chegou com fromMe já foi enviada pelo BOT/Sistema
+    let isBotEcho = false;
     if (fromMe) {
-      // Mensagem enviada pelo operador humano no WhatsApp: assume atendimento humano
+      try {
+        const { data: existingBotMsg } = await supabaseAdmin
+          .from("chat_messages")
+          .select("id, sender_type")
+          .or(`id.eq.${msgId},content.eq.${JSON.stringify(text)}`)
+          .eq("conversation_id", convId)
+          .maybeSingle();
+
+        if (existingBotMsg && (existingBotMsg.sender_type === "BOT" || existingBotMsg.sender_type === "SYSTEM")) {
+          isBotEcho = true;
+        }
+      } catch (_) {}
+    }
+
+    if (fromMe && !isBotEcho && (!convInfo || convInfo.is_bot_active === false || Boolean(convInfo.assigned_user_id))) {
+      // Mensagem enviada manualmente por operador humano no WhatsApp
       isHuman = true;
       isBotActive = false;
       finalStage = "em_atendimento";
@@ -1004,8 +1021,8 @@ class ChatStore {
       kanban_stage: finalStage,
       stage: finalStage,
       bot_interaction_count: convInfo?.bot_interaction_count || 0,
-      bot_handoff_reason: fromMe ? "HUMAN_OPERATOR_MESSAGE" : (convInfo?.bot_handoff_reason || null),
-      bot_handoff_at: fromMe ? now : (convInfo?.bot_handoff_at || null),
+      bot_handoff_reason: (fromMe && !isBotEcho && isHuman) ? "HUMAN_OPERATOR_MESSAGE" : (convInfo?.bot_handoff_reason || null),
+      bot_handoff_at: (fromMe && !isBotEcho && isHuman) ? now : (convInfo?.bot_handoff_at || null),
       assigned_user_id: isHuman ? (convInfo?.assigned_user_id || null) : (convInfo?.assigned_user_id || null),
       last_message_at: now,
       last_message_content: text,
@@ -1018,7 +1035,7 @@ class ChatStore {
     try {
       if (convInfo) {
         // CONVERSA EXISTENTE: Atualiza estritamente os metadados da última mensagem recebida.
-        // NÃO sobrescreve 'kanban_stage', 'status', 'is_bot_active', 'is_human_controlled' em mensagens de clientes.
+        // NÃO sobrescreve 'kanban_stage', 'status', 'is_bot_active', 'is_human_controlled' em mensagens de clientes ou ecos de bot.
         const convUpdateData: any = {
           last_message_at: now,
           last_message_content: text,
@@ -1030,7 +1047,8 @@ class ChatStore {
           convUpdateData.inbox_id = resolvedInboxId;
         }
 
-        if (fromMe) {
+        // Apenas transborda para humano se for mensagem manual confirmada de operador (não eco de bot) em conversa já sob controle humano
+        if (fromMe && !isBotEcho && convInfo.is_human_controlled === true) {
           convUpdateData.is_human_controlled = true;
           convUpdateData.is_bot_active = false;
           convUpdateData.status = "human_takeover";
@@ -1083,7 +1101,7 @@ class ChatStore {
     }
 
     // 4. Inserção da mensagem (chat_messages)
-    const senderType = fromMe ? "USER" : "CUSTOMER";
+    const senderType = fromMe ? (isBotEcho ? "BOT" : "USER") : "CUSTOMER";
 
     // Se for mídia (imagem, áudio, vídeo, documento, figurinha) e não tiver uma Data URI válida ou URL pública consumível
     const hasValidDirectMedia = isValidDirectMedia(extractedMediaUrl);
@@ -1119,23 +1137,25 @@ class ChatStore {
       created_at: now
     };
 
-    try {
-      const { error } = await supabaseAdmin.from("chat_messages").insert([{
-        id: msgId,
-        conversation_id: convId,
-        sender_type: senderType,
-        content: text,
-        media_url: extractedMediaUrl || null,
-        media_type: extractedMediaType || "text",
-        is_private: false,
-        created_at: now
-      }]);
-      
-      if (error) {
-        console.error('[ERRO CRITICO NO BACKGROUND]: Erro na inserção da mensagem (chat_messages)', error.message, error);
+    if (!isBotEcho) {
+      try {
+        const { error } = await supabaseAdmin.from("chat_messages").insert([{
+          id: msgId,
+          conversation_id: convId,
+          sender_type: senderType,
+          content: text,
+          media_url: extractedMediaUrl || null,
+          media_type: extractedMediaType || "text",
+          is_private: false,
+          created_at: now
+        }]);
+        
+        if (error) {
+          console.error('[ERRO CRITICO NO BACKGROUND]: Erro na inserção da mensagem (chat_messages)', error.message, error);
+        }
+      } catch (error: any) {
+        console.error('[ERRO CRITICO NO BACKGROUND]: Exceção na inserção da mensagem (chat_messages)', error.message, error.stack);
       }
-    } catch (error: any) {
-      console.error('[ERRO CRITICO NO BACKGROUND]: Exceção na inserção da mensagem (chat_messages)', error.message, error.stack);
     }
     
     // Atualiza cache em memória local apenas para fallback / dev
