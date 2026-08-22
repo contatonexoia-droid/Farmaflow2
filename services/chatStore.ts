@@ -977,16 +977,13 @@ class ChatStore {
     const currentUnreadCount = convInfo?.unread_count || 0;
     const newUnreadCount = fromMe ? 0 : currentUnreadCount + 1;
 
-    // Resolve o estágio atual da conversa
-    const existingStage = convInfo ? resolveConversationKanbanStage(convInfo) : null;
-    
-    // Identifica se a conversa está atualmente no fluxo de IA
-    const isCurrentlyInIaStage = existingStage === "ia_atendendo" || (convInfo && (convInfo.is_bot_active === true || convInfo.status === "bot" || convInfo.status === "BOT"));
-
-    let isBotActive = false;
-    let isHuman = false;
-    let finalStage = "novos_triagem";
-    let finalStatus = "OPEN";
+    // 1. PRESERVAÇÃO TOTAL DO ESTÁGIO:
+    // Para conversas existentes, mantém rigorosamente o estágio e status atuais do banco de dados.
+    // O kanban_stage NÃO deve ser alterado por mensagens recebidas de cliente.
+    let finalStage = convInfo ? (convInfo.kanban_stage || convInfo.stage || resolveConversationKanbanStage(convInfo)) : (fromMe ? "em_atendimento" : "ia_atendendo");
+    let isBotActive = convInfo ? (convInfo.is_bot_active ?? (finalStage === "ia_atendendo")) : (!fromMe);
+    let isHuman = convInfo ? (convInfo.is_human_controlled ?? (finalStage === "em_atendimento" || Boolean(convInfo.assigned_user_id))) : (fromMe);
+    let finalStatus = convInfo ? (convInfo.status || (isBotActive ? "bot" : (isHuman ? "human_takeover" : "OPEN"))) : (fromMe ? "human_takeover" : "bot");
 
     if (fromMe) {
       // Mensagem enviada pelo operador humano no WhatsApp: assume atendimento humano
@@ -994,49 +991,22 @@ class ChatStore {
       isBotActive = false;
       finalStage = "em_atendimento";
       finalStatus = "human_takeover";
-    } else if (!convInfo) {
-      // Nova conversa de cliente: inicia no estágio de IA com bot ativo
-      isBotActive = true;
-      isHuman = false;
-      finalStage = "ia_atendendo";
-      finalStatus = "bot";
-    } else if (isCurrentlyInIaStage) {
-      // PRESERVAÇÃO DO ESTÁGIO DA IA: Mensagem recebida do cliente com card em ia_atendendo ou bot ativo
-      // NÃO altera o kanban_stage para em_atendimento
-      // NÃO altera is_bot_active para false
-      isBotActive = true;
-      isHuman = false;
-      finalStage = "ia_atendendo";
-      finalStatus = "bot";
-    } else {
-      // Conversa já existente em outro estágio (ex: em_atendimento com operador atribuído, novos_triagem, etc)
-      finalStage = existingStage || "novos_triagem";
-      const hasHumanAssigned = Boolean(convInfo.assigned_user_id) || Boolean(convInfo.assigned_to) || convInfo.is_human_controlled === true || finalStage === "em_atendimento";
-      if (hasHumanAssigned) {
-        isHuman = true;
-        isBotActive = false;
-        finalStatus = "human_takeover";
-      } else {
-        isHuman = false;
-        isBotActive = false;
-        finalStatus = convInfo.status || "OPEN";
-      }
     }
 
     const conv: ChatConversation = {
       id: convId,
       store_id: storeId,
       contact_id: contactId,
-      inbox_id: resolvedInboxId,
+      inbox_id: resolvedInboxId || convInfo?.inbox_id || null,
       status: finalStatus,
       is_human_controlled: isHuman,
       is_bot_active: isBotActive,
       kanban_stage: finalStage,
       stage: finalStage,
       bot_interaction_count: convInfo?.bot_interaction_count || 0,
-      bot_handoff_reason: fromMe ? "HUMAN_OPERATOR_MESSAGE" : (isCurrentlyInIaStage ? null : convInfo?.bot_handoff_reason || null),
-      bot_handoff_at: fromMe ? now : (isCurrentlyInIaStage ? null : convInfo?.bot_handoff_at || null),
-      assigned_user_id: isHuman ? convInfo?.assigned_user_id || null : null,
+      bot_handoff_reason: fromMe ? "HUMAN_OPERATOR_MESSAGE" : (convInfo?.bot_handoff_reason || null),
+      bot_handoff_at: fromMe ? now : (convInfo?.bot_handoff_at || null),
+      assigned_user_id: isHuman ? (convInfo?.assigned_user_id || null) : (convInfo?.assigned_user_id || null),
       last_message_at: now,
       last_message_content: text,
       unread_count: newUnreadCount,
@@ -1044,49 +1014,69 @@ class ChatStore {
       created_at: convInfo?.created_at || now
     };
 
-    // 3. Busca ou criação da conversa (chat_conversations)
+    // 3. Atualização ou criação da conversa (chat_conversations)
     try {
-      const convUpsertData: any = {
-        id: convId,
-        store_id: storeId,
-        contact_id: contactId,
-        inbox_id: resolvedInboxId,
-        last_message_at: now,
-        last_message_content: text,
-        unread_count: newUnreadCount,
-        updated_at: now
-      };
+      if (convInfo) {
+        // CONVERSA EXISTENTE: Atualiza estritamente os metadados da última mensagem recebida.
+        // NÃO sobrescreve 'kanban_stage', 'status', 'is_bot_active', 'is_human_controlled' em mensagens de clientes.
+        const convUpdateData: any = {
+          last_message_at: now,
+          last_message_content: text,
+          unread_count: newUnreadCount,
+          updated_at: now
+        };
 
-      if (!convInfo) {
-        // Se a conversa for nova, inicializa os campos padrão do bot
-        convUpsertData.is_bot_active = !fromMe;
-        convUpsertData.is_human_controlled = fromMe;
-        convUpsertData.status = fromMe ? "human_takeover" : "bot";
-        convUpsertData.kanban_stage = fromMe ? "em_atendimento" : "ia_atendendo";
-        convUpsertData.bot_interaction_count = 0;
-        convUpsertData.created_at = now;
-      } else if (fromMe) {
-        convUpsertData.is_human_controlled = true;
-        convUpsertData.is_bot_active = false;
-        convUpsertData.status = "human_takeover";
-        convUpsertData.kanban_stage = "em_atendimento";
-        convUpsertData.bot_handoff_reason = "HUMAN_OPERATOR_MESSAGE";
-        convUpsertData.bot_handoff_at = now;
-      } else if (isCurrentlyInIaStage) {
-        // Preserva explicitamente o bot ativo no banco de dados e mantém em ia_atendendo
-        convUpsertData.is_bot_active = true;
-        convUpsertData.is_human_controlled = false;
-        convUpsertData.status = "bot";
-        convUpsertData.kanban_stage = "ia_atendendo";
-        convUpsertData.assigned_user_id = null;
-        convUpsertData.assigned_to = null;
-      }
+        if (resolvedInboxId && !convInfo.inbox_id) {
+          convUpdateData.inbox_id = resolvedInboxId;
+        }
 
-      const sanitizedUpsert = sanitizeChatConversationPayload(convUpsertData);
-      const { error } = await supabaseAdmin.from("chat_conversations").upsert([sanitizedUpsert], { onConflict: "id" });
-      
-      if (error) {
-        console.error('[ERRO CRITICO NO BACKGROUND]: Erro na busca ou criação da conversa (chat_conversations)', error.message, error);
+        if (fromMe) {
+          convUpdateData.is_human_controlled = true;
+          convUpdateData.is_bot_active = false;
+          convUpdateData.status = "human_takeover";
+          convUpdateData.kanban_stage = "em_atendimento";
+          convUpdateData.bot_handoff_reason = "HUMAN_OPERATOR_MESSAGE";
+          convUpdateData.bot_handoff_at = now;
+        }
+
+        const sanitizedUpdate = sanitizeChatConversationPayload(convUpdateData);
+        const { error } = await supabaseAdmin
+          .from("chat_conversations")
+          .update(sanitizedUpdate)
+          .eq("id", convId);
+
+        if (error) {
+          console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao atualizar conversa existente (chat_conversations)', error.message, error);
+        }
+      } else {
+        // CONVERSA NOVA (Primeiro Contato): Cria o registro inicial com estágio padrão (ia_atendendo para cliente)
+        const convInsertData: any = {
+          id: convId,
+          store_id: storeId,
+          contact_id: contactId,
+          inbox_id: resolvedInboxId,
+          last_message_at: now,
+          last_message_content: text,
+          unread_count: newUnreadCount,
+          updated_at: now,
+          created_at: now,
+          is_bot_active: !fromMe,
+          is_human_controlled: fromMe,
+          status: fromMe ? "human_takeover" : "bot",
+          kanban_stage: fromMe ? "em_atendimento" : "ia_atendendo",
+          bot_interaction_count: 0,
+          bot_handoff_reason: fromMe ? "HUMAN_OPERATOR_MESSAGE" : null,
+          bot_handoff_at: fromMe ? now : null
+        };
+
+        const sanitizedInsert = sanitizeChatConversationPayload(convInsertData);
+        const { error } = await supabaseAdmin
+          .from("chat_conversations")
+          .insert([sanitizedInsert]);
+
+        if (error) {
+          console.error('[ERRO CRITICO NO BACKGROUND]: Erro na criação da nova conversa (chat_conversations)', error.message, error);
+        }
       }
     } catch (error: any) {
       console.error('[ERRO CRITICO NO BACKGROUND]: Exceção na busca ou criação da conversa (chat_conversations)', error.message, error.stack);
