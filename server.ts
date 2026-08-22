@@ -4930,17 +4930,27 @@ const handleAgentStatus = async (req: express.Request, res: express.Response) =>
   try {
     const filterTenantId = (req.query.tenantId || req.query.tenant_id || req.query.store_id || req.headers['x-tenant-id'] || req.headers['x-store-id']) as string;
 
-    // 1. Busca todos os tenants (ou tenant filtrado)
-    let tenantQuery = supabaseAdmin
-      .from('tenants')
-      .select('id, name, slug, erp_type, is_active, last_ping_at, updated_at');
+    // 1. Busca todos os tenants (ou tenant filtrado) com campos seguros (sem is_active)
+    let tenantsList: any[] = [];
+    try {
+      let tenantQuery = supabaseAdmin
+        .from('tenants')
+        .select('id, name, slug, erp_type, last_ping_at, updated_at');
 
-    if (filterTenantId) {
-      const cleanFilter = filterTenantId.replace(/^store_/, '').replace(/^tenant_/, '').trim();
-      tenantQuery = tenantQuery.or(`id.eq.${cleanFilter},slug.eq.${cleanFilter}`);
+      if (filterTenantId) {
+        const cleanFilter = filterTenantId.replace(/^store_/, '').replace(/^tenant_/, '').trim();
+        tenantQuery = tenantQuery.or(`id.eq.${cleanFilter},slug.eq.${cleanFilter}`);
+      }
+
+      const { data, error: tenantsError } = await tenantQuery;
+      if (tenantsError) {
+        console.warn("[DESKTOP AGENT STATUS] Aviso na consulta de tenants:", tenantsError.message);
+      } else {
+        tenantsList = data || [];
+      }
+    } catch (tErr: any) {
+      console.warn("[DESKTOP AGENT STATUS] Erro ao buscar tenants:", tErr?.message);
     }
-
-    const { data: tenantsList, error: tenantsError } = await tenantQuery;
 
     // 2. Busca todos os registros de agent_integrations
     let agentQuery = supabaseAdmin
@@ -4987,7 +4997,7 @@ const handleAgentStatus = async (req: express.Request, res: express.Response) =>
           id: agent?.id || t.id,
           tenant_id: t.id,
           machine_id: agent?.machine_id || 'Servidor Local',
-          is_active: agent?.is_active ?? t.is_active ?? true,
+          is_active: agent?.is_active ?? true,
           last_seen: latestTimestamp,
           activation_token: agent?.activation_token || null,
           tenants: {
@@ -5288,9 +5298,13 @@ const requireChatEnabled = async (req: any, res: any, next: any) => {
     }
 
     if (tenantId) {
-       const { data: tenant } = await supabaseAdmin.from('tenants').select('is_chat_enabled').eq('id', tenantId).single();
-       if (tenant && tenant.is_chat_enabled === false) {
-          return res.status(403).json({ error: "Módulo de Chat desativado para esta loja." });
+       try {
+         const { data: tenant } = await supabaseAdmin.from('tenants').select('id, name, is_chat_enabled').eq('id', tenantId).maybeSingle();
+         if (tenant && tenant.is_chat_enabled === false) {
+            return res.status(403).json({ error: "Módulo de Chat desativado para esta loja." });
+         }
+       } catch (tErr: any) {
+         console.warn("[Chat Middleware] Aviso ao consultar licença do tenant:", tErr?.message);
        }
     }
     
@@ -7760,44 +7774,62 @@ app.post("/api/v1/chat/conversations/:id/trigger-handoff", async (req, res) => {
   }
 });
 
-// Endpoint para movimentação de estágio no Kanban (Drag-and-Drop)
-app.all("/api/v1/chat/conversations/:id/stage", async (req, res) => {
+// Endpoint para movimentação de estágio no Kanban (Drag-and-Drop) e Automação de Estágio
+const handleStageUpdate = async (req: express.Request, res: express.Response) => {
   try {
-    const conversationId = req.params.id;
+    const conversationId = req.params.id || req.body.conversationId || req.body.id;
     const storeId = (req.body?.storeId || req.query?.storeId || req.headers["x-tenant-id"] || "default") as string;
-    const { stage, assignedUserId } = req.body;
+    const { stage, kanban_stage, assignedUserId, manual, is_manual_move } = req.body;
+    const targetStageInput = stage || kanban_stage;
 
-    if (!conversationId || !stage) {
+    if (!conversationId || !targetStageInput) {
       return res.status(400).json({ error: "conversationId e stage são obrigatórios." });
     }
+
+    const isManual = manual === true || is_manual_move === true || targetStageInput === "novos_triagem";
 
     const validStages = [
       "novos_triagem", "em_atendimento", "aguardando_pagamento", "saiu_entrega", "finalizado",
       "NEW", "BOT", "WAITING", "STORE_REDIRECT", "HUMAN", "CLOSED",
-      "novos_clientes", "ia_atendendo", "atendimento_humano", "enviado_webloja", "aguardando_resposta", "em_separacao", "concluido"
+      "novos_clientes", "ia_atendendo", "atendimento_humano", "enviado_webloja", "aguardando_resposta", "em_separacao", "concluido",
+      "triagem", "novos", "delivery"
     ];
-    if (!validStages.includes(stage)) {
-      return res.status(400).json({ error: `Estágio inválido: ${stage}. Válidos: ${validStages.join(", ")}` });
+    if (!validStages.includes(targetStageInput)) {
+      return res.status(400).json({ error: `Estágio inválido: ${targetStageInput}. Válidos: ${validStages.join(", ")}` });
     }
 
-    const updated = await chatStore.updateConversationStage(conversationId, storeId, stage, assignedUserId);
+    const updated = await chatStore.updateConversationStage(
+      conversationId, 
+      storeId, 
+      targetStageInput, 
+      assignedUserId,
+      isManual
+    );
     
     // Broadcast em tempo real para todos os atendentes conectados no Kanban
+    const finalStage = updated?.kanban_stage || targetStageInput;
     realtimeHub.broadcastToStore(storeId, "conversation_stage_changed", {
       conversationId,
-      stage,
+      stage: finalStage,
+      kanban_stage: finalStage,
       status: updated?.status,
       is_bot_active: updated?.is_bot_active,
+      is_human_controlled: updated?.is_human_controlled,
       assigned_user_id: updated?.assigned_user_id,
+      manual: isManual,
       updated_at: new Date().toISOString()
     });
 
-    return res.json({ success: true, conversation: updated });
+    return res.json({ success: true, conversation: updated, stage: finalStage });
   } catch (err: any) {
     console.error("[Kanban Stage Update Error]:", err);
     return res.status(500).json({ error: err.message || "Erro ao atualizar estágio do Kanban." });
   }
-});
+};
+
+app.all("/api/v1/chat/conversations/:id/stage", handleStageUpdate);
+app.all("/api/v1/automation/stage", handleStageUpdate);
+app.all("/api/v1/chat/conversations/stage", handleStageUpdate);
 
 async function startServer() {
   let __filename = "";

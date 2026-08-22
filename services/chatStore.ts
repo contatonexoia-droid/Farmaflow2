@@ -39,6 +39,7 @@ export interface ChatConversation {
   is_human_controlled?: boolean;
   status: "OPEN" | "PENDING" | "finalizado" | "BOT" | string;
   kanban_stage?: "novos_triagem" | "ia_atendendo" | "aguardando_pagamento" | "em_atendimento" | "finalizado" | string;
+  stage?: string;
   last_message_at: string;
   last_message_content: string;
   unread_count?: number;
@@ -100,7 +101,9 @@ export const VALID_CHAT_CONVERSATION_COLUMNS = new Set([
   "last_message_content",
   "last_welcome_sent_at",
   "kanban_stage",
+  "stage",
   "is_bot_active",
+  "is_human_controlled",
   "bot_interaction_count",
   "bot_handoff_reason",
   "bot_handoff_at"
@@ -114,6 +117,60 @@ export function sanitizeChatConversationPayload(data: Record<string, any>): Reco
     }
   }
   return sanitized;
+}
+
+export function resolveConversationKanbanStage(conv: any): string {
+  const raw = conv.kanban_stage || conv.stage;
+  if (raw) {
+    const s = String(raw).toLowerCase().trim();
+    if (s === "novos_triagem" || s === "triagem" || s === "novos" || s === "novos_clientes" || s === "new" || s === "open") {
+      return "novos_triagem";
+    }
+    if (s === "ia_atendendo" || s === "bot" || s === "ia" || s === "bot_atendendo") {
+      return "ia_atendendo";
+    }
+    if (s === "em_atendimento" || s === "atendimento_humano" || s === "humano" || s === "human" || s === "human_takeover" || s === "balcao") {
+      return "em_atendimento";
+    }
+    if (s === "aguardando_pagamento" || s === "pagamento" || s === "enviado_webloja" || s === "aguardando_resposta" || s === "store_redirect" || s === "waiting" || s === "pending") {
+      return "aguardando_pagamento";
+    }
+    if (s === "saiu_entrega" || s === "delivery" || s === "em_separacao" || s === "separacao" || s === "rota" || s === "em_rota" || s === "enviado" || s === "saiu_para_entrega") {
+      return "saiu_entrega";
+    }
+    if (s === "finalizado" || s === "concluido" || s === "concluida" || s === "finalizada" || s === "closed" || s === "encerrado" || s === "encerrada") {
+      return "finalizado";
+    }
+    return s;
+  }
+
+  if (conv.status === "CLOSED" || conv.status === "finalizado" || conv.status === "concluido" || conv.status === "encerrado") {
+    return "finalizado";
+  }
+  if (conv.status === "PENDING" || conv.status === "WAITING" || conv.status === "aguardando_pagamento" || conv.bot_handoff_reason === "STORE_REDIRECT") {
+    return "aguardando_pagamento";
+  }
+  if (conv.status === "saiu_entrega" || conv.status === "delivery" || conv.status === "em_separacao") {
+    return "saiu_entrega";
+  }
+
+  const isHumanControlled = 
+    conv.is_human_controlled === true ||
+    Boolean(conv.assigned_user_id) ||
+    Boolean(conv.assigned_to) ||
+    conv.status === "human_takeover" ||
+    conv.status === "HUMAN" ||
+    conv.status === "em_atendimento";
+
+  if (isHumanControlled) {
+    return "em_atendimento";
+  }
+
+  if (conv.is_bot_active === true || conv.status === "bot" || conv.status === "BOT" || conv.status === "ia_atendendo") {
+    return "ia_atendendo";
+  }
+
+  return "novos_triagem";
 }
 
 class ChatStore {
@@ -282,14 +339,17 @@ class ChatStore {
       if (!error && data) {
         const conversations = data as any[];
         for (const conv of conversations) {
-          // Reconciliação retroativa e estrita entre status, flags humanas e estágios do Kanban
+          const resolvedStage = resolveConversationKanbanStage(conv);
+          conv.kanban_stage = resolvedStage;
+          conv.stage = resolvedStage;
+
           const isHumanControlled = 
             conv.is_human_controlled === true ||
             Boolean(conv.assigned_user_id) ||
             Boolean(conv.assigned_to) ||
-            conv.is_bot_active === false ||
             conv.status === "human_takeover" ||
-            conv.status === "em_atendimento";
+            conv.status === "em_atendimento" ||
+            resolvedStage === "em_atendimento";
 
           if (isHumanControlled) {
             conv.is_human_controlled = true;
@@ -297,34 +357,28 @@ class ChatStore {
             if (conv.status === "bot" || conv.status === "BOT" || !conv.status) {
               conv.status = "human_takeover";
             }
-            if (conv.status === "finalizado" || conv.kanban_stage === "finalizado") {
-              conv.kanban_stage = "finalizado";
-            } else if (conv.kanban_stage === "aguardando_pagamento" || conv.status === "PENDING") {
-              conv.kanban_stage = "aguardando_pagamento";
-            } else if (conv.kanban_stage === "aguardando_pagamento" || conv.bot_handoff_reason === "aguardando_pagamento") {
-              conv.kanban_stage = "aguardando_pagamento";
-            } else {
-              conv.kanban_stage = "em_atendimento";
-            }
-          } else {
-            // Estado IA Atendendo
+          } else if (resolvedStage === "ia_atendendo") {
             conv.is_human_controlled = false;
             conv.is_bot_active = true;
             conv.assigned_user_id = null;
             conv.assigned_to = null;
-            if (conv.status === "finalizado" || conv.kanban_stage === "finalizado") {
-              conv.kanban_stage = "finalizado";
-            } else if (conv.kanban_stage === "aguardando_pagamento" || conv.status === "PENDING") {
-              conv.kanban_stage = "aguardando_pagamento";
-            } else if (conv.kanban_stage === "aguardando_pagamento" || conv.bot_handoff_reason === "aguardando_pagamento") {
-              conv.kanban_stage = "aguardando_pagamento";
-            } else if (conv.kanban_stage === "novos_triagem") {
-              conv.kanban_stage = "novos_triagem";
-            } else {
-              conv.kanban_stage = "ia_atendendo";
+            if (!conv.status || conv.status === "OPEN") {
               conv.status = "bot";
             }
+          } else if (resolvedStage === "finalizado") {
+            conv.is_bot_active = false;
+            conv.status = "CLOSED";
+          } else if (resolvedStage === "aguardando_pagamento") {
+            if (!conv.status) conv.status = "PENDING";
+          } else if (resolvedStage === "saiu_entrega") {
+            conv.is_bot_active = false;
+            if (!conv.status) conv.status = "OPEN";
+          } else if (resolvedStage === "novos_triagem") {
+            conv.is_bot_active = false;
+            conv.is_human_controlled = false;
+            if (!conv.status) conv.status = "OPEN";
           }
+
           conv.labels = await this.getConversationLabels(conv.id);
         }
         return conversations;
@@ -347,13 +401,17 @@ class ChatStore {
       if (!conv.contact && conv.contact_id) {
         conv.contact = this.contacts.find(c => c.id === conv.contact_id);
       }
+      const resolvedStage = resolveConversationKanbanStage(conv);
+      conv.kanban_stage = resolvedStage;
+      conv.stage = resolvedStage;
+
       const isHumanControlled = 
         conv.is_human_controlled === true ||
         Boolean(conv.assigned_user_id) ||
         Boolean(conv.assigned_to) ||
-        conv.is_bot_active === false ||
         conv.status === "human_takeover" ||
-        conv.status === "em_atendimento";
+        conv.status === "em_atendimento" ||
+        resolvedStage === "em_atendimento";
 
       if (isHumanControlled) {
         conv.is_human_controlled = true;
@@ -361,33 +419,28 @@ class ChatStore {
         if (conv.status === "bot" || conv.status === "BOT" || !conv.status) {
           conv.status = "human_takeover";
         }
-        if (conv.status === "finalizado" || conv.kanban_stage === "finalizado") {
-          conv.kanban_stage = "finalizado";
-        } else if (conv.kanban_stage === "aguardando_pagamento" || conv.status === "PENDING") {
-          conv.kanban_stage = "aguardando_pagamento";
-        } else if (conv.kanban_stage === "aguardando_pagamento" || conv.bot_handoff_reason === "aguardando_pagamento") {
-          conv.kanban_stage = "aguardando_pagamento";
-        } else {
-          conv.kanban_stage = "em_atendimento";
-        }
-      } else {
+      } else if (resolvedStage === "ia_atendendo") {
         conv.is_human_controlled = false;
         conv.is_bot_active = true;
         conv.assigned_user_id = null;
         conv.assigned_to = null;
-        if (conv.status === "finalizado" || conv.kanban_stage === "finalizado") {
-          conv.kanban_stage = "finalizado";
-        } else if (conv.kanban_stage === "aguardando_pagamento" || conv.status === "PENDING") {
-          conv.kanban_stage = "aguardando_pagamento";
-        } else if (conv.kanban_stage === "aguardando_pagamento" || conv.bot_handoff_reason === "aguardando_pagamento") {
-          conv.kanban_stage = "aguardando_pagamento";
-        } else if (conv.kanban_stage === "novos_triagem") {
-          conv.kanban_stage = "novos_triagem";
-        } else {
-          conv.kanban_stage = "ia_atendendo";
+        if (!conv.status || conv.status === "OPEN") {
           conv.status = "bot";
         }
+      } else if (resolvedStage === "finalizado") {
+        conv.is_bot_active = false;
+        conv.status = "CLOSED";
+      } else if (resolvedStage === "aguardando_pagamento") {
+        if (!conv.status) conv.status = "PENDING";
+      } else if (resolvedStage === "saiu_entrega") {
+        conv.is_bot_active = false;
+        if (!conv.status) conv.status = "OPEN";
+      } else if (resolvedStage === "novos_triagem") {
+        conv.is_bot_active = false;
+        conv.is_human_controlled = false;
+        if (!conv.status) conv.status = "OPEN";
       }
+
       conv.labels = await this.getConversationLabels(conv.id);
     }
     return filtered;
@@ -1276,13 +1329,17 @@ class ChatStore {
       conv = this.conversations.find(c => c.id === conversationId) || null;
     }
     if (conv) {
+      const resolvedStage = resolveConversationKanbanStage(conv);
+      conv.kanban_stage = resolvedStage;
+      conv.stage = resolvedStage;
+
       const isHuman = 
         conv.is_human_controlled === true ||
         Boolean(conv.assigned_user_id) ||
         Boolean(conv.assigned_to) ||
-        conv.is_bot_active === false ||
         conv.status === "human_takeover" ||
-        conv.status === "em_atendimento";
+        conv.status === "em_atendimento" ||
+        resolvedStage === "em_atendimento";
 
       if (isHuman) {
         conv.is_human_controlled = true;
@@ -1290,32 +1347,26 @@ class ChatStore {
         if (conv.status === "bot" || conv.status === "BOT" || !conv.status) {
           conv.status = "human_takeover";
         }
-        if (conv.status === "finalizado" || conv.kanban_stage === "finalizado") {
-          conv.kanban_stage = "finalizado";
-        } else if (conv.kanban_stage === "aguardando_pagamento" || conv.status === "PENDING") {
-          conv.kanban_stage = "aguardando_pagamento";
-        } else if (conv.kanban_stage === "aguardando_pagamento" || conv.bot_handoff_reason === "aguardando_pagamento") {
-          conv.kanban_stage = "aguardando_pagamento";
-        } else {
-          conv.kanban_stage = "em_atendimento";
-        }
-      } else {
+      } else if (resolvedStage === "ia_atendendo") {
         conv.is_human_controlled = false;
         conv.is_bot_active = true;
         conv.assigned_user_id = null;
         conv.assigned_to = null;
-        if (conv.status === "finalizado" || conv.kanban_stage === "finalizado") {
-          conv.kanban_stage = "finalizado";
-        } else if (conv.kanban_stage === "aguardando_pagamento" || conv.status === "PENDING") {
-          conv.kanban_stage = "aguardando_pagamento";
-        } else if (conv.kanban_stage === "aguardando_pagamento" || conv.bot_handoff_reason === "aguardando_pagamento") {
-          conv.kanban_stage = "aguardando_pagamento";
-        } else if (conv.kanban_stage === "novos_triagem") {
-          conv.kanban_stage = "novos_triagem";
-        } else {
-          conv.kanban_stage = "ia_atendendo";
+        if (!conv.status || conv.status === "OPEN") {
           conv.status = "bot";
         }
+      } else if (resolvedStage === "finalizado") {
+        conv.is_bot_active = false;
+        conv.status = "CLOSED";
+      } else if (resolvedStage === "aguardando_pagamento") {
+        if (!conv.status) conv.status = "PENDING";
+      } else if (resolvedStage === "saiu_entrega") {
+        conv.is_bot_active = false;
+        if (!conv.status) conv.status = "OPEN";
+      } else if (resolvedStage === "novos_triagem") {
+        conv.is_bot_active = false;
+        conv.is_human_controlled = false;
+        if (!conv.status) conv.status = "OPEN";
       }
     }
     return conv as ChatConversation | null;
@@ -1387,22 +1438,23 @@ class ChatStore {
     conversationId: string,
     storeId: string,
     targetStage: string,
-    assignedUserId?: string | null
+    assignedUserId?: string | null,
+    isManual?: boolean
   ): Promise<ChatConversation | null> {
     const nowIso = new Date().toISOString();
     
     // Normalização estrita do estágio para o novo padrão de delivery
     let normalizedStage = "novos_triagem";
     const s = String(targetStage || "").toLowerCase().trim();
-    if (s === "novos_clientes" || s === "novos_triagem" || s === "new" || s === "open") {
+    if (s === "novos_triagem" || s === "triagem" || s === "novos" || s === "novos_clientes" || s === "new" || s === "open") {
       normalizedStage = "novos_triagem";
-    } else if (s === "ia_atendendo" || s === "bot") {
+    } else if (s === "ia_atendendo" || s === "bot" || s === "ia") {
       normalizedStage = "ia_atendendo";
-    } else if (s === "atendimento_humano" || s === "em_atendimento" || s === "human" || s === "human_takeover") {
+    } else if (s === "em_atendimento" || s === "atendimento_humano" || s === "humano" || s === "human" || s === "human_takeover" || s === "balcao") {
       normalizedStage = "em_atendimento";
-    } else if (s === "enviado_webloja" || s === "aguardando_resposta" || s === "aguardando_pagamento" || s === "store_redirect" || s === "waiting" || s === "pending") {
+    } else if (s === "aguardando_pagamento" || s === "pagamento" || s === "enviado_webloja" || s === "aguardando_resposta" || s === "store_redirect" || s === "waiting" || s === "pending") {
       normalizedStage = "aguardando_pagamento";
-    } else if (s === "em_separacao" || s === "saiu_entrega" || s === "separacao" || s === "delivery") {
+    } else if (s === "saiu_entrega" || s === "delivery" || s === "em_separacao" || s === "separacao" || s === "rota") {
       normalizedStage = "saiu_entrega";
     } else if (s === "finalizado" || s === "concluido" || s === "concluida" || s === "closed") {
       normalizedStage = "finalizado";
@@ -1410,6 +1462,7 @@ class ChatStore {
 
     const updates: any = {
       kanban_stage: normalizedStage,
+      stage: normalizedStage,
       updated_at: nowIso
     };
 
@@ -1425,6 +1478,9 @@ class ChatStore {
         updates.is_human_controlled = false;
         updates.assigned_user_id = null;
         updates.assigned_to = null;
+        updates.bot_interaction_count = 0;
+        updates.bot_handoff_reason = null;
+        updates.bot_handoff_at = null;
         break;
       case "ia_atendendo":
         updates.status = "bot";

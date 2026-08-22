@@ -126,13 +126,13 @@ export interface ChatKanbanProps {
 
 /**
  * Função de mapeamento e normalização com total retrocompatibilidade
- * para estágios legados, mensagens do webhook e agentes de IA.
+ * para estágios legados, variantes e agentes de IA.
  */
 export function normalizeKanbanStage(stageOrStatus: string | undefined | null, conv?: any): KanbanStageId {
   if (!stageOrStatus) {
     if (conv) {
-      if (conv.status === 'CLOSED' || conv.status === 'finalizado') return 'finalizado';
-      if (conv.status === 'PENDING' || conv.status === 'WAITING') return 'aguardando_pagamento';
+      if (conv.status === 'CLOSED' || conv.status === 'finalizado' || conv.status === 'concluido' || conv.status === 'concluida') return 'finalizado';
+      if (conv.status === 'PENDING' || conv.status === 'WAITING' || conv.status === 'aguardando_pagamento') return 'aguardando_pagamento';
       if (conv.bot_handoff_reason === 'STORE_REDIRECT') return 'aguardando_pagamento';
       const isHuman =
         conv.is_human_controlled === true ||
@@ -140,48 +140,55 @@ export function normalizeKanbanStage(stageOrStatus: string | undefined | null, c
         Boolean(conv.assigned_to) ||
         conv.is_bot_active === false ||
         conv.status === 'human_takeover' ||
-        conv.status === 'HUMAN';
+        conv.status === 'HUMAN' ||
+        conv.status === 'em_atendimento';
       if (isHuman) return 'em_atendimento';
-      if (conv.is_bot_active === true) return 'ia_atendendo';
+      if (conv.is_bot_active === true || conv.status === 'bot' || conv.status === 'BOT' || conv.status === 'ia_atendendo') return 'ia_atendendo';
     }
     return 'novos_triagem';
   }
 
   const s = String(stageOrStatus).toLowerCase().trim();
 
-  // 1. 'novos_clientes' ou 'novos_triagem' -> 'novos_triagem'
+  // 1. 'novos_triagem': aceitar 'novos_triagem' | 'triagem' | 'novos' | legados ('novos_clientes', 'new', 'open')
   if (
-    s === 'novos_clientes' ||
     s === 'novos_triagem' ||
+    s === 'triagem' ||
+    s === 'novos' ||
+    s === 'novos_clientes' ||
     s === 'new' ||
     s === 'open'
   ) {
     return 'novos_triagem';
   }
 
-  // 1.5. 'ia_atendendo' -> 'ia_atendendo'
+  // 2. 'ia_atendendo': aceitar 'ia_atendendo' | 'bot' | 'ia'
   if (
     s === 'ia_atendendo' ||
-    s === 'bot'
+    s === 'bot' ||
+    s === 'ia'
   ) {
     return 'ia_atendendo';
   }
 
-  // 2. 'atendimento_humano' -> 'em_atendimento'
+  // 3. 'em_atendimento': aceitar 'em_atendimento' | 'atendimento_humano' | 'humano' | 'human' | 'human_takeover' | 'balcao'
   if (
-    s === 'atendimento_humano' ||
     s === 'em_atendimento' ||
+    s === 'atendimento_humano' ||
+    s === 'humano' ||
     s === 'human' ||
-    s === 'human_takeover'
+    s === 'human_takeover' ||
+    s === 'balcao'
   ) {
     return 'em_atendimento';
   }
 
-  // 3. 'enviado_webloja' ou 'aguardando_resposta' -> 'aguardando_pagamento'
+  // 4. 'aguardando_pagamento': aceitar 'aguardando_pagamento' | 'pagamento' | 'enviado_webloja' | 'aguardando_resposta' | 'store_redirect' | 'waiting' | 'pending'
   if (
+    s === 'aguardando_pagamento' ||
+    s === 'pagamento' ||
     s === 'enviado_webloja' ||
     s === 'aguardando_resposta' ||
-    s === 'aguardando_pagamento' ||
     s === 'store_redirect' ||
     s === 'waiting' ||
     s === 'pending'
@@ -189,21 +196,23 @@ export function normalizeKanbanStage(stageOrStatus: string | undefined | null, c
     return 'aguardando_pagamento';
   }
 
-  // 4. 'em_separacao' ou 'saiu_entrega' -> 'saiu_entrega'
+  // 5. 'saiu_entrega': aceitar 'saiu_entrega' | 'delivery' | 'em_separacao' | 'separacao' | 'rota'
   if (
-    s === 'em_separacao' ||
     s === 'saiu_entrega' ||
+    s === 'delivery' ||
+    s === 'em_separacao' ||
     s === 'separacao' ||
-    s === 'delivery'
+    s === 'rota'
   ) {
     return 'saiu_entrega';
   }
 
-  // 5. 'finalizado' ou 'concluido' -> 'finalizado'
+  // 6. 'finalizado': aceitar 'finalizado' | 'concluido' | 'concluida' | 'finalizada' | 'closed'
   if (
     s === 'finalizado' ||
     s === 'concluido' ||
     s === 'concluida' ||
+    s === 'finalizada' ||
     s === 'closed'
   ) {
     return 'finalizado';
@@ -222,8 +231,12 @@ export function getConversationKanbanStage(conv: any): KanbanStageId {
     return normalizeKanbanStage(conv.kanban_stage, conv);
   }
 
-  if (conv.status === 'CLOSED' || conv.status === 'finalizado') return 'finalizado';
-  if (conv.status === 'PENDING' || conv.status === 'WAITING') return 'aguardando_pagamento';
+  if (conv.stage) {
+    return normalizeKanbanStage(conv.stage, conv);
+  }
+
+  if (conv.status === 'CLOSED' || conv.status === 'finalizado' || conv.status === 'concluido') return 'finalizado';
+  if (conv.status === 'PENDING' || conv.status === 'WAITING' || conv.status === 'aguardando_pagamento') return 'aguardando_pagamento';
   if (conv.bot_handoff_reason === 'STORE_REDIRECT') return 'aguardando_pagamento';
 
   const isHumanControlled = 
@@ -232,13 +245,14 @@ export function getConversationKanbanStage(conv: any): KanbanStageId {
     Boolean(conv.assigned_to) ||
     conv.is_bot_active === false ||
     conv.status === 'human_takeover' ||
-    conv.status === 'HUMAN';
+    conv.status === 'HUMAN' ||
+    conv.status === 'em_atendimento';
 
   if (isHumanControlled) {
     return 'em_atendimento';
   }
 
-  if (conv.is_bot_active === true) {
+  if (conv.is_bot_active === true || conv.status === 'bot' || conv.status === 'BOT') {
     return 'ia_atendendo';
   }
 
@@ -332,7 +346,7 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
     });
   }, [conversations, selectedInboxId, selectedTeamId, selectedTagId, searchQuery]);
 
-  // Agrupamento de conversas pelas 6 colunas do Kanban
+  // Agrupamento de conversas pelas 6 colunas do Kanban com filtro tolerante a aliases
   const columnConversations = useMemo(() => {
     const map: Record<KanbanStageId, any[]> = {
       novos_triagem: [],
@@ -344,11 +358,23 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
     } as any;
 
     filteredConversations.forEach(conv => {
+      const rawStage = (conv.kanban_stage || conv.stage || '').toLowerCase().trim();
       const stage = getConversationKanbanStage(conv);
-      if (stage === 'saiu_entrega' || stage === 'em_separacao' as any || stage === 'delivery' as any) {
-        map.saiu_entrega.push(conv);
-      } else if (stage === 'novos_triagem' || stage === 'novos_clientes' as any || stage === 'NEW' as any) {
+
+      // Filtro tolerante a aliases (novos_triagem / triagem / novos)
+      if (stage === 'novos_triagem' || rawStage === 'novos_triagem' || rawStage === 'triagem' || rawStage === 'novos') {
         map.novos_triagem.push(conv);
+      } else if (stage === 'ia_atendendo' || rawStage === 'ia_atendendo' || rawStage === 'bot' || rawStage === 'ia') {
+        map.ia_atendendo.push(conv);
+      } else if (stage === 'em_atendimento' || rawStage === 'em_atendimento' || rawStage === 'atendimento_humano' || rawStage === 'humano' || rawStage === 'balcao') {
+        map.em_atendimento.push(conv);
+      } else if (stage === 'aguardando_pagamento' || rawStage === 'aguardando_pagamento' || rawStage === 'pagamento' || rawStage === 'enviado_webloja' || rawStage === 'aguardando_resposta') {
+        map.aguardando_pagamento.push(conv);
+      // Filtro tolerante a aliases (saiu_entrega / delivery / em_separacao)
+      } else if (stage === 'saiu_entrega' || rawStage === 'saiu_entrega' || rawStage === 'delivery' || rawStage === 'em_separacao' || rawStage === 'separacao') {
+        map.saiu_entrega.push(conv);
+      } else if (stage === 'finalizado' || rawStage === 'finalizado' || rawStage === 'concluido' || rawStage === 'closed') {
+        map.finalizado.push(conv);
       } else if (map[stage]) {
         map[stage].push(conv);
       } else {
@@ -414,7 +440,8 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
     }
 
     // 1. Atualização Otimista na UI com as novas etapas de delivery
-    const isTargetBot = targetStage === 'novos_triagem' || targetStage === 'ia_atendendo';
+    const isTargetTriagem = targetStage === 'novos_triagem';
+    const isTargetBot = targetStage === 'ia_atendendo';
     const isTargetHumano = targetStage === 'em_atendimento';
     const isTargetFinalizado = targetStage === 'finalizado';
     const isTargetAguardando = targetStage === 'aguardando_pagamento';
@@ -422,6 +449,7 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
     const updatedConv = {
       ...draggedConv,
       kanban_stage: targetStage,
+      stage: targetStage,
       status: isTargetFinalizado
         ? 'CLOSED'
         : isTargetAguardando
@@ -432,9 +460,12 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
         ? 'bot'
         : 'OPEN',
       is_bot_active: isTargetBot,
-      is_human_controlled: isTargetHumano || !isTargetBot,
-      assigned_user_id: isTargetBot ? null : (isTargetHumano && currentUser?.id ? currentUser.id : draggedConv.assigned_user_id),
-      assigned_to: isTargetBot ? null : (isTargetHumano && currentUser?.id ? currentUser.id : draggedConv.assigned_to),
+      is_human_controlled: isTargetHumano,
+      assigned_user_id: isTargetBot || isTargetTriagem ? null : (isTargetHumano && currentUser?.id ? currentUser.id : draggedConv.assigned_user_id),
+      assigned_to: isTargetBot || isTargetTriagem ? null : (isTargetHumano && currentUser?.id ? currentUser.id : draggedConv.assigned_to),
+      bot_interaction_count: isTargetTriagem || isTargetBot ? 0 : draggedConv.bot_interaction_count,
+      bot_handoff_reason: isTargetTriagem || isTargetBot ? null : draggedConv.bot_handoff_reason,
+      bot_handoff_at: isTargetTriagem || isTargetBot ? null : draggedConv.bot_handoff_at,
       updated_at: new Date().toISOString()
     };
 
@@ -452,12 +483,13 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
       onConversationsChange(nextConversations);
     }
 
-    // 2. Persistência no Backend & Supabase (gravando a chave oficial do novo fluxo)
+    // 2. Persistência no Backend & Supabase (gravando kanban_stage e stage simultaneamente)
     try {
       setIsUpdating(true);
 
       const payload: Record<string, any> = {
         kanban_stage: targetStage,
+        stage: targetStage,
         status: updatedConv.status,
         is_bot_active: updatedConv.is_bot_active,
         is_human_controlled: updatedConv.is_human_controlled,
@@ -466,8 +498,13 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
       if (updatedConv.assigned_user_id !== undefined) {
         payload.assigned_user_id = updatedConv.assigned_user_id;
       }
+      if (isTargetTriagem || isTargetBot) {
+        payload.bot_interaction_count = 0;
+        payload.bot_handoff_reason = null;
+        payload.bot_handoff_at = null;
+      }
 
-      // 1. Atualiza o banco Supabase (Operação Principal)
+      // 1. Atualiza o banco Supabase (Operação Principal com kanban_stage e stage)
       const { error: dbError } = await supabase
         .from('chat_conversations')
         .update(payload)
@@ -475,7 +512,7 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
 
       if (dbError) throw dbError; // Apenas erros do Supabase revertem o Kanban
 
-      // 2. Dispara automações externas (Operação Secundária isolada)
+      // 2. Dispara automações externas (Operação Secundária isolada sem rollback invasivo)
       try {
         const res = await fetch(`/api/v1/chat/conversations/${activeId}/stage`, {
           method: 'POST',
@@ -485,14 +522,17 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
             stage: targetStage,
             kanban_stage: targetStage,
             is_bot_active: updatedConv.is_bot_active,
+            is_human_controlled: updatedConv.is_human_controlled,
+            manual: true,
+            is_manual_move: true,
             assignedUserId: isTargetHumano && currentUser?.id ? currentUser.id : undefined
           })
         });
         if (!res.ok) {
-          console.warn(`Aviso: Falha ao disparar automação do estágio (Status ${res.status}), mas a movimentação foi mantida.`);
+          console.warn(`Aviso: Falha ao disparar automação do estágio (Status ${res.status}), mas a movimentação manual foi mantida.`);
         }
       } catch (apiErr) {
-        console.warn("Aviso: Falha ao disparar automação do estágio, mas a movimentação no Kanban foi mantida:", apiErr);
+        console.warn("Aviso: Falha ao disparar automação do estágio, mas a movimentação manual no Kanban foi mantida:", apiErr);
       }
     } catch (e) {
       console.error('Erro no banco de dados ao mover card do Kanban:', e);
@@ -502,12 +542,14 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
       }
     } finally {
       setIsUpdating(false);
-      // Libera o card para voltar a receber atualizações via Realtime
-      setLockedConversations(prev => {
-        const n = new Set(prev);
-        n.delete(activeId);
-        return n;
-      });
+      // Mantém trava otimista temporária para absorver broadcasts concorrentes
+      setTimeout(() => {
+        setLockedConversations(prev => {
+          const n = new Set(prev);
+          n.delete(activeId);
+          return n;
+        });
+      }, 1500);
     }
   };
 
@@ -516,7 +558,8 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
     const targetConv = conversations.find(c => c.id === conversationId);
     if (!targetConv) return;
 
-    const isTargetBot = targetStage === 'novos_triagem' || targetStage === 'ia_atendendo';
+    const isTargetTriagem = targetStage === 'novos_triagem';
+    const isTargetBot = targetStage === 'ia_atendendo';
     const isTargetHumano = targetStage === 'em_atendimento';
     const isTargetFinalizado = targetStage === 'finalizado';
     const isTargetAguardando = targetStage === 'aguardando_pagamento';
@@ -524,6 +567,7 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
     const updatedConv = {
       ...targetConv,
       kanban_stage: targetStage,
+      stage: targetStage,
       status: isTargetFinalizado
         ? 'CLOSED'
         : isTargetAguardando
@@ -534,12 +578,12 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
         ? 'bot'
         : 'OPEN',
       is_bot_active: isTargetBot,
-      is_human_controlled: isTargetHumano || !isTargetBot,
-      assigned_user_id: isTargetBot ? null : targetConv.assigned_user_id,
-      assigned_to: isTargetBot ? null : targetConv.assigned_to,
-      bot_interaction_count: isTargetBot ? 0 : targetConv.bot_interaction_count,
-      bot_handoff_reason: isTargetBot ? null : targetConv.bot_handoff_reason,
-      bot_handoff_at: isTargetBot ? null : targetConv.bot_handoff_at
+      is_human_controlled: isTargetHumano,
+      assigned_user_id: isTargetBot || isTargetTriagem ? null : targetConv.assigned_user_id,
+      assigned_to: isTargetBot || isTargetTriagem ? null : targetConv.assigned_to,
+      bot_interaction_count: isTargetTriagem || isTargetBot ? 0 : targetConv.bot_interaction_count,
+      bot_handoff_reason: isTargetTriagem || isTargetBot ? null : targetConv.bot_handoff_reason,
+      bot_handoff_at: isTargetTriagem || isTargetBot ? null : targetConv.bot_handoff_at
     };
 
     const previousConversations = [...conversations];
@@ -559,9 +603,13 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
         .from('chat_conversations')
         .update({
           kanban_stage: targetStage,
+          stage: targetStage,
           status: updatedConv.status,
           is_bot_active: updatedConv.is_bot_active,
           is_human_controlled: updatedConv.is_human_controlled,
+          bot_interaction_count: isTargetTriagem || isTargetBot ? 0 : undefined,
+          bot_handoff_reason: isTargetTriagem || isTargetBot ? null : undefined,
+          bot_handoff_at: isTargetTriagem || isTargetBot ? null : undefined,
           updated_at: new Date().toISOString()
         })
         .eq('id', conversationId);
@@ -577,7 +625,10 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
             storeId: tenantId, 
             stage: targetStage, 
             kanban_stage: targetStage,
-            is_bot_active: isTargetBot
+            is_bot_active: isTargetBot,
+            is_human_controlled: isTargetHumano,
+            manual: true,
+            is_manual_move: true
           })
         });
         if (!res.ok) {
@@ -591,11 +642,13 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
       toast.error('Falha ao atualizar o card no banco. Revertendo...');
       if (onConversationsChange) onConversationsChange(previousConversations);
     } finally {
-      setLockedConversations(prev => {
-        const n = new Set(prev);
-        n.delete(conversationId);
-        return n;
-      });
+      setTimeout(() => {
+        setLockedConversations(prev => {
+          const n = new Set(prev);
+          n.delete(conversationId);
+          return n;
+        });
+      }, 1500);
     }
   };
 
@@ -616,6 +669,7 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
       bot_handoff_reason: nextStatus ? null : targetConv.bot_handoff_reason,
       bot_handoff_at: nextStatus ? null : targetConv.bot_handoff_at,
       kanban_stage: targetStage,
+      stage: targetStage,
       status: nextStatus ? 'bot' : 'human_takeover'
     };
 
@@ -637,6 +691,7 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
             is_bot_active: nextStatus,
             is_human_controlled: !nextStatus,
             kanban_stage: targetStage,
+            stage: targetStage,
             status: updatedConv.status,
             updated_at: new Date().toISOString()
           })

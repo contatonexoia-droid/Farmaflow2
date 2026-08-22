@@ -250,12 +250,16 @@ export interface PharmacyStats {
 
 export type KanbanStageId = 
   | 'novos_triagem' 
-  | 'ia_atendendo'
+  | 'ia_atendendo' 
   | 'em_atendimento' 
   | 'aguardando_pagamento' 
   | 'saiu_entrega' 
   | 'finalizado'
   // Retrocompatibilidade para estágios anteriores e legados
+  | 'triagem'
+  | 'novos'
+  | 'delivery'
+  | 'em_separacao'
   | 'NEW' 
   | 'BOT' 
   | 'WAITING' 
@@ -266,7 +270,6 @@ export type KanbanStageId =
   | 'atendimento_humano' 
   | 'enviado_webloja' 
   | 'aguardando_resposta' 
-  | 'em_separacao' 
   | 'concluido';
 
 export interface KanbanColumnConfig {

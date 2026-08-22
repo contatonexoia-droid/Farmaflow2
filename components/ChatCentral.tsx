@@ -648,18 +648,22 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
         if (json.data && Array.isArray(json.data)) {
           let list = json.data.map((c: any) => {
             const isHuman = c.is_human_controlled === true || Boolean(c.assigned_user_id) || Boolean(c.assigned_to) || c.is_bot_active === false || c.status === 'human_takeover' || c.status === 'HUMAN';
-            let stage = c.kanban_stage;
+            let stage = c.kanban_stage || c.stage;
             if (!stage) {
-              if (c.status === 'CLOSED') stage = 'CLOSED';
-              else if (isHuman) stage = (c.status === 'PENDING' ? 'WAITING' : c.bot_handoff_reason === 'STORE_REDIRECT' ? 'STORE_REDIRECT' : 'HUMAN');
-              else stage = (c.status === 'PENDING' ? 'WAITING' : c.bot_handoff_reason === 'STORE_REDIRECT' ? 'STORE_REDIRECT' : 'BOT');
+              if (c.status === 'CLOSED' || c.status === 'finalizado') stage = 'finalizado';
+              else if (c.status === 'PENDING' || c.status === 'WAITING' || c.bot_handoff_reason === 'STORE_REDIRECT') stage = 'aguardando_pagamento';
+              else if (c.status === 'saiu_entrega' || c.status === 'delivery') stage = 'saiu_entrega';
+              else if (isHuman) stage = 'em_atendimento';
+              else if (c.is_bot_active !== false) stage = 'ia_atendendo';
+              else stage = 'novos_triagem';
             }
             return {
               ...c,
               contact: c.contact || { name: 'Cliente sem nome', phone_number: '' },
               is_human_controlled: isHuman,
               is_bot_active: !isHuman && c.is_bot_active !== false,
-              kanban_stage: stage
+              kanban_stage: stage,
+              stage: stage
             };
           });
 
@@ -687,18 +691,22 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       if (!error && data && data.length > 0) {
         let list = data.map((c: any) => {
           const isHuman = c.is_human_controlled === true || Boolean(c.assigned_user_id) || Boolean(c.assigned_to) || c.is_bot_active === false || c.status === 'human_takeover' || c.status === 'HUMAN';
-          let stage = c.kanban_stage;
+          let stage = c.kanban_stage || c.stage;
           if (!stage) {
-            if (c.status === 'CLOSED') stage = 'CLOSED';
-            else if (isHuman) stage = (c.status === 'PENDING' ? 'WAITING' : c.bot_handoff_reason === 'STORE_REDIRECT' ? 'STORE_REDIRECT' : 'HUMAN');
-            else stage = (c.status === 'PENDING' ? 'WAITING' : c.bot_handoff_reason === 'STORE_REDIRECT' ? 'STORE_REDIRECT' : 'BOT');
+            if (c.status === 'CLOSED' || c.status === 'finalizado') stage = 'finalizado';
+            else if (c.status === 'PENDING' || c.status === 'WAITING' || c.bot_handoff_reason === 'STORE_REDIRECT') stage = 'aguardando_pagamento';
+            else if (c.status === 'saiu_entrega' || c.status === 'delivery') stage = 'saiu_entrega';
+            else if (isHuman) stage = 'em_atendimento';
+            else if (c.is_bot_active !== false) stage = 'ia_atendendo';
+            else stage = 'novos_triagem';
           }
           return {
             ...c,
             contact: c.contact || { name: 'Cliente sem nome', phone_number: '' },
             is_human_controlled: isHuman,
             is_bot_active: !isHuman && c.is_bot_active !== false,
-            kanban_stage: stage
+            kanban_stage: stage,
+            stage: stage
           };
         });
         if (isOperador && allowedIds.length === 1) {
@@ -713,18 +721,22 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
           try {
             let list = JSON.parse(saved).map((c: any) => {
               const isHuman = c.is_human_controlled === true || Boolean(c.assigned_user_id) || Boolean(c.assigned_to) || c.is_bot_active === false || c.status === 'human_takeover' || c.status === 'HUMAN';
-              let stage = c.kanban_stage;
+              let stage = c.kanban_stage || c.stage;
               if (!stage) {
-                if (c.status === 'CLOSED') stage = 'CLOSED';
-                else if (isHuman) stage = (c.status === 'PENDING' ? 'WAITING' : c.bot_handoff_reason === 'STORE_REDIRECT' ? 'STORE_REDIRECT' : 'HUMAN');
-                else stage = (c.status === 'PENDING' ? 'WAITING' : c.bot_handoff_reason === 'STORE_REDIRECT' ? 'STORE_REDIRECT' : 'BOT');
+                if (c.status === 'CLOSED' || c.status === 'finalizado') stage = 'finalizado';
+                else if (c.status === 'PENDING' || c.status === 'WAITING' || c.bot_handoff_reason === 'STORE_REDIRECT') stage = 'aguardando_pagamento';
+                else if (c.status === 'saiu_entrega' || c.status === 'delivery') stage = 'saiu_entrega';
+                else if (isHuman) stage = 'em_atendimento';
+                else if (c.is_bot_active !== false) stage = 'ia_atendendo';
+                else stage = 'novos_triagem';
               }
               return {
                 ...c,
                 contact: c.contact || { name: 'Cliente sem nome', phone_number: '' },
                 is_human_controlled: isHuman,
                 is_bot_active: !isHuman && c.is_bot_active !== false,
-                kanban_stage: stage
+                kanban_stage: stage,
+                stage: stage
               };
             });
             if (isOperador && allowedIds.length === 1) {
