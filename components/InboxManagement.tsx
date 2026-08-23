@@ -626,8 +626,9 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
             c.tenant_user_id === selectedId ||
             c.supabase_user_id === selectedId
           );
-          // Preferência por supabase_user_id se disponível no sistema Supabase Auth, caso contrário tenant_users.id
-          const finalUserId = colab?.supabase_user_id || colab?.tenant_user_id || colab?.id || selectedId;
+          // GARANTIA DE USO DO ID DA TABELA tenant_users CONFORME SOLICITADO
+          const finalUserId = colab?.tenant_user_id || colab?.id || selectedId;
+          
           return {
             department_id: departmentId,
             user_id: finalUserId,
@@ -658,13 +659,16 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
             })));
         } catch (_) {}
 
-        // Sincroniza com o backend Express
+        // Sincroniza com o backend Express enviando também o tenant_id para que a store grave corretamente
         try {
           const headers = await getAuthHeaders();
           await fetch(`/api/v1/inboxes/${departmentId}/members`, {
             method: 'POST',
             headers,
-            body: JSON.stringify({ userIds: recordsToInsert.map(r => r.user_id) })
+            body: JSON.stringify({ 
+              userIds: recordsToInsert.map(r => r.user_id),
+              tenantId: activeTenantId
+            })
           });
         } catch (_) {}
       } else {
@@ -674,7 +678,10 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
           await fetch(`/api/v1/inboxes/${departmentId}/members`, {
             method: 'POST',
             headers,
-            body: JSON.stringify({ userIds: [] })
+            body: JSON.stringify({ 
+              userIds: [],
+              tenantId: activeTenantId 
+            })
           });
         } catch (_) {}
       }

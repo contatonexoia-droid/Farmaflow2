@@ -235,15 +235,36 @@ class InboxStore {
     return this.members.filter(m => m.inbox_id === inboxId).map(m => m.user_id);
   }
 
-  public async setMembers(inboxId: string, userIds: string[]): Promise<string[]> {
+  public async setMembers(inboxId: string, userIds: string[], tenantId?: string): Promise<string[]> {
     const cleanUserIds = Array.from(new Set(userIds.filter(Boolean)));
+    
+    let activeTenantId = tenantId;
+    if (!activeTenantId) {
+      try {
+        const { data: inboxInfo } = await supabaseAdmin
+          .from("inboxes")
+          .select("store_id")
+          .eq("id", inboxId)
+          .single();
+        if (inboxInfo?.store_id) {
+          activeTenantId = inboxInfo.store_id;
+        }
+      } catch (e) {
+        console.warn("[InboxStore] Could not fetch store_id for inbox:", inboxId);
+      }
+    }
 
     // 1. Update department_access table
     try {
       await supabaseAdmin.from("department_access").delete().eq("department_id", inboxId);
       if (cleanUserIds.length > 0) {
         await supabaseAdmin.from("department_access").insert(
-          cleanUserIds.map(uid => ({ department_id: inboxId, user_id: uid, created_at: new Date().toISOString() }))
+          cleanUserIds.map(uid => ({ 
+            department_id: inboxId, 
+            user_id: uid, 
+            tenant_id: activeTenantId || null,
+            created_at: new Date().toISOString() 
+          }))
         );
       }
     } catch (err) {

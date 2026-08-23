@@ -324,8 +324,18 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
 
   // Filtro geral de conversas
   const filteredConversations = useMemo(() => {
+    // Lista de IDs de caixas permitidas que vieram pelas props do componente
+    const allowedInboxIdsSet = new Set(inboxes.map(i => i.id));
+
     return effectiveConversations.filter(conv => {
-      // Filtro por Caixa de Entrada
+      // Se for operador, só pode visualizar conversas pertencentes às caixas permitidas
+      if (isOperador) {
+        if (!conv.inbox_id || !allowedInboxIdsSet.has(conv.inbox_id)) {
+          return false;
+        }
+      }
+
+      // Filtro por Caixa de Entrada selecionada
       if (selectedInboxId !== 'all' && conv.inbox_id !== selectedInboxId) return false;
       // Filtro por Time
       if (selectedTeamId !== 'all' && conv.team_id !== selectedTeamId) return false;
@@ -344,7 +354,7 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
       }
       return true;
     });
-  }, [conversations, selectedInboxId, selectedTeamId, selectedTagId, searchQuery]);
+  }, [effectiveConversations, inboxes, isOperador, selectedInboxId, selectedTeamId, selectedTagId, searchQuery]);
 
   // Agrupamento de conversas pelas 6 colunas do Kanban com filtro tolerante a aliases
   const columnConversations = useMemo(() => {

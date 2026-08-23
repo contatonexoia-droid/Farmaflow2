@@ -759,22 +759,142 @@ app.post("/api/v1/teams/:id/members/toggle", async (req, res) => {
 // =========================================
 // MÓDULO DE CAIXAS DE ENTRADA (INBOXES)
 // =========================================
+
+// Helper robusto para resolver IDs autorizados de operadores em department_access e inbox_members
+async function resolveOperatorAllowedInboxIds(
+  storeId: string,
+  userId?: string,
+  userRole?: string,
+  authHeader?: string,
+  headerUserId?: string,
+  headerUserRole?: string
+): Promise<{ isOperator: boolean; allowedInboxIds: string[] }> {
+  const candidateUserIds = new Set<string>();
+  if (userId && typeof userId === "string" && userId !== "undefined" && userId !== "null") candidateUserIds.add(userId);
+  if (headerUserId && typeof headerUserId === "string" && headerUserId !== "undefined" && headerUserId !== "null") candidateUserIds.add(headerUserId);
+
+  let detectedRole = (userRole || headerUserRole || "").toLowerCase().trim();
+
+  // 1. Tentar resolver a partir do token Bearer se fornecido
+  const cleanAuthToken = authHeader ? String(authHeader).replace(/^Bearer\s+/i, '').trim() : '';
+  if (cleanAuthToken && cleanAuthToken !== "undefined" && cleanAuthToken !== "null") {
+    try {
+      const { data: { user: authUser } } = await supabaseAdmin.auth.getUser(cleanAuthToken);
+      if (authUser) {
+        candidateUserIds.add(authUser.id);
+        if (!detectedRole && authUser.user_metadata?.role) {
+          detectedRole = String(authUser.user_metadata.role).toLowerCase().trim();
+        }
+
+        try {
+          let tuQuery = supabaseAdmin
+            .from("tenant_users")
+            .select("id, supabase_user_id, role, tenant_id");
+          
+          if (authUser.email) {
+            tuQuery = tuQuery.or(`supabase_user_id.eq.${authUser.id},id.eq.${authUser.id},email.eq.${authUser.email}`);
+          } else {
+            tuQuery = tuQuery.or(`supabase_user_id.eq.${authUser.id},id.eq.${authUser.id}`);
+          }
+
+          const { data: tuRows } = await tuQuery;
+          if (tuRows && tuRows.length > 0) {
+            for (const tu of tuRows) {
+              if (tu.id) candidateUserIds.add(tu.id);
+              if (tu.supabase_user_id) candidateUserIds.add(tu.supabase_user_id);
+              if (!detectedRole && tu.role) detectedRole = String(tu.role).toLowerCase().trim();
+            }
+          }
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
+
+  // 2. Buscar correspondência em tenant_users para mapear todos os IDs possíveis (id e supabase_user_id) e role
+  if (candidateUserIds.size > 0) {
+    try {
+      const idFilters = Array.from(candidateUserIds).map(id => `id.eq.${id},supabase_user_id.eq.${id}`).join(',');
+      const { data: tuList } = await supabaseAdmin
+        .from("tenant_users")
+        .select("id, supabase_user_id, role, tenant_id")
+        .or(idFilters);
+      if (tuList && tuList.length > 0) {
+        for (const tu of tuList) {
+          if (tu.id) candidateUserIds.add(tu.id);
+          if (tu.supabase_user_id) candidateUserIds.add(tu.supabase_user_id);
+          if (!detectedRole && tu.role) detectedRole = String(tu.role).toLowerCase().trim();
+        }
+      }
+    } catch (_) {}
+  }
+
+  const isOperator = ["operador", "operator", "atendente", "balconista"].includes(detectedRole);
+  if (!isOperator) {
+    return { isOperator: false, allowedInboxIds: [] };
+  }
+
+  const userIdsArray = Array.from(candidateUserIds);
+  const allowedIdsSet = new Set<string>();
+
+  if (userIdsArray.length > 0) {
+    try {
+      const { data: deptRows, error: deptErr } = await supabaseAdmin
+        .from("department_access")
+        .select("department_id, user_id")
+        .in("user_id", userIdsArray);
+      if (!deptErr && deptRows) {
+        deptRows.forEach((r: any) => {
+          if (r.department_id) allowedIdsSet.add(r.department_id);
+        });
+      }
+    } catch (e) {
+      console.warn("[OperatorAccess] Error querying department_access:", e);
+    }
+
+    try {
+      const { data: memberRows, error: memErr } = await supabaseAdmin
+        .from("inbox_members")
+        .select("inbox_id, user_id")
+        .in("user_id", userIdsArray);
+      if (!memErr && memberRows) {
+        memberRows.forEach((r: any) => {
+          if (r.inbox_id) allowedIdsSet.add(r.inbox_id);
+        });
+      }
+    } catch (e) {
+      console.warn("[OperatorAccess] Error querying inbox_members:", e);
+    }
+  }
+
+  return {
+    isOperator: true,
+    allowedInboxIds: Array.from(allowedIdsSet)
+  };
+}
+
 app.get("/api/v1/inboxes", async (req, res) => {
   try {
-    const storeId = (req.query.storeId as string) || (req.headers["x-tenant-id"] as string) || "default";
-    const userId = req.query.userId as string | undefined;
-    const userRole = req.query.role as string | undefined;
+    const storeId = (req.query.storeId as string) || (req.query.tenantId as string) || (req.headers["x-tenant-id"] as string) || "default";
+    const userId = (req.query.userId as string) || (req.headers["x-user-id"] as string) || undefined;
+    const userRole = (req.query.role as string) || (req.headers["x-user-role"] as string) || undefined;
+    const authHeader = req.headers["authorization"] as string | undefined;
 
     let data = await inboxStore.getInboxes(storeId);
 
-    const isOperator = userId && (userRole?.toLowerCase() === "operador" || userRole?.toLowerCase() === "operator");
+    const { isOperator, allowedInboxIds } = await resolveOperatorAllowedInboxIds(
+      storeId,
+      userId,
+      userRole,
+      authHeader,
+      req.headers["x-user-id"] as string,
+      req.headers["x-user-role"] as string
+    );
+
     if (isOperator) {
-      const { data: memberRows } = await supabaseAdmin
-        .from("inbox_members")
-        .select("inbox_id")
-        .eq("user_id", userId);
-      const allowedIds = memberRows ? memberRows.map(r => r.inbox_id) : [];
-      data = data.filter(inbox => allowedIds.includes(inbox.id));
+      // REGRA ESTRITA DE OPERADOR:
+      // Se for operador, retorna ESTRITAMENTE APENAS as caixas com vínculo explícito em department_access ou inbox_members.
+      // Se não tiver nenhuma caixa vinculada (allowedInboxIds vazio), retorna array vazio ([]). NUNCA injeta outras caixas.
+      data = data.filter(inbox => allowedInboxIds.includes(inbox.id));
     }
 
     return res.json({ data });
@@ -832,10 +952,10 @@ app.get("/api/v1/inboxes/:id/members", async (req, res) => {
 app.post("/api/v1/inboxes/:id/members", async (req, res) => {
   try {
     const { id } = req.params;
-    const { userIds } = req.body;
+    const { userIds, tenantId } = req.body;
     if (!Array.isArray(userIds)) return res.status(400).json({ error: "userIds deve ser um array." });
 
-    const updatedMembers = await inboxStore.setMembers(id, userIds);
+    const updatedMembers = await inboxStore.setMembers(id, userIds, tenantId);
     return res.json({ data: updatedMembers });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
@@ -845,10 +965,10 @@ app.post("/api/v1/inboxes/:id/members", async (req, res) => {
 app.put("/api/v1/inboxes/:id/members", async (req, res) => {
   try {
     const { id } = req.params;
-    const { userIds } = req.body;
+    const { userIds, tenantId } = req.body;
     if (!Array.isArray(userIds)) return res.status(400).json({ error: "userIds deve ser um array." });
 
-    const updatedMembers = await inboxStore.setMembers(id, userIds);
+    const updatedMembers = await inboxStore.setMembers(id, userIds, tenantId);
     return res.json({ data: updatedMembers });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
@@ -7050,43 +7170,53 @@ app.post("/api/v1/contacts/merge", async (req, res) => {
 // --- ENDPOINTS DE CHAT ---
 app.get("/api/v1/chat/conversations", async (req, res) => {
   try {
-    const storeId = (req.query.tenantId as string) || (req.headers["x-tenant-id"] as string) || "default";
+    const storeId = (req.query.tenantId as string) || (req.query.storeId as string) || (req.headers["x-tenant-id"] as string) || "default";
     const inboxId = req.query.inboxId as string | undefined;
-    const userId = req.query.userId as string | undefined;
-    const userRole = req.query.role as string | undefined;
+    const userId = (req.query.userId as string) || (req.headers["x-user-id"] as string) || undefined;
+    const userRole = (req.query.role as string) || (req.headers["x-user-role"] as string) || undefined;
+    const authHeader = req.headers["authorization"] as string | undefined;
 
-    const isOperator = userId && (userRole?.toLowerCase() === "operador" || userRole?.toLowerCase() === "operator");
-    let allowedInboxIds: string[] | undefined = undefined;
+    const { isOperator, allowedInboxIds } = await resolveOperatorAllowedInboxIds(
+      storeId,
+      userId,
+      userRole,
+      authHeader,
+      req.headers["x-user-id"] as string,
+      req.headers["x-user-role"] as string
+    );
 
     if (isOperator) {
-      const { data: memberRows } = await supabaseAdmin
-        .from("inbox_members")
-        .select("inbox_id")
-        .eq("user_id", userId);
-      allowedInboxIds = memberRows ? memberRows.map(r => r.inbox_id) : [];
-
-      // Requirement 3: Protection of Route/Action
+      // Requirement: Protection of Route/Action
       if (inboxId && inboxId !== "all") {
         if (!allowedInboxIds.includes(inboxId)) {
-          return res.status(403).json({ error: "Permissão negada para esta caixa de entrada." });
+          return res.json({ data: [] });
         }
+      }
+      // Se for operador e não tiver nenhuma caixa permitida, retorna lista vazia imediatamente
+      if (allowedInboxIds.length === 0) {
+        return res.json({ data: [] });
       }
     }
 
-    let conversations = await chatStore.getConversations(storeId, inboxId, allowedInboxIds);
+    let conversations = await chatStore.getConversations(storeId, inboxId, isOperator ? allowedInboxIds : undefined);
 
     if (isOperator) {
-      const { data: teamRows } = await supabaseAdmin
-        .from("chat_team_members")
-        .select("team_id")
-        .eq("user_id", userId);
-      const allowedTeamIds = teamRows ? teamRows.map(r => r.team_id) : [];
+      let allowedTeamIds: string[] = [];
+      if (userId) {
+        try {
+          const { data: teamRows } = await supabaseAdmin
+            .from("chat_team_members")
+            .select("team_id")
+            .eq("user_id", userId);
+          if (teamRows) allowedTeamIds = teamRows.map(r => r.team_id);
+        } catch (_) {}
+      }
 
       conversations = conversations.filter(c => {
-        if (c.inbox_id && !allowedInboxIds!.includes(c.inbox_id)) {
+        if (!c.inbox_id || !allowedInboxIds.includes(c.inbox_id)) {
           return false;
         }
-        if (c.team_id) {
+        if (c.team_id && allowedTeamIds.length > 0) {
           return allowedTeamIds.includes(c.team_id);
         }
         return true;
