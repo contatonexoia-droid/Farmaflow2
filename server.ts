@@ -770,8 +770,21 @@ async function resolveOperatorAllowedInboxIds(
   headerUserRole?: string
 ): Promise<{ isOperator: boolean; allowedInboxIds: string[] }> {
   const candidateUserIds = new Set<string>();
-  if (userId && typeof userId === "string" && userId !== "undefined" && userId !== "null") candidateUserIds.add(userId);
-  if (headerUserId && typeof headerUserId === "string" && headerUserId !== "undefined" && headerUserId !== "null") candidateUserIds.add(headerUserId);
+  const candidateEmails = new Set<string>();
+
+  const addCandidate = (val?: string | null) => {
+    if (!val || typeof val !== "string") return;
+    const clean = val.trim();
+    if (!clean || clean === "undefined" || clean === "null") return;
+    if (clean.includes("@")) {
+      candidateEmails.add(clean.toLowerCase());
+    } else {
+      candidateUserIds.add(clean);
+    }
+  };
+
+  addCandidate(userId);
+  addCandidate(headerUserId);
 
   let detectedRole = (userRole || headerUserRole || "").toLowerCase().trim();
 
@@ -781,51 +794,92 @@ async function resolveOperatorAllowedInboxIds(
     try {
       const { data: { user: authUser } } = await supabaseAdmin.auth.getUser(cleanAuthToken);
       if (authUser) {
-        candidateUserIds.add(authUser.id);
+        addCandidate(authUser.id);
+        if (authUser.email) addCandidate(authUser.email);
         if (!detectedRole && authUser.user_metadata?.role) {
           detectedRole = String(authUser.user_metadata.role).toLowerCase().trim();
         }
-
-        try {
-          let tuQuery = supabaseAdmin
-            .from("tenant_users")
-            .select("id, supabase_user_id, role, tenant_id");
-          
-          if (authUser.email) {
-            tuQuery = tuQuery.or(`supabase_user_id.eq.${authUser.id},id.eq.${authUser.id},email.eq.${authUser.email}`);
-          } else {
-            tuQuery = tuQuery.or(`supabase_user_id.eq.${authUser.id},id.eq.${authUser.id}`);
-          }
-
-          const { data: tuRows } = await tuQuery;
-          if (tuRows && tuRows.length > 0) {
-            for (const tu of tuRows) {
-              if (tu.id) candidateUserIds.add(tu.id);
-              if (tu.supabase_user_id) candidateUserIds.add(tu.supabase_user_id);
-              if (!detectedRole && tu.role) detectedRole = String(tu.role).toLowerCase().trim();
-            }
-          }
-        } catch (_) {}
       }
     } catch (_) {}
   }
 
-  // 2. Buscar correspondência em tenant_users para mapear todos os IDs possíveis (id e supabase_user_id) e role
-  if (candidateUserIds.size > 0) {
-    try {
-      const idFilters = Array.from(candidateUserIds).map(id => `id.eq.${id},supabase_user_id.eq.${id}`).join(',');
-      const { data: tuList } = await supabaseAdmin
-        .from("tenant_users")
-        .select("id, supabase_user_id, role, tenant_id")
-        .or(idFilters);
-      if (tuList && tuList.length > 0) {
-        for (const tu of tuList) {
-          if (tu.id) candidateUserIds.add(tu.id);
-          if (tu.supabase_user_id) candidateUserIds.add(tu.supabase_user_id);
-          if (!detectedRole && tu.role) detectedRole = String(tu.role).toLowerCase().trim();
+  // 2. Buscar correspondência em tenant_users para mapear todos os IDs possíveis (id, supabase_user_id, email, role)
+  try {
+    const rawIds = Array.from(candidateUserIds);
+    const rawEmails = Array.from(candidateEmails);
+
+    const tuQueries: Promise<any>[] = [];
+
+    if (rawEmails.length > 0) {
+      for (const email of rawEmails) {
+        tuQueries.push(
+          Promise.resolve(
+            supabaseAdmin
+              .from("tenant_users")
+              .select("id, supabase_user_id, role, tenant_id, email")
+              .ilike("email", email)
+          )
+        );
+      }
+    }
+
+    if (rawIds.length > 0) {
+      const validUuids = rawIds.filter(id => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id));
+      if (validUuids.length > 0) {
+        tuQueries.push(
+          Promise.resolve(
+            supabaseAdmin
+              .from("tenant_users")
+              .select("id, supabase_user_id, role, tenant_id, email")
+              .or(`id.in.(${validUuids.join(',')}),supabase_user_id.in.(${validUuids.join(',')})`)
+          )
+        );
+      }
+      const otherIds = rawIds.filter(id => !validUuids.includes(id));
+      for (const oid of otherIds) {
+        tuQueries.push(
+          Promise.resolve(
+            supabaseAdmin
+              .from("tenant_users")
+              .select("id, supabase_user_id, role, tenant_id, email")
+              .eq("id", oid)
+          )
+        );
+      }
+    }
+
+    if (storeId && storeId !== "default" && rawEmails.length > 0) {
+      tuQueries.push(
+        Promise.resolve(
+          supabaseAdmin
+            .from("tenant_users")
+            .select("id, supabase_user_id, role, tenant_id, email")
+            .eq("tenant_id", storeId)
+        )
+      );
+    }
+
+    const results = await Promise.all(tuQueries);
+    for (const res of results) {
+      if (res.data && Array.isArray(res.data)) {
+        for (const tu of res.data) {
+          const matchEmail = tu.email && rawEmails.includes(String(tu.email).toLowerCase().trim());
+          const matchId = tu.id && rawIds.includes(String(tu.id));
+          const matchSubId = tu.supabase_user_id && rawIds.includes(String(tu.supabase_user_id));
+
+          if (matchEmail || matchId || matchSubId || (rawEmails.length === 0 && rawIds.length === 0)) {
+            if (tu.id) addCandidate(tu.id);
+            if (tu.supabase_user_id) addCandidate(tu.supabase_user_id);
+            if (tu.email) addCandidate(tu.email);
+            if (!detectedRole && tu.role) {
+              detectedRole = String(tu.role).toLowerCase().trim();
+            }
+          }
         }
       }
-    } catch (_) {}
+    }
+  } catch (e) {
+    console.warn("[OperatorAccess] Error resolving tenant_users:", e);
   }
 
   const isOperator = ["operador", "operator", "atendente", "balconista"].includes(detectedRole);
@@ -833,15 +887,16 @@ async function resolveOperatorAllowedInboxIds(
     return { isOperator: false, allowedInboxIds: [] };
   }
 
-  const userIdsArray = Array.from(candidateUserIds);
+  const allSearchIdentifiers = Array.from(new Set([...candidateUserIds, ...candidateEmails]));
   const allowedIdsSet = new Set<string>();
 
-  if (userIdsArray.length > 0) {
+  if (allSearchIdentifiers.length > 0) {
+    // 3. Buscar em department_access
     try {
       const { data: deptRows, error: deptErr } = await supabaseAdmin
         .from("department_access")
-        .select("department_id, user_id")
-        .in("user_id", userIdsArray);
+        .select("department_id, user_id, tenant_id")
+        .in("user_id", allSearchIdentifiers);
       if (!deptErr && deptRows) {
         deptRows.forEach((r: any) => {
           if (r.department_id) allowedIdsSet.add(r.department_id);
@@ -851,11 +906,12 @@ async function resolveOperatorAllowedInboxIds(
       console.warn("[OperatorAccess] Error querying department_access:", e);
     }
 
+    // 4. Buscar em inbox_members
     try {
       const { data: memberRows, error: memErr } = await supabaseAdmin
         .from("inbox_members")
         .select("inbox_id, user_id")
-        .in("user_id", userIdsArray);
+        .in("user_id", allSearchIdentifiers);
       if (!memErr && memberRows) {
         memberRows.forEach((r: any) => {
           if (r.inbox_id) allowedIdsSet.add(r.inbox_id);
@@ -863,6 +919,19 @@ async function resolveOperatorAllowedInboxIds(
       }
     } catch (e) {
       console.warn("[OperatorAccess] Error querying inbox_members:", e);
+    }
+
+    // 5. Buscar em inboxStore (memória / cache local de membros)
+    try {
+      const storeInboxes = await inboxStore.getInboxes(storeId);
+      for (const ib of storeInboxes) {
+        const members = await inboxStore.getMembers(ib.id);
+        if (members && members.some(m => allSearchIdentifiers.includes(m))) {
+          allowedIdsSet.add(ib.id);
+        }
+      }
+    } catch (e) {
+      console.warn("[OperatorAccess] Error querying inboxStore members:", e);
     }
   }
 
@@ -7186,42 +7255,24 @@ app.get("/api/v1/chat/conversations", async (req, res) => {
     );
 
     if (isOperator) {
-      // Requirement: Protection of Route/Action
+      // Se for operador e não tiver nenhuma caixa permitida, retorna lista vazia imediatamente
+      if (allowedInboxIds.length === 0) {
+        return res.json({ data: [] });
+      }
+
+      // Se filtrou por uma caixa específica, valida se o operador tem acesso
       if (inboxId && inboxId !== "all") {
         if (!allowedInboxIds.includes(inboxId)) {
           return res.json({ data: [] });
         }
       }
-      // Se for operador e não tiver nenhuma caixa permitida, retorna lista vazia imediatamente
-      if (allowedInboxIds.length === 0) {
-        return res.json({ data: [] });
-      }
     }
 
-    let conversations = await chatStore.getConversations(storeId, inboxId, isOperator ? allowedInboxIds : undefined);
-
-    if (isOperator) {
-      let allowedTeamIds: string[] = [];
-      if (userId) {
-        try {
-          const { data: teamRows } = await supabaseAdmin
-            .from("chat_team_members")
-            .select("team_id")
-            .eq("user_id", userId);
-          if (teamRows) allowedTeamIds = teamRows.map(r => r.team_id);
-        } catch (_) {}
-      }
-
-      conversations = conversations.filter(c => {
-        if (!c.inbox_id || !allowedInboxIds.includes(c.inbox_id)) {
-          return false;
-        }
-        if (c.team_id && allowedTeamIds.length > 0) {
-          return allowedTeamIds.includes(c.team_id);
-        }
-        return true;
-      });
-    }
+    const conversations = await chatStore.getConversations(
+      storeId,
+      (inboxId && inboxId !== "all") ? inboxId : undefined,
+      isOperator ? allowedInboxIds : undefined
+    );
 
     return res.json({ data: conversations });
   } catch (err: any) {

@@ -274,7 +274,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
 
   useEffect(() => {
     fetchConversations();
-  }, [tenantId, isOperador, userId, inboxes, selectedInboxId]);
+  }, [tenantId, isOperador, userId, selectedInboxId]);
 
   // Contadores dinâmicos para as abas de status
   const tabCounters = useMemo(() => {
@@ -583,7 +583,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       if (res.ok) {
         const json = await res.json();
         if (json.data && Array.isArray(json.data)) {
-          let list = json.data.map((c: any) => {
+          const list = json.data.map((c: any) => {
             const isHuman = c.is_human_controlled === true || Boolean(c.assigned_user_id) || Boolean(c.assigned_to) || c.is_bot_active === false || c.status === 'human_takeover' || c.status === 'HUMAN';
             let stage = c.kanban_stage || c.stage;
             if (!stage) {
@@ -604,17 +604,29 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
             };
           });
 
-          if (isOperador) {
-            const allowedSet = new Set(inboxes.map((i: any) => i.id));
-            list = list.filter((c: any) => c.inbox_id && allowedSet.has(c.inbox_id));
+          if (list.length > 0) {
+            setConversations(list);
+            try {
+              localStorage.setItem(`chat_conversations_${currentTenantId || tenantId}`, JSON.stringify(list));
+            } catch (_) {}
+          } else {
+            // Se veio vazio, só atualiza para vazio se as caixas já foram resolvidas, evitando limpar o cache na inicialização
+            if (!isOperador || inboxes.length > 0) {
+              setConversations([]);
+            }
           }
-          setConversations(list);
           return;
         }
       }
 
       if (isOperador) {
-        setConversations([]);
+        // Se a chamada de backend falhar temporariamente, preserva o estado e cache local
+        const saved = localStorage.getItem(`chat_conversations_${currentTenantId || tenantId}`);
+        if (saved) {
+          try {
+            setConversations(JSON.parse(saved));
+          } catch (_) {}
+        }
         return;
       }
 
