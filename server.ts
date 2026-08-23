@@ -947,23 +947,27 @@ app.get("/api/v1/inboxes", async (req, res) => {
     const userId = (req.query.userId as string) || (req.headers["x-user-id"] as string) || undefined;
     const userRole = (req.query.role as string) || (req.headers["x-user-role"] as string) || undefined;
     const authHeader = req.headers["authorization"] as string | undefined;
+    const forTransfer = req.query.forTransfer === "true" || req.query.all === "true";
 
     let data = await inboxStore.getInboxes(storeId);
 
-    const { isOperator, allowedInboxIds } = await resolveOperatorAllowedInboxIds(
-      storeId,
-      userId,
-      userRole,
-      authHeader,
-      req.headers["x-user-id"] as string,
-      req.headers["x-user-role"] as string
-    );
+    // Se a requisição for para transferência entre departamentos, exibe todos os departamentos da loja/empresa
+    if (!forTransfer) {
+      const { isOperator, allowedInboxIds } = await resolveOperatorAllowedInboxIds(
+        storeId,
+        userId,
+        userRole,
+        authHeader,
+        req.headers["x-user-id"] as string,
+        req.headers["x-user-role"] as string
+      );
 
-    if (isOperator) {
-      // REGRA ESTRITA DE OPERADOR:
-      // Se for operador, retorna ESTRITAMENTE APENAS as caixas com vínculo explícito em department_access ou inbox_members.
-      // Se não tiver nenhuma caixa vinculada (allowedInboxIds vazio), retorna array vazio ([]). NUNCA injeta outras caixas.
-      data = data.filter(inbox => allowedInboxIds.includes(inbox.id));
+      if (isOperator) {
+        // REGRA ESTRITA DE OPERADOR:
+        // Se for operador, retorna ESTRITAMENTE APENAS as caixas com vínculo explícito em department_access ou inbox_members.
+        // Se não tiver nenhuma caixa vinculada (allowedInboxIds vazio), retorna array vazio ([]). NUNCA injeta outras caixas.
+        data = data.filter(inbox => allowedInboxIds.includes(inbox.id));
+      }
     }
 
     return res.json({ data });
@@ -8067,6 +8071,95 @@ const handleStageUpdate = async (req: express.Request, res: express.Response) =>
 app.all("/api/v1/chat/conversations/:id/stage", handleStageUpdate);
 app.all("/api/v1/automation/stage", handleStageUpdate);
 app.all("/api/v1/chat/conversations/stage", handleStageUpdate);
+
+const handleTransferConversation = async (req: express.Request, res: express.Response) => {
+  try {
+    const conversationId = req.params.id || req.body.conversationId || req.body.conversation_id;
+    const storeId = (req.body.storeId as string) || (req.body.tenantId as string) || (req.headers["x-tenant-id"] as string) || "default";
+    const inboxId = req.body.inboxId || req.body.inbox_id || undefined;
+    const userId = req.body.userId || req.body.assignedUserId || req.body.assigned_user_id || req.body.assigned_to || undefined;
+    const fromUserId = req.body.fromUserId || (req.headers["x-user-id"] as string) || undefined;
+    const reason = req.body.reason || req.body.notes || undefined;
+
+    if (!conversationId) {
+      return res.status(400).json({ error: "conversationId é obrigatório para transferência." });
+    }
+
+    if (!inboxId && !userId) {
+      return res.status(400).json({ error: "É necessário informar ao menos um departamento (inboxId) ou um atendente (userId) de destino." });
+    }
+
+    // Validação de isolamento: Se inboxId for informado, valida se a caixa existe e pertence ao estabelecimento
+    if (inboxId) {
+      try {
+        const { data: inboxRow } = await supabaseAdmin
+          .from("inboxes")
+          .select("id, store_id, name")
+          .eq("id", inboxId)
+          .maybeSingle();
+
+        if (inboxRow && inboxRow.store_id && storeId && storeId !== "default" && inboxRow.store_id !== storeId) {
+          return res.status(403).json({ error: "O departamento selecionado pertence a outro estabelecimento." });
+        }
+      } catch (_) {}
+    }
+
+    // Executa a transferência via Service Role (sem restrições indevidas de RLS para operadores)
+    const result = await chatStore.transferConversation(conversationId, storeId, {
+      inboxId,
+      userId,
+      fromUserId,
+      reason
+    });
+
+    const updated = result.conversation;
+
+    // Disparar broadcast em tempo real para sincronização instantânea
+    realtimeHub.broadcastToStore(storeId, "conversation_transferred", {
+      conversationId,
+      storeId,
+      inboxId: updated?.inbox_id || inboxId,
+      assignedUserId: updated?.assigned_user_id || userId,
+      status: updated?.status,
+      kanban_stage: updated?.kanban_stage,
+      is_human_controlled: updated?.is_human_controlled,
+      is_bot_active: updated?.is_bot_active,
+      updated_at: updated?.updated_at || new Date().toISOString()
+    });
+
+    realtimeHub.broadcastToStore(storeId, "conversation_stage_changed", {
+      conversationId,
+      stage: updated?.kanban_stage || "novos_triagem",
+      kanban_stage: updated?.kanban_stage || "novos_triagem",
+      status: updated?.status,
+      is_bot_active: updated?.is_bot_active,
+      is_human_controlled: updated?.is_human_controlled,
+      assigned_user_id: updated?.assigned_user_id,
+      updated_at: updated?.updated_at || new Date().toISOString()
+    });
+
+    if (result.message) {
+      realtimeHub.broadcastToStore(storeId, "chat_message", {
+        conversationId,
+        message: result.message,
+        conversation: updated
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: "Conversa transferida com sucesso.",
+      data: updated,
+      conversation: updated
+    });
+  } catch (err: any) {
+    console.error("[Chat Transfer Error]:", err);
+    return res.status(500).json({ error: err.message || "Erro ao transferir conversa." });
+  }
+};
+
+app.post("/api/v1/chat/conversations/:id/transfer", handleTransferConversation);
+app.post("/api/v1/chat/transfer", handleTransferConversation);
 
 async function startServer() {
   let __filename = "";

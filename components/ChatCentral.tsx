@@ -908,29 +908,90 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
     setSelectedConversation(conv);
   };
 
-  const handleTransfer = (transferData: { userId?: string, inboxId?: string }) => {
+  const handleTransfer = async (transferData: { userId?: string, inboxId?: string }) => {
     if (!selectedConversation) return;
     
+    const convId = selectedConversation.id;
+    const currentTenantId = tenantId || localUser?.tenant_id || currentUser?.tenant_id || "default";
+
     // Optimistic UI update
     let updated = { ...selectedConversation };
     
     if (transferData.userId) {
        updated.assigned_user_id = transferData.userId;
+       updated.assigned_to = transferData.userId;
        updated.is_human_controlled = true;
        updated.is_bot_active = false;
        updated.status = 'human_takeover';
        updated.kanban_stage = 'em_atendimento';
+       updated.stage = 'em_atendimento';
     }
     
     if (transferData.inboxId) {
        updated.inbox_id = transferData.inboxId;
-       updated.assigned_user_id = null; // Send back to queue of that inbox
-       updated.status = 'OPEN';
-       updated.kanban_stage = 'novos_triagem';
+       if (!transferData.userId) {
+         updated.assigned_user_id = null;
+         updated.assigned_to = null;
+         updated.is_human_controlled = false;
+         updated.is_bot_active = false;
+         updated.status = 'OPEN';
+         updated.kanban_stage = 'novos_triagem';
+         updated.stage = 'novos_triagem';
+       }
     }
 
-    setSelectedConversation(updated);
-    setConversations(conversations.map(c => c.id === updated.id ? updated : c));
+    // Se o operador transferiu para um departamento fora de suas caixas permitidas,
+    // a conversa sai da sua visualização de forma suave
+    const isTransferredAwayFromOperator = isOperador && transferData.inboxId && allowedInboxIds.length > 0 && !allowedInboxIds.includes(transferData.inboxId);
+
+    if (isTransferredAwayFromOperator) {
+      setSelectedConversation(null);
+      setConversations(prev => prev.filter(c => c.id !== convId));
+    } else {
+      setSelectedConversation(updated);
+      setConversations(prev => prev.map(c => c.id === convId ? updated : c));
+    }
+
+    try {
+      let token = "";
+      try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        token = sessionData?.session?.access_token || "";
+      } catch (_) {}
+
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'x-tenant-id': currentTenantId,
+        'x-user-id': userId || "",
+        'x-user-role': cleanRole || ""
+      };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const res = await fetch(`/api/v1/chat/conversations/${convId}/transfer`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          storeId: currentTenantId,
+          tenantId: currentTenantId,
+          conversationId: convId,
+          inboxId: transferData.inboxId,
+          userId: transferData.userId,
+          fromUserId: userId
+        })
+      });
+
+      if (res.ok) {
+        if (!isTransferredAwayFromOperator) {
+          fetchMessages(convId);
+        }
+        fetchConversations();
+      } else {
+        const errJson = await res.json().catch(() => ({}));
+        console.error("Erro na transferência de conversa:", errJson.error || res.statusText);
+      }
+    } catch (err) {
+      console.error("Exceção ao disparar transferência de conversa:", err);
+    }
   };
 
   const handleToggleBot = async () => {

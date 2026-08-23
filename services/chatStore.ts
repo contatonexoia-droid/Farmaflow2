@@ -50,6 +50,7 @@ export interface ChatConversation {
   contact?: ChatContact;
   labels?: ChatLabel[];
   created_at: string;
+  updated_at?: string;
 }
 
 export interface ChatMessage {
@@ -116,6 +117,12 @@ export function sanitizeChatConversationPayload(data: Record<string, any>): Reco
       sanitized[key] = value;
     }
   }
+
+  // Se assigned_to foi passado mas assigned_user_id não, mapeia para a coluna correta do banco
+  if (data.assigned_to !== undefined && sanitized.assigned_user_id === undefined) {
+    sanitized.assigned_user_id = data.assigned_to;
+  }
+
   return sanitized;
 }
 
@@ -1592,6 +1599,112 @@ class ChatStore {
     }
 
     return await this.getConversationById(conversationId);
+  }
+
+  public async transferConversation(
+    conversationId: string,
+    storeId: string,
+    options: {
+      inboxId?: string | null;
+      userId?: string | null;
+      fromUserId?: string | null;
+      reason?: string | null;
+    }
+  ): Promise<{ success: boolean; conversation: ChatConversation | null; message?: ChatMessage | null }> {
+    const nowIso = new Date().toISOString();
+    const updates: any = {
+      updated_at: nowIso
+    };
+
+    let logMessageText = "";
+
+    if (options.inboxId) {
+      updates.inbox_id = options.inboxId;
+      if (!options.userId) {
+        updates.assigned_user_id = null;
+        updates.assigned_to = null;
+        updates.status = "OPEN";
+        updates.is_human_controlled = false;
+        updates.is_bot_active = false;
+        updates.kanban_stage = "novos_triagem";
+        updates.stage = "novos_triagem";
+      }
+    }
+
+    if (options.userId) {
+      updates.assigned_user_id = options.userId;
+      updates.assigned_to = options.userId;
+      updates.is_human_controlled = true;
+      updates.is_bot_active = false;
+      updates.status = "human_takeover";
+      updates.kanban_stage = "em_atendimento";
+      updates.stage = "em_atendimento";
+      updates.bot_handoff_reason = "OPERATOR_TRANSFER";
+      updates.bot_handoff_at = nowIso;
+    }
+
+    let targetName = "";
+    if (options.inboxId) {
+      try {
+        const { data: ib } = await supabaseAdmin.from("inboxes").select("name").eq("id", options.inboxId).maybeSingle();
+        if (ib?.name) targetName = `departamento "${ib.name}"`;
+      } catch (_) {}
+    }
+    if (options.userId) {
+      try {
+        const { data: tu } = await supabaseAdmin.from("tenant_users").select("name, email").eq("id", options.userId).maybeSingle();
+        const userName = tu?.name || tu?.email || options.userId;
+        targetName = targetName ? `${targetName} e atendente ${userName}` : `atendente ${userName}`;
+      } catch (_) {}
+    }
+
+    logMessageText = `Conversa transferida com sucesso para ${targetName || "novo destino"}.`;
+
+    try {
+      const sanitizedUpdates = sanitizeChatConversationPayload(updates);
+      const { error } = await supabaseAdmin
+        .from("chat_conversations")
+        .update(sanitizedUpdates)
+        .eq("id", conversationId);
+      if (error) {
+        console.error("[ChatStore] transferConversation Supabase error:", error.message, error);
+      }
+    } catch (err: any) {
+      console.warn("[ChatStore] transferConversation Supabase fallback:", err.message);
+    }
+
+    let sysMsg: ChatMessage | null = null;
+    try {
+      const { message } = await this.addMessage(
+        storeId,
+        conversationId,
+        "SYSTEM",
+        logMessageText,
+        true
+      );
+      sysMsg = message;
+    } catch (msgErr: any) {
+      console.warn("[ChatStore] Error creating transfer log message:", msgErr.message);
+    }
+
+    const idx = this.conversations.findIndex(c => c.id === conversationId);
+    let updatedConv: ChatConversation | null = null;
+    if (idx >= 0) {
+      this.conversations[idx] = {
+        ...this.conversations[idx],
+        ...updates
+      };
+      this.saveToFile();
+      updatedConv = this.conversations[idx];
+    } else {
+      updatedConv = await this.getConversationById(conversationId);
+    }
+
+    return {
+      success: true,
+      conversation: updatedConv,
+      message: sysMsg
+    };
   }
 }
 

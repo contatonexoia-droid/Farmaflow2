@@ -24,11 +24,13 @@ export const ChatTransferModal: React.FC<ChatTransferModalProps> = ({ isOpen, on
 
   const fetchData = async () => {
     try {
-      // Fetch inboxes
-      const inboxRes = await fetch(`/api/v1/inboxes?storeId=${tenantId}`);
+      // Fetch inboxes for transfer (all active departments of this store)
+      const inboxRes = await fetch(`/api/v1/inboxes?storeId=${tenantId}&forTransfer=true`);
       if (inboxRes.ok) {
         const json = await inboxRes.json();
-        if (json.data) setInboxes(json.data);
+        if (json.data && Array.isArray(json.data)) {
+          setInboxes(json.data);
+        }
       } else {
         const { data: inboxData } = await supabase.from('inboxes').select('*').eq('store_id', tenantId);
         if (inboxData) setInboxes(inboxData);
@@ -36,11 +38,22 @@ export const ChatTransferModal: React.FC<ChatTransferModalProps> = ({ isOpen, on
     } catch (_) {}
 
     try {
-      // Fetch users
-      const userRes = await fetch(`/api/v1/team/users?tenantId=${tenantId}`);
+      // Fetch users with auth token for RBAC endpoint
+      let token = "";
+      try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        token = sessionData?.session?.access_token || "";
+      } catch (_) {}
+
+      const headers: Record<string, string> = {
+        'x-tenant-id': tenantId || "default"
+      };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const userRes = await fetch(`/api/v1/team/users?tenantId=${tenantId}`, { headers });
       if (userRes.ok) {
         const json = await userRes.json();
-        if (json.data) {
+        if (json.data && Array.isArray(json.data)) {
           setUsers(json.data);
           return;
         }
