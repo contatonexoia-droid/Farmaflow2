@@ -6146,7 +6146,7 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
     }
 
     const hostOrigin = req.headers.origin || `https://${req.headers.host}`;
-    const webhookUrl = `${hostOrigin}/api/v1/chat/webhook?tenantId=${tenantId}`;
+    const webhookUrl = `${hostOrigin}/api/v1/chat/webhook?instance=${encodeURIComponent(instanceName)}&tenantId=${encodeURIComponent(tenantId)}`;
 
     let base64: string | null = null;
     let isEvolutionLive = false;
@@ -6574,7 +6574,7 @@ app.post("/api/v1/chat/instance/recreate", requireChatEnabled, async (req, res) 
 
     // 4. Configura webhook
     const hostOrigin = req.headers.origin || `https://${req.headers.host}`;
-    const webhookUrl = `${hostOrigin}/api/v1/chat/webhook?tenantId=${tenantId}`;
+    const webhookUrl = `${hostOrigin}/api/v1/chat/webhook?instance=${encodeURIComponent(instanceName)}&tenantId=${encodeURIComponent(tenantId)}`;
     safeEvolutionRequest(`${evolutionUrl}/webhook/set/${instanceName}`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "apikey": evolutionKey },
@@ -6757,35 +6757,22 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
     const dashId = cleanStoreId.replace(/_/g, '-');
     const underId = cleanStoreId.replace(/-/g, '_');
     
-    // Resolução segura e tolerante do tenant aceitando ID textual, UUID e múltiplos formatos de Slug
+    // Resolução segura e isolada do tenant aceitando ID textual da própria unidade ou da instância conectada
     let tenant: any = null;
     
-    // 1. Busca direta na tabela tenants por ID ou Slug
-    try {
-      const { data: directTenant } = await supabaseAdmin
-        .from("tenants")
-        .select("*")
-        .or(`id.eq.${rawId},id.eq.${cleanStoreId},id.eq.${dashId},id.eq.${underId},slug.eq.${rawId},slug.eq.${cleanStoreId},slug.eq.${dashId},slug.eq.${underId},id.ilike.${rawId},id.ilike.${cleanStoreId}`)
-        .limit(1)
-        .maybeSingle();
-      if (directTenant) {
-        tenant = directTenant;
-      }
-    } catch (e: any) {}
-    
-    // 2. Busca pela tabela whatsapp_instances
-    if (!tenant && (instanceName || cleanStoreId)) {
+    // 1. Busca estrita pela tabela whatsapp_instances quando instanceName é fornecido
+    if (instanceName) {
       try {
         const { data: instList } = await supabaseAdmin
           .from("whatsapp_instances")
           .select("store_id")
-          .or(`instance_name.ilike.${instanceName},instance_name.ilike.${cleanInst},instance_name.ilike.store_${cleanInst},instance_name.ilike.${cleanStoreId},store_id.ilike.${cleanStoreId}`)
+          .or(`instance_name.ilike.${instanceName},instance_name.ilike.${cleanInst}`)
           .limit(1);
 
         const instRow = instList?.[0];
         if (instRow?.store_id) {
           const targetStoreId = String(instRow.store_id).trim();
-          const cleanTarget = targetStoreId.replace(/^store_/, '');
+          const cleanTarget = targetStoreId.replace(/^store_/, '').replace(/^inbox_/, '');
           const cleanTargetDash = cleanTarget.replace(/_/g, '-');
           const { data: t } = await supabaseAdmin
             .from("tenants")
@@ -6800,25 +6787,24 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
       }
     }
 
-    // 3. Fallback por prefixo de rede
+    // 2. Busca direta na tabela tenants por ID ou Slug da própria drogaria
     if (!tenant) {
       try {
-        const prefix = cleanStoreId.split(/[-_]/)[0];
-        if (prefix && prefix.length >= 3) {
-          const { data: netTenant } = await supabaseAdmin
-            .from("tenants")
-            .select("*")
-            .or(`id.ilike.${prefix}%,network_id.ilike.${prefix}%`)
-            .order("is_network_master", { ascending: false })
-            .limit(1)
-            .maybeSingle();
-          if (netTenant) tenant = netTenant;
+        const { data: directTenant } = await supabaseAdmin
+          .from("tenants")
+          .select("*")
+          .or(`id.eq.${rawId},id.eq.${cleanStoreId},id.eq.${dashId},slug.eq.${rawId},slug.eq.${cleanStoreId}`)
+          .limit(1)
+          .maybeSingle();
+        if (directTenant) {
+          tenant = directTenant;
         }
       } catch (e: any) {}
     }
 
+    // 3. Se não encontrar o tenant específico, aborta o disparo para evitar misturar unidades
     if (!tenant) {
-      console.warn(`[WelcomeMessage] Tenant não localizado para storeId="${storeId}" ou instanceName="${instanceName}".`);
+      console.warn(`[WelcomeMessage] Tenant não localizado de forma estrita para storeId="${storeId}" ou instanceName="${instanceName}". Disparo de boas-vindas cancelado.`);
       return;
     }
 
@@ -7013,9 +6999,15 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
     // Log para diagnóstico de payload bruto (solicitado)
     console.log(`[Webhook RAW Payload] Evento: ${event}`, JSON.stringify(req.body, null, 2));
     
-    // Captura prioritária na query ou no corpo, com sanitização segura do prefixo 'store_'
-    const instanceName = bodyInstance || data?.instance || (typeof req.query.instance === 'string' ? req.query.instance : null);
-    const rawTenantId = req.query.tenantId || req.query.storeId || req.body.tenantId || instanceName;
+    // Captura prioritária e abrangente do instanceName (fonte única e canônica da conexão WhatsApp)
+    const instanceName = bodyInstance || 
+      data?.instance || 
+      req.body?.instanceName || 
+      data?.instanceName || 
+      (typeof req.query.instance === 'string' ? req.query.instance : null) || 
+      (typeof req.query.instanceName === 'string' ? req.query.instanceName : null);
+    
+    const rawTenantId = req.query.tenantId || req.query.storeId || req.body.tenantId;
     const sanitizedTenantId = typeof rawTenantId === 'string' ? rawTenantId.trim().replace(/^store_/, '') : rawTenantId;
     
     const eventName = String(event || "").toLowerCase();
@@ -7125,8 +7117,8 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
         }
       }
 
-      // 2. Se não encontrou por whatsapp_instances, tenta pelo tenantId/storeId explicitamente informado nos parâmetros da requisição
-      if (!resolvedTenant && (req.query.tenantId || req.query.storeId || req.body.tenantId)) {
+      // 2. Se NÃO havia instanceName no webhook, tenta pelo tenantId/storeId explicitamente informado nos parâmetros da requisição
+      if (!resolvedTenant && !instanceName && (req.query.tenantId || req.query.storeId || req.body.tenantId)) {
         const explicitId = String(req.query.tenantId || req.query.storeId || req.body.tenantId).trim();
         const cleanExplicit = explicitId.replace(/^store_/, '').replace(/^inbox_/, '').replace(/^tenant_/, '');
         const cleanExplicitDash = cleanExplicit.replace(/_/g, '-');
