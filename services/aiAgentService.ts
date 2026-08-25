@@ -272,19 +272,14 @@ export class AiAgentService {
       throw new Error(`Drogaria não encontrada (ID/Slug: ${tenantId}).`);
     }
 
-    // 5. Carregar configurações avançadas do agente (agent_settings) vinculadas ao UUID, slug ou fallback do tenant
+    // 5. Carregar configurações avançadas do agente (agent_settings) vinculadas ao UUID ou slug do tenant
     try {
       const orConditions = [
         `tenant_id.eq.${tenant.id}`,
         `store_id.eq.${tenant.id}`,
         tenant.slug ? `slug.eq.${tenant.slug}` : '',
         tenant.slug ? `tenant_id.eq.${tenant.slug}` : '',
-        tenant.slug ? `store_id.eq.${tenant.slug}` : '',
-        `tenant_id.eq.nosso-catalogo`,
-        `store_id.eq.nosso-catalogo`,
-        `slug.eq.nosso-catalogo`,
-        `tenant_id.eq.nossocatalogo`,
-        `store_id.eq.nossocatalogo`
+        tenant.slug ? `store_id.eq.${tenant.slug}` : ''
       ].filter(Boolean).join(",");
 
       let { data: agentSetting } = await supabaseAdmin

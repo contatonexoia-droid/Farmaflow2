@@ -984,13 +984,38 @@ class ChatStore {
     const currentUnreadCount = convInfo?.unread_count || 0;
     const newUnreadCount = fromMe ? 0 : currentUnreadCount + 1;
 
-    // 1. PRESERVAÇÃO TOTAL DO ESTÁGIO:
-    // Para conversas existentes, mantém rigorosamente o estágio e status atuais do banco de dados.
-    // O kanban_stage NÃO deve ser alterado por mensagens recebidas de cliente ou ecos de mensagens do bot.
+    // 1. PRESERVAÇÃO E REABERTURA DE ESTÁGIO:
+    // Verifica se a conversa anterior existia e estava finalizada/fechada.
+    const isPreviouslyClosed = Boolean(convInfo && (
+      convInfo.status === 'CLOSED' || 
+      convInfo.status === 'closed' || 
+      convInfo.status === 'finalizado' || 
+      convInfo.status === 'finalizada' || 
+      convInfo.status === 'RESOLVED' || 
+      convInfo.status === 'resolved' ||
+      convInfo.kanban_stage === 'finalizado' || 
+      convInfo.kanban_stage === 'finalizada' || 
+      convInfo.kanban_stage === 'fechado' || 
+      convInfo.kanban_stage === 'resolvido' ||
+      convInfo.stage === 'finalizado' ||
+      convInfo.stage === 'finalizada'
+    ));
+
     let finalStage = convInfo ? (convInfo.kanban_stage || convInfo.stage || resolveConversationKanbanStage(convInfo)) : (fromMe ? "em_atendimento" : "ia_atendendo");
     let isBotActive = convInfo ? (convInfo.is_bot_active ?? (finalStage === "ia_atendendo")) : (!fromMe);
     let isHuman = convInfo ? (convInfo.is_human_controlled ?? (finalStage === "em_atendimento" || Boolean(convInfo.assigned_user_id))) : (fromMe);
     let finalStatus = convInfo ? (convInfo.status || (isBotActive ? "bot" : (isHuman ? "human_takeover" : "OPEN"))) : (fromMe ? "human_takeover" : "bot");
+
+    // Reabertura Automática de Conversas Finalizadas quando o cliente envia nova mensagem
+    let wasReopened = false;
+    if (!fromMe && isPreviouslyClosed) {
+      console.log(`[ChatStore] 🔄 [REABERTURA AUTOMÁTICA] Conversa ${convId} estava finalizada. Reabrindo ticket para "novos_triagem" no Kanban.`);
+      wasReopened = true;
+      finalStage = "novos_triagem";
+      finalStatus = "OPEN";
+      isBotActive = true;
+      isHuman = false;
+    }
 
     // Verifica se a mensagem atual que chegou com fromMe já foi enviada pelo BOT/Sistema
     let isBotEcho = false;
@@ -1027,22 +1052,23 @@ class ChatStore {
       is_bot_active: isBotActive,
       kanban_stage: finalStage,
       stage: finalStage,
-      bot_interaction_count: convInfo?.bot_interaction_count || 0,
-      bot_handoff_reason: (fromMe && !isBotEcho && isHuman) ? "HUMAN_OPERATOR_MESSAGE" : (convInfo?.bot_handoff_reason || null),
-      bot_handoff_at: (fromMe && !isBotEcho && isHuman) ? now : (convInfo?.bot_handoff_at || null),
-      assigned_user_id: isHuman ? (convInfo?.assigned_user_id || null) : (convInfo?.assigned_user_id || null),
+      bot_interaction_count: wasReopened ? 0 : (convInfo?.bot_interaction_count || 0),
+      bot_handoff_reason: (fromMe && !isBotEcho && isHuman) ? "HUMAN_OPERATOR_MESSAGE" : (wasReopened ? null : (convInfo?.bot_handoff_reason || null)),
+      bot_handoff_at: (fromMe && !isBotEcho && isHuman) ? now : (wasReopened ? null : (convInfo?.bot_handoff_at || null)),
+      assigned_user_id: wasReopened ? null : (isHuman ? (convInfo?.assigned_user_id || null) : (convInfo?.assigned_user_id || null)),
       last_message_at: now,
       last_message_content: text,
       unread_count: newUnreadCount,
       contact: contact,
-      created_at: convInfo?.created_at || now
+      created_at: convInfo?.created_at || now,
+      updated_at: now
     };
+    (conv as any)._was_reopened = wasReopened;
 
     // 3. Atualização ou criação da conversa (chat_conversations)
     try {
       if (convInfo) {
         // CONVERSA EXISTENTE: Atualiza estritamente os metadados da última mensagem recebida.
-        // NÃO sobrescreve 'kanban_stage', 'status', 'is_bot_active', 'is_human_controlled' em mensagens de clientes ou ecos de bot.
         const convUpdateData: any = {
           last_message_at: now,
           last_message_content: text,
@@ -1054,8 +1080,18 @@ class ChatStore {
           convUpdateData.inbox_id = resolvedInboxId;
         }
 
-        // Apenas transborda para humano se for mensagem manual confirmada de operador (não eco de bot) em conversa já sob controle humano
-        if (fromMe && !isBotEcho && convInfo.is_human_controlled === true) {
+        // Se a conversa estava finalizada e recebeu mensagem do cliente, atualiza estágio e status para reaberto
+        if (wasReopened) {
+          convUpdateData.kanban_stage = "novos_triagem";
+          convUpdateData.stage = "novos_triagem";
+          convUpdateData.status = "OPEN";
+          convUpdateData.is_bot_active = true;
+          convUpdateData.is_human_controlled = false;
+          convUpdateData.assigned_user_id = null;
+          convUpdateData.bot_handoff_reason = null;
+          convUpdateData.bot_interaction_count = 0;
+        } else if (fromMe && !isBotEcho && convInfo.is_human_controlled === true) {
+          // Apenas transborda para humano se for mensagem manual confirmada de operador (não eco de bot) em conversa já sob controle humano
           convUpdateData.is_human_controlled = true;
           convUpdateData.is_bot_active = false;
           convUpdateData.status = "human_takeover";

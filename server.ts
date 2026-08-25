@@ -6706,24 +6706,6 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
       }
     }
 
-    // 4. Fallback tolerante final para a primeira drogaria cadastrada
-    if (!tenant) {
-      try {
-        const { data: firstTenant } = await supabaseAdmin
-          .from("tenants")
-          .select("*")
-          .order("created_at", { ascending: true })
-          .limit(1)
-          .maybeSingle();
-        if (firstTenant) {
-          console.warn(`[WelcomeMessage] [WARN] Tenant não mapeado para storeId="${storeId}". Usando tenant padrão: "${firstTenant.name}" (@${firstTenant.slug}, ID: ${firstTenant.id})`);
-          tenant = firstTenant;
-        }
-      } catch (fbErr: any) {
-        console.warn("[WelcomeMessage] Aviso ao buscar fallback tenant padrão:", fbErr.message);
-      }
-    }
-
     if (!tenant) {
       console.warn(`[WelcomeMessage] Tenant não localizado para storeId="${storeId}" ou instanceName="${instanceName}".`);
       return;
@@ -6953,89 +6935,72 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
       }
       
       let resolvedTenant: any = null;
-      let storeId = sanitizedTenantId || "default";
-      
-      // Resolução abrangente e tolerante do Tenant associado à requisição
-      const rawStoreParam = String(sanitizedTenantId || instanceName || '').trim();
-      const cleanParam = rawStoreParam.replace(/^store_/, '').replace(/^inbox_/, '').replace(/^tenant_/, '');
-      const cleanInst = instanceName ? instanceName.replace(/^store_/, '').replace(/^inbox_/, '') : '';
+      let storeId = "";
 
-      // 1. Se o parâmetro for UUID, busca direta por ID
-      if (/^[0-9a-f-]{36}$/i.test(cleanParam) || /^[0-9a-f-]{36}$/i.test(rawStoreParam)) {
-        const targetUuid = /^[0-9a-f-]{36}$/i.test(cleanParam) ? cleanParam : rawStoreParam;
-        const { data: byId } = await supabaseAdmin.from("tenants").select("*").eq("id", targetUuid).maybeSingle();
-        if (byId) resolvedTenant = byId;
-      }
-
-      // 2. Busca por variações de slug (ex: 'nosso-catalogo', 'nossocatalogo', 'nosso_catalogo')
-      if (!resolvedTenant) {
-        const searchSlugs = Array.from(new Set([
-          cleanParam,
-          rawStoreParam,
-          cleanParam.replace(/-/g, ''),
-          cleanParam.replace(/_/g, '-'),
-          cleanParam.replace(/-/g, '_'),
-          cleanInst,
-          instanceName,
-          cleanInst.replace(/-/g, ''),
-          cleanInst.replace(/_/g, '-')
-        ].filter(Boolean)));
-
-        for (const s of searchSlugs) {
-          const { data: bySlug } = await supabaseAdmin.from("tenants").select("*").eq("slug", s).maybeSingle();
-          if (bySlug) {
-            resolvedTenant = bySlug;
-            break;
-          }
-        }
-      }
-
-      // 3. Busca na tabela whatsapp_instances
-      if (!resolvedTenant && (instanceName || cleanParam)) {
+      // 1. Busca Obrigatória e Dinâmica pela tabela whatsapp_instances usando o instanceName recebido da Evolution API
+      if (instanceName) {
+        const cleanInst = String(instanceName).trim().replace(/^store_/, '').replace(/^inbox_/, '');
         try {
-          const { data: inst } = await supabaseAdmin
+          const { data: instRow } = await supabaseAdmin
             .from("whatsapp_instances")
-            .select("store_id, instance_name")
-            .or(`instance_name.eq.${instanceName},instance_name.eq.${cleanInst},instance_name.eq.store_${cleanInst},instance_name.eq.store_${cleanParam},instance_name.eq.${cleanParam}`)
+            .select("id, store_id, instance_name, status, phone_number")
+            .or(`instance_name.eq.${instanceName.trim()},instance_name.eq.${cleanInst},instance_name.eq.store_${cleanInst}`)
             .limit(1)
             .maybeSingle();
-            
-          if (inst?.store_id) {
-            const isUuid = /^[0-9a-f-]{36}$/i.test(inst.store_id);
-            const { data: t } = isUuid
-              ? await supabaseAdmin.from("tenants").select("*").eq("id", inst.store_id).maybeSingle()
-              : await supabaseAdmin.from("tenants").select("*").eq("slug", inst.store_id.replace(/^store_/, '')).maybeSingle();
-            if (t) resolvedTenant = t;
+
+          if (instRow?.store_id) {
+            const targetStoreId = String(instRow.store_id).trim();
+            const isStoreUuid = /^[0-9a-f-]{36}$/i.test(targetStoreId);
+            const cleanSlug = targetStoreId.replace(/^store_/, '');
+
+            const { data: tenantFromInst } = isStoreUuid
+              ? await supabaseAdmin.from("tenants").select("*").eq("id", targetStoreId).maybeSingle()
+              : await supabaseAdmin.from("tenants").select("*").eq("slug", cleanSlug).maybeSingle();
+
+            if (tenantFromInst) {
+              resolvedTenant = tenantFromInst;
+            } else if (isStoreUuid) {
+              // Se tiver UUID válido, utiliza o ID do tenant
+              resolvedTenant = { id: targetStoreId, name: targetStoreId, slug: cleanSlug };
+            }
           }
         } catch (instErr: any) {
-          console.error('[WEBHOOK]: Erro ao buscar whatsapp_instances', instErr.message);
+          console.error('[WEBHOOK] Erro ao consultar whatsapp_instances:', instErr.message);
         }
       }
 
-      // 4. Fallback tolerante final: seleciona a primeira drogaria cadastrada se não encontrou o tenant
-      if (!resolvedTenant) {
+      // 2. Se não encontrou por instanceName, tenta pelo tenantId/storeId explicitamente informado nos parâmetros da requisição
+      if (!resolvedTenant && (req.query.tenantId || req.query.storeId || req.body.tenantId)) {
+        const explicitId = String(req.query.tenantId || req.query.storeId || req.body.tenantId).trim();
+        const cleanExplicit = explicitId.replace(/^store_/, '').replace(/^inbox_/, '').replace(/^tenant_/, '');
+        const isExplicitUuid = /^[0-9a-f-]{36}$/i.test(cleanExplicit) || /^[0-9a-f-]{36}$/i.test(explicitId);
+
         try {
-          const { data: defaultTenant } = await supabaseAdmin
-            .from("tenants")
-            .select("*")
-            .order("created_at", { ascending: true })
-            .limit(1)
-            .maybeSingle();
-          if (defaultTenant) {
-            console.warn(`[WEBHOOK] [WARN] Tenant não mapeado para a instância "${instanceName || storeId}". Usando fallback tenant: "${defaultTenant.name}" (@${defaultTenant.slug}, ID: ${defaultTenant.id})`);
-            resolvedTenant = defaultTenant;
+          if (isExplicitUuid) {
+            const targetUuid = /^[0-9a-f-]{36}$/i.test(cleanExplicit) ? cleanExplicit : explicitId;
+            const { data: byId } = await supabaseAdmin.from("tenants").select("*").eq("id", targetUuid).maybeSingle();
+            if (byId) resolvedTenant = byId;
+          } else {
+            const { data: bySlug } = await supabaseAdmin.from("tenants").select("*").eq("slug", cleanExplicit).maybeSingle();
+            if (bySlug) resolvedTenant = bySlug;
           }
-        } catch (fbErr: any) {
-          console.warn("[WEBHOOK] Aviso ao buscar fallback tenant padrão:", fbErr.message);
+        } catch (paramErr: any) {
+          console.error('[WEBHOOK] Erro ao buscar tenant explícito:', paramErr.message);
         }
       }
 
-      // FORÇA storeId a ser SEMPRE o UUID real do tenant para evitar falhas de cast de UUID nas operações subsequentes
-      if (resolvedTenant?.id) {
-        storeId = resolvedTenant.id;
+      // 3. Fallback Seguro e Genérico: Se a instância ou loja não for encontrada no banco, registra erro claro e NÃO injeta em loja incorreta
+      if (!resolvedTenant) {
+        console.error(`[WEBHOOK ERROR] Instância não encontrada na tabela whatsapp_instances (instanceName: "${instanceName || 'indefinido'}", rawTenantId: "${rawTenantId || 'indefinido'}")`);
+        return res.status(404).json({
+          error: "Instância não encontrada na tabela whatsapp_instances",
+          instance: instanceName || null,
+          tenantId: rawTenantId || null
+        });
       }
 
-      console.log(`[WEBHOOK] Instância identificada: ${instanceName || 'N/A'} | Tenant: ${resolvedTenant?.slug || storeId} (UUID: ${storeId}) | Mensagens a processar: ${messages.length}`);
+      storeId = resolvedTenant.id;
+      console.log(`[WEBHOOK] Instância identificada: ${instanceName || 'N/A'} | Loja: "${resolvedTenant.name || resolvedTenant.slug || storeId}" (@${resolvedTenant.slug || storeId}, UUID: ${storeId}) | Mensagens a processar: ${messages.length}`);
 
       for (const msg of messages) {
         if (!msg) continue;
@@ -7064,6 +7029,7 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
 
           if (result && result.conversation) {
             const conversation = result.conversation;
+            const wasReopened = Boolean((conversation as any)._was_reopened);
 
             // 2. Broadcast IMEDIATO via WebSockets/Realtime para que apareça na tela do operador humano
             try {
@@ -7072,6 +7038,20 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                 message: result.message,
                 conversation: conversation
               });
+
+              // Se a conversa foi reaberta de um estágio finalizado, notifica a mudança de estágio para o Kanban atualizar em tempo real
+              if (wasReopened) {
+                realtimeHub.broadcastToStore(storeId, "conversation_stage_changed", {
+                  conversationId: conversation.id,
+                  stage: conversation.kanban_stage || "novos_triagem",
+                  kanban_stage: conversation.kanban_stage || "novos_triagem",
+                  status: conversation.status || "OPEN",
+                  is_bot_active: conversation.is_bot_active,
+                  is_human_controlled: conversation.is_human_controlled,
+                  assigned_user_id: conversation.assigned_user_id,
+                  updated_at: conversation.updated_at || new Date().toISOString()
+                });
+              }
             } catch (wsErr: any) {
               console.warn("[WEBHOOK] Aviso no broadcast realtime da mensagem recebida:", wsErr.message);
             }
