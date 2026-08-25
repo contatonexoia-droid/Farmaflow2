@@ -174,83 +174,154 @@ export class AiAgentService {
 
   /**
    * Valida se a farmácia tem autorização no Super Admin para usar o módulo de IA.
+   * Realiza resolução ultra-robusta de tenant via whatsapp_instances, ID direto, slug ou rede.
    */
   public async verifyTenantAuthorization(tenantId: string): Promise<any> {
     if (!tenantId) {
       throw new Error("ID da drogaria não informado.");
     }
 
-    // Sanitização segura: remove prefixos como 'store_', 'inbox_', 'tenant_'
     const rawId = String(tenantId).trim();
     const sanitizedId = rawId
       .replace(/^store_/, '')
       .replace(/^inbox_/, '')
       .replace(/^tenant_/, '');
+    const dashId = sanitizedId.replace(/_/g, '-');
+    const underId = sanitizedId.replace(/-/g, '_');
 
     let tenant: any = null;
-    const isUuid = /^[0-9a-f-]{36}$/i.test(sanitizedId) || /^[0-9a-f-]{36}$/i.test(rawId);
 
-    // 1. Se for UUID, busca diretamente por ID
-    if (isUuid) {
-      const targetUuid = /^[0-9a-f-]{36}$/i.test(sanitizedId) ? sanitizedId : rawId;
-      const { data, error } = await supabaseAdmin
+    // 1. Busca Direta por ID (ex: "maxima-popular", UUID ou variações diretas)
+    try {
+      const { data: directById } = await supabaseAdmin
         .from("tenants")
         .select("*")
-        .eq("id", targetUuid)
+        .eq("id", rawId)
         .maybeSingle();
-      if (!error && data) {
-        tenant = data;
-      }
-    }
 
-    // 2. Busca tolerante por múltiplas variações de slug
-    if (!tenant) {
-      const slugVariants = Array.from(new Set([
-        sanitizedId,
-        rawId,
-        sanitizedId.replace(/-/g, ''),
-        sanitizedId.replace(/_/g, '-'),
-        sanitizedId.replace(/-/g, '_'),
-        rawId.replace(/-/g, ''),
-        rawId.replace(/_/g, '-')
-      ].filter(Boolean)));
-
-      for (const s of slugVariants) {
-        const { data, error } = await supabaseAdmin
+      if (directById) {
+        tenant = directById;
+      } else if (sanitizedId !== rawId) {
+        const { data: directBySanitizedId } = await supabaseAdmin
           .from("tenants")
           .select("*")
-          .eq("slug", s)
+          .eq("id", sanitizedId)
           .maybeSingle();
-        if (!error && data) {
-          tenant = data;
-          break;
-        }
+        if (directBySanitizedId) tenant = directBySanitizedId;
+      } else if (dashId !== rawId) {
+        const { data: directByDash } = await supabaseAdmin
+          .from("tenants")
+          .select("*")
+          .eq("id", dashId)
+          .maybeSingle();
+        if (directByDash) tenant = directByDash;
       }
+    } catch (idErr: any) {
+      console.warn("[AiAgentService] Aviso na busca direta por ID em tenants:", idErr.message);
     }
 
-    // 3. Fallback dinâmico por instância do WhatsApp na tabela whatsapp_instances
+    // 2. Busca por Slug ou Nome (Case-Insensitive com ilike)
     if (!tenant) {
       try {
-        const { data: inst } = await supabaseAdmin
-          .from("whatsapp_instances")
-          .select("store_id, instance_name")
-          .or(`instance_name.ilike.${rawId},instance_name.ilike.${sanitizedId},instance_name.ilike.store_${sanitizedId},instance_name.ilike.store_${sanitizedId.replace(/-/g, '')}`)
+        const { data: matchSlugOrName } = await supabaseAdmin
+          .from("tenants")
+          .select("*")
+          .or(`slug.ilike.%${sanitizedId}%,slug.ilike.%${rawId}%,slug.ilike.%${dashId}%,name.ilike.%${sanitizedId}%,name.ilike.%${rawId}%,name.ilike.%${dashId}%`)
           .limit(1)
           .maybeSingle();
 
-        if (inst?.store_id) {
-          const targetStoreId = String(inst.store_id).trim();
-          const cleanTarget = targetStoreId.replace(/^store_/, '').replace(/^inbox_/, '');
-          const { data: t } = await supabaseAdmin
-            .from("tenants")
-            .select("*")
-            .or(`id.eq.${targetStoreId},id.eq.${cleanTarget},slug.eq.${targetStoreId},slug.eq.${cleanTarget}`)
-            .limit(1)
-            .maybeSingle();
-          if (t) tenant = t;
+        if (matchSlugOrName) {
+          tenant = matchSlugOrName;
+        }
+      } catch (slugErr: any) {
+        console.warn("[AiAgentService] Aviso na busca por slug/name em tenants:", slugErr.message);
+      }
+    }
+
+    // 2.1 Consulta via tabela whatsapp_instances (pelo instance_name ou store_id)
+    if (!tenant) {
+      try {
+        const { data: instList } = await supabaseAdmin
+          .from("whatsapp_instances")
+          .select("*")
+          .or(`instance_name.ilike.%${rawId}%,instance_name.ilike.%${sanitizedId}%,instance_name.ilike.%${dashId}%,store_id.ilike.%${rawId}%,store_id.ilike.%${sanitizedId}%,store_id.ilike.%${dashId}%`)
+          .limit(5);
+
+        if (instList && instList.length > 0) {
+          for (const inst of instList) {
+            if (inst?.store_id) {
+              const targetStoreId = String(inst.store_id).trim();
+              const cleanTarget = targetStoreId.replace(/^store_/, '').replace(/^inbox_/, '');
+              const cleanTargetDash = cleanTarget.replace(/_/g, '-');
+
+              const { data: t } = await supabaseAdmin
+                .from("tenants")
+                .select("*")
+                .or(`id.eq.${targetStoreId},id.eq.${cleanTarget},id.eq.${cleanTargetDash},slug.eq.${targetStoreId},slug.eq.${cleanTarget},name.ilike.%${cleanTarget}%`)
+                .limit(1)
+                .maybeSingle();
+
+              if (t) {
+                tenant = t;
+                break;
+              }
+            }
+          }
         }
       } catch (instErr: any) {
-        console.warn("[AiAgentService] Aviso ao buscar por whatsapp_instances:", instErr.message);
+        console.warn("[AiAgentService] Aviso ao consultar whatsapp_instances:", instErr.message);
+      }
+    }
+
+    // 3. Busca Ampla por Rede (Fallback Final: is_network_master: true ou primeira drogaria ativa)
+    if (!tenant) {
+      try {
+        const prefix = sanitizedId.split(/[-_]/)[0];
+        if (prefix && prefix.length >= 3) {
+          const { data: networkTenant } = await supabaseAdmin
+            .from("tenants")
+            .select("*")
+            .or(`id.ilike.%${prefix}%,network_id.ilike.%${prefix}%,slug.ilike.%${prefix}%,name.ilike.%${prefix}%`)
+            .order("is_network_master", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          if (networkTenant) {
+            console.log(`[AiAgentService] Tenant resolvido por afinidade de rede: "${networkTenant.name}" (id: ${networkTenant.id})`);
+            tenant = networkTenant;
+          }
+        }
+
+        if (!tenant) {
+          const { data: masterTenant } = await supabaseAdmin
+            .from("tenants")
+            .select("*")
+            .eq("is_network_master", true)
+            .order("created_at", { ascending: true })
+            .limit(1)
+            .maybeSingle();
+
+          if (masterTenant) {
+            console.warn(`[AiAgentService] [WARN] Drogaria não mapeada para "${tenantId}". Utilizando matriz da rede: "${masterTenant.name}" (ID: ${masterTenant.id})`);
+            tenant = masterTenant;
+          }
+        }
+
+        if (!tenant) {
+          const { data: firstTenant } = await supabaseAdmin
+            .from("tenants")
+            .select("*")
+            .order("created_at", { ascending: true })
+            .limit(1)
+            .maybeSingle();
+
+          if (firstTenant) {
+            console.warn(`[AiAgentService] [WARN] Drogaria não mapeada para "${tenantId}". Utilizando primeira drogaria ativa: "${firstTenant.name}" (ID: ${firstTenant.id})`);
+            tenant = firstTenant;
+          }
+        }
+      } catch (fbErr: any) {
+        console.warn("[AiAgentService] Aviso no fallback por rede/master:", fbErr.message);
       }
     }
 

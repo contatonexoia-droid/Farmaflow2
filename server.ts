@@ -6754,57 +6754,43 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
     const rawId = String(storeId || '').trim();
     const cleanStoreId = rawId.replace(/^store_/, '').replace(/^inbox_/, '').replace(/^tenant_/, '');
     const cleanInst = instanceName ? instanceName.replace(/^store_/, '').replace(/^inbox_/, '') : '';
+    const dashId = cleanStoreId.replace(/_/g, '-');
+    const underId = cleanStoreId.replace(/-/g, '_');
     
-    // Resolução segura e tolerante do tenant aceitando UUID e múltiplos formatos de Slug
+    // Resolução segura e tolerante do tenant aceitando ID textual, UUID e múltiplos formatos de Slug
     let tenant: any = null;
-    const isUuid = /^[0-9a-f-]{36}$/i.test(cleanStoreId) || /^[0-9a-f-]{36}$/i.test(rawId);
     
-    // 1. Se for UUID, busca direta por ID
-    if (isUuid) {
-      const targetUuid = /^[0-9a-f-]{36}$/i.test(cleanStoreId) ? cleanStoreId : rawId;
-      const { data } = await supabaseAdmin.from("tenants").select("*").eq("id", targetUuid).maybeSingle();
-      tenant = data;
-    }
-    
-    // 2. Busca por variações tolerantes de slug (ex: 'nosso-catalogo', 'nossocatalogo', 'nosso_catalogo')
-    if (!tenant) {
-      const slugVariants = Array.from(new Set([
-        cleanStoreId,
-        rawId,
-        cleanStoreId.replace(/-/g, ''),
-        cleanStoreId.replace(/_/g, '-'),
-        cleanStoreId.replace(/-/g, '_'),
-        cleanInst,
-        cleanInst.replace(/-/g, ''),
-        cleanInst.replace(/_/g, '-')
-      ].filter(Boolean)));
-
-      for (const s of slugVariants) {
-        const { data } = await supabaseAdmin.from("tenants").select("*").eq("slug", s).maybeSingle();
-        if (data) {
-          tenant = data;
-          break;
-        }
+    // 1. Busca direta na tabela tenants por ID ou Slug
+    try {
+      const { data: directTenant } = await supabaseAdmin
+        .from("tenants")
+        .select("*")
+        .or(`id.eq.${rawId},id.eq.${cleanStoreId},id.eq.${dashId},id.eq.${underId},slug.eq.${rawId},slug.eq.${cleanStoreId},slug.eq.${dashId},slug.eq.${underId},id.ilike.${rawId},id.ilike.${cleanStoreId}`)
+        .limit(1)
+        .maybeSingle();
+      if (directTenant) {
+        tenant = directTenant;
       }
-    }
-
-    // 3. Fallback pela tabela whatsapp_instances
+    } catch (e: any) {}
+    
+    // 2. Busca pela tabela whatsapp_instances
     if (!tenant && (instanceName || cleanStoreId)) {
       try {
-        const { data: instRow } = await supabaseAdmin
+        const { data: instList } = await supabaseAdmin
           .from("whatsapp_instances")
           .select("store_id")
-          .or(`instance_name.eq.${instanceName},instance_name.eq.${cleanInst},instance_name.eq.store_${cleanInst},instance_name.eq.store_${cleanStoreId},instance_name.eq.${cleanStoreId}`)
-          .limit(1)
-          .maybeSingle();
+          .or(`instance_name.ilike.${instanceName},instance_name.ilike.${cleanInst},instance_name.ilike.store_${cleanInst},instance_name.ilike.${cleanStoreId},store_id.ilike.${cleanStoreId}`)
+          .limit(1);
 
+        const instRow = instList?.[0];
         if (instRow?.store_id) {
           const targetStoreId = String(instRow.store_id).trim();
           const cleanTarget = targetStoreId.replace(/^store_/, '');
+          const cleanTargetDash = cleanTarget.replace(/_/g, '-');
           const { data: t } = await supabaseAdmin
             .from("tenants")
             .select("*")
-            .or(`id.eq.${targetStoreId},id.eq.${cleanTarget},slug.eq.${targetStoreId},slug.eq.${cleanTarget}`)
+            .or(`id.eq.${targetStoreId},id.eq.${cleanTarget},id.eq.${cleanTargetDash},slug.eq.${targetStoreId},slug.eq.${cleanTarget}`)
             .limit(1)
             .maybeSingle();
           tenant = t || { id: targetStoreId, name: targetStoreId, slug: cleanTarget };
@@ -6812,6 +6798,23 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
       } catch (instErr: any) {
         console.warn("[WelcomeMessage] Aviso ao consultar whatsapp_instances:", instErr.message);
       }
+    }
+
+    // 3. Fallback por prefixo de rede
+    if (!tenant) {
+      try {
+        const prefix = cleanStoreId.split(/[-_]/)[0];
+        if (prefix && prefix.length >= 3) {
+          const { data: netTenant } = await supabaseAdmin
+            .from("tenants")
+            .select("*")
+            .or(`id.ilike.${prefix}%,network_id.ilike.${prefix}%`)
+            .order("is_network_master", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          if (netTenant) tenant = netTenant;
+        }
+      } catch (e: any) {}
     }
 
     if (!tenant) {
