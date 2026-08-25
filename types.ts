@@ -287,6 +287,9 @@ export interface KanbanColumnConfig {
 export interface AuthSession {
   type: "SUPER_ADMIN" | "PHARMACY_ADMIN" | "GUEST";
   tenantId?: string;
+  originalTenantId?: string;
+  masterTenantId?: string;
+  isMatrixUser?: boolean;
   role?: "owner" | "admin" | "gerente" | "operador" | "entregador" | "matriz" | "MATRIZ" | string;
   user?: any;
   access_token?: string;

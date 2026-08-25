@@ -606,28 +606,50 @@ const App: React.FC = () => {
   const [networkTenants, setNetworkTenants] = useState<PharmacyConfig[]>([]);
   const [isSwitchingTenant, setIsSwitchingTenant] = useState(false);
 
-  // Determina se a sessão atual possui privilégios de gestão da Matriz / Rede
+  // Determina se a sessão atual possui privilégios de gestão da Matriz / Rede de forma persistente
   const isMatrixAdmin = useMemo(() => {
     if (!session || session.type === "GUEST") return false;
     if (session.type === "SUPER_ADMIN") return true;
+    if (session.isMatrixUser === true) return true;
+
     const role = (session.role || "").toLowerCase();
     if (role === "matriz" || role === "admin_matriz" || role === "network_admin") return true;
 
-    // Se o usuário logou em uma Matriz (ou a loja vinculada à sessão for a matriz) com perfil administrativo
-    const sessionTenantIsMaster = currentTenant?.isNetworkMaster || (session.tenantId && session.tenantId === currentTenant?.id && currentTenant?.isNetworkMaster);
-    if (sessionTenantIsMaster && (role === "owner" || role === "admin" || !role)) {
+    // Se o usuário possui masterTenantId registrado na sessão
+    if (session.masterTenantId && session.masterTenantId.trim() !== "") return true;
+
+    // Se a loja original do login ou o tenant atual for Matriz com perfil de dono/admin
+    const isLoginStoreMaster = session.originalTenantId && session.originalTenantId === currentTenant?.id && currentTenant?.isNetworkMaster;
+    const isCurrentStoreMaster = currentTenant?.isNetworkMaster;
+    if ((isLoginStoreMaster || isCurrentStoreMaster) && (role === "owner" || role === "admin" || !role)) {
       return true;
     }
+
+    // Se qualquer tenant da rede carregada for a matriz correspondente à sessão
+    if (networkTenants.some(t => t.isNetworkMaster && (t.id === session.tenantId || t.id === session.originalTenantId || t.id === session.masterTenantId))) {
+      return true;
+    }
+
+    // Se o tenant atual pertence a uma rede cujo master é o tenant original de login do usuário
+    if (currentTenant?.networkId && (currentTenant.networkId === session.tenantId || currentTenant.networkId === session.originalTenantId)) {
+      return true;
+    }
+
     return false;
-  }, [session, currentTenant?.id, currentTenant?.isNetworkMaster]);
+  }, [session, currentTenant?.id, currentTenant?.isNetworkMaster, currentTenant?.networkId, networkTenants]);
 
   // Carrega lista de filiais / rede estritamente se o usuário for Administrador da Matriz ou SuperAdmin
   useEffect(() => {
     if (!currentTenant) return;
 
-    // Se o usuário for de uma filial comum (operador, gerente ou filial sem privilégios de rede),
-    // a lista de unidades é restrita estritamente à sua própria loja
-    if (!isMatrixAdmin) {
+    // Se for guest, limpa
+    if (!session || session.type === "GUEST") {
+      setNetworkTenants([currentTenant]);
+      return;
+    }
+
+    // Se o usuário for de uma filial comum sem privilégios de rede
+    if (!isMatrixAdmin && session.type !== "SUPER_ADMIN" && !session.isMatrixUser) {
       setNetworkTenants([currentTenant]);
       return;
     }
@@ -637,11 +659,18 @@ const App: React.FC = () => {
         const allStores = await getTenants();
         if (allStores && allStores.length > 0) {
           // Identifica o ID da Matriz da rede atual:
-          // Se for filial, seu networkId aponta para o ID da Matriz.
-          // Se for matriz, seu próprio id é o ID da Matriz.
-          const masterNetworkId = (currentTenant.networkId && currentTenant.networkId.trim() !== "")
-            ? currentTenant.networkId.trim()
-            : (currentTenant.isNetworkMaster ? currentTenant.id : null);
+          // 1. session.masterTenantId
+          // 2. currentTenant.networkId (se for filial, aponta para o ID da Matriz)
+          // 3. currentTenant.id (se for a própria matriz)
+          // 4. Loja da sessão original do login
+          const sessionStore = allStores.find(s => s.id === session?.tenantId || s.id === session?.originalTenantId);
+          const isSessionStoreMaster = Boolean(sessionStore?.isNetworkMaster);
+
+          const masterNetworkId = 
+            (session?.masterTenantId && session.masterTenantId.trim() !== "") ? session.masterTenantId.trim() :
+            (currentTenant.networkId && currentTenant.networkId.trim() !== "") ? currentTenant.networkId.trim() :
+            (currentTenant.isNetworkMaster ? currentTenant.id : 
+            (isSessionStoreMaster ? sessionStore?.id : (sessionStore?.networkId || null)));
 
           if (masterNetworkId) {
             // Pertence a ESTA rede se:
@@ -649,10 +678,29 @@ const App: React.FC = () => {
             // 2. É uma Filial vinculada a esta rede (s.networkId === masterNetworkId)
             const related = allStores.filter((s) => {
               const isMatrizOfThisNetwork = s.id === masterNetworkId;
-              const isFilialOfThisNetwork = !!s.networkId && s.networkId.trim() === masterNetworkId;
+              const isFilialOfThisNetwork = Boolean(s.networkId && s.networkId.trim() === masterNetworkId);
               return isMatrizOfThisNetwork || isFilialOfThisNetwork;
             });
-            setNetworkTenants(related.length > 0 ? related : [currentTenant]);
+
+            if (related.length > 0) {
+              setNetworkTenants(related);
+              // Garante que o status de matriz/rede persista na sessão
+              if (!session.masterTenantId || !session.isMatrixUser) {
+                setSession(prev => {
+                  if (!prev || prev.type === "GUEST") return prev;
+                  const updated: AuthSession = {
+                    ...prev,
+                    isMatrixUser: true,
+                    masterTenantId: masterNetworkId,
+                    originalTenantId: prev.originalTenantId || prev.tenantId || masterNetworkId
+                  };
+                  localStorage.setItem("ff_session", JSON.stringify(updated));
+                  return updated;
+                });
+              }
+            } else {
+              setNetworkTenants([currentTenant]);
+            }
           } else {
             // Loja independente sem rede
             setNetworkTenants([currentTenant]);
@@ -663,13 +711,40 @@ const App: React.FC = () => {
       }
     };
     loadNetworkTenants();
-  }, [currentTenant?.id, currentTenant?.isNetworkMaster, currentTenant?.networkId, isMatrixAdmin]);
+  }, [
+    currentTenant?.id, 
+    currentTenant?.isNetworkMaster, 
+    currentTenant?.networkId, 
+    isMatrixAdmin, 
+    session?.type, 
+    session?.masterTenantId, 
+    session?.isMatrixUser, 
+    session?.tenantId,
+    session?.originalTenantId
+  ]);
 
   const handleSelectTenant = useCallback(async (selected: PharmacyConfig) => {
     if (!selected || selected.id === currentTenant?.id) return;
     setIsSwitchingTenant(true);
     setCurrentTenant(selected);
     localStorage.setItem("ff_tenant", JSON.stringify(selected));
+
+    // Preserva rigorosamente o privilégio de Administrador de Matriz/Rede ao alternar entre filiais
+    setSession(prev => {
+      if (!prev || prev.type === "GUEST") return prev;
+      const isCurrentlyMatrix = isMatrixAdmin || prev.isMatrixUser === true || prev.type === "SUPER_ADMIN";
+      const masterId = prev.masterTenantId || (currentTenant?.isNetworkMaster ? currentTenant.id : currentTenant?.networkId) || (selected.isNetworkMaster ? selected.id : selected.networkId);
+      
+      const updated: AuthSession = {
+        ...prev,
+        isMatrixUser: isCurrentlyMatrix || prev.isMatrixUser,
+        masterTenantId: masterId || prev.masterTenantId,
+        originalTenantId: prev.originalTenantId || prev.tenantId || masterId
+      };
+      localStorage.setItem("ff_session", JSON.stringify(updated));
+      return updated;
+    });
+
     try {
       const [prods, ords, promos, coups] = await Promise.all([
         getProductsByTenant(selected.id, setProducts),
@@ -687,7 +762,7 @@ const App: React.FC = () => {
     } finally {
       setIsSwitchingTenant(false);
     }
-  }, [currentTenant?.id]);
+  }, [currentTenant?.id, currentTenant?.isNetworkMaster, currentTenant?.networkId, isMatrixAdmin]);
 
   const [products, setProducts] = useState<Product[]>([]);
   const [matrizProducts, setMatrizProducts] = useState<Product[]>([]);
@@ -2727,12 +2802,32 @@ const App: React.FC = () => {
       return;
     }
 
-    setSession(auth);
     if (auth.type === "SUPER_ADMIN") {
+      const superAuth: AuthSession = {
+        ...auth,
+        isMatrixUser: true
+      };
+      setSession(superAuth);
+      localStorage.setItem("ff_session", JSON.stringify(superAuth));
       setView(ViewMode.ADMIN_SUPER);
       window.history.pushState({ view: ViewMode.ADMIN_SUPER, adminTab }, "");
     } else if (auth.type === "PHARMACY_ADMIN" && tenant) {
+      const isMaster = Boolean(tenant.isNetworkMaster);
+      const roleStr = (auth.role || "").toLowerCase();
+      const isMatrizRole = roleStr === "matriz" || roleStr === "admin_matriz" || roleStr === "network_admin";
+      const masterTenantId = isMaster ? tenant.id : (tenant.networkId || auth.masterTenantId);
+
+      const enrichedAuth: AuthSession = {
+        ...auth,
+        isMatrixUser: isMaster || isMatrizRole || Boolean(auth.isMatrixUser),
+        masterTenantId: masterTenantId,
+        originalTenantId: tenant.id
+      };
+      setSession(enrichedAuth);
+      localStorage.setItem("ff_session", JSON.stringify(enrichedAuth));
+
       setCurrentTenant(tenant);
+      localStorage.setItem("ff_tenant", JSON.stringify(tenant));
       setIsLoading(true);
       try {
         const [prods, ords, promos, coups] = await Promise.all([
@@ -3228,6 +3323,7 @@ const App: React.FC = () => {
           }
           networkTenants={networkTenants}
           onSelectTenant={handleSelectTenant}
+          isMatrixUser={isMatrixAdmin}
         />
       )}
 
@@ -3568,6 +3664,25 @@ const App: React.FC = () => {
                       networkName={networkTenants.find(t => t.isNetworkMaster)?.name || "Rede de Farmácias"}
                       className="w-full"
                     />
+                  </div>
+                )}
+
+                {/* Seletor Compacto quando o menu lateral estiver recolhido */}
+                {isMatrixAdmin && networkTenants.length > 1 && isSidebarCollapsed && (
+                  <div className="mb-3 pb-3 border-b border-gray-100 flex justify-center">
+                    <button
+                      onClick={() => {
+                        setIsSidebarCollapsed(false);
+                        localStorage.setItem("ff_sidebar_collapsed", "false");
+                      }}
+                      title={`Unidade Atual: ${currentTenant.name || "Drogaria"} (${networkTenants.length} unidades na rede - Clique para alternar)`}
+                      className="w-10 h-10 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 flex items-center justify-center transition-all cursor-pointer relative group shadow-2xs active:scale-95"
+                    >
+                      <Store size={18} />
+                      <span className="absolute -top-1 -right-1 w-4 h-4 bg-purple-600 text-white text-[9px] font-black rounded-full flex items-center justify-center shadow-xs">
+                        {networkTenants.length}
+                      </span>
+                    </button>
                   </div>
                 )}
 

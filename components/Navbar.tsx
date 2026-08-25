@@ -13,6 +13,7 @@ interface NavbarProps {
   onToggleSidebar?: () => void;
   networkTenants?: PharmacyConfig[];
   onSelectTenant?: (tenant: PharmacyConfig) => void;
+  isMatrixUser?: boolean;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({ 
@@ -23,7 +24,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   session, 
   onToggleSidebar,
   networkTenants = [],
-  onSelectTenant
+  onSelectTenant,
+  isMatrixUser: isMatrixUserProp
 }) => {
   const isStoreContext = !!config.id;
   // Agora consideramos tanto o Catálogo quanto o Carrinho como visualizações da "Loja" (Branding da Drogaria)
@@ -32,11 +34,15 @@ export const Navbar: React.FC<NavbarProps> = ({
   
   // Apenas Super Admin ou Administrador da Matriz tem privilégios de alternar unidades
   const userRole = (session?.role || "").toLowerCase();
-  const isMatrixUser = session?.type === 'SUPER_ADMIN' || 
+  const isMatrixUser = isMatrixUserProp !== undefined ? isMatrixUserProp : (
+    session?.type === 'SUPER_ADMIN' || 
+    Boolean(session?.isMatrixUser) ||
     userRole === 'matriz' || 
     userRole === 'admin_matriz' || 
     userRole === 'network_admin' || 
-    (config?.isNetworkMaster && (userRole === 'owner' || userRole === 'admin' || !userRole));
+    (config?.isNetworkMaster && (userRole === 'owner' || userRole === 'admin' || !userRole)) ||
+    (networkTenants.some(t => t.isNetworkMaster) && (userRole === 'owner' || userRole === 'admin'))
+  );
 
   // Decidimos ocultar controles administrativos na loja para que o dono veja exatamente o que o cliente vê
   const showAdminControls = !isCatalogView && !isGuest;

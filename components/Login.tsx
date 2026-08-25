@@ -64,10 +64,18 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
                // Obter role do funcionário se houver, ou assumir owner
                const userRole = (authData.user.user_metadata?.role || "owner").toLowerCase();
                
+               const isMaster = Boolean(validTenant.is_network_master);
+               const isMatrizRole = userRole === "matriz" || userRole === "admin_matriz" || userRole === "network_admin";
+               const isMatrixUser = isMaster || isMatrizRole;
+               const masterTenantId = isMaster ? validTenant.id : (validTenant.network_id || undefined);
+
                // Se der ok, já repassa
                onLogin({ 
                    type: 'PHARMACY_ADMIN', 
                    tenantId: validTenant.id, 
+                   originalTenantId: validTenant.id,
+                   masterTenantId: masterTenantId,
+                   isMatrixUser: isMatrixUser,
                    role: userRole as any,
                    access_token: authData.session?.access_token,
                    refresh_token: authData.session?.refresh_token
@@ -119,8 +127,18 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
         }
 
         const tenant = mapDbTenantToApp(validTenant);
+        const isMaster = Boolean(tenant.isNetworkMaster);
+        const masterTenantId = isMaster ? tenant.id : (tenant.networkId || undefined);
 
-        onLogin({ type: 'PHARMACY_ADMIN', tenantId: tenant.id, role: 'owner', ...tokens } as any, tenant);
+        onLogin({ 
+          type: 'PHARMACY_ADMIN', 
+          tenantId: tenant.id, 
+          originalTenantId: tenant.id,
+          masterTenantId: masterTenantId,
+          isMatrixUser: isMaster,
+          role: 'owner', 
+          ...tokens 
+        } as any, tenant);
 
     } catch (err: any) {
         console.error(err);
