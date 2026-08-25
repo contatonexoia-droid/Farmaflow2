@@ -6695,11 +6695,15 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
           .maybeSingle();
 
         if (instRow?.store_id) {
-          const instStoreIsUuid = /^[0-9a-f-]{36}$/i.test(instRow.store_id);
-          const { data: t } = instStoreIsUuid
-            ? await supabaseAdmin.from("tenants").select("*").eq("id", instRow.store_id).maybeSingle()
-            : await supabaseAdmin.from("tenants").select("*").eq("slug", instRow.store_id.replace(/^store_/, '')).maybeSingle();
-          tenant = t;
+          const targetStoreId = String(instRow.store_id).trim();
+          const cleanTarget = targetStoreId.replace(/^store_/, '');
+          const { data: t } = await supabaseAdmin
+            .from("tenants")
+            .select("*")
+            .or(`id.eq.${targetStoreId},id.eq.${cleanTarget},slug.eq.${targetStoreId},slug.eq.${cleanTarget}`)
+            .limit(1)
+            .maybeSingle();
+          tenant = t || { id: targetStoreId, name: targetStoreId, slug: cleanTarget };
         }
       } catch (instErr: any) {
         console.warn("[WelcomeMessage] Aviso ao consultar whatsapp_instances:", instErr.message);
@@ -6939,57 +6943,128 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
 
       // 1. Busca Obrigatória e Dinâmica pela tabela whatsapp_instances usando o instanceName recebido da Evolution API
       if (instanceName) {
-        const cleanInst = String(instanceName).trim().replace(/^store_/, '').replace(/^inbox_/, '');
+        const rawInst = String(instanceName).trim();
+        const cleanInst = rawInst.replace(/^store_/, '').replace(/^inbox_/, '').replace(/^tenant_/, '').trim();
+        const cleanInstDash = cleanInst.replace(/_/g, '-');
+        const cleanInstUnderscore = cleanInst.replace(/-/g, '_');
+        
+        console.log(`[WEBHOOK INSTANCE QUERY] Iniciando busca em whatsapp_instances para instanceName: "${rawInst}" (clean: "${cleanInst}", dash: "${cleanInstDash}")`);
+
         try {
-          const { data: instRow } = await supabaseAdmin
+          // 1.1 Tentativa com busca case-insensitive exata na coluna instance_name
+          let { data: instRow, error: instErr } = await supabaseAdmin
             .from("whatsapp_instances")
             .select("id, store_id, instance_name, status, phone_number")
-            .or(`instance_name.eq.${instanceName.trim()},instance_name.eq.${cleanInst},instance_name.eq.store_${cleanInst}`)
+            .ilike("instance_name", rawInst)
             .limit(1)
             .maybeSingle();
 
+          // 1.2 Se não encontrou, busca com variações tolerantes (com/sem prefixos, traços ou underscores)
+          if (!instRow && !instErr) {
+            const orFilter = [
+              `instance_name.ilike.${rawInst}`,
+              `instance_name.ilike.${cleanInst}`,
+              `instance_name.ilike.${cleanInstDash}`,
+              `instance_name.ilike.${cleanInstUnderscore}`,
+              `instance_name.ilike.store_${cleanInst}`,
+              `instance_name.ilike.inbox_${cleanInst}`,
+              `store_id.eq.${rawInst}`,
+              `store_id.eq.${cleanInst}`,
+              `store_id.eq.${cleanInstDash}`
+            ].join(',');
+
+            const orRes = await supabaseAdmin
+              .from("whatsapp_instances")
+              .select("id, store_id, instance_name, status, phone_number")
+              .or(orFilter)
+              .limit(1)
+              .maybeSingle();
+
+            instRow = orRes.data;
+            instErr = orRes.error;
+          }
+
+          console.log(`[WEBHOOK INSTANCE RESULT] Resultado da consulta em whatsapp_instances:`, instRow ? {
+            id: instRow.id,
+            store_id: instRow.store_id,
+            instance_name: instRow.instance_name,
+            status: instRow.status
+          } : "Nenhum registro encontrado", instErr ? `Erro: ${instErr.message}` : "");
+
           if (instRow?.store_id) {
             const targetStoreId = String(instRow.store_id).trim();
-            const isStoreUuid = /^[0-9a-f-]{36}$/i.test(targetStoreId);
-            const cleanSlug = targetStoreId.replace(/^store_/, '');
+            const cleanTargetStoreId = targetStoreId.replace(/^store_/, '').replace(/^inbox_/, '');
+            const cleanTargetDash = cleanTargetStoreId.replace(/_/g, '-');
 
-            const { data: tenantFromInst } = isStoreUuid
-              ? await supabaseAdmin.from("tenants").select("*").eq("id", targetStoreId).maybeSingle()
-              : await supabaseAdmin.from("tenants").select("*").eq("slug", cleanSlug).maybeSingle();
+            // Busca na tabela tenants pelo ID da loja ou pelo slug
+            const { data: tenantFromInst, error: tErr } = await supabaseAdmin
+              .from("tenants")
+              .select("*")
+              .or(`id.eq.${targetStoreId},id.eq.${cleanTargetStoreId},id.eq.${cleanTargetDash},slug.eq.${targetStoreId},slug.eq.${cleanTargetStoreId},slug.eq.${cleanTargetDash}`)
+              .limit(1)
+              .maybeSingle();
 
             if (tenantFromInst) {
               resolvedTenant = tenantFromInst;
-            } else if (isStoreUuid) {
-              // Se tiver UUID válido, utiliza o ID do tenant
-              resolvedTenant = { id: targetStoreId, name: targetStoreId, slug: cleanSlug };
+              console.log(`[WEBHOOK TENANT LOOKUP] Tenant localizado pelo store_id da instância: "${resolvedTenant.name}" (id: ${resolvedTenant.id}, slug: ${resolvedTenant.slug})`);
+            } else {
+              // Se não encontrou o registro completo na tabela tenants, usa o store_id da instância
+              resolvedTenant = { id: targetStoreId, name: targetStoreId, slug: cleanTargetStoreId };
+              console.warn(`[WEBHOOK TENANT LOOKUP] Registro não localizado em tenants, utilizando dados da instância: store_id="${targetStoreId}"`);
             }
           }
         } catch (instErr: any) {
-          console.error('[WEBHOOK] Erro ao consultar whatsapp_instances:', instErr.message);
+          console.error('[WEBHOOK ERROR] Erro na consulta de whatsapp_instances:', instErr.message);
         }
       }
 
-      // 2. Se não encontrou por instanceName, tenta pelo tenantId/storeId explicitamente informado nos parâmetros da requisição
+      // 2. Se não encontrou por whatsapp_instances, tenta pelo tenantId/storeId explicitamente informado nos parâmetros da requisição
       if (!resolvedTenant && (req.query.tenantId || req.query.storeId || req.body.tenantId)) {
         const explicitId = String(req.query.tenantId || req.query.storeId || req.body.tenantId).trim();
         const cleanExplicit = explicitId.replace(/^store_/, '').replace(/^inbox_/, '').replace(/^tenant_/, '');
-        const isExplicitUuid = /^[0-9a-f-]{36}$/i.test(cleanExplicit) || /^[0-9a-f-]{36}$/i.test(explicitId);
+        const cleanExplicitDash = cleanExplicit.replace(/_/g, '-');
 
         try {
-          if (isExplicitUuid) {
-            const targetUuid = /^[0-9a-f-]{36}$/i.test(cleanExplicit) ? cleanExplicit : explicitId;
-            const { data: byId } = await supabaseAdmin.from("tenants").select("*").eq("id", targetUuid).maybeSingle();
-            if (byId) resolvedTenant = byId;
-          } else {
-            const { data: bySlug } = await supabaseAdmin.from("tenants").select("*").eq("slug", cleanExplicit).maybeSingle();
-            if (bySlug) resolvedTenant = bySlug;
+          const { data: byIdOrSlug } = await supabaseAdmin
+            .from("tenants")
+            .select("*")
+            .or(`id.eq.${explicitId},id.eq.${cleanExplicit},id.eq.${cleanExplicitDash},slug.eq.${explicitId},slug.eq.${cleanExplicit},slug.eq.${cleanExplicitDash}`)
+            .limit(1)
+            .maybeSingle();
+
+          if (byIdOrSlug) {
+            resolvedTenant = byIdOrSlug;
+            console.log(`[WEBHOOK TENANT LOOKUP] Tenant localizado por parâmetro explícito: "${resolvedTenant.name}" (id: ${resolvedTenant.id})`);
           }
         } catch (paramErr: any) {
-          console.error('[WEBHOOK] Erro ao buscar tenant explícito:', paramErr.message);
+          console.error('[WEBHOOK ERROR] Erro ao buscar tenant explícito:', paramErr.message);
         }
       }
 
-      // 3. Fallback Seguro e Genérico: Se a instância ou loja não for encontrada no banco, registra erro claro e NÃO injeta em loja incorreta
+      // 3. Fallback tolerante direto na tabela tenants pelo instanceName caso a instância não esteja cadastrada em whatsapp_instances
+      if (!resolvedTenant && instanceName) {
+        const cleanInst = String(instanceName).trim().replace(/^store_/, '').replace(/^inbox_/, '').replace(/^tenant_/, '');
+        const cleanInstDash = cleanInst.replace(/_/g, '-');
+        const cleanInstUnder = cleanInst.replace(/-/g, '_');
+        
+        try {
+          const { data: fallbackTenant } = await supabaseAdmin
+            .from("tenants")
+            .select("*")
+            .or(`id.eq.${cleanInst},id.eq.${cleanInstDash},id.eq.${cleanInstUnder},slug.eq.${cleanInst},slug.eq.${cleanInstDash}`)
+            .limit(1)
+            .maybeSingle();
+
+          if (fallbackTenant) {
+            resolvedTenant = fallbackTenant;
+            console.log(`[WEBHOOK FALLBACK TENANT] Tenant mapeado diretamente por slug/id da instância: "${resolvedTenant.name}" (id: ${resolvedTenant.id})`);
+          }
+        } catch (fbErr: any) {
+          console.warn("[WEBHOOK FALLBACK WARNING] Erro na busca direta de fallback em tenants:", fbErr.message);
+        }
+      }
+
+      // 4. Se a instância ou loja não for encontrada no banco, registra erro claro e NÃO processa mensagem
       if (!resolvedTenant) {
         console.error(`[WEBHOOK ERROR] Instância não encontrada na tabela whatsapp_instances (instanceName: "${instanceName || 'indefinido'}", rawTenantId: "${rawTenantId || 'indefinido'}")`);
         return res.status(404).json({
@@ -7000,7 +7075,7 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
       }
 
       storeId = resolvedTenant.id;
-      console.log(`[WEBHOOK] Instância identificada: ${instanceName || 'N/A'} | Loja: "${resolvedTenant.name || resolvedTenant.slug || storeId}" (@${resolvedTenant.slug || storeId}, UUID: ${storeId}) | Mensagens a processar: ${messages.length}`);
+      console.log(`[WEBHOOK SUCCESS] Instância identificada com sucesso: "${instanceName || 'N/A'}" | Loja: "${resolvedTenant.name || resolvedTenant.slug || storeId}" (id: "${storeId}") | Mensagens a processar: ${messages.length}`);
 
       for (const msg of messages) {
         if (!msg) continue;
