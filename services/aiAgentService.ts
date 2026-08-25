@@ -203,7 +203,7 @@ export class AiAgentService {
       }
     }
 
-    // 2. Busca tolerante por múltiplas variações de slug (ex: 'nosso-catalogo', 'nossocatalogo', 'nosso_catalogo')
+    // 2. Busca tolerante por múltiplas variações de slug
     if (!tenant) {
       const slugVariants = Array.from(new Set([
         sanitizedId,
@@ -228,21 +228,25 @@ export class AiAgentService {
       }
     }
 
-    // 3. Fallback por instância do WhatsApp na tabela whatsapp_instances
+    // 3. Fallback dinâmico por instância do WhatsApp na tabela whatsapp_instances
     if (!tenant) {
       try {
         const { data: inst } = await supabaseAdmin
           .from("whatsapp_instances")
-          .select("store_id")
-          .or(`instance_name.eq.${rawId},instance_name.eq.${sanitizedId},instance_name.eq.store_${sanitizedId},instance_name.eq.store_${sanitizedId.replace(/-/g, '')}`)
+          .select("store_id, instance_name")
+          .or(`instance_name.ilike.${rawId},instance_name.ilike.${sanitizedId},instance_name.ilike.store_${sanitizedId},instance_name.ilike.store_${sanitizedId.replace(/-/g, '')}`)
           .limit(1)
           .maybeSingle();
 
         if (inst?.store_id) {
-          const instStoreIsUuid = /^[0-9a-f-]{36}$/i.test(inst.store_id);
-          const { data: t } = instStoreIsUuid
-            ? await supabaseAdmin.from("tenants").select("*").eq("id", inst.store_id).maybeSingle()
-            : await supabaseAdmin.from("tenants").select("*").eq("slug", inst.store_id.replace(/^store_/, '')).maybeSingle();
+          const targetStoreId = String(inst.store_id).trim();
+          const cleanTarget = targetStoreId.replace(/^store_/, '').replace(/^inbox_/, '');
+          const { data: t } = await supabaseAdmin
+            .from("tenants")
+            .select("*")
+            .or(`id.eq.${targetStoreId},id.eq.${cleanTarget},slug.eq.${targetStoreId},slug.eq.${cleanTarget}`)
+            .limit(1)
+            .maybeSingle();
           if (t) tenant = t;
         }
       } catch (instErr: any) {
@@ -250,102 +254,53 @@ export class AiAgentService {
       }
     }
 
-    // 4. Fallback tolerante para a primeira drogaria cadastrada/ativa caso o tenant não tenha sido localizado
     if (!tenant) {
+      console.error(`[AiAgentService] ❌ Nenhuma drogaria encontrada no banco de dados para o identificador "${tenantId}".`);
+      throw new Error(`Drogaria não encontrada no banco de dados para o identificador "${tenantId}". Verifique o cadastro da unidade no painel.`);
+    }
+
+    // 4. Carregamento 100% Dinâmico das Configurações de IA da Drogaria
+    let rawConfig: any = tenant.ai_agent_config || tenant.aiagentconfig;
+    if (typeof rawConfig === 'string') {
       try {
-        const { data: firstTenant } = await supabaseAdmin
-          .from("tenants")
-          .select("*")
-          .order("created_at", { ascending: true })
-          .limit(1)
-          .maybeSingle();
-        if (firstTenant) {
-          console.warn(`[AiAgentService] [WARN] Tenant não mapeado para "${tenantId}". Usando drogaria fallback: "${firstTenant.name}" (@${firstTenant.slug}, ID: ${firstTenant.id})`);
-          tenant = firstTenant;
-        }
-      } catch (fbErr: any) {
-        console.warn("[AiAgentService] Aviso ao buscar drogaria fallback:", fbErr.message);
+        rawConfig = JSON.parse(rawConfig);
+      } catch (e) {
+        rawConfig = {};
       }
     }
+    rawConfig = rawConfig || {};
 
-    if (!tenant) {
-      throw new Error(`Drogaria não encontrada (ID/Slug: ${tenantId}).`);
-    }
-
-    // 5. Carregar configurações avançadas do agente (agent_settings) vinculadas ao UUID ou slug do tenant
-    try {
-      const orConditions = [
-        `tenant_id.eq.${tenant.id}`,
-        `store_id.eq.${tenant.id}`,
-        tenant.slug ? `slug.eq.${tenant.slug}` : '',
-        tenant.slug ? `tenant_id.eq.${tenant.slug}` : '',
-        tenant.slug ? `store_id.eq.${tenant.slug}` : ''
-      ].filter(Boolean).join(",");
-
-      let { data: agentSetting } = await supabaseAdmin
-        .from("agent_settings")
-        .select("*")
-        .or(orConditions)
-        .order("updated_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      // Fallback: se não encontrar por ID/slug, tenta o primeiro registro de agent_settings
-      if (!agentSetting) {
-        const { data: fallbackSettings } = await supabaseAdmin
-          .from("agent_settings")
-          .select("*")
-          .order("created_at", { ascending: true })
-          .limit(1)
-          .maybeSingle();
-        if (fallbackSettings) {
-          agentSetting = fallbackSettings;
-        }
-      }
-
-      if (agentSetting) {
-        const resolvedApiKey = (
-          agentSetting.openai_api_key ||
-          agentSetting.api_key ||
-          agentSetting.apikey ||
-          agentSetting.gemini_api_key ||
-          agentSetting.apiKey ||
-          agentSetting.key
-        )?.trim();
-
-        const resolvedProvider = agentSetting.provider || (agentSetting.openai_api_key ? 'openai' : 'gemini');
-
-        tenant.ai_agent_config = {
-          ...(tenant.ai_agent_config || tenant.aiagentconfig || {}),
-          ...agentSetting,
-          apiKey: resolvedApiKey || tenant.ai_agent_config?.apiKey || tenant.ai_agent_config?.openai_api_key,
-          openai_api_key: agentSetting.openai_api_key || agentSetting.api_key || resolvedApiKey,
-          provider: resolvedProvider,
-          active: agentSetting.active ?? agentSetting.enabled ?? tenant.ai_agent_config?.active ?? true
-        };
-
-        console.log(`[AiAgentService] Configurações de IA carregadas com sucesso para "${tenant.name}" (@${tenant.slug || tenant.id}) - Provedor: ${resolvedProvider}, Chave configurada: ${Boolean(resolvedApiKey || process.env.OPENAI_API_KEY || process.env.GEMINI_API_KEY)}`);
-      }
-    } catch (agentErr: any) {
-      console.warn("[AiAgentService] Aviso ao carregar agent_settings:", agentErr.message);
-    }
-
-    // Validação e log crítico caso a chave da OpenAI não esteja configurada
-    const currentProvider = tenant.ai_agent_config?.provider || 'openai';
-    const currentKey = (
-      tenant.ai_agent_config?.apiKey ||
-      tenant.ai_agent_config?.openai_api_key ||
-      tenant.ai_agent_config?.api_key ||
-      (currentProvider === 'gemini' ? process.env.GEMINI_API_KEY : process.env.OPENAI_API_KEY)
+    const resolvedProvider = rawConfig.provider || (rawConfig.openai_api_key ? 'openai' : 'gemini');
+    const resolvedApiKey = (
+      rawConfig.apiKey ||
+      rawConfig.openai_api_key ||
+      rawConfig.api_key ||
+      (resolvedProvider === 'gemini' ? process.env.GEMINI_API_KEY : process.env.OPENAI_API_KEY)
     )?.trim();
 
-    if ((currentProvider === 'openai' || !currentKey) && !currentKey) {
-      console.error(`[AiAgentService] [ERRO] Chave de API da OpenAI não configurada para o tenant ${tenant.name || tenant.slug || tenant.id}.`);
-    }
+    tenant.ai_agent_config = {
+      active: rawConfig.active ?? rawConfig.enabled ?? true,
+      provider: resolvedProvider,
+      model: rawConfig.model || (resolvedProvider === 'openai' ? 'gpt-4o-mini' : 'gemini-2.5-flash'),
+      apiKey: resolvedApiKey,
+      openai_api_key: rawConfig.openai_api_key || (resolvedProvider === 'openai' ? resolvedApiKey : undefined),
+      systemPrompt: rawConfig.systemPrompt || DEFAULT_AI_AGENT_PROMPT,
+      fallbackMessage: rawConfig.fallbackMessage || "Desculpe, estou com uma instabilidade momentânea. Um de nossos atendentes humanos responderá sua mensagem em breve!",
+      transitionToHumanMessage: rawConfig.transitionToHumanMessage || "Encaminhei sua dúvida e o link da nossa loja. Um dos nossos balconistas humanos já vai te atender por aqui!",
+      maxTokens: rawConfig.maxTokens || 500,
+      temperature: rawConfig.temperature ?? 0.7,
+      maxInteractionsPerSession: rawConfig.maxInteractionsPerSession || 4,
+      antiAbuseGuardrailsEnabled: rawConfig.antiAbuseGuardrailsEnabled !== false,
+      strictStoreLinkEnforcement: rawConfig.strictStoreLinkEnforcement !== false,
+      storeLink: rawConfig.storeLink || tenant.welcome_message_link || (tenant.custom_domain ? `https://${tenant.custom_domain}` : tenant.slug ? `https://${tenant.slug}.farmaflow.online` : `https://${tenant.id}.farmaflow.online`),
+      ...rawConfig
+    };
 
-    const isEnabled = tenant.is_ai_agent_enabled === true || tenant.isaiagentenabled === true;
+    console.log(`[AiAgentService] Configurações de IA carregadas dinamicamente para "${tenant.name}" (@${tenant.slug || tenant.id}) - Provedor: ${resolvedProvider}, Chave ativa: ${Boolean(resolvedApiKey)}`);
+
+    const isEnabled = tenant.is_ai_agent_enabled !== false && tenant.isaiagentenabled !== false;
     if (!isEnabled) {
-      const err = new Error("MÓDULO_NÃO_AUTORIZADO: O Agente de IA não está liberado no plano desta drogaria. Entre em contato com o Super Admin.");
+      const err = new Error("MÓDULO_NÃO_AUTORIZADO: O Agente de IA está desativado para esta drogaria nas configurações do painel.");
       (err as any).statusCode = 403;
       throw err;
     }

@@ -26,7 +26,7 @@ import { contactMergeManager } from "./services/contactMergeManager.js";
 import { inboxStore } from "./services/inboxStore.js";
 import { chatStore } from "./services/chatStore.js";
 import { teamStore } from "./services/teamStore.js";
-import { aiAgentService } from "./services/aiAgentService.js";
+import { aiAgentService, DEFAULT_AI_AGENT_PROMPT } from "./services/aiAgentService.js";
 import { evolutionApiService } from "./services/evolutionApiService.js";
 import QRCode from "qrcode";
 
@@ -2193,22 +2193,126 @@ app.get("/api/v1/products/:id", async (req, res) => {
 app.post("/api/v1/tenants/admin", async (req, res) => {
   try {
     const { payload, isUpdate } = req.body;
+
+    // Padronização e Enriquecimento Automático para Onboarding Plug-and-Play
+    const enrichedPayload = { ...payload };
+    const pharmacyName = enrichedPayload.name || "Nossa Drogaria";
+    const pharmacySlug = enrichedPayload.slug || (enrichedPayload.id ? String(enrichedPayload.id).replace(/^store_/, '') : '');
+
+    if (!enrichedPayload.welcome_message_text) {
+      enrichedPayload.welcome_message_text = `Olá! Seja muito bem-vindo(a) à ${pharmacyName}! 🌟\n\nComo podemos te ajudar hoje? Digite o nome do produto ou medicamento que deseja consultar!`;
+    }
+    if (enrichedPayload.welcome_message_enabled === undefined) {
+      enrichedPayload.welcome_message_enabled = true;
+    }
+    if (!enrichedPayload.welcome_message_format) {
+      enrichedPayload.welcome_message_format = "button";
+    }
+    if (enrichedPayload.is_chat_enabled === undefined) {
+      enrichedPayload.is_chat_enabled = true;
+    }
+    if (enrichedPayload.is_ai_agent_enabled === undefined) {
+      enrichedPayload.is_ai_agent_enabled = true;
+    }
+    if (enrichedPayload.is_ai_copilot_enabled === undefined) {
+      enrichedPayload.is_ai_copilot_enabled = true;
+    }
+
+    const defaultStoreLink = enrichedPayload.welcome_message_link || (pharmacySlug ? `https://${pharmacySlug}.farmaflow.online` : '');
+    if (!enrichedPayload.welcome_message_link && defaultStoreLink) {
+      enrichedPayload.welcome_message_link = defaultStoreLink;
+    }
+
+    if (!enrichedPayload.ai_agent_config || typeof enrichedPayload.ai_agent_config !== 'object') {
+      enrichedPayload.ai_agent_config = {
+        active: true,
+        provider: 'gemini',
+        model: 'gemini-2.5-flash',
+        systemPrompt: DEFAULT_AI_AGENT_PROMPT,
+        fallbackMessage: "Desculpe, estou com uma instabilidade momentânea. Um de nossos atendentes humanos responderá sua mensagem em breve!",
+        transitionToHumanMessage: "Encaminhei sua dúvida e o link da nossa loja. Um dos nossos balconistas humanos já vai te atender por aqui!",
+        maxTokens: 500,
+        temperature: 0.7,
+        maxInteractionsPerSession: 4,
+        antiAbuseGuardrailsEnabled: true,
+        strictStoreLinkEnforcement: true,
+        storeLink: defaultStoreLink
+      };
+    }
+
+    let tenantData: any = null;
+
     if (isUpdate) {
       const { data, error } = await supabase
         .from("tenants")
-        .upsert(payload)
+        .upsert(enrichedPayload)
         .select();
       if (error) throw error;
-      res.json({ data });
+      tenantData = data;
     } else {
       const { data, error } = await supabase
         .from("tenants")
-        .insert(payload)
+        .insert(enrichedPayload)
         .select();
       if (error) throw error;
-      res.json({ data });
+      tenantData = data;
     }
+
+    // Onboarding Automático de Estrutura de Atendimento (Inboxes & Instâncias WhatsApp)
+    const savedTenant = (Array.isArray(tenantData) ? tenantData[0] : tenantData) || enrichedPayload;
+    const targetStoreId = savedTenant.id || enrichedPayload.id;
+
+    if (targetStoreId) {
+      // 1. Garantir Caixa de Entrada Padrão na tabela inboxes
+      try {
+        const { data: existingInbox } = await supabaseAdmin
+          .from("inboxes")
+          .select("id")
+          .eq("store_id", targetStoreId)
+          .limit(1)
+          .maybeSingle();
+
+        if (!existingInbox) {
+          await supabaseAdmin.from("inboxes").insert({
+            store_id: targetStoreId,
+            name: "WhatsApp Principal",
+            description: "Canal de atendimento padrão via WhatsApp"
+          });
+          console.log(`[ONBOARDING] Caixa de entrada padrão criada para a drogaria "${pharmacyName}" (${targetStoreId})`);
+        }
+      } catch (inboxErr: any) {
+        console.warn("[ONBOARDING] Aviso ao criar inbox padrão:", inboxErr.message);
+      }
+
+      // 2. Garantir Instância do WhatsApp na tabela whatsapp_instances
+      try {
+        const rawSlug = savedTenant.slug || targetStoreId;
+        const cleanSlug = String(rawSlug).replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase();
+        const defaultInstanceName = cleanSlug.startsWith('store_') ? cleanSlug : `store_${cleanSlug}`;
+
+        const { data: existingInst } = await supabaseAdmin
+          .from("whatsapp_instances")
+          .select("id")
+          .or(`store_id.eq.${targetStoreId},instance_name.eq.${defaultInstanceName}`)
+          .limit(1)
+          .maybeSingle();
+
+        if (!existingInst) {
+          await supabaseAdmin.from("whatsapp_instances").insert({
+            store_id: targetStoreId,
+            instance_name: defaultInstanceName,
+            status: "DISCONNECTED"
+          });
+          console.log(`[ONBOARDING] Registro de instância WhatsApp criado automaticamente: "${defaultInstanceName}" (${targetStoreId})`);
+        }
+      } catch (instErr: any) {
+        console.warn("[ONBOARDING] Aviso ao criar whatsapp_instance padrão:", instErr.message);
+      }
+    }
+
+    res.json({ data: tenantData });
   } catch (e: any) {
+    console.error("[ONBOARDING ERROR]:", e.message);
     res.status(500).json({ error: e.message });
   }
 });
@@ -7058,6 +7162,19 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
           if (fallbackTenant) {
             resolvedTenant = fallbackTenant;
             console.log(`[WEBHOOK FALLBACK TENANT] Tenant mapeado diretamente por slug/id da instância: "${resolvedTenant.name}" (id: ${resolvedTenant.id})`);
+            
+            // Auto-registro dinâmico da instância na tabela whatsapp_instances (Plug-and-Play)
+            try {
+              const rawInst = String(instanceName).trim();
+              await supabaseAdmin.from("whatsapp_instances").upsert({
+                store_id: fallbackTenant.id,
+                instance_name: rawInst,
+                status: "CONNECTED"
+              }, { onConflict: "instance_name" });
+              console.log(`[WEBHOOK AUTO-REGISTRATION] Instância "${rawInst}" auto-registrada para a drogaria "${fallbackTenant.name}"`);
+            } catch (autoRegErr: any) {
+              console.warn("[WEBHOOK AUTO-REGISTRATION] Aviso ao auto-registrar instância:", autoRegErr.message);
+            }
           }
         } catch (fbErr: any) {
           console.warn("[WEBHOOK FALLBACK WARNING] Erro na busca direta de fallback em tenants:", fbErr.message);
@@ -7066,11 +7183,12 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
 
       // 4. Se a instância ou loja não for encontrada no banco, registra erro claro e NÃO processa mensagem
       if (!resolvedTenant) {
-        console.error(`[WEBHOOK ERROR] Instância não encontrada na tabela whatsapp_instances (instanceName: "${instanceName || 'indefinido'}", rawTenantId: "${rawTenantId || 'indefinido'}")`);
+        console.error(`[WEBHOOK UNMAPPED INSTANCE] Instância não encontrada ou não cadastrada no sistema (instanceName: "${instanceName || 'indefinido'}", rawTenantId: "${rawTenantId || 'indefinido'}").`);
         return res.status(404).json({
-          error: "Instância não encontrada na tabela whatsapp_instances",
+          error: "Instância não vinculada a nenhuma drogaria cadastrada",
           instance: instanceName || null,
-          tenantId: rawTenantId || null
+          tenantId: rawTenantId || null,
+          hint: "Conecte ou cadastre a instância no painel da drogaria correspondente para ativar o atendimento automático."
         });
       }
 
