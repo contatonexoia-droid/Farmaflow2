@@ -610,46 +610,43 @@ const App: React.FC = () => {
   const isMatrixAdmin = useMemo(() => {
     if (!session || session.type === "GUEST") return false;
     if (session.type === "SUPER_ADMIN") return true;
-    if (session.isMatrixUser === true) return true;
 
-    const role = (session.role || "").toLowerCase();
-    if (role === "matriz" || role === "admin_matriz" || role === "network_admin") return true;
+    const role = (session.role || "").toLowerCase().trim();
+    
+    // Operadores, balconistas, atendentes e colaboradores de filial NUNCA possuem acesso de administrador de matriz/rede
+    const isRestrictedRole = [
+      "operador", 
+      "balconista", 
+      "atendente", 
+      "farmaceutico", 
+      "caixa", 
+      "vendedor", 
+      "entregador", 
+      "gerente"
+    ].includes(role);
+    if (isRestrictedRole) return false;
 
-    // Se o usuário possui masterTenantId registrado na sessão
-    if (session.masterTenantId && session.masterTenantId.trim() !== "") return true;
+    // Perfis explicitamente de Administrador Master / Rede
+    if (role === "matriz" || role === "admin_matriz" || role === "network_admin" || role === "master" || role === "super_admin") return true;
 
-    // Se a loja original do login ou o tenant atual for Matriz com perfil de dono/admin
+    // Se o usuário possui flag de isMatrixUser com cargo de dono/admin master
+    if (session.isMatrixUser === true && (role === "admin" || role === "owner" || !role)) return true;
+
+    // Se a loja de login é a Matriz da rede e o usuário é Administrador/Proprietário Master
     const isLoginStoreMaster = session.originalTenantId && session.originalTenantId === currentTenant?.id && currentTenant?.isNetworkMaster;
-    const isCurrentStoreMaster = currentTenant?.isNetworkMaster;
-    if ((isLoginStoreMaster || isCurrentStoreMaster) && (role === "owner" || role === "admin" || !role)) {
-      return true;
-    }
-
-    // Se qualquer tenant da rede carregada for a matriz correspondente à sessão
-    if (networkTenants.some(t => t.isNetworkMaster && (t.id === session.tenantId || t.id === session.originalTenantId || t.id === session.masterTenantId))) {
-      return true;
-    }
-
-    // Se o tenant atual pertence a uma rede cujo master é o tenant original de login do usuário
-    if (currentTenant?.networkId && (currentTenant.networkId === session.tenantId || currentTenant.networkId === session.originalTenantId)) {
+    if (isLoginStoreMaster && (role === "owner" || role === "admin" || !role)) {
       return true;
     }
 
     return false;
-  }, [session, currentTenant?.id, currentTenant?.isNetworkMaster, currentTenant?.networkId, networkTenants]);
+  }, [session, currentTenant?.id, currentTenant?.isNetworkMaster, currentTenant?.networkId]);
 
   // Carrega lista de filiais / rede estritamente se o usuário for Administrador da Matriz ou SuperAdmin
   useEffect(() => {
     if (!currentTenant) return;
 
-    // Se for guest, limpa
-    if (!session || session.type === "GUEST") {
-      setNetworkTenants([currentTenant]);
-      return;
-    }
-
-    // Se o usuário for de uma filial comum sem privilégios de rede
-    if (!isMatrixAdmin && session.type !== "SUPER_ADMIN" && !session.isMatrixUser) {
+    // Se for guest ou operador de filial com unidade fixa
+    if (!session || session.type === "GUEST" || (!isMatrixAdmin && session.type !== "SUPER_ADMIN")) {
       setNetworkTenants([currentTenant]);
       return;
     }
@@ -659,10 +656,6 @@ const App: React.FC = () => {
         const allStores = await getTenants();
         if (allStores && allStores.length > 0) {
           // Identifica o ID da Matriz da rede atual:
-          // 1. session.masterTenantId
-          // 2. currentTenant.networkId (se for filial, aponta para o ID da Matriz)
-          // 3. currentTenant.id (se for a própria matriz)
-          // 4. Loja da sessão original do login
           const sessionStore = allStores.find(s => s.id === session?.tenantId || s.id === session?.originalTenantId);
           const isSessionStoreMaster = Boolean(sessionStore?.isNetworkMaster);
 
@@ -684,8 +677,8 @@ const App: React.FC = () => {
 
             if (related.length > 0) {
               setNetworkTenants(related);
-              // Garante que o status de matriz/rede persista na sessão
-              if (!session.masterTenantId || !session.isMatrixUser) {
+              // Garante que o status de matriz/rede persista na sessão apenas para quem tem permissão real
+              if (isMatrixAdmin && (!session.masterTenantId || !session.isMatrixUser)) {
                 setSession(prev => {
                   if (!prev || prev.type === "GUEST") return prev;
                   const updated: AuthSession = {
@@ -2813,13 +2806,15 @@ const App: React.FC = () => {
       window.history.pushState({ view: ViewMode.ADMIN_SUPER, adminTab }, "");
     } else if (auth.type === "PHARMACY_ADMIN" && tenant) {
       const isMaster = Boolean(tenant.isNetworkMaster);
-      const roleStr = (auth.role || "").toLowerCase();
-      const isMatrizRole = roleStr === "matriz" || roleStr === "admin_matriz" || roleStr === "network_admin";
-      const masterTenantId = isMaster ? tenant.id : (tenant.networkId || auth.masterTenantId);
+      const roleStr = (auth.role || "").toLowerCase().trim();
+      const isRestrictedRole = ["operador", "balconista", "atendente", "farmaceutico", "caixa", "vendedor", "entregador", "gerente"].includes(roleStr);
+      const isMatrizRole = roleStr === "matriz" || roleStr === "admin_matriz" || roleStr === "network_admin" || roleStr === "master" || roleStr === "super_admin";
+      const isMasterUser = !isRestrictedRole && (isMatrizRole || (isMaster && (roleStr === "owner" || roleStr === "admin" || !roleStr)) || Boolean(auth.isMatrixUser));
+      const masterTenantId = isMasterUser ? (isMaster ? tenant.id : (tenant.networkId || auth.masterTenantId)) : undefined;
 
       const enrichedAuth: AuthSession = {
         ...auth,
-        isMatrixUser: isMaster || isMatrizRole || Boolean(auth.isMatrixUser),
+        isMatrixUser: isMasterUser,
         masterTenantId: masterTenantId,
         originalTenantId: tenant.id
       };

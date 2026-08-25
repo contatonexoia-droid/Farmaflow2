@@ -32,16 +32,29 @@ export const Navbar: React.FC<NavbarProps> = ({
   const isCatalogView = currentView === ViewMode.CATALOG || currentView === ViewMode.CART;
   const isGuest = session.type === 'GUEST';
   
-  // Apenas Super Admin ou Administrador da Matriz tem privilégios de alternar unidades
-  const userRole = (session?.role || "").toLowerCase();
-  const isMatrixUser = isMatrixUserProp !== undefined ? isMatrixUserProp : (
-    session?.type === 'SUPER_ADMIN' || 
-    Boolean(session?.isMatrixUser) ||
-    userRole === 'matriz' || 
-    userRole === 'admin_matriz' || 
-    userRole === 'network_admin' || 
-    (config?.isNetworkMaster && (userRole === 'owner' || userRole === 'admin' || !userRole)) ||
-    (networkTenants.some(t => t.isNetworkMaster) && (userRole === 'owner' || userRole === 'admin'))
+  // Apenas Super Admin ou Administrador Master da Rede tem privilégios de alternar unidades e ver selos de matriz
+  const userRole = (session?.role || "").toLowerCase().trim();
+  const isRestrictedRole = [
+    "operador",
+    "balconista",
+    "atendente",
+    "farmaceutico",
+    "caixa",
+    "vendedor",
+    "entregador",
+    "gerente"
+  ].includes(userRole);
+
+  const isMatrixUser = isRestrictedRole ? false : (
+    isMatrixUserProp !== undefined ? isMatrixUserProp : (
+      session?.type === 'SUPER_ADMIN' || 
+      userRole === 'matriz' || 
+      userRole === 'admin_matriz' || 
+      userRole === 'network_admin' || 
+      userRole === 'master' ||
+      (Boolean(session?.isMatrixUser) && (userRole === 'owner' || userRole === 'admin')) ||
+      (config?.isNetworkMaster && (userRole === 'owner' || userRole === 'admin'))
+    )
   );
 
   // Decidimos ocultar controles administrativos na loja para que o dono veja exatamente o que o cliente vê
@@ -99,7 +112,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                       <span className="text-xl font-black text-gray-900 leading-none tracking-tight">
                           Farma<span className="text-brand">Flow</span>
                       </span>
-                      {config.isNetworkMaster && (
+                      {isMatrixUser && config.isNetworkMaster && (
                         <span className="hidden sm:inline-block bg-purple-100 text-purple-700 text-[9px] font-black px-2 py-0.5 rounded-full uppercase tracking-wider">
                           Rede / Matriz
                         </span>
@@ -113,13 +126,13 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
           </div>
 
-          {/* Center: Quick Tenant Selector for Matrix / Multi-Store Networks */}
-          {currentView === ViewMode.ADMIN_PHARMACY && hasMultipleUnits && onSelectTenant && (
+          {/* Center: Quick Tenant Selector for Matrix / Multi-Store Networks or Fixed Unit Chip */}
+          {currentView === ViewMode.ADMIN_PHARMACY && (
             <div className="hidden lg:flex items-center mx-4">
               <TenantSelector
-                tenants={networkTenants}
+                tenants={isMatrixUser ? networkTenants : [config]}
                 currentTenant={config}
-                onSelectTenant={onSelectTenant}
+                onSelectTenant={isMatrixUser ? onSelectTenant || (() => {}) : () => {}}
                 isMatrixUser={isMatrixUser}
                 userRole={session?.role}
                 networkName={networkTenants.find(t => t.isNetworkMaster)?.name || "Rede de Farmácias"}
@@ -131,12 +144,12 @@ export const Navbar: React.FC<NavbarProps> = ({
           {/* Right Actions */}
           <div className="flex items-center gap-2 sm:gap-3 shrink-0">
              {/* Seletor compacto para telas médias/pequenas no topo */}
-             {currentView === ViewMode.ADMIN_PHARMACY && hasMultipleUnits && onSelectTenant && (
+             {currentView === ViewMode.ADMIN_PHARMACY && (
                 <div className="flex lg:hidden">
                   <TenantSelector
-                    tenants={networkTenants}
+                    tenants={isMatrixUser ? networkTenants : [config]}
                     currentTenant={config}
-                    onSelectTenant={onSelectTenant}
+                    onSelectTenant={isMatrixUser ? onSelectTenant || (() => {}) : () => {}}
                     isMatrixUser={isMatrixUser}
                     userRole={session?.role}
                     networkName={networkTenants.find(t => t.isNetworkMaster)?.name || "Rede"}

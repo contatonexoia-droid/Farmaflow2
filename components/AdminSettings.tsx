@@ -136,13 +136,27 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
   session,
   isMatrixUser
 }) => {
-  const userRole = (session?.role || "").toLowerCase();
-  const effectiveIsMatrixUser = isMatrixUser ?? (
-    session?.type === 'SUPER_ADMIN' || 
-    userRole === 'matriz' || 
-    userRole === 'admin_matriz' || 
-    userRole === 'network_admin' || 
-    (config?.isNetworkMaster && (userRole === 'owner' || userRole === 'admin' || !userRole))
+  const userRole = (session?.role || "").toLowerCase().trim();
+  const isRestrictedRole = [
+    "operador", 
+    "balconista", 
+    "atendente", 
+    "farmaceutico", 
+    "caixa", 
+    "vendedor", 
+    "entregador", 
+    "gerente"
+  ].includes(userRole);
+
+  const effectiveIsMatrixUser = isRestrictedRole ? false : (
+    isMatrixUser ?? (
+      session?.type === 'SUPER_ADMIN' || 
+      userRole === 'matriz' || 
+      userRole === 'admin_matriz' || 
+      userRole === 'network_admin' || 
+      userRole === 'master' || 
+      (config?.isNetworkMaster && (userRole === 'owner' || userRole === 'admin' || !userRole))
+    )
   );
 
   const canSwitchStore = effectiveIsMatrixUser && networkTenants && networkTenants.length > 1 && !!onSelectTenant;

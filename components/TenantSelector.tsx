@@ -1,6 +1,6 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { PharmacyConfig } from '../types';
-import { Building2, ChevronDown, Check, Search, Globe, Shield, Store, MapPin, Sparkles, Layers } from 'lucide-react';
+import { Building2, ChevronDown, Check, Search, Globe, Shield, Store, MapPin, Sparkles, Layers, Lock } from 'lucide-react';
 
 interface TenantSelectorProps {
   tenants: PharmacyConfig[];
@@ -29,10 +29,27 @@ export const TenantSelector: React.FC<TenantSelectorProps> = ({
   const [search, setSearch] = useState('');
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  // Se o usuário não for da Matriz (ou se houver apenas 1 loja), o seletor é estático
-  const canSwitch = isMatrixUser && tenants && tenants.length > 1;
+  const cleanRole = (userRole || '').toLowerCase().trim();
+  const isRestrictedRole = useMemo(() => {
+    return [
+      'operador',
+      'balconista',
+      'atendente',
+      'farmaceutico',
+      'caixa',
+      'vendedor',
+      'entregador',
+      'gerente'
+    ].includes(cleanRole);
+  }, [cleanRole]);
 
-  // Lojas visíveis: se não tiver permissão de matriz, estritamente APENAS a loja atual
+  // Se o usuário tiver papel restrito de operador ou não for da Matriz (ou houver <= 1 loja), o seletor é bloqueado e estático
+  const canSwitch = useMemo(() => {
+    if (isRestrictedRole) return false;
+    return Boolean(isMatrixUser) && Array.isArray(tenants) && tenants.length > 1;
+  }, [isRestrictedRole, isMatrixUser, tenants]);
+
+  // Lojas visíveis: se não tiver permissão de matriz, estritamente APENAS a loja atual vinculada
   const visibleTenants = canSwitch ? tenants : (currentTenant ? [currentTenant] : []);
 
   // Fecha dropdown ao clicar fora
@@ -57,35 +74,39 @@ export const TenantSelector: React.FC<TenantSelectorProps> = ({
     );
   });
 
-  const matrixStore = visibleTenants.find(t => t.isNetworkMaster);
-
-  // Se for usuário de filial sem permissão de troca, renderiza apenas o card estático da unidade
+  // Se for operador de filial/loja sem privilégio de Administrador Master, exibe unidade travada (somente leitura)
   if (!canSwitch) {
+    const roleLabel = cleanRole === 'balconista' ? 'Balconista' :
+                      cleanRole === 'operador' ? 'Operador' :
+                      cleanRole === 'gerente' ? 'Gerente' :
+                      cleanRole === 'farmaceutico' ? 'Farmacêutico' :
+                      cleanRole === 'entregador' ? 'Entregador' :
+                      'Unidade Fixa';
+
     return (
       <div className={`relative inline-block text-left ${className}`}>
-        <div className="w-full flex items-center justify-between gap-2.5 px-3 py-2 bg-gray-50/80 text-gray-800 rounded-xl border border-gray-200 shadow-2xs text-xs font-bold select-none">
+        <div 
+          title={`Unidade Fixa: ${currentTenant?.name || 'Drogaria'} (Acesso restrito à filial vinculada)`}
+          className="w-full flex items-center justify-between gap-2.5 px-3 py-2 bg-gray-50/90 text-gray-800 rounded-xl border border-gray-200/90 shadow-2xs text-xs font-bold select-none cursor-default"
+        >
           <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-7 h-7 rounded-lg bg-gray-100 text-gray-700 flex items-center justify-center shrink-0 font-black">
-              <Store size={15} className="text-gray-700" />
+            <div className="w-7 h-7 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-100 flex items-center justify-center shrink-0 font-black">
+              <Store size={15} className="text-emerald-700" />
             </div>
             <div className="flex flex-col text-left min-w-0">
               <div className="flex items-center gap-1.5">
                 <span className="text-[9px] uppercase font-black tracking-wider text-gray-400 truncate">
-                  Unidade Atual
+                  Unidade Vinculada
                 </span>
-                {currentTenant?.isNetworkMaster && (
-                  <span className="bg-purple-100 text-purple-700 text-[8px] font-black px-1.5 py-0.2 rounded-full uppercase shrink-0">
-                    Matriz
-                  </span>
-                )}
               </div>
-              <span className="text-gray-900 font-extrabold text-xs truncate max-w-[160px] sm:max-w-[220px]">
+              <span className="text-gray-900 font-extrabold text-xs truncate max-w-[150px] sm:max-w-[210px]">
                 {currentTenant?.name || 'Drogaria'}
               </span>
             </div>
           </div>
-          <span className="text-[9px] font-bold text-gray-400 bg-gray-200/60 px-1.5 py-0.5 rounded shrink-0">
-            Filial
+          <span className="text-[9px] font-bold text-gray-500 bg-gray-200/70 px-2 py-0.5 rounded-md shrink-0 flex items-center gap-1">
+            <Lock size={10} className="text-gray-400" />
+            {roleLabel}
           </span>
         </div>
       </div>
@@ -94,7 +115,7 @@ export const TenantSelector: React.FC<TenantSelectorProps> = ({
 
   return (
     <div className={`relative inline-block text-left ${className}`} ref={dropdownRef}>
-      {/* Botão Gatilho do Seletor de Loja / Rede */}
+      {/* Botão Gatilho do Seletor de Loja / Rede (Apenas Administradores Master da Rede) */}
       <button
         type="button"
         onClick={() => setIsOpen(!isOpen)}
@@ -259,3 +280,4 @@ export const TenantSelector: React.FC<TenantSelectorProps> = ({
     </div>
   );
 };
+
