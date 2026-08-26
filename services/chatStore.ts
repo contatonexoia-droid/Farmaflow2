@@ -5,6 +5,7 @@ import crypto from "crypto";
 import { inboxStore } from "./inboxStore.js";
 import { evolutionApiService } from "./evolutionApiService.js";
 import { isWeblojaOrderMessage } from "./botHandoffManager.js";
+import { realtimeHub } from "./realtimeHub.js";
 
 function stringToUuid(str: string): string {
   const hash = crypto.createHash('md5').update(str).digest('hex');
@@ -54,10 +55,18 @@ export interface ChatConversation {
   updated_at?: string;
 }
 
+export interface ChatMessageReaction {
+  emoji: string;
+  sender?: "CUSTOMER" | "USER" | "SYSTEM" | string;
+  fromMe?: boolean;
+  created_at?: string;
+}
+
 export interface ChatMessage {
   id: string;
   conversation_id: string;
   sender_type: "CUSTOMER" | "USER" | "BOT" | "SYSTEM";
+  sender_id?: string | null;
   content: string;
   is_private: boolean;
   media_url?: string;
@@ -65,6 +74,10 @@ export interface ChatMessage {
   mediaUrl?: string;
   mediaType?: string;
   type?: string;
+  reaction?: string | null;
+  reactions?: ChatMessageReaction[];
+  remote_id?: string | null;
+  message_ack?: string;
   created_at: string;
 }
 
@@ -87,6 +100,32 @@ export interface CannedResponse {
   shortcut: string;
   text: string;
   created_at: string;
+}
+
+export const VALID_CHAT_MESSAGE_COLUMNS = new Set([
+  "id",
+  "conversation_id",
+  "sender_type",
+  "sender_id",
+  "content",
+  "media_url",
+  "media_type",
+  "is_private",
+  "message_ack",
+  "reaction",
+  "reactions",
+  "remote_id",
+  "created_at"
+]);
+
+export function sanitizeChatMessagePayload(data: Record<string, any>): Record<string, any> {
+  const sanitized: Record<string, any> = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (VALID_CHAT_MESSAGE_COLUMNS.has(key) && value !== undefined) {
+      sanitized[key] = value;
+    }
+  }
+  return sanitized;
 }
 
 export const VALID_CHAT_CONVERSATION_COLUMNS = new Set([
@@ -471,8 +510,22 @@ class ChatStore {
         return data.map((row: any) => {
           const mediaUrl = row.media_url || row.mediaUrl;
           const mediaType = row.media_type || row.mediaType || row.type || (mediaUrl ? (mediaUrl.startsWith("data:audio") || /\.(ogg|oga|opus|mp3|wav|m4a)/i.test(mediaUrl) ? "audio" : "image") : "text");
+          let parsedReactions = row.reactions;
+          if (typeof parsedReactions === "string") {
+            try {
+              parsedReactions = JSON.parse(parsedReactions);
+            } catch (_) {
+              parsedReactions = [];
+            }
+          }
+          if (!Array.isArray(parsedReactions)) {
+            parsedReactions = row.reaction ? [{ emoji: row.reaction, created_at: row.created_at }] : [];
+          }
           return {
             ...row,
+            reaction: row.reaction || (parsedReactions.length > 0 ? parsedReactions[parsedReactions.length - 1].emoji : null),
+            reactions: parsedReactions,
+            remote_id: row.remote_id || null,
             media_url: mediaUrl,
             mediaUrl: mediaUrl,
             media_type: mediaType,
@@ -485,7 +538,9 @@ class ChatStore {
       console.warn("[ChatStore] Supabase messages query fallback:", err);
     }
 
-    return [];
+    // Memory Fallback
+    const localMsgs = this.messages.filter(m => m.conversation_id === conversationId);
+    return [...localMsgs].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
   }
 
   public async addMessage(
@@ -703,6 +758,33 @@ class ChatStore {
     
     // Extração estruturada de Mídia e Texto (Evolution API v2)
     const rawMsg = msg.message || msg.data?.message || msg.data || {};
+
+    // 0. Detecção imediata de Mensagem de Reação (WhatsApp Reaction Message)
+    const isReactionMessage = Boolean(
+      rawMsg.reactionMessage || 
+      msg.messageType === "reactionMessage" || 
+      msg.type === "reaction" || 
+      msg.reaction || 
+      rawMsg.reaction
+    );
+    if (isReactionMessage) {
+      console.log(`[ChatStore] Mensagem identificada como ReactionMessage. Delegando para processMessageReaction...`);
+      const reactionResult = await this.processMessageReaction(cleanStoreId, msg, instanceName);
+      if (reactionResult?.message && reactionResult.conversationId) {
+        const conv = this.conversations.find(c => c.id === reactionResult.conversationId) || {
+          id: reactionResult.conversationId,
+          store_id: cleanStoreId,
+          contact_id: "",
+          status: "OPEN",
+          last_message_at: new Date().toISOString(),
+          last_message_content: `[Reação: ${reactionResult.message.reaction || ''}]`,
+          created_at: new Date().toISOString()
+        };
+        return { conversation: conv as ChatConversation, message: reactionResult.message };
+      }
+      return null;
+    }
+
     let extractedMediaType = "text";
     let extractedMediaUrl: string | undefined = undefined;
     let text = "";
@@ -1201,25 +1283,43 @@ class ChatStore {
       mediaUrl: extractedMediaUrl,
       mediaType: extractedMediaType,
       type: extractedMediaType,
+      remote_id: rawMsgKey,
+      reaction: null,
+      reactions: [],
       is_private: false,
       created_at: now
     };
 
     if (!isBotEcho) {
       try {
-        const { error } = await supabaseAdmin.from("chat_messages").insert([{
+        const msgInsertData = sanitizeChatMessagePayload({
           id: msgId,
           conversation_id: convId,
           sender_type: senderType,
           content: text,
           media_url: extractedMediaUrl || null,
           media_type: extractedMediaType || "text",
+          remote_id: rawMsgKey,
+          reaction: null,
+          reactions: [],
           is_private: false,
           created_at: now
-        }]);
+        });
+
+        const { error } = await supabaseAdmin.from("chat_messages").insert([msgInsertData]);
         
         if (error) {
-          console.error('[ERRO CRITICO NO BACKGROUND]: Erro na inserção da mensagem (chat_messages)', error.message, error);
+          console.warn('[ChatStore] Aviso na inserção com sanitizeChatMessagePayload (tentando fallback direto):', error.message);
+          await supabaseAdmin.from("chat_messages").insert([{
+            id: msgId,
+            conversation_id: convId,
+            sender_type: senderType,
+            content: text,
+            media_url: extractedMediaUrl || null,
+            media_type: extractedMediaType || "text",
+            is_private: false,
+            created_at: now
+          }]);
         }
       } catch (error: any) {
         console.error('[ERRO CRITICO NO BACKGROUND]: Exceção na inserção da mensagem (chat_messages)', error.message, error.stack);
@@ -1238,6 +1338,373 @@ class ChatStore {
     this.messages.push(newMsg);
 
     return { conversation: conv, message: newMsg };
+  }
+
+  /**
+   * Processa evento ou payload de reação (messages.reaction ou reactionMessage)
+   */
+  public async processMessageReaction(
+    storeId: string,
+    rawPayload: any,
+    instanceName?: string
+  ): Promise<{ message: ChatMessage | null; conversationId: string | null } | null> {
+    if (!rawPayload) return null;
+
+    const cleanStoreId = typeof storeId === 'string' ? storeId.trim().replace(/^store_/, '') : (storeId || 'default');
+
+    // Extração flexível para suportar múltiplos formatos da Evolution API v1, v2 e Baileys
+    const reactionObj = rawPayload.reaction || 
+                        rawPayload.message?.reactionMessage || 
+                        rawPayload.reactionMessage || 
+                        rawPayload.data?.reaction || 
+                        rawPayload.data?.message?.reactionMessage || 
+                        rawPayload;
+
+    const targetKey = reactionObj?.key || rawPayload.key || {};
+    const targetMsgKeyId = targetKey.id || reactionObj?.id || rawPayload.id || rawPayload.messageId || rawPayload.targetMessageId;
+    const remoteJid = targetKey.remoteJid || reactionObj?.remoteJid || rawPayload.remoteJid || rawPayload.sender || "";
+    
+    // Emoji enviado (ou string vazia se a reação foi removida no WhatsApp)
+    const emojiRaw = reactionObj?.text !== undefined 
+      ? reactionObj.text 
+      : (reactionObj?.emoji !== undefined 
+        ? reactionObj.emoji 
+        : (rawPayload.emoji !== undefined ? rawPayload.emoji : (rawPayload.text !== undefined ? rawPayload.text : "")));
+    const emoji = typeof emojiRaw === "string" ? emojiRaw.trim() : "";
+
+    const fromMe = Boolean(targetKey.fromMe ?? reactionObj?.fromMe ?? rawPayload.fromMe ?? false);
+    const timestamp = reactionObj?.senderTimestampMs || rawPayload.senderTimestampMs || Date.now();
+
+    if (!targetMsgKeyId) {
+      console.warn("[ChatStore] [REACTION] targetMsgKeyId não localizado no payload de reação:", JSON.stringify(rawPayload));
+      return null;
+    }
+
+    let phone = remoteJid.replace("@s.whatsapp.net", "").replace("@g.us", "");
+    if (phone.includes(":")) {
+      phone = phone.split(":")[0];
+    }
+    phone = phone.replace(/\D/g, "");
+
+    const convId = phone ? stringToUuid(`conv_${phone}_${cleanStoreId}`) : null;
+    const deterministicMsgUuid = convId ? stringToUuid(`msg_${targetMsgKeyId}_${convId}`) : null;
+
+    console.log(`[ChatStore] [REACTION] Alvo: msgId="${targetMsgKeyId}" (uuid: ${deterministicMsgUuid}), convId="${convId}", phone="${phone}", emoji="${emoji}", fromMe=${fromMe}`);
+
+    // 1. Busca a mensagem correspondente no Supabase
+    let matchedDbMessage: any = null;
+    try {
+      // 1.1 Tenta buscar pelo remote_id, id determinístico ou id direto
+      const queryOr = [
+        `id.eq.${targetMsgKeyId}`,
+        ...(deterministicMsgUuid ? [`id.eq.${deterministicMsgUuid}`] : []),
+        `remote_id.eq.${targetMsgKeyId}`
+      ].join(',');
+
+      let query = supabaseAdmin.from("chat_messages").select("*").or(queryOr);
+      if (convId) {
+        query = query.eq("conversation_id", convId);
+      }
+
+      const { data: dbMatches, error: dbErr } = await query.limit(1).maybeSingle();
+      if (!dbErr && dbMatches) {
+        matchedDbMessage = dbMatches;
+      } else {
+        // 1.2 Se não filtrou por convId ou não achou com convId, busca globalmente pelo targetMsgKeyId
+        const { data: globalMatch } = await supabaseAdmin
+          .from("chat_messages")
+          .select("*")
+          .or(`id.eq.${targetMsgKeyId},remote_id.eq.${targetMsgKeyId}${deterministicMsgUuid ? `,id.eq.${deterministicMsgUuid}` : ''}`)
+          .limit(1)
+          .maybeSingle();
+
+        if (globalMatch) {
+          matchedDbMessage = globalMatch;
+        }
+      }
+    } catch (e: any) {
+      console.warn("[ChatStore] Erro ao consultar mensagem no Supabase para reação:", e.message);
+    }
+
+    // 1.3 Se não encontrou no Supabase, tenta buscar na memória local
+    let matchedMemoryMsg = this.messages.find(m => 
+      m.id === targetMsgKeyId || 
+      (deterministicMsgUuid && m.id === deterministicMsgUuid) || 
+      m.remote_id === targetMsgKeyId
+    );
+
+    const targetMessageId = matchedDbMessage?.id || matchedMemoryMsg?.id || deterministicMsgUuid || targetMsgKeyId;
+    const resolvedConvId = matchedDbMessage?.conversation_id || matchedMemoryMsg?.conversation_id || convId;
+
+    if (!resolvedConvId) {
+      console.warn("[ChatStore] [REACTION] Impossível determinar conversation_id para a reação.");
+      return null;
+    }
+
+    // 2. Calcula a nova lista de reações
+    let existingReactions: ChatMessageReaction[] = [];
+    if (matchedDbMessage?.reactions) {
+      if (Array.isArray(matchedDbMessage.reactions)) {
+        existingReactions = [...matchedDbMessage.reactions];
+      } else if (typeof matchedDbMessage.reactions === "string") {
+        try {
+          existingReactions = JSON.parse(matchedDbMessage.reactions);
+        } catch (_) {}
+      }
+    } else if (matchedMemoryMsg?.reactions && Array.isArray(matchedMemoryMsg.reactions)) {
+      existingReactions = [...matchedMemoryMsg.reactions];
+    } else if (matchedDbMessage?.reaction) {
+      existingReactions = [{ emoji: matchedDbMessage.reaction, fromMe: false, sender: "CUSTOMER", created_at: new Date().toISOString() }];
+    } else if (matchedMemoryMsg?.reaction) {
+      existingReactions = [{ emoji: matchedMemoryMsg.reaction, fromMe: false, sender: "CUSTOMER", created_at: new Date().toISOString() }];
+    }
+
+    const senderIdentifier = fromMe ? "USER" : (phone || "CUSTOMER");
+
+    if (!emoji) {
+      // Reação removida
+      existingReactions = existingReactions.filter(r => r.fromMe !== fromMe && r.sender !== senderIdentifier);
+    } else {
+      // Reação adicionada ou atualizada
+      existingReactions = existingReactions.filter(r => r.fromMe !== fromMe && r.sender !== senderIdentifier);
+      existingReactions.push({
+        emoji,
+        sender: senderIdentifier,
+        fromMe,
+        created_at: new Date(timestamp).toISOString()
+      });
+    }
+
+    const finalReaction = existingReactions.length > 0 ? existingReactions[existingReactions.length - 1].emoji : null;
+
+    console.log(`[ChatStore] [REACTION] Reação atualizada: "${finalReaction}" | Total reações: ${existingReactions.length} | Alvo: ${targetMessageId}`);
+
+    // 3. Atualiza no Supabase
+    if (matchedDbMessage?.id || targetMessageId) {
+      try {
+        const { error: updateErr } = await supabaseAdmin
+          .from("chat_messages")
+          .update({
+            reaction: finalReaction,
+            reactions: existingReactions
+          })
+          .eq("id", targetMessageId);
+
+        if (updateErr) {
+          console.warn("[ChatStore] Aviso ao atualizar reações no Supabase (tentando apenas coluna reaction):", updateErr.message);
+          await supabaseAdmin
+            .from("chat_messages")
+            .update({ reaction: finalReaction })
+            .eq("id", targetMessageId);
+        }
+      } catch (err: any) {
+        console.warn("[ChatStore] Exceção ao gravar reação no Supabase:", err.message);
+      }
+    }
+
+    // 4. Atualiza no cache em memória
+    if (matchedMemoryMsg) {
+      matchedMemoryMsg.reaction = finalReaction;
+      matchedMemoryMsg.reactions = existingReactions;
+    } else if (matchedDbMessage) {
+      const memoryObj: ChatMessage = {
+        ...matchedDbMessage,
+        reaction: finalReaction,
+        reactions: existingReactions
+      };
+      this.messages.push(memoryObj);
+    }
+    this.saveToFile();
+
+    const updatedChatMessage: ChatMessage = {
+      ...(matchedDbMessage || matchedMemoryMsg || {
+        id: targetMessageId,
+        conversation_id: resolvedConvId,
+        sender_type: fromMe ? "USER" : "CUSTOMER",
+        content: "",
+        is_private: false,
+        created_at: new Date().toISOString()
+      }),
+      reaction: finalReaction,
+      reactions: existingReactions,
+      remote_id: targetMsgKeyId
+    };
+
+    // 5. Broadcast instantâneo via RealtimeHub
+    realtimeHub.broadcastToStore(cleanStoreId, "message_reaction", {
+      conversationId: resolvedConvId,
+      messageId: targetMessageId,
+      remote_id: targetMsgKeyId,
+      reaction: finalReaction,
+      reactions: existingReactions,
+      emoji: emoji || null,
+      fromMe
+    });
+
+    realtimeHub.broadcastToStore(cleanStoreId, "chat_message_updated", {
+      conversationId: resolvedConvId,
+      message: updatedChatMessage
+    });
+
+    return {
+      message: updatedChatMessage,
+      conversationId: resolvedConvId
+    };
+  }
+
+  /**
+   * Adiciona ou atualiza reação enviada manualmente por um operador via Web UI
+   */
+  public async addOrUpdateReaction(
+    storeId: string,
+    conversationId: string,
+    messageId: string,
+    emoji: string,
+    fromMe = true,
+    explicitInstanceName?: string
+  ): Promise<{ success: boolean; message: ChatMessage | null; error?: string }> {
+    const cleanStoreId = typeof storeId === 'string' ? storeId.trim().replace(/^store_/, '') : (storeId || 'default');
+
+    try {
+      // 1. Busca a mensagem
+      let msgToReact: any = null;
+      try {
+        const { data } = await supabaseAdmin
+          .from("chat_messages")
+          .select("*")
+          .eq("id", messageId)
+          .maybeSingle();
+        if (data) msgToReact = data;
+      } catch (_) {}
+
+      if (!msgToReact) {
+        msgToReact = this.messages.find(m => m.id === messageId);
+      }
+
+      if (!msgToReact) {
+        return { success: false, message: null, error: "Mensagem não encontrada" };
+      }
+
+      // 2. Despacha para o WhatsApp via Evolution API se tiver remote_id ou se pudermos resolver
+      const remoteMsgId = msgToReact.remote_id || msgToReact.id;
+      let phoneToSend: string | null = null;
+      try {
+        const { data: convData } = await supabaseAdmin
+          .from("chat_conversations")
+          .select("contact_id")
+          .eq("id", conversationId)
+          .maybeSingle();
+
+        if (convData?.contact_id) {
+          const { data: contactData } = await supabaseAdmin
+            .from("chat_contacts")
+            .select("phone_number")
+            .eq("id", convData.contact_id)
+            .maybeSingle();
+          if (contactData?.phone_number) phoneToSend = contactData.phone_number;
+        }
+      } catch (_) {}
+
+      if (!phoneToSend) {
+        const match = conversationId.match(/_(\d{10,15})_/);
+        if (match) phoneToSend = match[1];
+      }
+
+      const targetInstance = await evolutionApiService.resolveInstanceName(cleanStoreId, explicitInstanceName);
+      if (targetInstance && phoneToSend && remoteMsgId) {
+        const cleanJid = `${phoneToSend.replace(/\D/g, '')}@s.whatsapp.net`;
+        evolutionApiService.sendReaction(targetInstance, {
+          remoteJid: cleanJid,
+          id: remoteMsgId,
+          fromMe: msgToReact.sender_type === "USER" || msgToReact.sender_type === "BOT"
+        }, emoji).catch(err => {
+          console.warn("[ChatStore] Falha assíncrona ao despachar reação para Evolution API:", err.message || err);
+        });
+      }
+
+      // 3. Atualiza localmente no banco e memória
+      let existingReactions: ChatMessageReaction[] = [];
+      if (msgToReact.reactions) {
+        if (Array.isArray(msgToReact.reactions)) {
+          existingReactions = [...msgToReact.reactions];
+        } else if (typeof msgToReact.reactions === "string") {
+          try {
+            existingReactions = JSON.parse(msgToReact.reactions);
+          } catch (_) {}
+        }
+      } else if (msgToReact.reaction) {
+        existingReactions = [{ emoji: msgToReact.reaction, fromMe: false, sender: "CUSTOMER", created_at: new Date().toISOString() }];
+      }
+
+      const senderIdentifier = fromMe ? "USER" : (phoneToSend || "CUSTOMER");
+
+      if (!emoji) {
+        existingReactions = existingReactions.filter(r => r.fromMe !== fromMe);
+      } else {
+        existingReactions = existingReactions.filter(r => r.fromMe !== fromMe);
+        existingReactions.push({
+          emoji,
+          sender: senderIdentifier,
+          fromMe,
+          created_at: new Date().toISOString()
+        });
+      }
+
+      const finalReaction = existingReactions.length > 0 ? existingReactions[existingReactions.length - 1].emoji : null;
+
+      try {
+        const { error: updateErr } = await supabaseAdmin
+          .from("chat_messages")
+          .update({
+            reaction: finalReaction,
+            reactions: existingReactions
+          })
+          .eq("id", messageId);
+
+        if (updateErr) {
+          await supabaseAdmin
+            .from("chat_messages")
+            .update({ reaction: finalReaction })
+            .eq("id", messageId);
+        }
+      } catch (err: any) {
+        console.warn("[ChatStore] Exceção ao atualizar reação:", err.message);
+      }
+
+      const memMsg = this.messages.find(m => m.id === messageId);
+      if (memMsg) {
+        memMsg.reaction = finalReaction;
+        memMsg.reactions = existingReactions;
+      }
+      this.saveToFile();
+
+      const updatedMsg: ChatMessage = {
+        ...msgToReact,
+        reaction: finalReaction,
+        reactions: existingReactions
+      };
+
+      // Broadcast
+      realtimeHub.broadcastToStore(cleanStoreId, "message_reaction", {
+        conversationId,
+        messageId,
+        remote_id: remoteMsgId,
+        reaction: finalReaction,
+        reactions: existingReactions,
+        emoji: emoji || null,
+        fromMe
+      });
+
+      realtimeHub.broadcastToStore(cleanStoreId, "chat_message_updated", {
+        conversationId,
+        message: updatedMsg
+      });
+
+      return { success: true, message: updatedMsg };
+    } catch (err: any) {
+      console.error("[ChatStore] Erro em addOrUpdateReaction:", err);
+      return { success: false, message: null, error: err.message };
+    }
   }
 
   // --- LABELS SYSTEM ---

@@ -427,6 +427,72 @@ export class EvolutionApiService {
     }
     return null;
   }
+
+  /**
+   * Envia uma reação (emoji) ou remove uma reação para uma mensagem específica no WhatsApp via Evolution API.
+   * Endpoint oficial: POST /message/sendReaction/{instance}
+   */
+  public async sendReaction(
+    instanceName: string,
+    key: { remoteJid: string; id: string; fromMe?: boolean },
+    emoji: string
+  ): Promise<{ success: boolean; data?: any; error?: string; status?: number }> {
+    if (!instanceName || instanceName.trim() === "" || /^[0-9a-f-]{36}$/i.test(instanceName.trim())) {
+      const err = `Nome de instância inválido ou incompatível (UUID): "${instanceName}"`;
+      console.error(`[EvolutionAPI] [ERRO EVOLUTION] Falha ao disparar sendReaction: ${err}`);
+      return { success: false, error: err };
+    }
+
+    const { url, key: apiKeyToUse } = await this.getInstanceConfig(instanceName);
+    const cleanInstance = instanceName.trim();
+    const cleanJid = key.remoteJid.includes("@") ? key.remoteJid : `${key.remoteJid.replace(/\D/g, "")}@s.whatsapp.net`;
+
+    const payload = {
+      key: {
+        remoteJid: cleanJid,
+        fromMe: Boolean(key.fromMe),
+        id: key.id
+      },
+      reaction: emoji || "" // emoji vazio remove a reação no WhatsApp
+    };
+
+    console.log(`[EvolutionAPI] Enviando reação "${emoji || '(remover)'}" para msg ${key.id} (${cleanJid}) via ${cleanInstance}...`);
+
+    const endpoints = [
+      `${url}/message/sendReaction/${cleanInstance}`,
+      `${url}/chat/sendReaction/${cleanInstance}`
+    ];
+
+    for (const endpoint of endpoints) {
+      try {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "apikey": apiKeyToUse
+          },
+          body: JSON.stringify(payload)
+        });
+
+        const responseText = await response.text();
+        let responseJson: any = null;
+        try {
+          responseJson = JSON.parse(responseText);
+        } catch (_) {
+          responseJson = { raw: responseText };
+        }
+
+        if (response.ok) {
+          console.log(`[EvolutionAPI] ✅ Reação "${emoji}" enviada com sucesso para msg ${key.id}`);
+          return { success: true, status: response.status, data: responseJson };
+        }
+      } catch (err: any) {
+        console.warn(`[EvolutionAPI] Falha no endpoint ${endpoint}:`, err.message);
+      }
+    }
+
+    return { success: false, error: "Falha ao enviar reação nos endpoints da Evolution API" };
+  }
 }
 
 export const evolutionApiService = new EvolutionApiService();

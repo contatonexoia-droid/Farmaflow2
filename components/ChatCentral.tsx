@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Search, Send, FileText, Image as ImageIcon, Paperclip, User, Users, Clock, ShoppingBag, CreditCard, MessageSquare, Lock, AlertCircle, RefreshCw, Smartphone, ChevronLeft, ChevronDown, ChevronUp, Info, BarChart2, CheckCircle2, UserPlus, Inbox, MoreVertical, Kanban, LayoutList, Columns, QrCode, Pill, Sparkles, Calendar, X, Download } from 'lucide-react';
+import { Search, Send, FileText, Image as ImageIcon, Paperclip, User, Users, Clock, ShoppingBag, CreditCard, MessageSquare, Lock, AlertCircle, RefreshCw, Smartphone, ChevronLeft, ChevronDown, ChevronUp, Info, BarChart2, CheckCircle2, UserPlus, Inbox, MoreVertical, Kanban, LayoutList, Columns, QrCode, Pill, Sparkles, Calendar, X, Download, Smile } from 'lucide-react';
 import { ChatTransferModal } from './ChatTransferModal';
 import { AiChatCopilot } from './AiChatCopilot';
 import { ChatKanban } from './ChatKanban';
@@ -222,23 +222,104 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   // Anti-collision state
   const [otherUserViewing, setOtherUserViewing] = useState<string | null>(null);
 
+  // Reaction picker active message
+  const [activeReactionPickerMsgId, setActiveReactionPickerMsgId] = useState<string | null>(null);
+
+  const handleReactToMessage = async (msg: any, emoji: string) => {
+    if (!selectedConversation) return;
+    setActiveReactionPickerMsgId(null);
+
+    const prevReaction = msg.reaction;
+    const isRemoving = prevReaction === emoji || emoji === '';
+    const newEmoji = isRemoving ? '' : emoji;
+
+    // Atualização otimista imediata na UI
+    setMessages((prev) =>
+      prev.map((m) => {
+        if (m.id === msg.id) {
+          const currentReactions: any[] = Array.isArray(m.reactions) ? [...m.reactions] : [];
+          const filtered = currentReactions.filter((r) => r.fromMe !== true && r.sender !== 'USER');
+          if (newEmoji) {
+            filtered.push({
+              emoji: newEmoji,
+              sender: 'USER',
+              fromMe: true,
+              created_at: new Date().toISOString()
+            });
+          }
+          return {
+            ...m,
+            reaction: newEmoji || (filtered.length > 0 ? filtered[filtered.length - 1].emoji : null),
+            reactions: filtered
+          };
+        }
+        return m;
+      })
+    );
+
+    try {
+      await fetch('/api/v1/chat/react', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-tenant-id': tenantId
+        },
+        body: JSON.stringify({
+          conversationId: selectedConversation.id,
+          messageId: msg.id,
+          emoji: newEmoji
+        })
+      });
+    } catch (e) {
+      console.warn('Erro ao enviar reação:', e);
+    }
+  };
+
   useEffect(() => {
-    // 1. Inscrição no Supabase Realtime para mensagens do chat
+    // 1. Inscrição no Supabase Realtime para mensagens e reações do chat
     const channel = supabase
       .channel(`chat_messages_realtime_${tenantId}`)
       .on(
         'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'chat_messages' },
+        { event: '*', schema: 'public', table: 'chat_messages' },
         (payload) => {
-          const newMsg = payload.new;
-          if (newMsg) {
+          const row: any = payload.new;
+          if (row) {
+            let parsedReactions = row.reactions;
+            if (typeof parsedReactions === 'string') {
+              try {
+                parsedReactions = JSON.parse(parsedReactions);
+              } catch (_) {
+                parsedReactions = [];
+              }
+            }
+            if (!Array.isArray(parsedReactions)) {
+              parsedReactions = row.reaction ? [{ emoji: row.reaction, created_at: row.created_at }] : [];
+            }
+            const formattedMsg = {
+              ...row,
+              reaction: row.reaction || (parsedReactions.length > 0 ? parsedReactions[parsedReactions.length - 1].emoji : null),
+              reactions: parsedReactions
+            };
+
             if (
               selectedConversation &&
-              newMsg.conversation_id === selectedConversation.id
+              row.conversation_id === selectedConversation.id
             ) {
               setMessages((prev) => {
-                if (prev.some((m) => m.id === newMsg.id)) return prev;
-                return [...prev, newMsg];
+                const existingIdx = prev.findIndex((m) => m.id === row.id || (row.remote_id && m.remote_id === row.remote_id));
+                if (existingIdx >= 0) {
+                  const next = [...prev];
+                  next[existingIdx] = {
+                    ...next[existingIdx],
+                    ...formattedMsg
+                  };
+                  return next;
+                }
+                if (payload.eventType === 'INSERT') {
+                  return [...prev, formattedMsg];
+                }
+                return prev;
               });
             }
             fetchConversations();
@@ -721,7 +802,25 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
             return;
           }
         }
-        setMessages(data);
+        const formatted = data.map((row: any) => {
+          let parsedReactions = row.reactions;
+          if (typeof parsedReactions === 'string') {
+            try {
+              parsedReactions = JSON.parse(parsedReactions);
+            } catch (_) {
+              parsedReactions = [];
+            }
+          }
+          if (!Array.isArray(parsedReactions)) {
+            parsedReactions = row.reaction ? [{ emoji: row.reaction, created_at: row.created_at }] : [];
+          }
+          return {
+            ...row,
+            reaction: row.reaction || (parsedReactions.length > 0 ? parsedReactions[parsedReactions.length - 1].emoji : null),
+            reactions: parsedReactions
+          };
+        });
+        setMessages(formatted);
       }
     } catch (e) {
       console.warn("Error fetching messages", e);
@@ -1549,7 +1648,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                 const isDocument = msgType === 'document' || (rawUrl && /\.(pdf|doc|docx|xls|xlsx|txt)($|\?)/i.test(rawUrl));
 
                 return (
-                  <div key={`${msg.id || 'msg'}_${index}`} className={`flex ${msg.sender_type === 'CUSTOMER' ? 'justify-start' : 'justify-end'}`}>
+                  <div key={`${msg.id || 'msg'}_${index}`} className={`flex ${msg.sender_type === 'CUSTOMER' ? 'justify-start' : 'justify-end'} group relative`}>
                     <div className={`max-w-[85%] md:max-w-[70%] p-3 rounded-2xl shadow-sm relative ${
                       msg.is_private 
                         ? 'bg-[#fff9c4] border border-[#fbc02d] text-gray-800 rounded-tr-none' 
@@ -1642,7 +1741,90 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                       <span className="text-[10px] text-gray-500 block text-right mt-1">
                         {msg.created_at ? new Date(msg.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' }) : ''}
                       </span>
+
+                      {/* WhatsApp-Native Reaction Floating Badge */}
+                      {((Array.isArray(msg.reactions) && msg.reactions.length > 0) || msg.reaction) && (
+                        <div 
+                          className={`absolute -bottom-2.5 ${
+                            msg.sender_type === 'CUSTOMER' ? 'left-3' : 'right-3'
+                          } flex items-center gap-0.5 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 shadow-sm rounded-full px-1.5 py-0.5 z-10 cursor-pointer select-none hover:scale-110 transition-transform`}
+                          title={
+                            Array.isArray(msg.reactions) && msg.reactions.length > 0
+                              ? msg.reactions.map((r: any) => `${r.emoji} (${r.fromMe ? 'Atendente' : 'Cliente'})`).join(', ')
+                              : `Reação: ${msg.reaction}`
+                          }
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setActiveReactionPickerMsgId(activeReactionPickerMsgId === msg.id ? null : msg.id);
+                          }}
+                        >
+                          {Array.isArray(msg.reactions) && msg.reactions.length > 0 ? (
+                            <>
+                              {Array.from(new Set(msg.reactions.map((r: any) => r.emoji))).slice(0, 3).map((em: any, emIdx) => (
+                                <span key={emIdx} className="text-xs leading-none">{em}</span>
+                              ))}
+                              {msg.reactions.length > 1 && (
+                                <span className="text-[10px] font-semibold text-gray-500 ml-0.5">{msg.reactions.length}</span>
+                              )}
+                            </>
+                          ) : (
+                            <span className="text-xs leading-none">{msg.reaction}</span>
+                          )}
+                        </div>
+                      )}
                     </div>
+
+                    {/* Quick Reaction Action Button (Hover) */}
+                    {!msg.is_private && (
+                      <div className={`absolute top-1/2 -translate-y-1/2 ${
+                        msg.sender_type === 'CUSTOMER' ? '-right-8' : '-left-8'
+                      } opacity-0 group-hover:opacity-100 transition-opacity flex items-center z-20`}>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setActiveReactionPickerMsgId(activeReactionPickerMsgId === msg.id ? null : msg.id);
+                          }}
+                          className="p-1 rounded-full bg-white dark:bg-gray-800 text-gray-400 hover:text-amber-500 shadow-sm border border-gray-200 dark:border-gray-700 transition-all hover:scale-110"
+                          title="Reagir com emoji"
+                        >
+                          <Smile className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Popup Emoji Reaction Bar */}
+                    {activeReactionPickerMsgId === msg.id && (
+                      <div 
+                        className={`absolute z-30 -top-8 ${
+                          msg.sender_type === 'CUSTOMER' ? 'left-0' : 'right-0'
+                        } bg-white dark:bg-gray-800 rounded-full shadow-lg border border-gray-200 dark:border-gray-700 px-2 py-1 flex items-center gap-1.5 animate-in zoom-in-95 duration-150`}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {['👍', '❤️', '😂', '😮', '😢', '🙏'].map((emoji) => (
+                          <button
+                            key={emoji}
+                            type="button"
+                            onClick={() => handleReactToMessage(msg, emoji)}
+                            className={`text-base p-1 hover:scale-125 transition-transform rounded-full ${
+                              msg.reaction === emoji ? 'bg-amber-100 dark:bg-amber-900/40 ring-1 ring-amber-400' : 'hover:bg-gray-100 dark:hover:bg-gray-700'
+                            }`}
+                          >
+                            {emoji}
+                          </button>
+                        ))}
+                        {msg.reaction && (
+                          <button
+                            type="button"
+                            onClick={() => handleReactToMessage(msg, '')}
+                            className="text-[10px] text-gray-400 hover:text-red-500 px-1 py-0.5 font-bold hover:bg-red-50 rounded"
+                            title="Remover reação"
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })}

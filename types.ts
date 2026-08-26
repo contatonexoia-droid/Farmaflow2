@@ -677,3 +677,70 @@ export const calculateItemTotal = (
   const details = calculateItemPromotionDetails(item, activePromotions, matrizProducts, tenantId);
   return item.price * item.quantity - details.discount;
 };
+
+export interface ChatMessageReaction {
+  emoji: string;
+  sender?: "CUSTOMER" | "USER" | "SYSTEM" | string;
+  fromMe?: boolean;
+  created_at?: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  conversation_id: string;
+  sender_type: "CUSTOMER" | "USER" | "BOT" | "SYSTEM";
+  sender_id?: string | null;
+  content: string;
+  is_private: boolean;
+  media_url?: string;
+  media_type?: string;
+  mediaUrl?: string;
+  mediaType?: string;
+  type?: string;
+  reaction?: string | null;
+  reactions?: ChatMessageReaction[];
+  remote_id?: string | null;
+  message_ack?: string;
+  created_at: string;
+}
+
+export interface ChatContact {
+  id: string;
+  store_id: string;
+  name: string;
+  phone_number: string;
+  created_at: string;
+}
+
+export interface ChatLabel {
+  id: string;
+  store_id: string;
+  name: string;
+  color: string;
+  created_at: string;
+}
+
+export interface ChatConversation {
+  id: string;
+  store_id: string;
+  contact_id: string;
+  inbox_id?: string | null;
+  team_id?: string | null;
+  assigned_user_id?: string | null;
+  assigned_to?: string | null;
+  is_human_controlled?: boolean;
+  status: "OPEN" | "PENDING" | "finalizado" | "BOT" | string;
+  kanban_stage?: "novos_triagem" | "ia_atendendo" | "aguardando_pagamento" | "em_atendimento" | "finalizado" | "saiu_entrega" | string;
+  stage?: string;
+  last_message_at: string;
+  last_message_content: string;
+  unread_count?: number;
+  is_bot_active?: boolean;
+  bot_interaction_count?: number;
+  bot_handoff_reason?: string;
+  bot_handoff_at?: string;
+  contact?: ChatContact;
+  labels?: ChatLabel[];
+  created_at: string;
+  updated_at?: string;
+}

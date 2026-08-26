@@ -130,8 +130,17 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     media_type TEXT,
     is_private BOOLEAN DEFAULT FALSE,
     message_ack TEXT DEFAULT 'SENT', 
+    reaction TEXT,
+    reactions JSONB DEFAULT '[]'::jsonb,
+    remote_id TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- Garantir colunas de reações e remote_id em bancos já existentes
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS reaction TEXT;
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS reactions JSONB DEFAULT '[]'::jsonb;
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS remote_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_chat_messages_remote_id ON chat_messages(remote_id);
 
 -- 5. canned_responses
 CREATE TABLE IF NOT EXISTS canned_responses (

@@ -7019,8 +7019,16 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
     const eventName = String(event || "").toLowerCase();
     const eventNameUpper = String(event || "").toUpperCase();
     
+    const isReactionEvent = (
+      eventName.includes("reaction") || 
+      eventNameUpper.includes("REACTION") ||
+      Boolean(data?.reaction) ||
+      Boolean(data?.message?.reactionMessage) ||
+      Boolean(data?.reactionMessage)
+    );
+
     let isMessageEvent = false;
-    if (eventNameUpper === "MESSAGES_UPSERT" || eventName === "messages.upsert" || eventName === "messages-upsert") {
+    if (eventNameUpper === "MESSAGES_UPSERT" || eventName === "messages.upsert" || eventName === "messages-upsert" || isReactionEvent) {
       isMessageEvent = true;
     } else if (data?.messages || (data?.message && data.message.key) || data?.key) {
       isMessageEvent = true;
@@ -7041,6 +7049,8 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
         messages = [data]; // data is the message itself
       } else if (Array.isArray(data)) {
         messages = data;
+      } else if (isReactionEvent && data) {
+        messages = [data];
       }
       
       let resolvedTenant: any = null;
@@ -7635,6 +7645,40 @@ app.post("/api/v1/chat/send", requireChatEnabled, async (req, res) => {
     return res.status(200).json({ success: true, data: message, conversation });
   } catch (error: any) {
     console.error("[Chat API] Erro ao enviar mensagem:", error);
+    return res.status(500).json({ error: error.message || "Erro interno." });
+  }
+});
+
+// Endpoint para reagir a uma mensagem (ou remover reação) no chat
+app.post("/api/v1/chat/react", requireChatEnabled, async (req, res) => {
+  try {
+    const { conversation_id, conversationId, message_id, messageId, emoji, instanceName } = req.body;
+    const rawStoreId = (req.headers["x-tenant-id"] as string) || (req.query.tenantId as string) || "default";
+    const storeId = typeof rawStoreId === 'string' ? rawStoreId.trim().replace(/^store_/, '') : rawStoreId;
+
+    const targetConvId = conversation_id || conversationId;
+    const targetMsgId = message_id || messageId;
+
+    if (!targetConvId || !targetMsgId) {
+      return res.status(400).json({ error: "conversation_id e message_id são obrigatórios." });
+    }
+
+    const result = await chatStore.addOrUpdateReaction(
+      storeId,
+      targetConvId,
+      targetMsgId,
+      typeof emoji === "string" ? emoji : "",
+      true,
+      instanceName
+    );
+
+    if (!result.success) {
+      return res.status(400).json({ error: result.error || "Falha ao aplicar reação." });
+    }
+
+    return res.status(200).json({ success: true, message: result.message });
+  } catch (error: any) {
+    console.error("[Chat API] Erro ao reagir mensagem:", error);
     return res.status(500).json({ error: error.message || "Erro interno." });
   }
 });
