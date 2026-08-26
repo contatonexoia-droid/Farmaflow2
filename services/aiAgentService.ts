@@ -2,7 +2,7 @@ import { GoogleGenAI } from "@google/genai";
 import { createClient } from "@supabase/supabase-js";
 import { AiAgentConfig, PharmacyConfig } from "../types.js";
 import { chatStore, sanitizeChatConversationPayload } from "./chatStore.js";
-import { botHandoffManager } from "./botHandoffManager.js";
+import { botHandoffManager, detectHumanHandoffIntent } from "./botHandoffManager.js";
 import { realtimeHub } from "./realtimeHub.js";
 import { evolutionApiService } from "./evolutionApiService.js";
 
@@ -22,10 +22,16 @@ DIRETRIZES DE ATENDIMENTO E FORMATAÇÃO:
    - Use APENAS e EXCLUSIVAMENTE os preços e produtos reais informados na seção [CATÁLOGO EM TEMPO REAL].
    - Se um produto estiver listado no catálogo: informe o nome exato, a apresentação e o preço cadastrado, e forneça o link direto de compra ({STORE_LINK}?produto=ID) ou o link de busca ({STORE_LINK}?busca=termo).
    - Se o produto solicitado NÃO estiver listado no catálogo: informe educadamente que não localizou o preço/item exato no momento e forneça o link de busca na Webloja ({STORE_LINK}?busca=termo) para o cliente pesquisar ou convide-o a falar com a equipe de balcão. JAMAIS cite um valor aleatório.
-5. FORMATO DE LINKS:
+5. REGRA MANDATÓRIA DE TRANSFERÊNCIA PARA ATENDIMENTO HUMANO / BALCÃO:
+   - Sempre que o cliente pedir ou demonstrar intenção de falar com um balconista, atendente, farmacêutico, pessoa humana ou balcão:
+   - Responda confirmando IMEDIATAMENTE com empatia e presteza que está transferindo o atendimento para a equipe de balcão.
+   - Exemplo: "Com certeza! Já estou transferindo seu atendimento para um de nossos balconistas. Um momento que um atendente já vai te responder por aqui! 👨‍⚕️"
+   - Adicione OBRIGATORIAMENTE no final da sua mensagem a tag especial [TRANSFERIR_ATENDIMENTO].
+   - NUNCA continue respondendo como robô quando o cliente solicitar falar com atendente ou balconista.
+6. FORMATO DE LINKS:
    - Envie os links da loja sempre em TEXTO PURO (exemplo: Acesse na nossa Webloja: {STORE_LINK}?produto=123).
    - NUNCA use formatação markdown de links repetidos como [link](link).
-6. Seja conciso (1 a 3 parágrafos curtos), educado e use quebras de linha confortáveis para leitura rápida no celular.`;
+7. Seja conciso (1 a 3 parágrafos curtos), educado e use quebras de linha confortáveis para leitura rápida no celular.`;
 
 export interface AiChatMessage {
   role: 'user' | 'model' | 'assistant' | 'system';
@@ -568,26 +574,31 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       rawResult = await this.callGemini(apiKey, effectiveConfig.model || 'gemini-2.5-flash', fullSystemInstruction, incomingMessage, chatHistory, storeLink);
     }
 
-    // 9. Garantia de Presença do Link da Webloja (Strict Enforcement)
-    let enforcedReply = rawResult.reply;
+    // 9. Detecção Ativa de Pedido de Atendimento Humano ou Balconista
+    const humanCheck = detectHumanHandoffIntent(incomingMessage);
+    const hasTransferTag = /\[(TRANSFERIR_ATENDIMENTO|TRANSFER_TO_HUMAN|HANDOFF_HUMAN|TRANSBORDO)\]/i.test(rawResult.reply);
+    const indicatesTransferInText = /((estou|vou)\s+(transferir|passar|encaminhar)|(um\s+de\s+nossos\s+balconistas|nossa\s+equipe\s+de\s+balconistas|um\s+atendente\s+humano|nossos\s+atendentes)\s+(ir[áa]|vai|ja\s+vai)\s+(te\s+)?(atender|responder))/i.test(rawResult.reply);
+
+    const shouldHandoff = isFinalSessionTurn || rawResult.transferredToHuman === true || humanCheck.isHumanRequested || hasTransferTag || indicatesTransferInText;
+    const handoffReason = humanCheck.isHumanRequested 
+      ? "HUMAN_REQUESTED" 
+      : (hasTransferTag || indicatesTransferInText 
+          ? "HUMAN_REQUESTED" 
+          : (isFinalSessionTurn ? "MAX_INTERACTIONS_REACHED" : "HUMAN_REQUESTED"));
+
+    // 10. Limpeza de tags internas e garantia de presença do link da Webloja
+    let enforcedReply = rawResult.reply
+      .replace(/\[(TRANSFERIR_ATENDIMENTO|TRANSFER_TO_HUMAN|HANDOFF_HUMAN|TRANSBORDO)\]/gi, '')
+      .trim();
+
     if (!enforcedReply.includes("http") && !enforcedReply.includes(".online") && !enforcedReply.includes(".com")) {
       enforcedReply = `${enforcedReply}\n\n🛍️ *Consulte nosso catálogo e compre online:* ${storeLink}`;
     }
 
-    // 10. Se for o último turno da sessão, anexa mensagem de transição humana
+    // 11. Se for o último turno da sessão por limite, anexa mensagem de transição humana caso não tenha
     const transitionMsg = effectiveConfig.transitionToHumanMessage || "Encaminhei sua dúvida e o link da nossa loja. Um dos nossos balconistas humanos já vai te atender por aqui!";
-    if (isFinalSessionTurn) {
-      if (!enforcedReply.includes("balconista") && !enforcedReply.includes("atendente humano")) {
-        enforcedReply = `${enforcedReply}\n\n${transitionMsg}`;
-      }
-      return {
-        ...rawResult,
-        reply: enforcedReply,
-        transferredToHuman: true,
-        interactionCount: currentInteraction,
-        maxInteractions,
-        handoffReason: 'MAX_INTERACTIONS_REACHED'
-      };
+    if (isFinalSessionTurn && !enforcedReply.includes("balconista") && !enforcedReply.includes("atendente humano")) {
+      enforcedReply = `${enforcedReply}\n\n${transitionMsg}`;
     }
 
     return {
@@ -595,7 +606,8 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       reply: enforcedReply,
       interactionCount: currentInteraction,
       maxInteractions,
-      transferredToHuman: false
+      transferredToHuman: shouldHandoff,
+      handoffReason: shouldHandoff ? handoffReason : undefined
     };
   }
 
@@ -641,7 +653,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
     }
 
     // 2. Disparo na API externa da Evolution API (WhatsApp) com confirmação síncrona
-    console.log(`[AiAgentService] Disparando resposta do BOT para ${cleanPhone} via instância "${targetInstanceName}"...`);
+    console.log(`[AiAgentService] Disparando resposta do BOT para ${cleanPhone} via instância "${targetInstanceName}" (Handoff: ${params.isHandoff ? params.handoffReason : 'NÃO'})...`);
     const sendResult = await evolutionApiService.sendTextMessage(
       targetInstanceName,
       cleanPhone,
@@ -657,7 +669,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       return { success: false, error: sendResult.error || "WHATSAPP_DELIVERY_FAILED" };
     }
 
-    console.log(`[AiAgentService] ✅ Mensagem entregue com sucesso ao WhatsApp de ${cleanPhone}. Gravando no banco de dados e incrementando contador.`);
+    console.log(`[AiAgentService] ✅ Mensagem entregue com sucesso ao WhatsApp de ${cleanPhone}. Gravando no banco de dados e atualizando estado da conversa.`);
 
     // 3. Registra a resposta da IA na tabela messages / chat_messages do Supabase APENAS após confirmação
     const { message: recordedMsg } = await chatStore.addMessage(
@@ -677,13 +689,14 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
 
     // 4. Incremento do Contador de Interações e Atualização Atômica de Estado
     if (params.isHandoff) {
+      const handoffReason = params.handoffReason || "HUMAN_REQUESTED";
       const handoffPayload: any = {
         bot_interaction_count: nextCount,
         is_bot_active: false,
         is_human_controlled: true,
         kanban_stage: "em_atendimento",
         status: "human_takeover",
-        bot_handoff_reason: params.handoffReason || "MAX_INTERACTIONS_REACHED",
+        bot_handoff_reason: handoffReason,
         bot_handoff_at: nowIso,
         last_message_at: nowIso,
         last_message_content: replyText,
@@ -703,11 +716,20 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       await botHandoffManager.triggerHandoff(
         conversationId,
         realTenantId,
-        params.handoffReason || "MAX_INTERACTIONS_REACHED",
+        handoffReason,
         params.transitionMsg
       );
 
       await chatStore.updateConversationBotStatus(conversationId, handoffPayload);
+
+      realtimeHub.broadcastToStore(realTenantId, "conversation_bot_toggled", {
+        conversationId,
+        is_bot_active: false,
+        is_human_controlled: true,
+        status: "human_takeover",
+        kanban_stage: "em_atendimento",
+        bot_interaction_count: nextCount
+      });
 
       realtimeHub.broadcastToStore(realTenantId, "conversation_status_changed", {
         conversationId,
@@ -715,7 +737,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         is_bot_active: false,
         is_human_controlled: true,
         bot_interaction_count: nextCount,
-        bot_handoff_reason: params.handoffReason || "MAX_INTERACTIONS_REACHED",
+        bot_handoff_reason: handoffReason,
         bot_handoff_at: nowIso,
         kanban_stage: "em_atendimento"
       });
@@ -725,6 +747,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         stage: "HUMAN",
         status: "human_takeover",
         is_bot_active: false,
+        is_human_controlled: true,
         updated_at: nowIso
       });
     } else {
@@ -993,9 +1016,11 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
 
       let finalReply = aiResult.reply;
 
-      // 10. Se for a última interação da sessão, realizar transbordo definitivo para humano
+      // 10. Se for a última interação da sessão ou se a IA transferiu para humano, realizar transbordo definitivo
       if (isFinalTurn || aiResult.transferredToHuman) {
-        if (!finalReply.includes("balconista") && !finalReply.includes("atendente humano")) {
+        const resolvedReason = aiResult.handoffReason || (isFinalTurn ? "MAX_INTERACTIONS_REACHED" : "HUMAN_REQUESTED");
+
+        if (isFinalTurn && !finalReply.includes("balconista") && !finalReply.includes("atendente humano")) {
           finalReply = `${finalReply}\n\n${transitionMsg}`;
         }
 
@@ -1007,7 +1032,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
           finalReply,
           {
             isHandoff: true,
-            handoffReason: "MAX_INTERACTIONS_REACHED",
+            handoffReason: resolvedReason,
             transitionMsg,
             currentCount,
             nextCount
@@ -1022,7 +1047,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
           handled: true,
           replyText: finalReply,
           transferredToHuman: true,
-          reason: "MAX_INTERACTIONS_REACHED"
+          reason: resolvedReason
         };
       }
 

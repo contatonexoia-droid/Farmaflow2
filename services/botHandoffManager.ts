@@ -16,6 +16,82 @@ export interface HandoffResult {
   handoffReason?: string;
 }
 
+/**
+ * Normaliza o texto para detecção resiliente de intenções (sem acentos, minúsculo, sem pontuação excessiva)
+ */
+export function normalizeTextForIntent(text: string): string {
+  if (!text || typeof text !== 'string') return '';
+  return text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // remove acentos
+    .replace(/[^\w\s]/gi, ' ') // remove pontuações
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Detector de alta sensibilidade para pedidos de Atendimento Humano, Balconista, Farmacêutico ou Atendente
+ */
+export function detectHumanHandoffIntent(message: string): { isHumanRequested: boolean; reason?: string } {
+  if (!message || typeof message !== 'string') return { isHumanRequested: false };
+  const raw = message.trim();
+  const normalized = normalizeTextForIntent(raw);
+
+  if (!normalized) return { isHumanRequested: false };
+
+  // 1. Mensagens diretas e termos exatos
+  const directWords = [
+    "atendente", "balconista", "humano", "humana", "pessoa", "farmaceutico", "farmaceutica",
+    "atendente humano", "pessoa real", "balcao", "atendente por favor", "balconista por favor",
+    "falar com atendente", "falar com balconista", "falar com humano", "falar com pessoa",
+    "falar com farmaceutico", "chamar atendente", "chamar balconista", "chamar humano",
+    "chamar farmaceutico", "quero atendente", "quero balconista", "quero humano", "quero pessoa",
+    "preciso de atendente", "preciso de balconista", "preciso de humano", "passa pro atendente",
+    "passa para o atendente", "passa pro balconista", "passa para o balconista",
+    "transferir para atendente", "transferir para balconista", "transferir para humano",
+    "me transfere", "me passa", "0", "falar com atendente humano", "quero falar com atendente",
+    "quero falar com o balconista", "quero falar com um atendente", "quero falar com balconista",
+    "atendimento humano", "suporte humano", "falar com atendente", "falar com atendentes",
+    "falar com balconistas", "atendentes", "balconistas", "gente", "pessoa de verdade"
+  ];
+
+  if (directWords.includes(normalized)) {
+    return { isHumanRequested: true, reason: "DIRECT_KEYWORD" };
+  }
+
+  // 2. Expressões Regulares de Intenção de Transferência / Balconista / Atendente Humano
+  const handoffPatterns = [
+    // Verbos de ação + atendente/balconista/humano/farmacêutico
+    /\b(falar|conversar|dialogar|passar|passa|transfere|transferir|chamar|chama|conectar|mandar|encaminhar|colocar|atender|atende)\s+(com\s+|pro\s+|pra\s+|para\s+)?(um|uma|o|a|os|as\s+)?(atendente|balconista|farmaceutico|farmaceutica|humano|humana|pessoa|operador|operadora|vendedor|vendedora|balcao|equipe|alguem|gente)\b/i,
+    
+    // Quero / Preciso / Gostaria de + atendente/balconista/humano
+    /\b(quero|queria|preciso|precisava|gostaria\s+de|desejo|favor)\s+(falar\s+com\s+|conversar\s+com\s+|atendimento\s+com\s+|ser\s+atendido\s+por\s+)?(um|uma|o|a|os|as\s+)?(atendente|balconista|farmaceutico|farmaceutica|humano|humana|pessoa|operador|operadora|vendedor|vendedora|balcao|alguem)\b/i,
+    
+    // Pergunta de disponibilidade de humano / atendente
+    /\b(tem|teria|existe|possui)\s+(algum|alguma|um|uma\s+)?(atendente|balconista|humano|pessoa|farmaceutico|alguem)\s+(ai|online|disponivel|pra\s+falar|atendendo)?\b/i,
+    
+    // Rejeição ao bot / robô
+    /\b(nao\s+quero|chega\s+de|sai|odeio|para\s+de)\s+(robo|bot|ia|inteligencia\s+artificial|maquina|sistema\s+automatico)\b/i,
+    /\b(quero\s+falar\s+com\s+gente|falar\s+com\s+gente\s+de\s+verdade|pessoa\s+de\s+carne\s+e\s+osso)\b/i,
+
+    // Atendimento humano explícito
+    /\b(atendimento\s+humano|suporte\s+humano|contato\s+humano|atendente\s+humano|balconista\s+humano)\b/i,
+    /\b(me\s+passa|me\s+transfere|me\s+atende|me\s+ajuda\s+alguem|tem\s+alguem\s+ai)\b/i,
+
+    // Remédios de controle especial e receitas
+    /\b(remedio\s+controlado|medicamento\s+controlado|tarja\s+preta|receita\s+controlada|notificacao\s+de\s+receita)\b/i
+  ];
+
+  for (const pattern of handoffPatterns) {
+    if (pattern.test(normalized)) {
+      return { isHumanRequested: true, reason: "REGEX_PATTERN_MATCH" };
+    }
+  }
+
+  return { isHumanRequested: false };
+}
+
 export class BotHandoffManager {
   private static instance: BotHandoffManager;
 
@@ -28,27 +104,8 @@ export class BotHandoffManager {
     return BotHandoffManager.instance;
   }
 
-  // Termos sensíveis para transbordo imediato para o farmacêutico / atendente humano
-  private sensitiveKeywords = [
-    "falar com humano",
-    "falar com atendente",
-    "falar com pessoa",
-    "falar com balconista",
-    "falar com farmacêutico",
-    "falar com farmaceutico",
-    "chamar atendente",
-    "chamar humano",
-    "atendente humano",
-    "passar para atendente",
-    "transferir para atendente",
-    "quero falar com uma pessoa",
-    "remédio controlado",
-    "remedio controlado",
-    "tarja preta"
-  ];
-
   /**
-   * Avalia a mensagem recebida no robô. Se detectar termo sensível, aciona o transbordo humano e Round-Robin.
+   * Avalia a mensagem recebida no robô. Se detectar termo sensível ou pedido de atendente, aciona o transbordo humano e Round-Robin.
    */
   public async processMessageState(
     conversationId: string,
@@ -56,23 +113,15 @@ export class BotHandoffManager {
     content: string,
     currentStatus: string
   ): Promise<HandoffResult> {
-    const lowerContent = content.toLowerCase().trim();
+    const handoffCheck = detectHumanHandoffIntent(content);
 
-    // Se já estiver em atendimento humano em progresso
-    if (currentStatus === "in_progress" || currentStatus === "OPEN") {
-      // Verifica se é um comando explícito de transferência
-    }
-
-    // Verificar se a mensagem contém gatilhos de transbordo imediato
-    const triggersHandoff = this.sensitiveKeywords.some((term) => lowerContent.includes(term));
-
-    if (triggersHandoff || lowerContent === "0" || lowerContent === "falar com atendente" || lowerContent === "humano") {
-      console.log(`[BotHandoffManager] Handoff triggered for conversation ${conversationId} (keyword match: ${lowerContent})`);
+    if (handoffCheck.isHumanRequested) {
+      console.log(`[BotHandoffManager] Handoff triggered for conversation ${conversationId} (reason: ${handoffCheck.reason}, content: "${content}")`);
       return await this.triggerHandoff(
         conversationId,
         storeId,
-        "KEYWORD_TRIGGER",
-        "Encaminhei sua dúvida e o link da nossa loja. Um dos nossos balconistas humanos já vai te atender por aqui!"
+        "HUMAN_REQUESTED",
+        "Com certeza! Já estou transferindo o seu atendimento para a nossa equipe de balconistas. Um momento que um atendente humano já vai te responder por aqui! 👨‍⚕️"
       );
     }
 
