@@ -4,6 +4,7 @@ import path from "path";
 import crypto from "crypto";
 import { inboxStore } from "./inboxStore.js";
 import { evolutionApiService } from "./evolutionApiService.js";
+import { isWeblojaOrderMessage } from "./botHandoffManager.js";
 
 function stringToUuid(str: string): string {
   const hash = crypto.createHash('md5').update(str).digest('hex');
@@ -1006,9 +1007,21 @@ class ChatStore {
     let isHuman = convInfo ? (convInfo.is_human_controlled ?? (finalStage === "em_atendimento" || Boolean(convInfo.assigned_user_id))) : (fromMe);
     let finalStatus = convInfo ? (convInfo.status || (isBotActive ? "bot" : (isHuman ? "human_takeover" : "OPEN"))) : (fromMe ? "human_takeover" : "bot");
 
-    // Reabertura Automática de Conversas Finalizadas quando o cliente envia nova mensagem
+    // 2. DETECÇÃO AUTOMÁTICA DE PEDIDO DA WEBLOJA / LOJA ONLINE
+    const orderCheck = !fromMe ? isWeblojaOrderMessage(text) : { isOrder: false };
+    let isWeblojaOrder = Boolean(orderCheck.isOrder);
+
+    if (isWeblojaOrder) {
+      console.log(`[ChatStore] 🛒 [PEDIDO WEBLOJA DETECTADO] Mensagem recebida de ${remoteJid} é um pedido finalizado da Loja Online FarmaFlow (Pedido: ${orderCheck.orderId || 'N/A'}). Movendo automaticamente para "saiu_entrega" (Em Separação / Delivery) e desativando a IA.`);
+      finalStage = "saiu_entrega";
+      finalStatus = "em_separacao";
+      isBotActive = false;
+      isHuman = true;
+    }
+
+    // Reabertura Automática de Conversas Finalizadas quando o cliente envia nova mensagem (se não for pedido da webloja)
     let wasReopened = false;
-    if (!fromMe && isPreviouslyClosed) {
+    if (!fromMe && isPreviouslyClosed && !isWeblojaOrder) {
       console.log(`[ChatStore] 🔄 [REABERTURA AUTOMÁTICA] Conversa ${convId} estava finalizada. Reabrindo ticket para "novos_triagem" no Kanban.`);
       wasReopened = true;
       finalStage = "novos_triagem";
@@ -1052,9 +1065,9 @@ class ChatStore {
       is_bot_active: isBotActive,
       kanban_stage: finalStage,
       stage: finalStage,
-      bot_interaction_count: wasReopened ? 0 : (convInfo?.bot_interaction_count || 0),
-      bot_handoff_reason: (fromMe && !isBotEcho && isHuman) ? "HUMAN_OPERATOR_MESSAGE" : (wasReopened ? null : (convInfo?.bot_handoff_reason || null)),
-      bot_handoff_at: (fromMe && !isBotEcho && isHuman) ? now : (wasReopened ? null : (convInfo?.bot_handoff_at || null)),
+      bot_interaction_count: (wasReopened || isWeblojaOrder) ? 0 : (convInfo?.bot_interaction_count || 0),
+      bot_handoff_reason: isWeblojaOrder ? "WEBLOJA_ORDER_RECEIVED" : ((fromMe && !isBotEcho && isHuman) ? "HUMAN_OPERATOR_MESSAGE" : (wasReopened ? null : (convInfo?.bot_handoff_reason || null))),
+      bot_handoff_at: (isWeblojaOrder || (fromMe && !isBotEcho && isHuman)) ? now : (wasReopened ? null : (convInfo?.bot_handoff_at || null)),
       assigned_user_id: wasReopened ? null : (isHuman ? (convInfo?.assigned_user_id || null) : (convInfo?.assigned_user_id || null)),
       last_message_at: now,
       last_message_content: text,
@@ -1064,6 +1077,8 @@ class ChatStore {
       updated_at: now
     };
     (conv as any)._was_reopened = wasReopened;
+    (conv as any)._is_webloja_order = isWeblojaOrder;
+    (conv as any)._order_id = orderCheck.orderId;
 
     // 3. Atualização ou criação da conversa (chat_conversations)
     try {
@@ -1080,8 +1095,17 @@ class ChatStore {
           convUpdateData.inbox_id = resolvedInboxId;
         }
 
-        // Se a conversa estava finalizada e recebeu mensagem do cliente, atualiza estágio e status para reaberto
-        if (wasReopened) {
+        // Se for pedido da webloja, move imediatamente para "saiu_entrega" (Em Separação / Delivery) e desliga a IA
+        if (isWeblojaOrder) {
+          convUpdateData.kanban_stage = "saiu_entrega";
+          convUpdateData.stage = "saiu_entrega";
+          convUpdateData.status = "em_separacao";
+          convUpdateData.is_bot_active = false;
+          convUpdateData.is_human_controlled = true;
+          convUpdateData.bot_handoff_reason = "WEBLOJA_ORDER_RECEIVED";
+          convUpdateData.bot_handoff_at = now;
+        } else if (wasReopened) {
+          // Se a conversa estava finalizada e recebeu mensagem comum do cliente, reabre para "novos_triagem"
           convUpdateData.kanban_stage = "novos_triagem";
           convUpdateData.stage = "novos_triagem";
           convUpdateData.status = "OPEN";
@@ -1110,7 +1134,7 @@ class ChatStore {
           console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao atualizar conversa existente (chat_conversations)', error.message, error);
         }
       } else {
-        // CONVERSA NOVA (Primeiro Contato): Cria o registro inicial com estágio padrão (ia_atendendo para cliente)
+        // CONVERSA NOVA (Primeiro Contato): Cria o registro inicial
         const convInsertData: any = {
           id: convId,
           store_id: storeId,
@@ -1121,13 +1145,14 @@ class ChatStore {
           unread_count: newUnreadCount,
           updated_at: now,
           created_at: now,
-          is_bot_active: !fromMe,
-          is_human_controlled: fromMe,
-          status: fromMe ? "human_takeover" : "bot",
-          kanban_stage: fromMe ? "em_atendimento" : "ia_atendendo",
+          is_bot_active: isWeblojaOrder ? false : !fromMe,
+          is_human_controlled: isWeblojaOrder ? true : fromMe,
+          status: isWeblojaOrder ? "em_separacao" : (fromMe ? "human_takeover" : "bot"),
+          kanban_stage: isWeblojaOrder ? "saiu_entrega" : (fromMe ? "em_atendimento" : "ia_atendendo"),
+          stage: isWeblojaOrder ? "saiu_entrega" : (fromMe ? "em_atendimento" : "ia_atendendo"),
           bot_interaction_count: 0,
-          bot_handoff_reason: fromMe ? "HUMAN_OPERATOR_MESSAGE" : null,
-          bot_handoff_at: fromMe ? now : null
+          bot_handoff_reason: isWeblojaOrder ? "WEBLOJA_ORDER_RECEIVED" : (fromMe ? "HUMAN_OPERATOR_MESSAGE" : null),
+          bot_handoff_at: (isWeblojaOrder || fromMe) ? now : null
         };
 
         const sanitizedInsert = sanitizeChatConversationPayload(convInsertData);

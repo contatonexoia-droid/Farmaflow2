@@ -92,6 +92,75 @@ export function detectHumanHandoffIntent(message: string): { isHumanRequested: b
   return { isHumanRequested: false };
 }
 
+/**
+ * Detector de mensagens de resumo de pedido originadas da Webloja / Loja Online FarmaFlow
+ */
+export function isWeblojaOrderMessage(text: string): {
+  isOrder: boolean;
+  orderId?: string;
+  customerName?: string;
+  total?: string;
+} {
+  if (!text || typeof text !== 'string') return { isOrder: false };
+  const raw = text.trim();
+  if (raw.length < 15) return { isOrder: false };
+
+  const normalized = normalizeTextForIntent(raw);
+
+  // 1. Extração de ID de Pedido (ex: PEDIDO #123456 ou PEDIDO #a1b2c3)
+  const orderIdMatch = raw.match(/PEDIDO\s*#?([A-Za-z0-9\-_]+)/i) || raw.match(/Pedido\s*(?:nº|n°|num|numero|#)?\s*([A-Za-z0-9\-_]+)/i);
+  const orderId = orderIdMatch ? orderIdMatch[1] : undefined;
+
+  // 2. Extração de Nome do Cliente se presente
+  const customerMatch = raw.match(/\*?Nome:\*?\s*([^\n\r]+)/i) || raw.match(/Cliente:\s*([^\n\r]+)/i);
+  const customerName = customerMatch ? customerMatch[1].trim() : undefined;
+
+  // 3. Extração de Total se presente
+  const totalMatch = raw.match(/TOTAL:\s*(?:R\$\s*)?([0-9.,]+)/i) || raw.match(/Valor Total:\s*(?:R\$\s*)?([0-9.,]+)/i);
+  const total = totalMatch ? totalMatch[1].trim() : undefined;
+
+  // 4. Indicadores estruturados de pedido da Webloja
+  const hasOrderHeader = 
+    /(\*?🆕?\s*PEDIDO\s*#|\*?NOVO PEDIDO|\*?RESUMO DO PEDIDO|\*?PEDIDO DA LOJA|\*?PEDIDO WEBLOJA|\*?CONFIRMACAO DE PEDIDO|\*?PEDIDO ONLINE)/i.test(raw) ||
+    /(pedido\s*#|novo\s*pedido|resumo\s*do\s*pedido|pedido\s*da\s*loja|pedido\s*webloja|pedido\s*online)/i.test(normalized);
+
+  const hasProductsOrItems = 
+    /(\*?🛒?\s*PRODUTOS|\*?ITENS DO PEDIDO|\*?ITENS:|\bprodutos\b|\bitens\b)/i.test(raw) ||
+    /(produtos|itens do pedido|itens)/i.test(normalized);
+
+  const hasTotalOrPayment = 
+    /(\*?💰?\s*TOTAL|\*?💳?\s*PAGAMENTO|\*?VALOR TOTAL|TAXA DE ENTREGA|\btotal:\s*r\$|\bpagamento:\b)/i.test(raw) ||
+    /(total r|valor total|pagamento|taxa de entrega)/i.test(normalized);
+
+  const hasCustomerOrDelivery = 
+    /(\*?👤?\s*DADOS DO CLIENTE|\*?📍?\s*(ENTREGA|RETIRADA NA LOJA)|\bendereco:|\bretirada no balcao)/i.test(raw) ||
+    /(dados do cliente|retirada na loja|entrega|endereco de retirada)/i.test(normalized);
+
+  // A. Padrão direto com cabeçalho explícito de pedido + itens/total/cliente
+  if (hasOrderHeader && (hasTotalOrPayment || hasProductsOrItems || hasCustomerOrDelivery)) {
+    return { isOrder: true, orderId, customerName, total };
+  }
+
+  // B. Padrão completo de carrinho finalizado (Produtos + Total + Entrega/Pagamento)
+  if (hasProductsOrItems && hasTotalOrPayment && hasCustomerOrDelivery) {
+    return { isOrder: true, orderId, customerName, total };
+  }
+
+  // C. Pontuação por múltiplos marcadores de pedido
+  let orderScore = 0;
+  if (/\b(pedido|resumo)\b/i.test(normalized)) orderScore += 1;
+  if (/\b(produtos|itens|quantidade|unidades|\d+x)\b/i.test(normalized)) orderScore += 1;
+  if (/\b(total|subtotal|valor total|r\$)\b/i.test(normalized)) orderScore += 1;
+  if (/\b(pagamento|cartao|dinheiro|pix|troco|credito|debito)\b/i.test(normalized)) orderScore += 1;
+  if (/\b(entrega|retirada|taxa de entrega|frete|endereco|bairro)\b/i.test(normalized)) orderScore += 1;
+
+  if (orderScore >= 4) {
+    return { isOrder: true, orderId, customerName, total };
+  }
+
+  return { isOrder: false };
+}
+
 export class BotHandoffManager {
   private static instance: BotHandoffManager;
 

@@ -19,7 +19,7 @@ import { calculateDeliveryDistance } from "./lib/maps.js";
 import { dispatcher } from "./services/asyncDispatcher.js";
 import { whatsappHealthManager } from "./services/whatsappHealthManager.js";
 import { realtimeHub } from "./services/realtimeHub.js";
-import { botHandoffManager } from "./services/botHandoffManager.js";
+import { botHandoffManager, isWeblojaOrderMessage } from "./services/botHandoffManager.js";
 import { continuousUseRefillManager } from "./services/continuousUseRefillManager.js";
 import { csatManager } from "./services/csatManager.js";
 import { contactMergeManager } from "./services/contactMergeManager.js";
@@ -6832,6 +6832,12 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
       console.warn("[WelcomeMessage] Aviso ao consultar last_welcome_sent_at:", e.message);
     }
 
+    // Se a mensagem recebida for um resumo de pedido da Webloja, não envia boas-vindas para não sobrepor o pedido
+    if (incomingText && isWeblojaOrderMessage(incomingText).isOrder) {
+      console.log(`[WelcomeMessage] Mensagem identificada como pedido da Loja Online FarmaFlow. Omitindo mensagem de boas-vindas para a conversa ${conversation.id}.`);
+      return;
+    }
+
     const isTest = incomingText?.trim().toLowerCase() === '#teste' || 
                    incomingText?.trim().toLowerCase() === '#teste-boas-vindas' ||
                    incomingText?.trim().toLowerCase() === '#teste-bv';
@@ -7218,6 +7224,7 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
           if (result && result.conversation) {
             const conversation = result.conversation;
             const wasReopened = Boolean((conversation as any)._was_reopened);
+            const isWeblojaOrder = Boolean((conversation as any)._is_webloja_order);
 
             // 2. Broadcast IMEDIATO via WebSockets/Realtime para que apareça na tela do operador humano
             try {
@@ -7227,8 +7234,39 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                 conversation: conversation
               });
 
-              // Se a conversa foi reaberta de um estágio finalizado, notifica a mudança de estágio para o Kanban atualizar em tempo real
-              if (wasReopened) {
+              // Se for pedido finalizado da Loja Online, emite evento de movimentação automática para "saiu_entrega" (Em Separação / Delivery)
+              if (isWeblojaOrder) {
+                console.log(`[WEBHOOK - WEBLOJA ORDER] 🛒 Pedido da loja online detectado na conversa ${conversation.id}. Emitindo evento de movimentação para "saiu_entrega" (Em Separação / Delivery) e desativando IA.`);
+                realtimeHub.broadcastToStore(storeId, "conversation_stage_changed", {
+                  conversationId: conversation.id,
+                  stage: "saiu_entrega",
+                  kanban_stage: "saiu_entrega",
+                  status: "em_separacao",
+                  is_bot_active: false,
+                  is_human_controlled: true,
+                  assigned_user_id: conversation.assigned_user_id,
+                  bot_handoff_reason: "WEBLOJA_ORDER_RECEIVED",
+                  updated_at: conversation.updated_at || new Date().toISOString()
+                });
+
+                realtimeHub.broadcastToStore(storeId, "conversation_bot_toggled", {
+                  conversationId: conversation.id,
+                  is_bot_active: false,
+                  is_human_controlled: true,
+                  status: "em_separacao",
+                  kanban_stage: "saiu_entrega"
+                });
+
+                realtimeHub.broadcastToStore(storeId, "conversation_status_changed", {
+                  conversationId: conversation.id,
+                  status: "em_separacao",
+                  is_bot_active: false,
+                  is_human_controlled: true,
+                  kanban_stage: "saiu_entrega",
+                  bot_handoff_reason: "WEBLOJA_ORDER_RECEIVED"
+                });
+              } else if (wasReopened) {
+                // Se a conversa foi reaberta de um estágio finalizado, notifica a mudança de estágio para o Kanban atualizar em tempo real
                 realtimeHub.broadcastToStore(storeId, "conversation_stage_changed", {
                   conversationId: conversation.id,
                   stage: conversation.kanban_stage || "novos_triagem",
@@ -7246,7 +7284,7 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
 
             if (!fromMe) {
               // Log de Diagnóstico solicitado
-              console.log(`[Webhook Message] Recebida msg de ${remoteJid}. is_bot_active: ${conversation.is_bot_active}, is_human_controlled: ${conversation.is_human_controlled}`);
+              console.log(`[Webhook Message] Recebida msg de ${remoteJid}. is_bot_active: ${conversation.is_bot_active}, is_human_controlled: ${conversation.is_human_controlled}, is_webloja_order: ${isWeblojaOrder}`);
 
               // 3. Processamento CSAT isolado
               try {
@@ -7258,15 +7296,17 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                 console.warn("[WEBHOOK] Aviso ao processar CSAT:", csatErr.message);
               }
 
-              // 4. Disparo da Mensagem Automática de Boas-Vindas da Primeira Mensagem do Dia em bloco isolado
-              try {
-                await handleDailyWelcomeMessage(storeId, conversation, instanceName, text);
-              } catch (welcomeErr: any) {
-                console.error('[WEBHOOK] Exceção ao processar boas-vindas diárias:', welcomeErr.message);
+              // 4. Disparo da Mensagem Automática de Boas-Vindas da Primeira Mensagem do Dia em bloco isolado (apenas se não for pedido da webloja)
+              if (!isWeblojaOrder) {
+                try {
+                  await handleDailyWelcomeMessage(storeId, conversation, instanceName, text);
+                } catch (welcomeErr: any) {
+                  console.error('[WEBHOOK] Exceção ao processar boas-vindas diárias:', welcomeErr.message);
+                }
               }
 
               // 5. Se is_bot_active === true (ou estágio 'ia_atendendo') e is_human_controlled === false, force o dispatch imediato para o AiAgentService
-              const shouldDispatchToAi = (conversation.is_bot_active === true || conversation.kanban_stage === "ia_atendendo") && conversation.is_human_controlled !== true && !conversation.assigned_user_id;
+              const shouldDispatchToAi = !isWeblojaOrder && (conversation.is_bot_active === true || conversation.kanban_stage === "ia_atendendo") && conversation.is_human_controlled !== true && !conversation.assigned_user_id;
               if (shouldDispatchToAi) {
                 try {
                   const phone = conversation.contact?.phone_number || msg.key?.remoteJid?.replace(/@.*$/, '');

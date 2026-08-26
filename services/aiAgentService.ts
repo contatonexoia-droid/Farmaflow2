@@ -2,7 +2,7 @@ import { GoogleGenAI } from "@google/genai";
 import { createClient } from "@supabase/supabase-js";
 import { AiAgentConfig, PharmacyConfig } from "../types.js";
 import { chatStore, sanitizeChatConversationPayload } from "./chatStore.js";
-import { botHandoffManager, detectHumanHandoffIntent } from "./botHandoffManager.js";
+import { botHandoffManager, detectHumanHandoffIntent, isWeblojaOrderMessage } from "./botHandoffManager.js";
 import { realtimeHub } from "./realtimeHub.js";
 import { evolutionApiService } from "./evolutionApiService.js";
 
@@ -825,6 +825,13 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       if (dbConfig.active === false || dbConfig.enabled === false) {
         console.log(`[AiAgentService] IA desativada nas configurações da drogaria "${tenant.name}"`);
         return { handled: false, transferredToHuman: false, reason: "AGENT_PAUSED" };
+      }
+
+      // 1.1. Se a mensagem for um resumo de pedido da Webloja, não responder via IA e transferir para separação operacional
+      const orderCheck = isWeblojaOrderMessage(incomingMessage);
+      if (orderCheck.isOrder) {
+        console.log(`[AiAgentService] 🛒 Mensagem é um resumo de pedido da Loja Online (Pedido: ${orderCheck.orderId || 'N/A'}). Bloqueando IA e transferindo para separação operacional.`);
+        return { handled: true, transferredToHuman: true, reason: "WEBLOJA_ORDER_RECEIVED" };
       }
 
       // 2. Obter conversa atual para inspecionar estado do bot
