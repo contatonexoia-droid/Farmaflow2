@@ -9,7 +9,7 @@ import { fileURLToPath } from "url";
 import crypto from "crypto";
 import { webhookQueue } from "./queue.js";
 import { setupSwagger } from "./swagger.js";
-import { getDepartmentForCategory } from "./lib/departments.js";
+import { getDepartmentForCategory, classifyProductTaxonomy, OFFICIAL_DEPARTMENTS, OFFICIAL_TAXONOMY } from "./lib/departments.js";
 import multer from "multer";
 import * as XLSX from "xlsx";
 
@@ -5485,6 +5485,26 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
        ]);
        const name = rawName !== undefined && rawName !== null ? String(rawName).trim() : `Produto ${ean}`;
 
+       const rawCategory = getValFromProduct(p, [
+         'category', 'categoria', 'secao', 'grupo', 'departamento', 'classe', 'subcategoria', 'familia', 'depto'
+       ]);
+       const rawActivePrinciple = getValFromProduct(p, [
+         'active_principle', 'activePrinciple', 'principio_ativo', 'substancia', 'formula'
+       ]);
+       const rawDescription = getValFromProduct(p, ['description', 'descricao_longa', 'detalhes']);
+       const rawDrugType = getValFromProduct(p, ['drug_type', 'drugType', 'tipo', 'tipo_produto', 'classe_terapeutica']);
+       const rawManufacturer = getValFromProduct(p, ['manufacturer', 'fabricante', 'laboratorio']);
+       const rawPresentation = getValFromProduct(p, ['presentation', 'apresentacao', 'embalagem']);
+
+       const classified = classifyProductTaxonomy({
+         name: name,
+         activePrinciple: rawActivePrinciple,
+         description: rawDescription,
+         rawCategory: rawCategory,
+         drugType: rawDrugType,
+         manufacturer: rawManufacturer
+       });
+
        uniquePayloadMap.set(ean, {
           tenant_id: tenantId,
           barcode: ean,
@@ -5492,7 +5512,13 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
           stock,
           price,
           original_price: originalPrice,
-          name: name
+          name: name,
+          category: classified.subcategory,
+          department: classified.department,
+          active_principle: rawActivePrinciple || null,
+          manufacturer: rawManufacturer || null,
+          presentation: rawPresentation || null,
+          drug_type: rawDrugType || (classified.department === "Medicamentos" ? "Outros" : "Cosmético")
        });
      }
 
@@ -5546,9 +5572,18 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
                finalOriginalPrice = existing.original_price;
             }
             
+            // Se a categoria existente for vazia ou genérica ('OUTROS', 'DIVERSOS', 'Geral', etc.), atualiza para a classificação oficial
+            const isGenericCategory = !existing.category || 
+              ['outros', 'diversos', 'geral', 'sem categoria', 'nao cadastrado', 'não cadastrado', 'padrao', 'padrão'].includes(String(existing.category).trim().toLowerCase());
+            
+            const finalCategory = isGenericCategory ? item.category : existing.category;
+            const finalDepartment = (!existing.department || isGenericCategory) ? item.department : existing.department;
+
             // Regra de Ouro: atualizações de produtos existentes alteram apenas campos específicos, mas completamos a linha com os dados já existentes para evitar que o upsert do PostgREST limpe as colunas não informadas (sobrescrevendo com NULL)
             existingProductsPayload.push({
                ...existing, // Mantém todos os campos existentes (nome, categoria, imagem, princípio ativo, etc.)
+               category: finalCategory,
+               department: finalDepartment,
                internal_code: item.internal_code || existing.internal_code,
                stock: item.stock,
                price: finalPrice,

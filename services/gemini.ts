@@ -1,5 +1,6 @@
 
 import { GoogleGenAI, Type, GenerateContentResponse } from "@google/genai";
+import { OFFICIAL_DEPARTMENTS, OFFICIAL_TAXONOMY, classifyProductTaxonomy } from "../lib/departments.js";
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -60,16 +61,30 @@ export const fetchProductDetailsBatch = async (productsToEnrich: { name: string,
     
     const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
       model: "gemini-3-flash-preview",
-      contents: `Analise os seguintes produtos farmacêuticos e retorne APENAS os campos solicitados em 'missingFields' para cada um: ${JSON.stringify(productsToEnrich)}. 
+      contents: `Analise os seguintes produtos farmacêuticos/varejo e retorne APENAS os campos solicitados em 'missingFields' para cada um: ${JSON.stringify(productsToEnrich)}. 
       Para cada produto, retorne um objeto com os campos solicitados.
-      Possíveis campos:
-      1. description: Descrição comercial vendedora (máx 150 chars).
-      2. activePrinciple: Princípio Ativo.
-      3. drugType: TIPO legal do medicamento (EXATAMENTE um destes valores: 'Genérico', 'Referência', 'Similar', 'Fitoterápico', 'Cosmético', 'Outros').
-      4. category: CLASSE Terapêutica (Ex: 'Antibiótico', 'Analgésico', 'Vitamina', etc. NÃO coloque 'Genérico' aqui).
-      5. manufacturer: Fabricante/Laboratório.
-      6. presentation: Apresentação (ex: 'Caixa com 30 comprimidos').
-      7. indications: Indicações principais.
+      
+      DIRETRIZES ESTRITAS DE DEPARTAMENTO E CATEGORIA:
+      1. department: DEVE ser EXATAMENTE um dos 7 Departamentos Oficiais:
+         ['Medicamentos', 'Saúde e Bem-Estar', 'Dermocosméticos e Beleza', 'Higiene e Cuidados Pessoais', 'Mamãe e Bebê', 'Saúde, Ortopedia e Primeiros Socorros', 'Conveniência']
+      2. category: DEVE ser EXATAMENTE uma das Subcategorias Oficiais correspondentes ao departamento:
+         - Medicamentos: ['Dor e Febre', 'Gripe e Resfriado', 'Alergias', 'Saúde Digestiva', 'Saúde Respiratória', 'Diabetes', 'Pressão e Coração', 'Saúde da Mulher', 'Saúde do Homem', 'Outros Medicamentos']
+         - Saúde e Bem-Estar: ['Vitaminas e Minerais', 'Suplementos', 'Imunidade', 'Saúde Digestiva', 'Energia e Disposição', 'Sono e Relaxamento', 'Controle de Peso', 'Esporte e Performance', 'Saúde da Mulher', 'Saúde do Homem']
+         - Dermocosméticos e Beleza: ['Cuidados com o Rosto', 'Cuidados com o Corpo', 'Proteção Solar', 'Cabelos', 'Maquiagem', 'Perfumes', 'Cuidados com as Unhas', 'Beleza Masculina']
+         - Higiene e Cuidados Pessoais: ['Higiene Bucal', 'Banho e Corpo', 'Desodorantes', 'Higiene Íntima', 'Cuidados Masculinos', 'Absorventes e Cuidados Femininos', 'Lenços e Algodão']
+         - Mamãe e Bebê: ['Fraldas', 'Higiene do Bebê', 'Alimentação Infantil', 'Amamentação', 'Cuidados com a Mamãe']
+         - Saúde, Ortopedia e Primeiros Socorros: ['Primeiros Socorros', 'Aparelhos de Saúde', 'Ortopédicos', 'Cuidados para Idosos', 'Outros Acessórios de Saúde']
+         - Conveniência: ['Alimentos e Bebidas', 'Snacks', 'Produtos para o Dia a Dia', 'Acessórios', 'Utilidades']
+      3. NÃO crie subcategorias avulsas. NÃO use termos genéricos como "Outros" solto ou "Geral".
+      4. NÃO transforme atributos secundários (ex: miligramas '500mg', sabores, tamanhos de fraldas 'G' ou embalagens) em subcategorias.
+      5. Se o produto for pet/veterinário, classifique como Conveniência (ex: 'Produtos para o Dia a Dia' ou 'Utilidades') ou Medicamentos ('Outros Medicamentos' se for remédio/tratamento veterinário).
+      6. description: Descrição comercial vendedora (máx 150 chars).
+      7. activePrinciple: Princípio Ativo (se aplicável).
+      8. drugType: EXATAMENTE um destes valores: ['Genérico', 'Referência', 'Similar', 'Fitoterápico', 'Cosmético', 'Outros'].
+      9. manufacturer: Fabricante/Laboratório.
+      10. presentation: Apresentação (ex: 'Caixa com 30 comprimidos').
+      11. indications: Indicações principais.
+      
       Retorne um array de JSON em PT-BR, na mesma ordem dos produtos enviados.`,
       config: {
         maxOutputTokens: 8192,
@@ -82,6 +97,7 @@ export const fetchProductDetailsBatch = async (productsToEnrich: { name: string,
               description: { type: Type.STRING },
               activePrinciple: { type: Type.STRING },
               drugType: { type: Type.STRING, enum: ['Genérico', 'Referência', 'Similar', 'Fitoterápico', 'Cosmético', 'Outros'] },
+              department: { type: Type.STRING, enum: [...OFFICIAL_DEPARTMENTS] },
               category: { type: Type.STRING },
               manufacturer: { type: Type.STRING },
               presentation: { type: Type.STRING },
@@ -95,8 +111,9 @@ export const fetchProductDetailsBatch = async (productsToEnrich: { name: string,
     if (!response.text) throw new Error("A IA retornou uma resposta vazia.");
     let jsonStr = cleanJsonResponse(response.text);
     
+    let parsed: any[] = [];
     try {
-        return JSON.parse(jsonStr);
+        parsed = JSON.parse(jsonStr);
     } catch (parseError: any) {
         // Attempt to repair truncated JSON
         const fixes = ['"]}', ']}', ']', '"}', '}', '"}', '"]', '"} ]', '"}]'];
@@ -105,29 +122,47 @@ export const fetchProductDetailsBatch = async (productsToEnrich: { name: string,
                 const repaired = JSON.parse(jsonStr + fix);
                 if (Array.isArray(repaired)) {
                     console.warn("JSON truncado foi reparado com sucesso.");
-                    return repaired;
+                    parsed = repaired;
+                    break;
                 }
             } catch (e) {
                 // Continue trying fixes
             }
         }
         
-        // If it still fails, try removing the last incomplete item
-        try {
-            const lastBraceIndex = jsonStr.lastIndexOf('}');
-            if (lastBraceIndex > 0) {
-                const repaired = JSON.parse(jsonStr.substring(0, lastBraceIndex + 1) + ']');
-                if (Array.isArray(repaired)) {
-                    console.warn("JSON truncado foi parcialmente recuperado.");
-                    return repaired;
+        if (!parsed || parsed.length === 0) {
+            try {
+                const lastBraceIndex = jsonStr.lastIndexOf('}');
+                if (lastBraceIndex > 0) {
+                    const repaired = JSON.parse(jsonStr.substring(0, lastBraceIndex + 1) + ']');
+                    if (Array.isArray(repaired)) {
+                        parsed = repaired;
+                    }
                 }
-            }
-        } catch (e) {
-            // Ignore
+            } catch (e) {}
         }
-        
-        throw parseError; // Throw original error if repair fails
+        if (!parsed || parsed.length === 0) throw parseError;
     }
+
+    // Normaliza estritamente os resultados com o classificador taxonômico oficial
+    return parsed.map((item, idx) => {
+      const origProd = productsToEnrich[idx];
+      const classified = classifyProductTaxonomy({
+        name: origProd?.name || "",
+        activePrinciple: item.activePrinciple,
+        description: item.description,
+        rawCategory: item.category,
+        drugType: item.drugType,
+        indications: item.indications
+      });
+
+      return {
+        ...item,
+        department: classified.department,
+        category: classified.subcategory
+      };
+    });
+
   } catch (e: any) {
     console.error("Erro Gemini Batch Details:", e);
     if (e.message === "LIMITE_IA_ATINGIDO" || e.message?.includes("429") || e.message?.includes("RESOURCE_EXHAUSTED")) {
@@ -143,13 +178,23 @@ export const fetchProductDetails = async (productName: string) => {
     
     const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
       model: "gemini-3-flash-preview",
-      contents: `Analise o produto farmacêutico: "${productName}". 
+      contents: `Analise o produto farmacêutico/varejo: "${productName}". 
       1. Crie uma descrição comercial vendedora (máx 150 chars).
       2. Sugira um código interno curto (suggestedCode).
       3. Identifique o Princípio Ativo (activePrinciple).
       4. Identifique o TIPO legal do medicamento (drugType). Use EXATAMENTE um destes valores: 'Genérico', 'Referência', 'Similar', 'Fitoterápico', 'Cosmético', 'Outros'.
-      5. Identifique a CLASSE Terapêutica (category). Ex: 'Antibiótico', 'Analgésico', 'Anti-hipertensivo', 'Vitamina', etc. NÃO coloque 'Genérico' aqui.
-      6. Preencha dados técnicos (indicações, uso, etc).
+      5. Enquadre obrigatoriamente o produto em um dos 7 Departamentos Oficiais (department):
+         ['Medicamentos', 'Saúde e Bem-Estar', 'Dermocosméticos e Beleza', 'Higiene e Cuidados Pessoais', 'Mamãe e Bebê', 'Saúde, Ortopedia e Primeiros Socorros', 'Conveniência']
+      6. Enquadre obrigatoriamente em apenas 1 Subcategoria Oficial correspondente (category):
+         - Medicamentos: ['Dor e Febre', 'Gripe e Resfriado', 'Alergias', 'Saúde Digestiva', 'Saúde Respiratória', 'Diabetes', 'Pressão e Coração', 'Saúde da Mulher', 'Saúde do Homem', 'Outros Medicamentos']
+         - Saúde e Bem-Estar: ['Vitaminas e Minerais', 'Suplementos', 'Imunidade', 'Saúde Digestiva', 'Energia e Disposição', 'Sono e Relaxamento', 'Controle de Peso', 'Esporte e Performance', 'Saúde da Mulher', 'Saúde do Homem']
+         - Dermocosméticos e Beleza: ['Cuidados com o Rosto', 'Cuidados com o Corpo', 'Proteção Solar', 'Cabelos', 'Maquiagem', 'Perfumes', 'Cuidados com as Unhas', 'Beleza Masculina']
+         - Higiene e Cuidados Pessoais: ['Higiene Bucal', 'Banho e Corpo', 'Desodorantes', 'Higiene Íntima', 'Cuidados Masculinos', 'Absorventes e Cuidados Femininos', 'Lenços e Algodão']
+         - Mamãe e Bebê: ['Fraldas', 'Higiene do Bebê', 'Alimentação Infantil', 'Amamentação', 'Cuidados com a Mamãe']
+         - Saúde, Ortopedia e Primeiros Socorros: ['Primeiros Socorros', 'Aparelhos de Saúde', 'Ortopédicos', 'Cuidados para Idosos', 'Outros Acessórios de Saúde']
+         - Conveniência: ['Alimentos e Bebidas', 'Snacks', 'Produtos para o Dia a Dia', 'Acessórios', 'Utilidades']
+      7. Se o produto for de uso veterinário/pet, enquadre em Conveniência ('Produtos para o Dia a Dia'/'Utilidades') ou Medicamentos ('Outros Medicamentos').
+      8. Preencha dados técnicos (indicações, uso, fabricante, etc).
       Retorne JSON em PT-BR.`,
       config: {
         maxOutputTokens: 8192,
@@ -161,6 +206,7 @@ export const fetchProductDetails = async (productName: string) => {
             suggestedCode: { type: Type.STRING },
             activePrinciple: { type: Type.STRING },
             drugType: { type: Type.STRING, enum: ['Genérico', 'Referência', 'Similar', 'Fitoterápico', 'Cosmético', 'Outros'] },
+            department: { type: Type.STRING, enum: [...OFFICIAL_DEPARTMENTS] },
             category: { type: Type.STRING },
             manufacturer: { type: Type.STRING },
             presentation: { type: Type.STRING },
@@ -169,7 +215,7 @@ export const fetchProductDetails = async (productName: string) => {
             sideEffects: { type: Type.STRING },
             contraindications: { type: Type.STRING }
           },
-          required: ["description", "category", "drugType", "suggestedCode", "activePrinciple", "indications"]
+          required: ["description", "department", "category", "drugType", "suggestedCode", "activePrinciple", "indications"]
         }
       }
     }));
@@ -177,17 +223,34 @@ export const fetchProductDetails = async (productName: string) => {
     if (!response.text) throw new Error("A IA retornou uma resposta vazia.");
     const jsonStr = cleanJsonResponse(response.text);
     
+    let parsed: any;
     try {
-        return JSON.parse(jsonStr);
+        parsed = JSON.parse(jsonStr);
     } catch (parseError: any) {
         const fixes = ['"}', '}', '"]}', ']}'];
         for (const fix of fixes) {
             try {
-                return JSON.parse(jsonStr + fix);
+                parsed = JSON.parse(jsonStr + fix);
+                break;
             } catch (e) {}
         }
-        throw parseError;
+        if (!parsed) throw parseError;
     }
+
+    const classified = classifyProductTaxonomy({
+      name: productName,
+      activePrinciple: parsed.activePrinciple,
+      description: parsed.description,
+      rawCategory: parsed.category,
+      drugType: parsed.drugType,
+      indications: parsed.indications
+    });
+
+    return {
+      ...parsed,
+      department: classified.department,
+      category: classified.subcategory
+    };
   } catch (e: any) {
     console.error("Erro Gemini Details:", e);
     const msg = e.message || "";

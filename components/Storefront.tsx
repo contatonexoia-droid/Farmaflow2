@@ -380,16 +380,20 @@ const getDepartmentIcon = (deptName: string) => {
   switch (deptName) {
     case "Medicamentos":
       return <Pill size={28} />;
+    case "Saúde e Bem-Estar":
+    case "Bem-estar e Vitaminas":
+      return <Heart size={28} />;
+    case "Dermocosméticos e Beleza":
+    case "Beleza e Dermo":
+      return <Sparkles size={28} />;
+    case "Higiene e Cuidados Pessoais":
     case "Higiene e Banho":
       return <Droplets size={28} />;
-    case "Beleza e Dermo":
-      return <SprayCan size={28} />;
     case "Mamãe e Bebê":
       return <Baby size={28} />;
-    case "Bem-estar e Vitaminas":
-      return <Sun size={28} />;
+    case "Saúde, Ortopedia e Primeiros Socorros":
     case "Cuidados com a Saúde":
-      return <Heart size={28} />;
+      return <BriefcaseMedical size={28} />;
     case "Conveniência":
       return <ShoppingBasket size={28} />;
     default:

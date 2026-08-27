@@ -16,7 +16,7 @@ import Select from 'react-select';
 import Fuse from 'fuse.js';
 import ProductScanner from './ProductScanner';
 import { SmartNumberInput } from './SmartNumberInput';
-import { getDepartmentForCategory, DEPARTMENT_MAPPING } from '../lib/departments';
+import { getDepartmentForCategory, DEPARTMENT_MAPPING, OFFICIAL_DEPARTMENTS, OFFICIAL_TAXONOMY, classifyProductTaxonomy } from '../lib/departments';
 import { getStoreUrl } from '../lib/store';
 import { AdminDepartmentManager } from './AdminDepartmentManager';
 import { DynamicFlyerGenerator } from './DynamicFlyerGenerator';
@@ -638,23 +638,24 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
   const defaultDrugTypes = ['Livre', 'Outros', 'Referência', 'Genérico', 'Similar', 'Fitoterápico', 'Cosmético', 'Suplemento', 'Homeopático', 'Biológico', 'Manipulado', 'Alimento'];
 
   const categoryOptions = useMemo(() => {
-      const opts = new Set(defaultCategories);
+      const allOfficialSubcats = Object.values(OFFICIAL_TAXONOMY).flat();
+      const opts = new Set(allOfficialSubcats);
       products.forEach(p => { if (p.category) opts.add(p.category); });
       if (editingProduct?.category) opts.add(editingProduct.category);
       return Array.from(opts).sort();
   }, [products, editingProduct?.category]);
 
   const departmentOptions = useMemo(() => {
-      if (tenant.departments && tenant.departments.length > 0) {
-          return tenant.departments.map(d => d.name).sort();
-      }
-      return Object.keys(DEPARTMENT_MAPPING).sort();
-  }, [tenant.departments]);
+      return [...OFFICIAL_DEPARTMENTS];
+  }, []);
 
   const filteredCategoryOptions = useMemo(() => {
       if (filterDepartment === 'Todos') return categoryOptions;
       if (filterDepartment === 'Sem Departamento') {
-          return categoryOptions.filter(c => getDepartmentForCategory(c, tenant.departments) === 'Outros');
+          return [];
+      }
+      if (OFFICIAL_TAXONOMY[filterDepartment]) {
+          return OFFICIAL_TAXONOMY[filterDepartment];
       }
       return categoryOptions.filter(c => getDepartmentForCategory(c, tenant.departments) === filterDepartment);
   }, [filterDepartment, categoryOptions, tenant.departments]);
@@ -749,11 +750,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
       let matchesDepartment = true;
       if (filterDepartment !== 'Todos') {
           const prodDept = getDepartmentForCategory(p.category, tenant.departments);
-          if (filterDepartment === 'Sem Departamento') {
-              matchesDepartment = prodDept === 'Outros';
-          } else {
-              matchesDepartment = prodDept === filterDepartment;
-          }
+          matchesDepartment = prodDept === filterDepartment;
       }
       
       const matchesCategory = filterCategory === 'Todos' || p.category === filterCategory;
@@ -977,7 +974,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
           if (currentDeptName !== selectedDeptForEdit) {
               const depts = [...(tenant.departments || [])];
               
-              if (currentDeptName && currentDeptName !== 'Outros') {
+              if (currentDeptName) {
                   const oldDeptIdx = depts.findIndex(d => d.name === currentDeptName);
                   if (oldDeptIdx !== -1) {
                       depts[oldDeptIdx] = {
@@ -987,7 +984,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                   }
               }
 
-              if (selectedDeptForEdit !== 'Outros') {
+              if (selectedDeptForEdit) {
                   const newDeptIdx = depts.findIndex(d => d.name === selectedDeptForEdit);
                   if (newDeptIdx !== -1) {
                       if (!depts[newDeptIdx].categories.includes(productToSave.category)) {
@@ -1017,6 +1014,9 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
     setIsGeneratingInfo(true);
     try {
         const details = await fetchProductDetails(editingProduct.name);
+        if (details.department) {
+            setSelectedDeptForEdit(details.department);
+        }
         setEditingProduct(prev => ({ ...prev, ...details, isAiEnriched: true }));
     } catch (e: any) { alert(e.message); } finally { setIsGeneratingInfo(false); }
   };
@@ -2913,34 +2913,11 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                         <Select
                             options={[
                                 { value: 'Todos', label: 'Todos os Departamentos' },
-                                { value: 'Sem Departamento', label: 'Sem Departamento' },
-                                { value: 'NEW_DEPT', label: '➕ Criar Novo...' },
-                                ...departmentOptions.filter(d => d !== 'Outros').map(d => ({ value: d, label: d }))
+                                ...departmentOptions.map(d => ({ value: d, label: d }))
                             ]}
-                            value={{ value: filterDepartment, label: filterDepartment === 'Todos' ? 'Todos os Departamentos' : filterDepartment === 'NEW_DEPT' ? '➕ Criar Novo...' : filterDepartment }}
+                            value={{ value: filterDepartment, label: filterDepartment === 'Todos' ? 'Todos os Departamentos' : filterDepartment }}
                             onChange={(selected: any) => {
-                                if (selected.value === 'NEW_DEPT') {
-                                    const newName = prompt('Nome do novo departamento:');
-                                    if (newName && newName.trim()) {
-                                        const parsedName = newName.trim();
-                                        const currentDepts = tenant.departments || [];
-                                        if (!currentDepts.find(d => d.name.toLowerCase() === parsedName.toLowerCase())) {
-                                            const newDepts = [...currentDepts, {
-                                                id: Math.random().toString(36).substr(2, 9),
-                                                name: parsedName,
-                                                iconName: 'Package',
-                                                priority: currentDepts.length,
-                                                categories: []
-                                            }];
-                                            onTenantUpdate({ ...tenant, departments: newDepts });
-                                            setFilterDepartment(parsedName);
-                                        } else {
-                                            alert('Departamento já existe!');
-                                        }
-                                    }
-                                } else {
-                                    setFilterDepartment(selected.value);
-                                }
+                                setFilterDepartment(selected.value);
                             }}
                             styles={customSelectStyles}
                             isSearchable
@@ -3294,23 +3271,45 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                             <div className="space-y-1"><InputLabel label="Apresentação" /><input type="text" className="w-full bg-gray-50 p-4 rounded-2xl font-bold border text-gray-900" value={editingProduct.presentation || ''} onChange={e => setEditingProduct({...editingProduct, presentation: e.target.value})} placeholder="30 cápsulas, 500mg, etc." /></div>
                             <div className="grid grid-cols-2 gap-4">
                                 <div className="space-y-1 relative">
-                                    <InputLabel label="Departamento" />
+                                    <InputLabel label="Departamento Oficial" />
                                     <div className="relative">
                                         <select 
                                            className="w-full bg-gray-50 p-4 rounded-2xl font-bold border-2 border-transparent focus:bg-white focus:border-brand outline-none text-gray-900 appearance-none transition-all cursor-pointer"
                                            value={selectedDeptForEdit} 
-                                           onChange={(e) => setSelectedDeptForEdit(e.target.value)}
+                                           onChange={(e) => {
+                                               const nextDept = e.target.value;
+                                               setSelectedDeptForEdit(nextDept);
+                                               const availableSubs = OFFICIAL_TAXONOMY[nextDept] || [];
+                                               if (availableSubs.length > 0 && !availableSubs.includes(editingProduct.category || '')) {
+                                                   setEditingProduct({...editingProduct, category: availableSubs[0]});
+                                               }
+                                           }}
                                         >
-                                            {(tenant.departments && tenant.departments.length > 0) ? (
-                                                tenant.departments.map(d => <option key={d.id} value={d.name}>{d.name}</option>)
-                                            ) : (
-                                                <option value="Outros">Outros</option>
-                                            )}
+                                            {OFFICIAL_DEPARTMENTS.map(d => (
+                                                <option key={d} value={d}>{d}</option>
+                                            ))}
                                         </select>
                                         <ChevronDown size={20} className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none"/>
                                     </div>
                                 </div>
-                                <div className="space-y-1 relative"><InputLabel label="Categoria (Subcategoria)" />{customCategoryMode ? ( <div className="flex gap-2"><input autoFocus className="flex-1 bg-white p-4 rounded-2xl font-bold border-2 border-brand outline-none text-gray-900 transition-all" value={editingProduct.category} onChange={e => setEditingProduct({...editingProduct, category: e.target.value})} placeholder="Digite a nova subcategoria..." /><button onClick={() => setCustomCategoryMode(false)} className="px-4 bg-gray-100 rounded-2xl text-gray-500 hover:bg-gray-200 font-bold"><X size={20}/></button></div> ) : ( <div className="relative"><select className="w-full bg-gray-50 p-4 rounded-2xl font-bold border-2 border-transparent focus:bg-white focus:border-brand outline-none text-gray-900 appearance-none transition-all cursor-pointer" value={editingProduct.category} onChange={(e) => { if (e.target.value === 'NEW_ENTRY') { setCustomCategoryMode(true); setEditingProduct({...editingProduct, category: ''}); } else { setEditingProduct({...editingProduct, category: e.target.value}); } }} ><option value="" disabled>Selecione...</option>{categoryOptions.filter(c => getDepartmentForCategory(c, tenant.departments) === selectedDeptForEdit).map(c => <option key={c} value={c}>{c}</option>)}<option value="NEW_ENTRY" className="font-black text-brand">➕ Cadastrar Nova...</option></select><ChevronDown size={20} className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none"/></div> )}</div>
+                                <div className="space-y-1 relative">
+                                    <InputLabel label="Subcategoria Oficial" />
+                                    <div className="relative">
+                                        <select 
+                                            className="w-full bg-gray-50 p-4 rounded-2xl font-bold border-2 border-transparent focus:bg-white focus:border-brand outline-none text-gray-900 appearance-none transition-all cursor-pointer" 
+                                            value={editingProduct.category || ''} 
+                                            onChange={(e) => { 
+                                                setEditingProduct({...editingProduct, category: e.target.value}); 
+                                            }} 
+                                        >
+                                            <option value="" disabled>Selecione a subcategoria...</option>
+                                            {(OFFICIAL_TAXONOMY[selectedDeptForEdit] || OFFICIAL_TAXONOMY['Medicamentos'] || []).map(c => (
+                                                <option key={c} value={c}>{c}</option>
+                                            ))}
+                                        </select>
+                                        <ChevronDown size={20} className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none"/>
+                                    </div>
+                                </div>
                             </div>
                             <div className="grid grid-cols-2 gap-4">
                                 <div className="space-y-1 relative"><InputLabel label="Fabricante" />{customManufacturerMode ? ( <div className="flex gap-2"><input autoFocus className="flex-1 bg-white p-4 rounded-2xl font-bold border-2 border-brand outline-none text-gray-900 transition-all" value={editingProduct.manufacturer} onChange={e => setEditingProduct({...editingProduct, manufacturer: e.target.value})} placeholder="Novo fabricante..." /><button onClick={() => setCustomManufacturerMode(false)} className="px-4 bg-gray-100 rounded-2xl text-gray-500 hover:bg-gray-200 font-bold"><X size={20}/></button></div> ) : ( <div className="relative"><select className="w-full bg-gray-50 p-4 rounded-2xl font-bold border-2 border-transparent focus:bg-white focus:border-brand outline-none text-gray-900 appearance-none transition-all cursor-pointer" value={editingProduct.manufacturer} onChange={(e) => { if (e.target.value === 'NEW_ENTRY') { setCustomManufacturerMode(true); setEditingProduct({...editingProduct, manufacturer: ''}); } else { setEditingProduct({...editingProduct, manufacturer: e.target.value}); } }} ><option value="" disabled>Selecione...</option><option value="Outros">Outros</option>{manufacturerOptions.filter(m => m !== 'Outros').map(m => <option key={m} value={m}>{m}</option>)}<option value="NEW_ENTRY" className="font-black text-brand">➕ Cadastrar Novo...</option></select><ChevronDown size={20} className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none"/></div> )}</div>
@@ -3879,36 +3878,12 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                             <label className="text-[10px] font-black uppercase text-gray-400 tracking-widest ml-1">Para o Departamento:</label>
                             <div className="relative">
                                 <Select
-                                    options={[
-                                        { value: 'NEW_DEPT', label: '➕ Criar Novo...' },
-                                        ...departmentOptions.map(d => ({ value: d, label: d }))
-                                    ]}
-                                    value={{ value: bulkSelectedDepartment, label: bulkSelectedDepartment === 'NEW_DEPT' ? '➕ Criar Novo...' : bulkSelectedDepartment }}
+                                    options={OFFICIAL_DEPARTMENTS.map(d => ({ value: d, label: d }))}
+                                    value={{ value: bulkSelectedDepartment, label: bulkSelectedDepartment }}
                                     onChange={(s: any) => {
-                                        if (s.value === 'NEW_DEPT') {
-                                            const newName = prompt('Nome do novo departamento:');
-                                            if (newName && newName.trim()) {
-                                                const parsedName = newName.trim();
-                                                const currentDepts = tenant.departments || [];
-                                                if (!currentDepts.find(d => d.name.toLowerCase() === parsedName.toLowerCase())) {
-                                                    const newDepts = [...currentDepts, {
-                                                        id: Math.random().toString(36).substr(2, 9),
-                                                        name: parsedName,
-                                                        iconName: 'Package',
-                                                        priority: currentDepts.length,
-                                                        categories: []
-                                                    }];
-                                                    onTenantUpdate({ ...tenant, departments: newDepts });
-                                                    setBulkSelectedDepartment(parsedName);
-                                                    setBulkSelectedCategory('');
-                                                } else {
-                                                    alert('Departamento já existe!');
-                                                }
-                                            }
-                                        } else {
-                                            setBulkSelectedDepartment(s.value);
-                                            setBulkSelectedCategory('');
-                                        }
+                                        setBulkSelectedDepartment(s.value);
+                                        const subs = OFFICIAL_TAXONOMY[s.value] || [];
+                                        setBulkSelectedCategory(subs.length > 0 ? subs[0] : '');
                                     }}
                                     styles={customSelectStyles}
                                     placeholder="Departamento"
@@ -3922,40 +3897,14 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                             <label className="text-[10px] font-black uppercase text-gray-400 tracking-widest ml-1">Nova Subcategoria:</label>
                             <div className="relative">
                                 <Select
-                                    options={[
-                                        { value: 'NEW_CAT', label: '➕ Criar Nova Subcategoria...' },
-                                        ...categoryOptions.filter(c => getDepartmentForCategory(c, tenant.departments) === bulkSelectedDepartment).map(c => ({ value: c, label: c }))
-                                    ]}
-                                    value={bulkSelectedCategory ? { value: bulkSelectedCategory, label: bulkSelectedCategory === 'NEW_CAT' ? '➕ Criar Nova Subcategoria...' : bulkSelectedCategory } : null}
+                                    options={(OFFICIAL_TAXONOMY[bulkSelectedDepartment] || []).map(c => ({ value: c, label: c }))}
+                                    value={bulkSelectedCategory ? { value: bulkSelectedCategory, label: bulkSelectedCategory } : null}
                                     onChange={(s: any) => {
-                                        if (s.value === 'NEW_CAT') {
-                                            const newSub = prompt('Nome da nova subcategoria:');
-                                            if (newSub && newSub.trim()) {
-                                                const parsedSub = newSub.trim();
-                                                // Link this category to selected department
-                                                const currentDepts = tenant.departments || [];
-                                                const deptToUpdate = currentDepts.find(d => d.name === bulkSelectedDepartment) || {
-                                                    id: Math.random().toString(36).substr(2, 9),
-                                                    name: bulkSelectedDepartment,
-                                                    iconName: 'Package',
-                                                    priority: currentDepts.length,
-                                                    categories: []
-                                                };
-                                                
-                                                if (!deptToUpdate.categories.includes(parsedSub)) {
-                                                    deptToUpdate.categories.push(parsedSub);
-                                                    const otherDepts = currentDepts.filter(d => d.name !== bulkSelectedDepartment);
-                                                    onTenantUpdate({ ...tenant, departments: [...otherDepts, deptToUpdate] });
-                                                }
-                                                setBulkSelectedCategory(parsedSub);
-                                            }
-                                        } else {
-                                            setBulkSelectedCategory(s.value);
-                                        }
+                                        setBulkSelectedCategory(s.value);
                                     }}
                                     styles={customSelectStyles}
                                     isSearchable
-                                    placeholder="Selecione a Subcategoria"
+                                    placeholder="Selecione a Subcategoria Oficial"
                                     className="w-full"
                                     menuPlacement="auto"
                                     menuPosition="fixed"
