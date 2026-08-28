@@ -896,23 +896,27 @@ export const saveProductsByTenant = async (
       };
     });
 
-    // Use the backend API to bypass RLS issues for product updates
-    await retryRequest(async () => {
-      const token = (await supabase.auth.getSession()).data.session?.access_token;
-      const res = await fetch(`/api/v1/tenants/${tenantId}/products/bulk`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ products: dbProducts }),
-      });
+    // Use the backend API to bypass RLS issues for product updates in safe chunks
+    const BATCH_SIZE = 250;
+    for (let i = 0; i < dbProducts.length; i += BATCH_SIZE) {
+      const batch = dbProducts.slice(i, i + BATCH_SIZE);
+      await retryRequest(async () => {
+        const token = (await supabase.auth.getSession()).data.session?.access_token;
+        const res = await fetch(`/api/v1/tenants/${tenantId}/products/bulk`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({ products: batch }),
+        });
 
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || "Falha ao salvar produtos no servidor.");
-      }
-    });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error || "Falha ao salvar produtos no servidor.");
+        }
+      });
+    }
 
     // Sincronização e Invalidação Imediata do Cache IndexedDB / Localforage
     try {

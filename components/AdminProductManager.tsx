@@ -2633,17 +2633,37 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                     return item;
                 });
 
-                const CHUNK_SIZE = 50;
-                for (let i = 0; i < updatePayload.length; i += CHUNK_SIZE) {
-                    const chunk = updatePayload.slice(i, i + CHUNK_SIZE);
-                    const { error } = await supabase
-                        .from('products')
-                        .upsert(chunk, { onConflict: 'id', ignoreDuplicates: false }); 
-
-                    if (error) {
-                        console.error("[FarmaFlow Debug] Erro no upsert de atualização:", error);
+                const persistProductChunk = async (items: any[]) => {
+                    if (!items || items.length === 0) return;
+                    const CHUNK_SIZE = 200;
+                    const token = (await supabase.auth.getSession()).data.session?.access_token;
+                    for (let i = 0; i < items.length; i += CHUNK_SIZE) {
+                        const chunk = items.slice(i, i + CHUNK_SIZE);
+                        try {
+                            const res = await fetch(`/api/v1/tenants/${tenant.id}/products/bulk`, {
+                                method: "PUT",
+                                headers: {
+                                    "Content-Type": "application/json",
+                                    ...(token ? { Authorization: `Bearer ${token}` } : {})
+                                },
+                                body: JSON.stringify({ products: chunk })
+                            });
+                            if (!res.ok) {
+                                const { error } = await supabase.from('products').upsert(chunk, { onConflict: 'id', ignoreDuplicates: false });
+                                if (error) console.error("[FarmaFlow Debug] Erro no fallback de upsert:", error);
+                            }
+                        } catch (err) {
+                            console.error("[FarmaFlow Debug] Erro de rede ao salvar lote de produtos:", err);
+                            try {
+                                await supabase.from('products').upsert(chunk, { onConflict: 'id', ignoreDuplicates: false });
+                            } catch (fallbackErr) {
+                                console.error("[FarmaFlow Debug] Fallback falhou:", fallbackErr);
+                            }
+                        }
                     }
-                }
+                };
+
+                await persistProductChunk(updatePayload);
             }
 
             // 2. Inserção de Novos Produtos (payload completo, salvaguardado contra sobreescrita se o barcode ou internal_code já existir no banco)
@@ -2769,19 +2789,39 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                     }
                 });
 
-                // Executar atualizações seletivas para os itens que já existiam no banco
-                if (actualUpdateFromNewProducts.length > 0) {
-                    const CHUNK_SIZE = 50;
-                    for (let i = 0; i < actualUpdateFromNewProducts.length; i += CHUNK_SIZE) {
-                        const chunk = actualUpdateFromNewProducts.slice(i, i + CHUNK_SIZE);
-                        const { error } = await supabase
-                            .from('products')
-                            .upsert(chunk, { onConflict: 'id', ignoreDuplicates: false }); 
-
-                        if (error) {
-                            console.error("[FarmaFlow Debug] Erro no upsert de atualização seletiva (novos reclassificados):", error);
+                const persistProductChunk = async (items: any[]) => {
+                    if (!items || items.length === 0) return;
+                    const CHUNK_SIZE = 200;
+                    const token = (await supabase.auth.getSession()).data.session?.access_token;
+                    for (let i = 0; i < items.length; i += CHUNK_SIZE) {
+                        const chunk = items.slice(i, i + CHUNK_SIZE);
+                        try {
+                            const res = await fetch(`/api/v1/tenants/${tenant.id}/products/bulk`, {
+                                method: "PUT",
+                                headers: {
+                                    "Content-Type": "application/json",
+                                    ...(token ? { Authorization: `Bearer ${token}` } : {})
+                                },
+                                body: JSON.stringify({ products: chunk })
+                            });
+                            if (!res.ok) {
+                                const { error } = await supabase.from('products').upsert(chunk, { onConflict: 'id', ignoreDuplicates: false });
+                                if (error) console.error("[FarmaFlow Debug] Erro no fallback de upsert:", error);
+                            }
+                        } catch (err) {
+                            console.error("[FarmaFlow Debug] Erro de rede ao salvar lote de produtos:", err);
+                            try {
+                                await supabase.from('products').upsert(chunk, { onConflict: 'id', ignoreDuplicates: false });
+                            } catch (fallbackErr) {
+                                console.error("[FarmaFlow Debug] Fallback falhou:", fallbackErr);
+                            }
                         }
                     }
+                };
+
+                // Executar atualizações seletivas para os itens que já existiam no banco
+                if (actualUpdateFromNewProducts.length > 0) {
+                    await persistProductChunk(actualUpdateFromNewProducts);
                 }
 
                 // Inserir de fato novos produtos
@@ -2809,17 +2849,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                         requires_prescription: p.requires_prescription
                     }));
 
-                    const CHUNK_SIZE = 50;
-                    for (let i = 0; i < insertPayload.length; i += CHUNK_SIZE) {
-                        const chunk = insertPayload.slice(i, i + CHUNK_SIZE);
-                        const { error } = await supabase
-                            .from('products')
-                            .upsert(chunk, { onConflict: 'id', ignoreDuplicates: false });
-                            
-                        if (error) {
-                            console.error("[FarmaFlow Debug] Erro no upsert de novos produtos:", error);
-                        }
-                    }
+                    await persistProductChunk(insertPayload);
                 }
             }
 
