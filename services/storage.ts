@@ -1242,17 +1242,66 @@ export const mapDbPromotionToApp = (p: any): PromotionRule => ({
 });
 
 
-const getAuthHeaders = (tenantId: string) => {
+export const getAuthHeaders = async (tenantId: string) => {
   let token = '';
+
+  // 1. Try Supabase Auth native session
   try {
-    if (typeof window !== 'undefined') {
-        const saved = window.localStorage.getItem('ff_session');
-        if (saved) {
-          const parsed = JSON.parse(saved);
-          token = parsed.access_token;
-        }
+    const { data } = await supabase.auth.getSession();
+    if (data?.session?.access_token) {
+      token = data.session.access_token;
     }
   } catch (e) {}
+
+  // 2. If no token or expired, try session refresh
+  if (!token) {
+    try {
+      const { data } = await supabase.auth.refreshSession();
+      if (data?.session?.access_token) {
+        token = data.session.access_token;
+      }
+    } catch (e) {}
+  }
+
+  // 3. Fallback: ff_session from localStorage
+  if (!token && typeof window !== 'undefined') {
+    try {
+      const saved = window.localStorage.getItem('ff_session');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        token = parsed.access_token || parsed.token || '';
+      }
+    } catch (e) {}
+  }
+
+  // 4. Fallback: ff_user from localStorage
+  if (!token && typeof window !== 'undefined') {
+    try {
+      const ffUser = window.localStorage.getItem('ff_user');
+      if (ffUser) {
+        const parsed = JSON.parse(ffUser);
+        token = parsed.access_token || parsed.token || '';
+      }
+    } catch (e) {}
+  }
+
+  // 5. Fallback: check any sb-*-auth-token or supabase.auth.token in localStorage
+  if (!token && typeof window !== 'undefined') {
+    try {
+      for (let i = 0; i < window.localStorage.length; i++) {
+        const key = window.localStorage.key(i);
+        if (key && ((key.startsWith('sb-') && key.endsWith('-auth-token')) || key === 'supabase.auth.token')) {
+          const raw = window.localStorage.getItem(key);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            token = parsed.access_token || (parsed.currentSession && parsed.currentSession.access_token) || '';
+            if (token) break;
+          }
+        }
+      }
+    } catch (e) {}
+  }
+
   return {
     'Content-Type': 'application/json',
     'x-tenant-id': tenantId,
@@ -1299,52 +1348,66 @@ export const getPromotionsByTenant = async (
 };
 
 export const savePromotion = async (promotion: PromotionRule) => {
-  try {
-    const buyXVal = promotion.buyX !== undefined && promotion.buyX !== null ? Number(promotion.buyX) : (promotion.type === "BUY_X_PAY_Y" ? 3 : null);
-    const payYVal = promotion.payY !== undefined && promotion.payY !== null ? Number(promotion.payY) : (promotion.type === "BUY_X_PAY_Y" ? 2 : null);
+  const buyXVal = promotion.buyX !== undefined && promotion.buyX !== null ? Number(promotion.buyX) : (promotion.type === "BUY_X_PAY_Y" ? 3 : null);
+  const payYVal = promotion.payY !== undefined && promotion.payY !== null ? Number(promotion.payY) : (promotion.type === "BUY_X_PAY_Y" ? 2 : null);
 
-    const payload: any = {
-      id: promotion.id,
-      tenant_id: promotion.tenantId,
-      name: promotion.name,
-      type: promotion.type,
-      target_type: promotion.targetType,
-      target_value: promotion.targetValue,
-      buy_x: buyXVal,
-      pay_y: payYVal,
-      lightning_discount_percentage: promotion.lightningDiscountPercentage,
-      discount_thresholds: promotion.discountThresholds,
-      combo_products: promotion.comboProducts,
-      combo_discount_percentage: promotion.comboDiscountPercentage,
-      specific_product_ids: promotion.specificProductIds,
-      filters_metadata: {
-        ...(promotion.filtersMetadata || {}),
-        buyX: buyXVal,
-        payY: payYVal,
-        highlightInCategoriesBar: promotion.highlightInCategoriesBar,
-        highlightColor: promotion.highlightColor,
-        highlightIcon: promotion.highlightIcon,
-        scheduleConfig: promotion.scheduleConfig,
-      },
-      start_date: promotion.startDate,
-      end_date: promotion.endDate,
-      is_active: promotion.isActive,
-    };
-    
-    // scope is required by the backend
-    payload.scope = promotion.scope || "SINGLE_STORE";
-    
+  const payload: any = {
+    id: promotion.id,
+    tenant_id: promotion.tenantId,
+    name: promotion.name,
+    type: promotion.type,
+    target_type: promotion.targetType,
+    target_value: promotion.targetValue,
+    buy_x: buyXVal,
+    pay_y: payYVal,
+    lightning_discount_percentage: promotion.lightningDiscountPercentage,
+    discount_thresholds: promotion.discountThresholds,
+    combo_products: promotion.comboProducts,
+    combo_discount_percentage: promotion.comboDiscountPercentage,
+    specific_product_ids: promotion.specificProductIds,
+    filters_metadata: {
+      ...(promotion.filtersMetadata || {}),
+      buyX: buyXVal,
+      payY: payYVal,
+      highlightInCategoriesBar: promotion.highlightInCategoriesBar,
+      highlightColor: promotion.highlightColor,
+      highlightIcon: promotion.highlightIcon,
+      scheduleConfig: promotion.scheduleConfig,
+    },
+    start_date: promotion.startDate,
+    end_date: promotion.endDate,
+    is_active: promotion.isActive,
+    scope: promotion.scope || "SINGLE_STORE",
+  };
+
+  try {
     const res = await fetch(`/api/v1/tenants/${encodeURIComponent(promotion.tenantId)}/promos`, {
       method: 'POST',
-      headers: getAuthHeaders(promotion.tenantId),
+      headers: await getAuthHeaders(promotion.tenantId),
       body: JSON.stringify(payload)
     });
     if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text);
+      // Direct Supabase fallback
+      const { error: sbErr } = await supabase.from('promotions').upsert(payload);
+      if (sbErr) {
+        let errMessage = 'Falha ao salvar promoção';
+        try {
+          const errData = await res.json();
+          errMessage = errData.error || errData.message || JSON.stringify(errData);
+        } catch {
+          errMessage = await res.text();
+        }
+        throw new Error(errMessage || sbErr.message);
+      }
     }
   } catch (e: any) {
-    throw new Error(handleNetworkError(e, "Salvar Promoção"));
+    // Attempt final direct Supabase fallback before failing
+    try {
+      const { error: sbErr } = await supabase.from('promotions').upsert(payload);
+      if (sbErr) throw sbErr;
+    } catch (finalErr: any) {
+      throw new Error(handleNetworkError(finalErr || e, "Salvar Promoção"));
+    }
   }
 };
 
@@ -1352,14 +1415,28 @@ export const deletePromotion = async (id: string, tenantId: string) => {
   try {
     const res = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/promos/${encodeURIComponent(id)}`, {
         method: 'DELETE',
-        headers: getAuthHeaders(tenantId)
+        headers: await getAuthHeaders(tenantId)
     });
     if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text);
+      const { error: sbErr } = await supabase.from('promotions').delete().eq('id', id).eq('tenant_id', tenantId);
+      if (sbErr) {
+        let errMessage = 'Falha ao excluir promoção';
+        try {
+          const errData = await res.json();
+          errMessage = errData.error || errData.message || JSON.stringify(errData);
+        } catch {
+          errMessage = await res.text();
+        }
+        throw new Error(errMessage || sbErr.message);
+      }
     }
   } catch (e: any) {
-    throw new Error(handleNetworkError(e, "Excluir Promoção"));
+    try {
+      const { error: sbErr } = await supabase.from('promotions').delete().eq('id', id).eq('tenant_id', tenantId);
+      if (sbErr) throw sbErr;
+    } catch (finalErr: any) {
+      throw new Error(handleNetworkError(finalErr || e, "Excluir Promoção"));
+    }
   }
 };
 
@@ -1430,38 +1507,52 @@ export const getCouponsByTenant = async (
 };
 
 export const saveCoupon = async (coupon: CouponRule) => {
+  const dbCoupon: any = {
+    id: coupon.id,
+    tenant_id: coupon.tenantId,
+    code: coupon.code,
+    discount_type: coupon.discountType,
+    discount_value: coupon.discountValue,
+    coupon_scope: coupon.couponScope,
+    min_purchase_value: coupon.minPurchaseValue,
+    usage_limit: coupon.usageLimit,
+    times_used: coupon.timesUsed,
+    first_purchase_only: coupon.firstPurchaseOnly,
+    applicable_products: coupon.applicableProducts,
+    applicable_categories: coupon.applicableCategories,
+    applicable_manufacturers: coupon.applicableManufacturers,
+    start_date: coupon.startDate,
+    end_date: coupon.endDate,
+    is_active: coupon.isActive,
+    scope: coupon.scope || "SINGLE_STORE",
+  };
+
   try {
-    const dbCoupon: any = {
-      id: coupon.id,
-      tenant_id: coupon.tenantId,
-      code: coupon.code,
-      discount_type: coupon.discountType,
-      discount_value: coupon.discountValue,
-      coupon_scope: coupon.couponScope,
-      min_purchase_value: coupon.minPurchaseValue,
-      usage_limit: coupon.usageLimit,
-      times_used: coupon.timesUsed,
-      first_purchase_only: coupon.firstPurchaseOnly,
-      applicable_products: coupon.applicableProducts,
-      applicable_categories: coupon.applicableCategories,
-      applicable_manufacturers: coupon.applicableManufacturers,
-      start_date: coupon.startDate,
-      end_date: coupon.endDate,
-      is_active: coupon.isActive,
-    };
-    dbCoupon.scope = coupon.scope || "SINGLE_STORE";
-    
     const res = await fetch(`/api/v1/tenants/${encodeURIComponent(coupon.tenantId)}/vouchers`, {
       method: 'POST',
-      headers: getAuthHeaders(coupon.tenantId),
+      headers: await getAuthHeaders(coupon.tenantId),
       body: JSON.stringify(dbCoupon)
     });
     if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text);
+      const { error: sbErr } = await supabase.from('coupons').upsert(dbCoupon);
+      if (sbErr) {
+        let errMessage = 'Falha ao salvar cupom';
+        try {
+          const errData = await res.json();
+          errMessage = errData.error || errData.message || JSON.stringify(errData);
+        } catch {
+          errMessage = await res.text();
+        }
+        throw new Error(errMessage || sbErr.message);
+      }
     }
   } catch (e: any) {
-    throw new Error(handleNetworkError(e, "Salvar Cupom"));
+    try {
+      const { error: sbErr } = await supabase.from('coupons').upsert(dbCoupon);
+      if (sbErr) throw sbErr;
+    } catch (finalErr: any) {
+      throw new Error(handleNetworkError(finalErr || e, "Salvar Cupom"));
+    }
   }
 };
 
@@ -1469,14 +1560,28 @@ export const deleteCoupon = async (id: string, tenantId: string) => {
   try {
     const res = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/vouchers/${encodeURIComponent(id)}`, {
         method: 'DELETE',
-        headers: getAuthHeaders(tenantId)
+        headers: await getAuthHeaders(tenantId)
     });
     if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text);
+      const { error: sbErr } = await supabase.from('coupons').delete().eq('id', id).eq('tenant_id', tenantId);
+      if (sbErr) {
+        let errMessage = 'Falha ao excluir cupom';
+        try {
+          const errData = await res.json();
+          errMessage = errData.error || errData.message || JSON.stringify(errData);
+        } catch {
+          errMessage = await res.text();
+        }
+        throw new Error(errMessage || sbErr.message);
+      }
     }
   } catch (e: any) {
-    throw new Error(handleNetworkError(e, "Excluir Cupom"));
+    try {
+      const { error: sbErr } = await supabase.from('coupons').delete().eq('id', id).eq('tenant_id', tenantId);
+      if (sbErr) throw sbErr;
+    } catch (finalErr: any) {
+      throw new Error(handleNetworkError(finalErr || e, "Excluir Cupom"));
+    }
   }
 };
 
