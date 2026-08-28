@@ -277,7 +277,7 @@ const readSpreadsheetToJSON = async (file: File): Promise<any[]> => {
       aoa = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
     }
 
-    const keywords = ['nome', 'produto', 'descricao', 'ean', 'codigo', 'barras', 'preco', 'valor', 'estoque', 'quantidade', 'ativo', 'unidade', 'un'];
+    const keywords = ['nome', 'produto', 'descricao', 'ean', 'codigo', 'barras', 'preco', 'valor', 'estoque', 'quantidade', 'ativo', 'unidade', 'un', 'fabricante', 'laboratorio', 'marca', 'fornecedor', 'empresa', 'logo', 'imagem'];
     const normalize = (str: any) => String(str).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
     let bestHeaderIdx = 0;
@@ -1496,37 +1496,152 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
       alert(`Mesclagem concluída! ${productsToUpdate.length} produtos atualizados.`);
   };
 
+  const extractManufacturerRow = (row: any): { name: string; logo?: string } | null => {
+      if (!row) return null;
+      
+      // Se a linha for uma string simples ou número (ex: lista colada de nomes)
+      if (typeof row === 'string' || typeof row === 'number') {
+          const clean = String(row).trim();
+          if (clean && clean.length > 1 && !clean.startsWith('http')) {
+              return { name: clean };
+          }
+          return null;
+      }
+
+      // Se for um array de colunas
+      if (Array.isArray(row)) {
+          const validCells = row.map(c => c !== null && c !== undefined ? String(c).trim() : '').filter(Boolean);
+          if (validCells.length === 0) return null;
+          
+          let foundLogo: string | undefined;
+          let foundName: string | undefined;
+          for (const cell of validCells) {
+              if (/^https?:\/\/|^data:image\//i.test(cell) || /\.(png|jpe?g|webp|svg|gif)$/i.test(cell)) {
+                  if (!foundLogo) foundLogo = cell;
+              } else if (!foundName && cell.length > 0) {
+                  foundName = cell;
+              }
+          }
+          if (foundName) return { name: foundName, logo: foundLogo };
+          return null;
+      }
+
+      if (typeof row !== 'object') return null;
+
+      const keys = Object.keys(row);
+      if (keys.length === 0) return null;
+
+      const normalizeKey = (k: string) => k.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
+      const nameKeysPriority = [
+          'fabricante', 'laboratorio', 'lab', 'marca', 'nome', 'name', 
+          'fornecedor', 'empresa', 'razaosocial', 'razao', 'descricao', 'desc', 
+          'nomedofabricante', 'nomedolaboratorio', 'nomelaboratorio', 'nomefabricante', 
+          'brand', 'producer', 'manufacturer', 'title', 'fabricantes', 'laboratorios', 'marcas'
+      ];
+
+      const logoKeysPriority = [
+          'logo', 'logotipo', 'imagem', 'image', 'img', 'foto', 'picture', 'url', 'urllogo', 'link', 'icone', 'icon', 'src', 'avatar'
+      ];
+
+      let rawName: any = undefined;
+      let rawLogo: any = undefined;
+
+      // 1. Procurar chaves prioritárias para o Nome
+      for (const pKey of nameKeysPriority) {
+          const matchedKey = keys.find(k => {
+              const norm = normalizeKey(k);
+              return norm === pKey || norm.startsWith(pKey) || norm.includes(pKey);
+          });
+          if (matchedKey && row[matchedKey] !== undefined && row[matchedKey] !== null && String(row[matchedKey]).trim() !== '') {
+              rawName = row[matchedKey];
+              break;
+          }
+      }
+
+      // 2. Procurar chaves prioritárias para a Logo / Imagem
+      for (const pKey of logoKeysPriority) {
+          const matchedKey = keys.find(k => {
+              const norm = normalizeKey(k);
+              return norm === pKey || norm.startsWith(pKey) || norm.includes(pKey);
+          });
+          if (matchedKey && row[matchedKey] !== undefined && row[matchedKey] !== null && String(row[matchedKey]).trim() !== '') {
+              rawLogo = row[matchedKey];
+              break;
+          }
+      }
+
+      // 3. Fallback inteligente: inspecionar os valores presentes nas colunas
+      if (!rawName) {
+          for (const k of keys) {
+              const val = row[k];
+              if (val !== undefined && val !== null) {
+                  const strVal = String(val).trim();
+                  if (/^https?:\/\/|^data:image\//i.test(strVal) || /\.(png|jpe?g|webp|svg|gif)$/i.test(strVal)) {
+                      if (!rawLogo) rawLogo = strVal;
+                  } else if (!rawName && strVal.length > 0 && isNaN(Number(strVal))) {
+                      rawName = strVal;
+                  }
+              }
+          }
+      }
+
+      // 4. Se a primeira coluna veio como chave (ex: tabela sem cabeçalho onde o cabeçalho virou o primeiro valor)
+      if (!rawName && keys.length > 0) {
+          const firstKey = keys[0];
+          const firstVal = row[firstKey];
+          if (firstKey && !['id', '_id', '__v'].includes(firstKey.toLowerCase())) {
+              if (typeof firstVal === 'string' && (/^https?:\/\//i.test(firstVal) || /\.(png|jpe?g|webp|svg|gif)$/i.test(firstVal))) {
+                  rawName = firstKey;
+                  rawLogo = firstVal;
+              }
+          }
+      }
+
+      if (rawName) {
+          const cleanName = String(rawName).trim();
+          const normClean = normalizeKey(cleanName);
+          // Ignorar se o valor for apenas a palavra do cabeçalho
+          if (normClean === 'fabricante' || normClean === 'laboratorio' || normClean === 'marca' || normClean === 'nomedofabricante' || normClean === 'nome') {
+              return null;
+          }
+          if (cleanName) {
+              return {
+                  name: cleanName,
+                  logo: rawLogo ? String(rawLogo).trim() : undefined
+              };
+          }
+      }
+
+      return null;
+  };
+
   const executeManufacturerImport = async (json: any[]) => {
-         const newLogos = { ...(tenant.manufacturerLogos || {}) };
-         const newCustom = new Set(tenant.customManufacturers || []);
+      const newLogos = { ...(tenant.manufacturerLogos || {}) };
+      const newCustom = new Set(tenant.customManufacturers || []);
 
-         let count = 0;
-         for (const row of json) {
-             const name = row['Fabricante'] || row['Name'] || row['nome'];
-             const logo = row['Imagem'] || row['Logo'] || row['logo'];
+      let count = 0;
+      for (const row of json) {
+          const extracted = extractManufacturerRow(row);
+          if (extracted && extracted.name) {
+              newCustom.add(extracted.name);
+              if (extracted.logo) {
+                  newLogos[extracted.name] = extracted.logo;
+              }
+              count++;
+          }
+      }
 
-             if (name) {
-                 const cleanName = String(name).trim();
-                 if (cleanName) {
-                     newCustom.add(cleanName);
-                     if (logo) {
-                         newLogos[cleanName] = String(logo).trim();
-                     }
-                     count++;
-                 }
-             }
-         }
-
-         if (count > 0) {
-             await onTenantUpdate({
-                 ...tenant,
-                 customManufacturers: Array.from(newCustom),
-                 manufacturerLogos: newLogos
-             });
-             alert(`${count} fabricantes importados com sucesso!`);
-         } else {
-             alert("Nenhum fabricante encontrado nos dados.");
-         }
+      if (count > 0) {
+          await onTenantUpdate({
+              ...tenant,
+              customManufacturers: Array.from(newCustom),
+              manufacturerLogos: newLogos
+          });
+          alert(`${count} fabricantes importados com sucesso!`);
+      } else {
+          alert("Nenhum fabricante encontrado nos dados. Verifique se o arquivo ou texto contém nomes de fabricantes.");
+      }
   };
 
   const processManufacturerImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1545,14 +1660,28 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
   };
 
   const importPastedManufacturers = async () => {
-    if (!pastedManufacturersText.trim()) {
+    const rawText = pastedManufacturersText.trim();
+    if (!rawText) {
         alert("Cole os dados dos fabricantes antes de continuar.");
         return;
     }
-    const json = parsePastedData(pastedManufacturersText);
-    if (json.length === 0) {
-        alert("Nenhum dado válido encontrado. Verifique se copiou a tabela com os cabeçalhos corretamente.");
-        return;
+
+    let json = parsePastedData(rawText);
+    let extractedCount = json.map(extractManufacturerRow).filter(Boolean).length;
+
+    // Se o parse padrão de tabela não encontrou nada (ex: lista simples de nomes linha por linha), faz o parse por linha
+    if (extractedCount === 0) {
+        const lines = rawText.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+        json = lines.map(line => {
+            if (line.includes('\t')) {
+                return line.split('\t').map(p => p.trim());
+            } else if (line.includes(';')) {
+                return line.split(';').map(p => p.trim());
+            } else if (line.includes(',')) {
+                return line.split(',').map(p => p.trim());
+            }
+            return line;
+        });
     }
 
     try {
