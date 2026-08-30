@@ -1,6 +1,6 @@
 const readline = require('readline');
 const { loadConfig, saveConfig, getLastSyncDate, updateLastSyncDate } = require('./shared/state');
-const { validateToken, sendData, sendHeartbeat } = require('./shared/api');
+const { validateToken, sendData, sendHeartbeat, activeBaseUrl } = require('./shared/api');
 
 const SYNC_INTERVAL_MS = 60000;
 const RETRY_INTERVAL_MS = 300000;
@@ -27,6 +27,7 @@ async function askForToken() {
 async function startAgent(expectedErpType, ConnectorClass) {
     console.log('===================================================');
     console.log(`🚀 Agente FarmaFlow Iniciado (Módulo: ${expectedErpType.toUpperCase()})`);
+    console.log(`🌐 Servidor de Destino: https://farmaflow.online`);
     console.log('===================================================\n');
 
     let config = loadConfig();
@@ -50,6 +51,7 @@ async function startAgent(expectedErpType, ConnectorClass) {
                 erpType: apiConfig.erpType,
                 dbConfig: apiConfig.dbConfig,
                 apiKey: apiConfig.apiKey,
+                apiUrl: 'https://farmaflow.online/api/v1',
                 lastSyncDate: '1970-01-01T00:00:00.000Z'
             };
             saveConfig(config);

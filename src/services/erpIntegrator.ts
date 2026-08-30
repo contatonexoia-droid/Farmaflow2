@@ -461,7 +461,7 @@ async function bootstrap() {
       const defaultEnvContent = `LOCAL_TENANT_ID=${config.tenantId}
 SUPABASE_URL=${config.supabaseUrl}
 SUPABASE_ANON_KEY=${config.supabaseAnonKey}
-API_BASE_URL=https://farmaflow.nexoia.online
+API_BASE_URL=https://farmaflow.online
 SOFTPHARMA_INTEGRATION_DIR=C:\\Softpharma\\Integracao\\Entrada
 SOFTPHARMA_LOGS_DIR=C:\\Softpharma\\Integracao\\Logs`;
 
@@ -476,7 +476,7 @@ SOFTPHARMA_LOGS_DIR=C:\\Softpharma\\Integracao\\Logs`;
       process.env.LOCAL_TENANT_ID = config.tenantId;
       process.env.SUPABASE_URL = config.supabaseUrl;
       process.env.SUPABASE_ANON_KEY = config.supabaseAnonKey;
-      process.env.API_BASE_URL = 'https://farmaflow.nexoia.online';
+      process.env.API_BASE_URL = 'https://farmaflow.online';
       
       if (initSupabaseClient()) {
         startERPIntegrator();

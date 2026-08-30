@@ -4,6 +4,7 @@ process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 const axios = require('axios');
 const path = require('path');
 const os = require('os');
+const fs = require('fs');
 const https = require('https');
 const http = require('http');
 
@@ -20,6 +21,45 @@ function getMachineId() {
     } catch (e) {
         return 'unknown';
     }
+}
+
+/**
+ * Lê diretamente o arquivo .env ou farmaflow_config.json no diretório de trabalho atual,
+ * garantindo compatibilidade mesmo quando empacotado como executável standalone (.exe)
+ */
+function getCustomApiUrl() {
+    // 1. Checa farmaflow_config.json
+    try {
+        const configFile = path.join(process.cwd(), 'farmaflow_config.json');
+        if (fs.existsSync(configFile)) {
+            const parsed = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+            if (parsed && (parsed.apiUrl || parsed.apiBaseUrl || parsed.url)) {
+                return parsed.apiUrl || parsed.apiBaseUrl || parsed.url;
+            }
+        }
+    } catch (e) {}
+
+    // 2. Lê manualmente o arquivo .env no diretório atual
+    try {
+        const envFile = path.join(process.cwd(), '.env');
+        if (fs.existsSync(envFile)) {
+            const content = fs.readFileSync(envFile, 'utf8');
+            const lines = content.split('\n');
+            for (const line of lines) {
+                const match = line.match(/^\s*(API_URL|API_BASE_URL)\s*=\s*(.+)$/i);
+                if (match) {
+                    return match[2].trim().replace(/^["']|["']$/g, '');
+                }
+            }
+        }
+    } catch (e) {}
+
+    // 3. Checa process.env
+    if (process.env.API_BASE_URL || process.env.API_URL) {
+        return process.env.API_BASE_URL || process.env.API_URL;
+    }
+
+    return 'https://farmaflow.online/api/v1';
 }
 
 /**
@@ -71,19 +111,20 @@ const apiClient = axios.create({
 
 /**
  * Normaliza e sanitiza a URL de integração, corrigindo concatenações incorretas
- * como farmaflow.online.nexoia.online e garantindo a estrutura correta /api/v1.
+ * e garantindo o domínio oficial farmaflow.online e a estrutura correta /api/v1.
  */
 function sanitizeBaseUrl(inputUrl) {
     if (!inputUrl || typeof inputUrl !== 'string') {
-        return 'https://farmaflow.nexoia.online/api/v1';
+        return 'https://farmaflow.online/api/v1';
     }
     let url = inputUrl.trim();
     if (!url.startsWith('http://') && !url.startsWith('https://')) {
         url = 'https://' + url;
     }
     
-    // Corrige concatenações duplas de domínios (ex: farmaflow.online.nexoia.online)
-    url = url.replace(/farmaflow\.online\.nexoia\.online/gi, 'farmaflow.nexoia.online');
+    // Substitui domínios legados ou concatenados incorretamente pelo domínio oficial
+    url = url.replace(/farmaflow\.nexoia\.online/gi, 'farmaflow.online');
+    url = url.replace(/farmaflow\.online\.nexoia\.online/gi, 'farmaflow.online');
     url = url.replace(/nexoia\.online\.farmaflow\.online/gi, 'farmaflow.online');
     
     // Remove barras finais
@@ -101,14 +142,23 @@ function sanitizeBaseUrl(inputUrl) {
 
 // Lista de URLs base candidatas para fallback em caso de falha de conexão/SSL
 function getCandidateBaseUrls() {
-    const rawEnv = process.env.API_BASE_URL || process.env.API_URL || '';
+    const rawEnv = getCustomApiUrl();
     const primary = sanitizeBaseUrl(rawEnv);
     const fallbacks = [
-        'https://farmaflow.nexoia.online/api/v1',
-        'https://farmaflow.online/api/v1'
+        'https://farmaflow.online/api/v1',
+        'https://www.farmaflow.online/api/v1',
+        'http://farmaflow.online/api/v1',
+        'http://www.farmaflow.online/api/v1'
     ];
     
     const candidates = [primary];
+    // Se a primary for HTTPS, adiciona a versão HTTP correspondente como fallback imediato
+    if (primary.startsWith('https://')) {
+        const httpPrimary = primary.replace('https://', 'http://');
+        if (!candidates.includes(httpPrimary)) {
+            candidates.push(httpPrimary);
+        }
+    }
     for (const fb of fallbacks) {
         if (!candidates.includes(fb)) {
             candidates.push(fb);

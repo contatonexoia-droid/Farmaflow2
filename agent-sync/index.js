@@ -42,8 +42,9 @@ const apiClient = axios.create({
 });
 
 function sanitizeUrl(raw) {
-    let url = raw || 'https://farmaflow.nexoia.online/api/v1/integration';
-    url = url.replace(/farmaflow\.online\.nexoia\.online/gi, 'farmaflow.nexoia.online');
+    let url = raw || 'https://farmaflow.online/api/v1/integration';
+    url = url.replace(/farmaflow\.nexoia\.online/gi, 'farmaflow.online');
+    url = url.replace(/farmaflow\.online\.nexoia\.online/gi, 'farmaflow.online');
     url = url.replace(/nexoia\.online\.farmaflow\.online/gi, 'farmaflow.online');
     return url;
 }
@@ -124,16 +125,40 @@ async function syncData() {
 
         console.log(`Encontrados ${records.length} novos registros para envio.`);
 
-        // 3. Enviar os dados para a API (FarmaFlow)
-        const response = await apiClient.post(API_URL, {
-            dados: records
-        }, {
-            headers: {
-                'x-api-key': API_KEY,
-                'Content-Type': 'application/json'
-            },
-            timeout: 20000
-        });
+        // 3. Enviar os dados para a API (FarmaFlow) com suporte a fallback
+        let targetApiUrl = API_URL;
+        let response;
+        try {
+            response = await apiClient.post(targetApiUrl, {
+                dados: records
+            }, {
+                headers: {
+                    'x-api-key': API_KEY,
+                    'Content-Type': 'application/json'
+                },
+                timeout: 20000
+            });
+        } catch (postErr) {
+            // Se falhou por erro de SSL (EPROTO / alert), tenta automaticamente via HTTP
+            if (targetApiUrl.startsWith('https://') && (
+                postErr.code === 'EPROTO' || 
+                (postErr.message && (postErr.message.includes('SSL') || postErr.message.includes('tlsv1') || postErr.message.includes('alert')))
+            )) {
+                const httpFallbackUrl = targetApiUrl.replace('https://', 'http://');
+                console.warn(`⚠️ [SSL Fallback] Erro de certificado na rota HTTPS. Tentando via HTTP: ${httpFallbackUrl}...`);
+                response = await apiClient.post(httpFallbackUrl, {
+                    dados: records
+                }, {
+                    headers: {
+                        'x-api-key': API_KEY,
+                        'Content-Type': 'application/json'
+                    },
+                    timeout: 20000
+                });
+            } else {
+                throw postErr;
+            }
+        }
 
         if (response.status >= 200 && response.status < 300) {
             console.log('✅ Dados sincronizados com sucesso com o FarmaFlow AI.');
