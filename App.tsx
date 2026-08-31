@@ -27,6 +27,8 @@ import {
   CouponRule,
   isPromotionActive,
   checkProductMatchesRule,
+  getVariableCombosForProduct,
+  VariableComboRequirement,
 } from "./types";
 
 import { Navbar } from "./components/Navbar";
@@ -1461,12 +1463,24 @@ const App: React.FC = () => {
     return () => clearInterval(interval);
   }, [promotions]);
 
+  const variableCombosForSelected = useMemo(() => {
+    if (!selectedProduct) return [];
+    return getVariableCombosForProduct(
+      selectedProduct,
+      promotions,
+      products,
+      matrizProducts,
+      currentTenant?.id,
+    );
+  }, [selectedProduct, promotions, products, matrizProducts, currentTenant?.id]);
+
   const activePromotionForSelected = useMemo(() => {
     if (!selectedProduct || promotions.length === 0) return null;
     const idSet = new Set(activePromoIds.split(",").filter(Boolean));
 
     return promotions.find((p) => {
       if (!idSet.has(p.id)) return false;
+      if (p.type === "VARIABLE_COMBO" || (p.type as string) === "COMBO_VARIABLE") return false;
       return checkProductMatchesRule(p, selectedProduct, matrizProducts, currentTenant?.id);
     });
   }, [selectedProduct, promotions, activePromoIds, matrizProducts, currentTenant?.id]);
@@ -2964,9 +2978,9 @@ const App: React.FC = () => {
       let validatedTotal = 0;
       const cleanItems = cart.map((item) => {
         const { image, ...rest } = item;
-        const itemTotal = calculateItemTotal(item, promotions, matrizProducts, currentTenant?.id);
+        const itemTotal = calculateItemTotal(item, promotions, matrizProducts, currentTenant?.id, cart);
         validatedTotal += itemTotal;
-        const promoDetails = calculateItemPromotionDetails(item, promotions, matrizProducts, currentTenant?.id);
+        const promoDetails = calculateItemPromotionDetails(item, promotions, matrizProducts, currentTenant?.id, cart);
         return {
           ...rest,
           appliedPromotionId: promoDetails.promotionId,
@@ -3058,7 +3072,7 @@ const App: React.FC = () => {
       msg += `*🛒 PRODUTOS*\n\n`;
 
       cart.forEach((item) => {
-        const itemTotal = calculateItemTotal(item, promotions, matrizProducts, currentTenant?.id).toFixed(2);
+        const itemTotal = calculateItemTotal(item, promotions, matrizProducts, currentTenant?.id, cart).toFixed(2);
         msg += `*${item.quantity}x ${item.name}*\n`;
         if (item.internalCode) msg += `   🏷️ Ref: ${item.internalCode}\n`;
         msg += `   💲 R$ ${itemTotal}\n\n`;
@@ -4479,6 +4493,115 @@ const App: React.FC = () => {
                       ) : null}
                     </div>
                   )}
+
+                  {variableCombosForSelected.map((comboReq) => (
+                    <div
+                      key={comboReq.promo.id}
+                      className="mb-6 animate-in slide-in-from-top duration-500 bg-gradient-to-br from-orange-50 via-amber-50 to-orange-50 border-2 border-orange-200/80 rounded-3xl p-5 md:p-6 shadow-sm relative overflow-hidden"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                        <div className="flex items-center gap-2">
+                          <span className="bg-orange-600 text-white text-[10px] font-black uppercase px-2.5 py-1 rounded-full tracking-wider flex items-center gap-1 shadow-sm shadow-orange-200">
+                            <Sparkles size={12} /> Combo Especial
+                          </span>
+                          <h4 className="text-base md:text-lg font-black text-gray-900 tracking-tight">
+                            {comboReq.promo.name}
+                          </h4>
+                        </div>
+                        <span className="bg-emerald-100 text-emerald-800 text-[11px] font-black px-2.5 py-0.5 rounded-full">
+                          Economize R$ {comboReq.discountAmount.toFixed(2)} ({comboReq.discountPercentage}% OFF)
+                        </span>
+                      </div>
+
+                      <div className="flex items-baseline gap-3 mb-4">
+                        <span className="text-2xl md:text-3xl font-black text-orange-600">
+                          R$ {comboReq.comboPrice.toFixed(2)}
+                        </span>
+                        <span className="text-xs md:text-sm font-bold text-gray-400 line-through">
+                          R$ {comboReq.regularTotal.toFixed(2)}
+                        </span>
+                        <span className="text-xs font-semibold text-gray-500">
+                          pelos {comboReq.requiredProducts.reduce((acc, r) => acc + r.requiredQty, 0)} itens juntos
+                        </span>
+                      </div>
+
+                      <p className="text-xs font-black text-gray-600 uppercase tracking-wider mb-2">
+                        Itens necessários para ativar esta oferta:
+                      </p>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-4">
+                        {comboReq.requiredProducts.map((req) => (
+                          <div
+                            key={req.productId}
+                            className={`p-2.5 rounded-2xl border flex items-center gap-3 transition-all ${
+                              req.isCurrentSelected
+                                ? "bg-white border-orange-300 shadow-sm ring-1 ring-orange-200"
+                                : "bg-white/80 border-gray-200"
+                            }`}
+                          >
+                            <div className="w-10 h-10 rounded-xl bg-gray-50 border border-gray-100 flex items-center justify-center shrink-0 overflow-hidden">
+                              {req.product?.image ? (
+                                <img
+                                  src={req.product.image}
+                                  alt={req.productName}
+                                  className="w-full h-full object-contain p-0.5"
+                                  referrerPolicy="no-referrer"
+                                />
+                              ) : (
+                                <Package size={18} className="text-gray-400" />
+                              )}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-1">
+                                <span className="bg-orange-100 text-orange-800 text-[10px] font-black px-1.5 py-0.2 rounded shrink-0">
+                                  {req.requiredQty}x
+                                </span>
+                                <p className="text-xs font-bold text-gray-900 truncate" title={req.productName}>
+                                  {req.productName}
+                                </p>
+                              </div>
+                              <p className="text-[11px] text-gray-500 font-medium truncate">
+                                {req.productPresentation || (req.unitPrice ? `R$ ${req.unitPrice.toFixed(2)} un` : "")}
+                              </p>
+                            </div>
+                            {req.isCurrentSelected && (
+                              <span className="bg-orange-500 text-white text-[9px] font-black px-1.5 py-0.5 rounded uppercase tracking-wider shrink-0">
+                                Este item
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="bg-amber-100/70 border border-amber-300/60 rounded-2xl p-3 text-amber-900 text-xs font-semibold flex items-start gap-2 mb-4">
+                        <AlertCircle size={16} className="text-amber-700 shrink-0 mt-0.5" />
+                        <span className="leading-snug">
+                          <strong>Regra do Combo:</strong> O valor promocional de <strong>R$ {comboReq.comboPrice.toFixed(2)}</strong> será aplicado automaticamente no carrinho quando você adicionar todos os produtos listados acima.
+                        </span>
+                      </div>
+
+                      <button
+                        onClick={() => {
+                          comboReq.requiredProducts.forEach((req) => {
+                            const prod =
+                              req.product ||
+                              products.find((p) => p.id === req.productId) ||
+                              matrizProducts.find((p) => p.id === req.productId);
+                            if (prod && prod.stock > 0) {
+                              for (let i = 0; i < req.requiredQty; i++) {
+                                addToCart(prod as Product, false, false);
+                              }
+                            }
+                          });
+                          setGlobalToast(`Itens do combo (${comboReq.promo.name}) adicionados ao carrinho!`);
+                          setTimeout(() => setGlobalToast(null), 2500);
+                        }}
+                        className="w-full py-3 px-4 bg-orange-600 hover:bg-orange-700 active:scale-[0.99] text-white rounded-2xl font-black text-xs md:text-sm flex items-center justify-center gap-2 shadow-md shadow-orange-300/40 transition-all cursor-pointer"
+                      >
+                        <ShoppingCart size={16} /> Adicionar Combo Completo ao Carrinho (R$ {comboReq.comboPrice.toFixed(2)})
+                      </button>
+                    </div>
+                  ))}
 
                   {activePromotionForSelected && (
                     <div className="mb-6 animate-in slide-in-from-left duration-500">

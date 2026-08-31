@@ -361,10 +361,11 @@ export interface PromotionRule {
     | "PROGRESSIVE_DISCOUNT"
     | "FIXED_COMBO"
     | "LIGHTNING_OFFER"
-    | "DISCOUNT_ON_QTY";
+    | "DISCOUNT_ON_QTY"
+    | "VARIABLE_COMBO";
   targetType: "CATEGORY" | "MANUFACTURER" | "PRODUCT" | "SPECIFIC_SELECTION";
   targetValue: string; // Category name, Manufacturer name, or Product ID
-  specificProductIds?: string[]; // For SPECIFIC_SELECTION
+  specificProductIds?: string[]; // For SPECIFIC_SELECTION or VARIABLE_COMBO
   scheduleConfig?: FlashDealsScheduleConfig;
   filtersMetadata?: {
     category?: string | string[];
@@ -376,6 +377,8 @@ export interface PromotionRule {
     branchIds?: string[];
     buyX?: number;
     payY?: number;
+    comboProducts?: string[];
+    comboPrice?: number;
   };
   networkId?: string;
   targetBranchIds?: string[];
@@ -386,7 +389,10 @@ export interface PromotionRule {
   payY?: number;
   lightningDiscountPercentage?: number; // For LIGHTNING_OFFER
   discountThresholds?: { qty: number; discountPercentage: number }[]; // For progressive
-  comboProducts?: string[]; // Array of Product IDs for Fixed Combo
+  comboProducts?: string[]; // Array of Product IDs for Variable Combo / Fixed Combo
+  comboPrice?: number; // Fixed promotional price for the entire Variable Combo (e.g. 14.99)
+  bundle_price?: number;
+  bundle_slots?: any;
   comboDiscountPercentage?: number;
   startDate: string;
   endDate: string;
@@ -498,6 +504,23 @@ export const isPromotionActive = (
   return true;
 };
 
+export const matchProductToSlot = (
+  productIdOrSlot: string,
+  product: Product,
+  matrizProducts: Product[] = [],
+  tenantId?: string,
+  isNetworkScope?: boolean,
+): boolean => {
+  if (product.id === productIdOrSlot) return true;
+  if (isNetworkScope && product.barcode) {
+    const matrizProd = matrizProducts.find((mp) => mp.id === productIdOrSlot);
+    if (matrizProd && matrizProd.barcode && matrizProd.barcode === product.barcode) {
+      return true;
+    }
+  }
+  return false;
+};
+
 export const checkProductMatchesRule = (
   rule: PromotionRule | CouponRule,
   p: Product,
@@ -506,6 +529,20 @@ export const checkProductMatchesRule = (
 ): boolean => {
   // Se a regra for de rede ou pertencer a um tenant diferente do produto, é escopo rede
   const isNetworkScope = rule.scope === "NETWORK" || (tenantId && rule.tenantId !== tenantId);
+
+  if ("type" in rule && (rule.type === "VARIABLE_COMBO" || (rule.type as string) === "COMBO_VARIABLE")) {
+    const pIds = (rule.comboProducts && rule.comboProducts.length > 0)
+      ? rule.comboProducts
+      : rule.specificProductIds || [];
+    if (pIds.includes(p.id)) return true;
+    if (isNetworkScope && p.barcode) {
+      const targetEans = matrizProducts
+        .filter((mp) => pIds.includes(mp.id) && mp.barcode)
+        .map((mp) => mp.barcode);
+      if (p.barcode && targetEans.includes(p.barcode)) return true;
+    }
+    return false;
+  }
 
   if (rule.targetType === "PRODUCT") {
     if (rule.targetValue === p.id) return true;
@@ -545,11 +582,99 @@ export const checkProductMatchesRule = (
   return false;
 };
 
+export interface VariableComboRequirement {
+  promo: PromotionRule;
+  comboPrice: number;
+  regularTotal: number;
+  discountAmount: number;
+  discountPercentage: number;
+  requiredProducts: {
+    productId: string;
+    productName: string;
+    productPresentation?: string;
+    requiredQty: number;
+    unitPrice: number;
+    product?: Product;
+    isCurrentProduct: boolean;
+    isCurrentSelected: boolean;
+  }[];
+}
+
+export const getVariableCombosForProduct = (
+  product: Product,
+  promotions: PromotionRule[] = [],
+  allProducts: Product[] = [],
+  matrizProducts: Product[] = [],
+  tenantId?: string,
+): VariableComboRequirement[] => {
+  const now = new Date();
+  const comboPromos = promotions.filter((p) => {
+    if (!isPromotionActive(p, now)) return false;
+    const isVarCombo = p.type === "VARIABLE_COMBO" || (p.type as string) === "COMBO_VARIABLE";
+    if (!isVarCombo) return false;
+    return checkProductMatchesRule(p, product, matrizProducts, tenantId);
+  });
+
+  return comboPromos.map((promo) => {
+    const isNetworkScope = promo.scope === "NETWORK" || (tenantId && promo.tenantId !== tenantId);
+    const rawIds = (promo.comboProducts && promo.comboProducts.length > 0)
+      ? promo.comboProducts
+      : (promo.specificProductIds || []);
+
+    const slotMap = new Map<string, number>();
+    rawIds.forEach((id) => {
+      slotMap.set(id, (slotMap.get(id) || 0) + 1);
+    });
+
+    const requiredProducts = Array.from(slotMap.entries()).map(([pId, reqQty]) => {
+      const isCurrent = matchProductToSlot(pId, product, matrizProducts, tenantId, isNetworkScope);
+      const foundProduct = isCurrent
+        ? product
+        : allProducts.find((p) => matchProductToSlot(pId, p, matrizProducts, tenantId, isNetworkScope)) ||
+          matrizProducts.find((mp) => mp.id === pId);
+
+      const name = foundProduct?.name || `Produto (ID: ${pId.slice(0, 8)})`;
+      const presentation = foundProduct?.presentation;
+      const unitPrice = foundProduct?.price || 0;
+
+      return {
+        productId: pId,
+        productName: name,
+        productPresentation: presentation,
+        requiredQty: reqQty,
+        unitPrice,
+        product: foundProduct,
+        isCurrentProduct: isCurrent,
+        isCurrentSelected: isCurrent,
+      };
+    });
+
+    const regularTotal = requiredProducts.reduce((sum, item) => {
+      const price = item.product?.price || 0;
+      return sum + price * item.requiredQty;
+    }, 0);
+
+    const comboPrice = Number(promo.comboPrice ?? promo.bundle_price ?? promo.payY ?? regularTotal);
+    const discountAmount = Math.max(0, regularTotal - comboPrice);
+    const discountPercentage = regularTotal > 0 ? Math.round((discountAmount / regularTotal) * 100) : 0;
+
+    return {
+      promo,
+      comboPrice,
+      regularTotal,
+      discountAmount,
+      discountPercentage,
+      requiredProducts,
+    };
+  });
+};
+
 export const calculateItemPromotionDetails = (
   item: CartItem,
   activePromotions: PromotionRule[] = [],
   matrizProducts: Product[] = [],
   tenantId?: string,
+  allCartItems?: CartItem[],
 ): PromotionDetail => {
   const now = new Date();
   const applicablePromos = activePromotions.filter((p) => {
@@ -560,8 +685,12 @@ export const calculateItemPromotionDetails = (
   const baseTotal = item.price * item.quantity;
 
   if (applicablePromos.length > 0) {
-    // Sort to prioritize FIXED_COMBO rules or more specific rules
+    // Sort to prioritize VARIABLE_COMBO and FIXED_COMBO rules over generic rules
     applicablePromos.sort((a, b) => {
+      const isACombo = a.type === "VARIABLE_COMBO" || (a.type as string) === "COMBO_VARIABLE";
+      const isBCombo = b.type === "VARIABLE_COMBO" || (b.type as string) === "COMBO_VARIABLE";
+      if (isACombo && !isBCombo) return -1;
+      if (isBCombo && !isACombo) return 1;
       if (a.type === "FIXED_COMBO" && b.type !== "FIXED_COMBO") return -1;
       if (b.type === "FIXED_COMBO" && a.type !== "FIXED_COMBO") return 1;
       return 0;
@@ -570,7 +699,80 @@ export const calculateItemPromotionDetails = (
     const promo = applicablePromos[0];
     let discountedTotal = baseTotal;
 
-    if (
+    if (promo.type === "VARIABLE_COMBO" || (promo.type as string) === "COMBO_VARIABLE") {
+      const isNetworkScope = promo.scope === "NETWORK" || (tenantId && promo.tenantId !== tenantId);
+      const rawIds = (promo.comboProducts && promo.comboProducts.length > 0)
+        ? promo.comboProducts
+        : (promo.specificProductIds || []);
+
+      const cartSource = allCartItems && allCartItems.length > 0 ? allCartItems : [item];
+
+      // Build requirement map of slot -> required quantity
+      const slotMap = new Map<string, number>();
+      rawIds.forEach((id) => {
+        slotMap.set(id, (slotMap.get(id) || 0) + 1);
+      });
+
+      // Check each distinct required slot against cart items
+      let canFormCombo = rawIds.length >= 2;
+      const slotChecks: { slotId: string; reqQty: number; availableQty: number; cartItem?: CartItem; price: number }[] = [];
+
+      for (const [slotId, reqQty] of slotMap.entries()) {
+        // Find matching cart item for THIS specific slot (strict slot matching, not any-promo match)
+        const matchingItems = cartSource.filter((ci) =>
+          matchProductToSlot(slotId, ci, matrizProducts, tenantId, isNetworkScope),
+        );
+        const availableQty = matchingItems.reduce((sum, ci) => sum + ci.quantity, 0);
+
+        if (availableQty < reqQty) {
+          canFormCombo = false;
+        }
+
+        const sampleItem = matchingItems[0] || matrizProducts.find((mp) => mp.id === slotId);
+        slotChecks.push({
+          slotId,
+          reqQty,
+          availableQty,
+          cartItem: matchingItems[0],
+          price: sampleItem?.price || 0,
+        });
+      }
+
+      if (canFormCombo) {
+        // Number of complete combos formed
+        const numCombos = Math.min(...slotChecks.map((s) => Math.floor(s.availableQty / s.reqQty)));
+
+        if (numCombos > 0) {
+          const regularComboTotal = slotChecks.reduce((sum, s) => sum + s.price * s.reqQty, 0);
+          const comboPromoPrice = Number(promo.comboPrice ?? promo.bundle_price ?? promo.payY ?? regularComboTotal);
+          const comboDiscountPerSet = Math.max(0, regularComboTotal - comboPromoPrice);
+
+          // Find THIS item's slot requirement
+          const thisSlot = slotChecks.find((s) =>
+            matchProductToSlot(s.slotId, item, matrizProducts, tenantId, isNetworkScope),
+          );
+
+          if (thisSlot && regularComboTotal > 0 && comboDiscountPerSet > 0) {
+            const itemShareRatio = (thisSlot.price * thisSlot.reqQty) / regularComboTotal;
+            const itemDiscount = numCombos * comboDiscountPerSet * itemShareRatio;
+            discountedTotal = Math.max(0, baseTotal - itemDiscount);
+
+            return {
+              promotionId: promo.id,
+              promotionName: promo.name,
+              discount: Math.max(0, baseTotal - discountedTotal),
+            };
+          }
+        }
+      }
+
+      // If combo is not formed or only partial items in cart, discount is 0
+      return {
+        promotionId: promo.id,
+        promotionName: promo.name,
+        discount: 0,
+      };
+    } else if (
       promo.type === "BUY_X_PAY_Y" &&
       promo.buyX &&
       promo.payY &&
@@ -673,8 +875,9 @@ export const calculateItemTotal = (
   activePromotions: PromotionRule[] = [],
   matrizProducts: Product[] = [],
   tenantId?: string,
+  allCartItems?: CartItem[],
 ): number => {
-  const details = calculateItemPromotionDetails(item, activePromotions, matrizProducts, tenantId);
+  const details = calculateItemPromotionDetails(item, activePromotions, matrizProducts, tenantId, allCartItems);
   return item.price * item.quantity - details.discount;
 };
 

@@ -1220,10 +1220,30 @@ export const mapDbPromotionToApp = (p: any): PromotionRule => ({
   lightningDiscountPercentage:
     p.lightning_discount_percentage || p.lightningdiscountpercentage,
   discountThresholds: p.discount_thresholds || p.discountthresholds || [],
-  comboProducts: p.combo_products || p.comboproducts || [],
+  comboProducts:
+    p.combo_products ||
+    p.comboproducts ||
+    (p.filters_metadata || p.filtersmetadata)?.comboProducts ||
+    p.specific_product_ids ||
+    p.specificproductids ||
+    [],
+  comboPrice:
+    p.bundle_price ??
+    p.combo_price ??
+    (p.filters_metadata || p.filtersmetadata)?.comboPrice ??
+    (p.type === "VARIABLE_COMBO" || p.type === "COMBO_VARIABLE" ? (p.pay_y ?? p.payy) : undefined),
+  bundle_price:
+    p.bundle_price ??
+    p.combo_price ??
+    (p.filters_metadata || p.filtersmetadata)?.comboPrice,
   comboDiscountPercentage:
     p.combo_discount_percentage || p.combodiscountpercentage,
-  specificProductIds: p.specific_product_ids || p.specificproductids || [],
+  specificProductIds:
+    p.specific_product_ids ||
+    p.specificproductids ||
+    p.combo_products ||
+    p.comboproducts ||
+    [],
   filtersMetadata: p.filters_metadata || p.filtersmetadata,
   highlightInCategoriesBar:
     p.highlight_in_categories_bar ??
@@ -1348,8 +1368,17 @@ export const getPromotionsByTenant = async (
 };
 
 export const savePromotion = async (promotion: PromotionRule) => {
-  const buyXVal = promotion.buyX !== undefined && promotion.buyX !== null ? Number(promotion.buyX) : (promotion.type === "BUY_X_PAY_Y" ? 3 : null);
-  const payYVal = promotion.payY !== undefined && promotion.payY !== null ? Number(promotion.payY) : (promotion.type === "BUY_X_PAY_Y" ? 2 : null);
+  const isVarCombo = promotion.type === "VARIABLE_COMBO" || (promotion.type as string) === "COMBO_VARIABLE";
+  const comboProds = promotion.comboProducts || promotion.specificProductIds || [];
+  const comboPriceVal = promotion.comboPrice !== undefined && promotion.comboPrice !== null ? Number(promotion.comboPrice) : (promotion.bundle_price !== undefined ? Number(promotion.bundle_price) : undefined);
+
+  const buyXVal = promotion.buyX !== undefined && promotion.buyX !== null
+    ? Number(promotion.buyX)
+    : (promotion.type === "BUY_X_PAY_Y" ? 3 : (isVarCombo ? (comboProds.length || 2) : null));
+
+  const payYVal = promotion.payY !== undefined && promotion.payY !== null
+    ? Number(promotion.payY)
+    : (promotion.type === "BUY_X_PAY_Y" ? 2 : (isVarCombo ? comboPriceVal : null));
 
   const payload: any = {
     id: promotion.id,
@@ -1360,15 +1389,18 @@ export const savePromotion = async (promotion: PromotionRule) => {
     target_value: promotion.targetValue,
     buy_x: buyXVal,
     pay_y: payYVal,
+    bundle_price: comboPriceVal ?? (isVarCombo ? payYVal : null),
     lightning_discount_percentage: promotion.lightningDiscountPercentage,
     discount_thresholds: promotion.discountThresholds,
-    combo_products: promotion.comboProducts,
+    combo_products: comboProds,
     combo_discount_percentage: promotion.comboDiscountPercentage,
-    specific_product_ids: promotion.specificProductIds,
+    specific_product_ids: promotion.specificProductIds || comboProds,
     filters_metadata: {
       ...(promotion.filtersMetadata || {}),
       buyX: buyXVal,
       payY: payYVal,
+      comboProducts: comboProds,
+      comboPrice: comboPriceVal ?? (isVarCombo ? payYVal : null),
       highlightInCategoriesBar: promotion.highlightInCategoriesBar,
       highlightColor: promotion.highlightColor,
       highlightIcon: promotion.highlightIcon,

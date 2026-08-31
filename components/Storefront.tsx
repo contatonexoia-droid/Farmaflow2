@@ -510,6 +510,9 @@ const ProductCard = React.memo(
       ) {
         currentPrice = activePromo.payY / activePromo.buyX;
         promoDescription = `Combo: R$ ${currentPrice.toFixed(2)} cada no combo`;
+      } else if (activePromo.type === "VARIABLE_COMBO") {
+        const comboPrice = activePromo.comboPrice ?? activePromo.payY ?? 0;
+        promoDescription = `Combo Especial: ${activePromo.name} por R$ ${Number(comboPrice).toFixed(2).replace(".", ",")}`;
       } else if (
         activePromo.type === "PROGRESSIVE_DISCOUNT" &&
         activePromo.discountThresholds?.[0]
@@ -677,14 +680,16 @@ const ProductCard = React.memo(
                     <Tag size={10} strokeWidth={4} />
                     {activePromo.type === "BUY_X_PAY_Y"
                       ? `Leve ${activePromo.buyX} Pague ${activePromo.payY}`
-                      : activePromo.type === "LIGHTNING_OFFER" &&
-                          activePromo.lightningDiscountPercentage
-                        ? `GANHE ${activePromo.lightningDiscountPercentage}% OFF`
+                      : activePromo.type === "VARIABLE_COMBO"
+                        ? `COMBO POR R$ ${Number(activePromo.comboPrice ?? activePromo.payY ?? 0).toFixed(2).replace(".", ",")}`
                         : activePromo.type === "LIGHTNING_OFFER" &&
-                            activePromo.buyX &&
-                            activePromo.payY
-                          ? `Leve ${activePromo.buyX} por R$ ${activePromo.payY.toFixed(2).replace(".", ",")}`
-                          : activePromo.name}
+                            activePromo.lightningDiscountPercentage
+                          ? `GANHE ${activePromo.lightningDiscountPercentage}% OFF`
+                          : activePromo.type === "LIGHTNING_OFFER" &&
+                              activePromo.buyX &&
+                              activePromo.payY
+                            ? `Leve ${activePromo.buyX} por R$ ${activePromo.payY.toFixed(2).replace(".", ",")}`
+                            : activePromo.name}
                   </span>
                 )}
                 {Boolean(hasDiscount && !activePromo) && (
@@ -3380,14 +3385,16 @@ export const Storefront: React.FC<StorefrontProps> = ({
                     </span>
                   </div>
                   <p className="text-gray-500 font-bold text-sm">
-                    {selectedPromotion.type === "LIGHTNING_OFFER" &&
-                    selectedPromotion.lightningDiscountPercentage
-                      ? `Exibindo apenas itens com ${selectedPromotion.lightningDiscountPercentage}% OFF`
+                    {selectedPromotion.type === "VARIABLE_COMBO"
+                      ? `Exibindo os itens do Combo Variável (Leve o conjunto por R$ ${Number(selectedPromotion.comboPrice ?? selectedPromotion.payY ?? 0).toFixed(2).replace(".", ",")})`
                       : selectedPromotion.type === "LIGHTNING_OFFER" &&
-                          selectedPromotion.buyX &&
-                          selectedPromotion.payY
-                        ? `Exibindo produtos da oferta (Leve ${selectedPromotion.buyX} por R$ ${selectedPromotion.payY.toFixed(2).replace(".", ",")})`
-                        : `Mostrando apenas produtos desta promoção.`}
+                        selectedPromotion.lightningDiscountPercentage
+                        ? `Exibindo apenas itens com ${selectedPromotion.lightningDiscountPercentage}% OFF`
+                        : selectedPromotion.type === "LIGHTNING_OFFER" &&
+                            selectedPromotion.buyX &&
+                            selectedPromotion.payY
+                          ? `Exibindo produtos da oferta (Leve ${selectedPromotion.buyX} por R$ ${selectedPromotion.payY.toFixed(2).replace(".", ",")})`
+                          : `Mostrando apenas produtos desta promoção.`}
                   </p>
                 </div>
               </div>

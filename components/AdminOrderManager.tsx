@@ -343,7 +343,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
 
   const recalculateOrderTotals = (items: any[], appliedCouponCode?: string) => {
     const subtotal = items.reduce(
-      (acc, curr) => acc + calculateItemTotal(curr, promotions, matrizProducts, tenant?.id),
+      (acc, curr) => acc + calculateItemTotal(curr, promotions, matrizProducts, tenant?.id, items),
       0,
     );
 
@@ -370,7 +370,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
               let isApplicable = checkProductMatchesRule(appliedCoupon, item, matrizProducts, tenant?.id);
 
               if (isApplicable) {
-                return acc + calculateItemTotal(item, promotions, matrizProducts, tenant?.id);
+                return acc + calculateItemTotal(item, promotions, matrizProducts, tenant?.id, items);
               }
               return acc;
             }, 0);
@@ -517,7 +517,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
         <tr>
             <td style="padding: 8px; border-bottom: 1px solid #eee;">${item.quantity}x</td>
             <td style="padding: 8px; border-bottom: 1px solid #eee;">${item.name}</td>
-            <td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">R$ ${calculateItemTotal(item, promotions, matrizProducts, tenant?.id).toFixed(2)}</td>
+            <td style="padding: 8px; border-bottom: 1px solid #eee; text-align: right;">R$ ${calculateItemTotal(item, promotions, matrizProducts, tenant?.id, order.items).toFixed(2)}</td>
         </tr>
       `,
       )
@@ -1298,7 +1298,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                       </div>
                       <div className="text-right">
                         <p className="font-black text-gray-900 text-sm">
-                          R$ {calculateItemTotal(item, promotions, matrizProducts, tenant?.id).toFixed(2)}
+                          R$ {calculateItemTotal(item, promotions, matrizProducts, tenant?.id, viewingOrder.items).toFixed(2)}
                         </p>
                       </div>
                     </div>
@@ -1558,7 +1558,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                             </p>
                             <p className="font-black text-emerald-600 text-lg tracking-tight">
                               R${" "}
-                              {calculateItemTotal(item, promotions, matrizProducts, tenant?.id).toFixed(2)}
+                              {calculateItemTotal(item, promotions, matrizProducts, tenant?.id, editingOrder.items).toFixed(2)}
                             </p>
                           </div>
                         </div>

@@ -713,7 +713,11 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
 
   const handleEdit = (promo: PromotionRule) => {
     setEditingPromo({ ...promo });
-    setSelectedProductIds(promo.specificProductIds || []);
+    setSelectedProductIds(
+      promo.comboProducts && promo.comboProducts.length > 0
+        ? promo.comboProducts
+        : promo.specificProductIds || [],
+    );
 
     // Restore filters from metadata if available
     if (promo.filtersMetadata) {
@@ -816,10 +820,35 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
     );
   }, [filteredProducts]);
 
+  const selectedProductsList = useMemo(() => {
+    return products.filter((p) => selectedProductIds.includes(p.id));
+  }, [products, selectedProductIds]);
+
+  const comboOriginalSum = useMemo(() => {
+    return selectedProductsList.reduce((sum, p) => sum + (p.price || 0), 0);
+  }, [selectedProductsList]);
+
   const handleSaveAttempt = () => {
     if (!editingPromo?.name) {
       toast.error("Por favor, preencha o nome da promoção.");
       return;
+    }
+    if (editingPromo.type === "VARIABLE_COMBO") {
+      if (selectedProductIds.length < 2) {
+        toast.error("O Combo Variável precisa de pelo menos 2 produtos selecionados.");
+        return;
+      }
+      const comboPriceNum = Number(editingPromo.comboPrice ?? editingPromo.payY);
+      if (isNaN(comboPriceNum) || comboPriceNum <= 0) {
+        toast.error("Por favor, informe um preço promocional válido para o combo.");
+        return;
+      }
+      if (comboOriginalSum > 0 && comboPriceNum >= comboOriginalSum) {
+        toast.error(
+          `O preço do combo (R$ ${comboPriceNum.toFixed(2).replace(".", ",")}) deve ser menor que a soma dos produtos (R$ ${comboOriginalSum.toFixed(2).replace(".", ",")}).`,
+        );
+        return;
+      }
     }
     if (editingPromo.type === "LIGHTNING_OFFER") {
       const hasCombo = (editingPromo.buyX || 0) > 0 && (editingPromo.payY || 0) > 0;
@@ -848,6 +877,7 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
     }
     if (
       editingPromo.targetType !== "SPECIFIC_SELECTION" &&
+      editingPromo.type !== "VARIABLE_COMBO" &&
       !editingPromo.targetValue
     ) {
       toast.error("Por favor, selecione o alvo da promoção.");
@@ -859,6 +889,11 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
   const handleSave = async () => {
     setIsSaving(true);
     try {
+      const isVarCombo = editingPromo?.type === "VARIABLE_COMBO";
+      const varComboPrice = isVarCombo
+        ? Number(editingPromo?.comboPrice ?? editingPromo?.payY)
+        : undefined;
+
       let sanitizedBuyX = 3;
       if (editingPromo?.buyX !== undefined && editingPromo.buyX !== null) {
         if (typeof editingPromo.buyX === "string") {
@@ -881,30 +916,44 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
         }
       }
 
-      const finalBuyX = isNaN(sanitizedBuyX) || sanitizedBuyX <= 0 ? (editingPromo?.type === "BUY_X_PAY_Y" ? 3 : 0) : sanitizedBuyX;
-      const finalPayY = isNaN(sanitizedPayY) || sanitizedPayY <= 0 ? (editingPromo?.type === "BUY_X_PAY_Y" ? 2 : 0) : sanitizedPayY;
+      const finalBuyX = isVarCombo
+        ? selectedProductIds.length
+        : isNaN(sanitizedBuyX) || sanitizedBuyX <= 0
+          ? (editingPromo?.type === "BUY_X_PAY_Y" ? 3 : 0)
+          : sanitizedBuyX;
+
+      const finalPayY = isVarCombo
+        ? (varComboPrice || 0)
+        : isNaN(sanitizedPayY) || sanitizedPayY <= 0
+          ? (editingPromo?.type === "BUY_X_PAY_Y" ? 2 : 0)
+          : sanitizedPayY;
 
       const promoToSave = {
         ...editingPromo,
-        id: editingPromo.id || `promo_${Date.now()}`,
+        id: editingPromo?.id || `promo_${Date.now()}`,
+        type: editingPromo?.type,
         buyX: finalBuyX,
         payY: finalPayY,
-        lightningDiscountPercentage: editingPromo.type === "LIGHTNING_OFFER" ? (editingPromo.lightningDiscountPercentage || 0) : editingPromo.lightningDiscountPercentage,
-        specificProductIds:
-          editingPromo.targetType === "SPECIFIC_SELECTION"
-            ? selectedProductIds
-            : [],
+        comboPrice: isVarCombo ? varComboPrice : editingPromo?.comboPrice,
+        bundle_price: isVarCombo ? varComboPrice : editingPromo?.bundle_price,
+        comboProducts: isVarCombo ? selectedProductIds : editingPromo?.comboProducts,
+        targetType: isVarCombo ? "SPECIFIC_SELECTION" : editingPromo?.targetType,
+        targetValue: isVarCombo ? "COMBO VARIÁVEL" : editingPromo?.targetValue,
+        lightningDiscountPercentage: editingPromo?.type === "LIGHTNING_OFFER" ? (editingPromo?.lightningDiscountPercentage || 0) : editingPromo?.lightningDiscountPercentage,
+        specificProductIds: selectedProductIds,
         filtersMetadata: {
-          ...(editingPromo.filtersMetadata || {}),
+          ...(editingPromo?.filtersMetadata || {}),
           buyX: finalBuyX,
           payY: finalPayY,
-          ...(editingPromo.targetType === "SPECIFIC_SELECTION" ? filters : {})
+          comboPrice: isVarCombo ? varComboPrice : editingPromo?.comboPrice,
+          comboProducts: isVarCombo ? selectedProductIds : editingPromo?.comboProducts,
+          ...(editingPromo?.targetType === "SPECIFIC_SELECTION" || isVarCombo ? filters : {})
         },
-        createdAt: editingPromo.createdAt || new Date().toISOString(),
-        startDate: editingPromo.startDate || new Date().toISOString(),
-        scope: editingPromo.scope || "SINGLE_STORE",
+        createdAt: editingPromo?.createdAt || new Date().toISOString(),
+        startDate: editingPromo?.startDate || new Date().toISOString(),
+        scope: editingPromo?.scope || "SINGLE_STORE",
         endDate:
-          editingPromo.endDate ||
+          editingPromo?.endDate ||
           new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
       } as PromotionRule;
 
@@ -1114,15 +1163,22 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
                     </label>
                     <select
                       value={editingPromo.type || "BUY_X_PAY_Y"}
-                      onChange={(e) =>
+                      onChange={(e) => {
+                        const newType = e.target.value as any;
                         setEditingPromo({
                           ...editingPromo,
-                          type: e.target.value as any,
-                        })
-                      }
+                          type: newType,
+                          ...(newType === "VARIABLE_COMBO"
+                            ? { targetType: "SPECIFIC_SELECTION", targetValue: "SELEÇÃO MANUAL" }
+                            : {}),
+                        });
+                      }}
                       className="w-full px-4 py-3 rounded-xl border-2 border-gray-100 focus:border-red-500 focus:ring-0 transition-all font-medium appearance-none bg-white"
                     >
                       <option value="BUY_X_PAY_Y">Leve X Pague Y</option>
+                      <option value="VARIABLE_COMBO">
+                        Combo Variável (2 ou mais produtos com preço único)
+                      </option>
                       <option value="PROGRESSIVE_DISCOUNT">
                         Desconto Progressivo
                       </option>
@@ -1500,6 +1556,191 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
                         className="w-full px-4 py-3 rounded-xl border-2 border-white focus:border-red-500 focus:ring-0 transition-all font-bold text-red-600"
                       />
                     </div>
+                  </div>
+                )}
+
+                {editingPromo.type === "VARIABLE_COMBO" && (
+                  <div className="space-y-6 p-6 bg-gradient-to-br from-indigo-50/80 via-purple-50/50 to-pink-50/30 rounded-2xl border-2 border-indigo-100">
+                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-2 border-b border-indigo-100 pb-4">
+                      <div>
+                        <h4 className="text-sm font-black text-indigo-950 uppercase tracking-wider flex items-center gap-2">
+                          <ShoppingBag size={18} className="text-indigo-600" />
+                          Configuração do Combo Variável
+                        </h4>
+                        <p className="text-xs text-indigo-700/80 font-medium mt-0.5">
+                          Selecione 2 ou mais produtos na tabela acima e defina o preço fixo promocional do conjunto.
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`text-xs font-black px-3 py-1.5 rounded-xl border ${
+                            selectedProductIds.length >= 2
+                              ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                              : "bg-amber-50 text-amber-700 border-amber-200"
+                          }`}
+                        >
+                          {selectedProductIds.length}{" "}
+                          {selectedProductIds.length === 1
+                            ? "produto selecionado"
+                            : "produtos selecionados"}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Selected Products Preview List */}
+                    <div className="space-y-2">
+                      <label className="text-[11px] font-black uppercase text-indigo-400 tracking-widest ml-1">
+                        Itens Inclusos no Combo ({selectedProductsList.length})
+                      </label>
+                      {selectedProductsList.length === 0 ? (
+                        <div className="p-6 bg-white rounded-xl border-2 border-dashed border-indigo-200 text-center text-xs font-bold text-indigo-400">
+                          Nenhum produto selecionado ainda. Marque os produtos na tabela de seleção acima.
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 max-h-56 overflow-y-auto custom-scrollbar p-1">
+                          {selectedProductsList.map((p) => (
+                            <div
+                              key={p.id}
+                              className="flex items-center justify-between gap-3 p-3 bg-white rounded-xl border border-indigo-100 shadow-sm hover:border-indigo-300 transition-all"
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                {p.image ? (
+                                  <img
+                                    src={p.image}
+                                    alt={p.name}
+                                    className="w-10 h-10 object-contain rounded-lg border border-gray-100 bg-gray-50 flex-shrink-0"
+                                    referrerPolicy="no-referrer"
+                                  />
+                                ) : (
+                                  <div className="w-10 h-10 rounded-lg bg-indigo-50 flex items-center justify-center flex-shrink-0 text-indigo-400">
+                                    <Package size={18} />
+                                  </div>
+                                )}
+                                <div className="min-w-0">
+                                  <p className="text-xs font-bold text-gray-900 truncate" title={p.name}>
+                                    {p.name}
+                                  </p>
+                                  <p className="text-[11px] font-black text-indigo-600">
+                                    R$ {(p.price || 0).toFixed(2).replace(".", ",")}
+                                  </p>
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => toggleProductSelection(p.id)}
+                                className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all flex-shrink-0"
+                                title="Remover do combo"
+                              >
+                                <Trash2 size={15} />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Pricing Calculation Grid */}
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2">
+                      {/* Original sum */}
+                      <div className="bg-white p-4 rounded-xl border border-indigo-100 shadow-sm flex flex-col justify-between">
+                        <span className="text-[10px] font-black uppercase text-gray-400 tracking-wider">
+                          Preço Original Total (De)
+                        </span>
+                        <div className="mt-2 flex items-baseline gap-1">
+                          <span className="text-2xl font-black text-gray-700">
+                            R$ {comboOriginalSum.toFixed(2).replace(".", ",")}
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-gray-400 font-semibold mt-1">
+                          Soma de todos os {selectedProductsList.length} itens
+                        </span>
+                      </div>
+
+                      {/* Combo Promotional Price Input */}
+                      <div className="bg-white p-4 rounded-xl border-2 border-indigo-300 shadow-sm flex flex-col justify-between focus-within:border-indigo-600 transition-all">
+                        <label className="text-[10px] font-black uppercase text-indigo-600 tracking-wider">
+                          Preço Promocional do Combo (Por) *
+                        </label>
+                        <div className="mt-1 flex items-center gap-1">
+                          <span className="text-lg font-black text-indigo-600">R$</span>
+                          <SmartNumberInput
+                            value={editingPromo.comboPrice ?? editingPromo.payY ?? 0}
+                            onChangeValue={(val) =>
+                              setEditingPromo({
+                                ...editingPromo,
+                                comboPrice: val || 0,
+                                payY: val || 0,
+                              })
+                            }
+                            isFloat={true}
+                            className="w-full px-2 py-1 text-2xl font-black text-indigo-700 border-b-2 border-indigo-200 focus:border-indigo-600 outline-none"
+                            placeholder="0,00"
+                          />
+                        </div>
+                        <span className="text-[10px] text-indigo-500 font-semibold mt-1">
+                          Preço único pelo conjunto
+                        </span>
+                      </div>
+
+                      {/* Calculated Savings Card */}
+                      {(() => {
+                        const promoPrice = Number(editingPromo.comboPrice ?? editingPromo.payY ?? 0);
+                        const savings差异 = Math.max(0, comboOriginalSum - promoPrice);
+                        const discountPct =
+                          comboOriginalSum > 0 && promoPrice > 0
+                            ? Math.round((savings差异 / comboOriginalSum) * 100)
+                            : 0;
+                        const isValidDiscount = promoPrice > 0 && promoPrice < comboOriginalSum;
+
+                        return (
+                          <div
+                            className={`p-4 rounded-xl border shadow-sm flex flex-col justify-between ${
+                              isValidDiscount
+                                ? "bg-emerald-50/80 border-emerald-200"
+                                : "bg-gray-50 border-gray-200"
+                            }`}
+                          >
+                            <span
+                              className={`text-[10px] font-black uppercase tracking-wider ${
+                                isValidDiscount ? "text-emerald-700" : "text-gray-400"
+                              }`}
+                            >
+                              Economia do Cliente
+                            </span>
+                            <div className="mt-2 flex items-baseline gap-2">
+                              <span
+                                className={`text-2xl font-black ${
+                                  isValidDiscount ? "text-emerald-700" : "text-gray-400"
+                                }`}
+                              >
+                                R$ {savings差异.toFixed(2).replace(".", ",")}
+                              </span>
+                              {isValidDiscount && (
+                                <span className="text-xs font-black bg-emerald-600 text-white px-2 py-0.5 rounded-md">
+                                  {discountPct}% OFF
+                                </span>
+                              )}
+                            </div>
+                            <span
+                              className={`text-[10px] font-semibold mt-1 ${
+                                isValidDiscount ? "text-emerald-600" : "text-gray-400"
+                              }`}
+                            >
+                              {isValidDiscount
+                                ? `Cliente economiza R$ ${savings差异.toFixed(2).replace(".", ",")} no combo`
+                                : "Defina o preço promocional abaixo do total"}
+                            </span>
+                          </div>
+                        );
+                      })()}
+                    </div>
+
+                    {selectedProductIds.length < 2 && (
+                      <div className="flex items-center gap-2 p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 text-xs font-bold">
+                        <AlertCircle size={16} className="text-amber-600 flex-shrink-0" />
+                        <span>Selecione pelo menos 2 produtos na tabela acima para compor este combo promocional.</span>
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -1939,7 +2180,13 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
                   <span className="font-black text-gray-900">
                     {editingPromo.type === "BUY_X_PAY_Y"
                       ? "Leve X Pague Y"
-                      : "Desconto Progressivo"}
+                      : editingPromo.type === "VARIABLE_COMBO"
+                        ? `Combo Variável (R$ ${Number(editingPromo.comboPrice ?? editingPromo.payY ?? 0).toFixed(2).replace(".", ",")})`
+                        : editingPromo.type === "LIGHTNING_OFFER"
+                          ? "Oferta Relâmpago"
+                          : editingPromo.type === "FIXED_COMBO"
+                            ? "Combo Fixo"
+                            : "Desconto Progressivo"}
                   </span>
                 </div>
                 <div className="flex items-center justify-between text-sm">
@@ -2015,7 +2262,9 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
                             ? "bg-blue-100 text-blue-600"
                             : promo.type === "LIGHTNING_OFFER"
                               ? "bg-orange-100 text-orange-600"
-                              : "bg-purple-100 text-purple-600"
+                              : promo.type === "VARIABLE_COMBO"
+                                ? "bg-indigo-100 text-indigo-600"
+                                : "bg-purple-100 text-purple-600"
                       }`}
                     >
                       {promo.type === "BUY_X_PAY_Y" ? (
@@ -2065,11 +2314,13 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
                       <span className="font-bold text-gray-900">
                         {promo.type === "BUY_X_PAY_Y"
                           ? `Leve ${promo.buyX ?? (promo.filtersMetadata?.buyX || 3)} Pague ${promo.payY ?? (promo.filtersMetadata?.payY || 2)}`
-                          : promo.type === "PROGRESSIVE_DISCOUNT"
-                            ? `${promo.discountThresholds?.length} faixas de desconto`
-                            : promo.type === "LIGHTNING_OFFER"
-                              ? "Oferta Relâmpago (Topbar)"
-                              : "Combo Fixo"}
+                          : promo.type === "VARIABLE_COMBO"
+                            ? `Combo por R$ ${Number(promo.comboPrice ?? promo.payY ?? 0).toFixed(2).replace(".", ",")} (${(promo.comboProducts || promo.specificProductIds || []).length} itens)`
+                            : promo.type === "PROGRESSIVE_DISCOUNT"
+                              ? `${promo.discountThresholds?.length} faixas de desconto`
+                              : promo.type === "LIGHTNING_OFFER"
+                                ? "Oferta Relâmpago (Topbar)"
+                                : "Combo Fixo"}
                       </span>
                     </div>
                     <div className="flex items-center justify-between text-sm">

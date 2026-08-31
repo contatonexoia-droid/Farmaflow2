@@ -586,7 +586,7 @@ export const Cart: React.FC<CartProps> = ({
   };
 
   const subtotal = items.reduce(
-    (acc, curr) => acc + calculateItemTotal(curr, promotions, matrizProducts, tenant?.id),
+    (acc, curr) => acc + calculateItemTotal(curr, promotions, matrizProducts, tenant?.id, items),
     0,
   );
 
@@ -618,7 +618,7 @@ export const Cart: React.FC<CartProps> = ({
         let isApplicable = checkProductMatchesRule(activeProductCoupon, item, matrizProducts, tenant?.id);
 
         if (isApplicable) {
-          return acc + calculateItemTotal(item, promotions, matrizProducts, tenant?.id);
+          return acc + calculateItemTotal(item, promotions, matrizProducts, tenant?.id, items);
         }
         return acc;
       }, 0);
@@ -1233,12 +1233,13 @@ export const Cart: React.FC<CartProps> = ({
         <div className="space-y-4">
           {items.map((item) => {
             const isMaxStock = item.quantity >= item.stock;
-            const itemTotal = calculateItemTotal(item, promotions, matrizProducts, tenant?.id);
+            const itemTotal = calculateItemTotal(item, promotions, matrizProducts, tenant?.id, items);
             const promoDetails = calculateItemPromotionDetails(
               item,
               promotions,
               matrizProducts,
               tenant?.id,
+              items,
             );
             let activePromo =
               promotions.find((p) => p.id === promoDetails.promotionId) ||
