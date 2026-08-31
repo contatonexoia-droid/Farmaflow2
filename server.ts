@@ -4996,21 +4996,18 @@ async function resolveTenantForAgent(req: express.Request): Promise<AgentTenantR
       }
     }
 
-    // 3. Busca por id (UUID ou identificador) na tabela tenants
+    // 3. Busca por id (string ou UUID) na tabela tenants
     if (!foundTenant) {
       for (const key of keyArray) {
         try {
-          const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(key);
-          if (isUuid) {
-            const { data: byId } = await supabaseAdmin
-              .from('tenants')
-              .select('*')
-              .eq('id', key)
-              .maybeSingle();
-            if (byId) {
-              foundTenant = byId;
-              break;
-            }
+          const { data: byId } = await supabaseAdmin
+            .from('tenants')
+            .select('*')
+            .eq('id', key)
+            .maybeSingle();
+          if (byId) {
+            foundTenant = byId;
+            break;
           }
         } catch (e) {}
       }
@@ -5285,12 +5282,12 @@ const handleAgentStatus = async (req: express.Request, res: express.Response) =>
   try {
     const filterTenantId = (req.query.tenantId || req.query.tenant_id || req.query.store_id || req.headers['x-tenant-id'] || req.headers['x-store-id']) as string;
 
-    // 1. Busca todos os tenants (ou tenant filtrado) com campos seguros (sem is_active)
+    // 1. Busca todos os tenants (ou tenant filtrado) com os campos reais da tabela
     let tenantsList: any[] = [];
     try {
       let tenantQuery = supabaseAdmin
         .from('tenants')
-        .select('id, name, slug, erp_type, last_ping_at, updated_at');
+        .select('id, name, slug, erp_type, last_seen, agent_last_seen, created_at, integration_token');
 
       if (filterTenantId) {
         const cleanFilter = filterTenantId.replace(/^store_/, '').replace(/^tenant_/, '').trim();
@@ -5340,8 +5337,8 @@ const handleAgentStatus = async (req: express.Request, res: express.Response) =>
         // Encontra o timestamp mais recente entre agent_integrations e tenants
         const candidateDates = [
           agent?.last_seen,
-          t.last_ping_at,
-          t.updated_at
+          t.agent_last_seen,
+          t.last_seen
         ].filter(Boolean).map((d: any) => new Date(d).getTime()).filter(n => !isNaN(n) && n > 0);
 
         const latestTimestamp = candidateDates.length > 0
@@ -5354,7 +5351,7 @@ const handleAgentStatus = async (req: express.Request, res: express.Response) =>
           machine_id: agent?.machine_id || 'Servidor Local',
           is_active: agent?.is_active ?? true,
           last_seen: latestTimestamp,
-          activation_token: agent?.activation_token || null,
+          activation_token: agent?.activation_token || t.integration_token || null,
           tenants: {
             id: t.id,
             name: t.name,
