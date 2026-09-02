@@ -589,6 +589,16 @@ export const mapDbProductToApp = (p: any): Product => ({
   isAiEnriched: p.is_ai_enriched === true || p.isaienriched === true,
   promotionType: p.promotion_type || p.promotiontype || "NONE",
   originalPrice: Number(p.original_price || p.originalprice) || 0,
+  promotionalPrice:
+    p.promotional_price !== null && p.promotional_price !== undefined && !isNaN(Number(p.promotional_price)) && Number(p.promotional_price) > 0
+      ? Number(p.promotional_price)
+      : (p.promotionalPrice !== null && p.promotionalPrice !== undefined && !isNaN(Number(p.promotionalPrice)) && Number(p.promotionalPrice) > 0
+        ? Number(p.promotionalPrice)
+        : undefined),
+  promotional_price:
+    p.promotional_price !== null && p.promotional_price !== undefined && !isNaN(Number(p.promotional_price)) && Number(p.promotional_price) > 0
+      ? Number(p.promotional_price)
+      : null,
   buyX: Number(p.buy_x || p.buyx) || 0,
   payY: Number(p.pay_y || p.payy) || 0,
   discountQtyThreshold: Number(p.discount_qty_threshold || p.discountqtythreshold) || 0,
@@ -862,6 +872,14 @@ export const saveProductsByTenant = async (
         p.id = existingId;
       }
 
+      // Conversão e tratamento estrito de promotional_price:
+      // Se vazio, zero ou inválido, envia null; caso contrário o float tratado
+      const rawPromo = (p as any).promotional_price !== undefined && (p as any).promotional_price !== null
+        ? (p as any).promotional_price
+        : p.promotionalPrice;
+      const numPromo = rawPromo !== '' && rawPromo !== null && rawPromo !== undefined ? Number(rawPromo) : NaN;
+      const validPromotionalPrice = !isNaN(numPromo) && numPromo > 0 ? numPromo : null;
+
       return {
         id: existingId,
         tenant_id: tenantId,
@@ -871,6 +889,8 @@ export const saveProductsByTenant = async (
         active_principle: p.activePrinciple || "",
         drug_type: p.drugType || "",
         price: Number(p.price) || 0,
+        original_price: Number(p.originalPrice) || 0,
+        promotional_price: validPromotionalPrice,
         stock: Number(p.stock) || 0,
         category: p.category || "Geral",
         grouping_slug: p.groupingSlug || "",
@@ -885,7 +905,6 @@ export const saveProductsByTenant = async (
         contraindications: p.contraindications || "",
         is_featured: p.isFeatured === true,
         requires_prescription: Boolean(p.requires_prescription || (p as any).requiresprescription),
-        original_price: Number(p.originalPrice) || 0,
         promotion_type: p.promotionType || "NONE",
         buy_x: Number(p.buyX) || 0,
         pay_y: Number(p.payY) || 0,
@@ -2074,20 +2093,32 @@ export const exportBackupData = async (
         return;
       }
 
-      const headers = Object.keys(data[0]);
+      const enrichedData = data.map((p: any) => {
+        const promo = p.promotional_price !== undefined && p.promotional_price !== null
+          ? p.promotional_price
+          : (p.promotionalPrice !== undefined && p.promotionalPrice !== null ? p.promotionalPrice : '');
+        return {
+          ...p,
+          promotional_price: promo,
+          PRECO_PROMOCIONAL: promo,
+          PROMOTIONAL_PRICE: promo
+        };
+      });
+
+      const headers = Object.keys(enrichedData[0]);
       const csvRows = [headers.join(",")];
 
-      for (const row of data) {
+      for (const row of enrichedData) {
         const values = headers.map((header) => {
-          const val = row[header];
+          const val = row[header] !== undefined && row[header] !== null ? row[header] : "";
           const escaped = ("" + val).replace(/"/g, '""');
           return `"${escaped}"`;
         });
         csvRows.push(values.join(","));
       }
 
-      const csvContent = csvRows.join("\n");
-      const blob = new Blob([csvContent], { type: "text/csv" });
+      const csvContent = "\uFEFF" + csvRows.join("\n");
+      const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -2140,6 +2171,27 @@ export const exportBackupData = async (
     console.error("Erro ao exportar backup:", err);
     alert("Erro ao exportar backup: " + err.message);
   }
+};
+
+export const exportProductsSpreadsheet = async (
+  tenantId: string,
+  tenantName: string = "farmacia",
+  format: "xlsx" | "csv" = "xlsx"
+) => {
+  const endpoint = `/api/v1/tenants/${encodeURIComponent(tenantId)}/products/export?format=${format}`;
+  const response = await fetch(endpoint);
+  if (!response.ok) {
+    throw new Error(`Erro ao exportar produtos: ${response.statusText}`);
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `produtos_${tenantName.replace(/\s+/g, "_")}_${new Date().toISOString().split("T")[0]}.${format}`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 };
 
 export const downloadLatestBackupFile = async (tenantId: string) => {

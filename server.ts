@@ -252,7 +252,7 @@ app.get("/api/v1/store/:tenantId/init", async (req, res) => {
       couponsQuery,
       supabase
         .from("products")
-        .select("id, tenant_id, internal_code, barcode, name, active_principle, drug_type, manufacturer, presentation, price, original_price, stock, category, grouping_slug, variant_attribute, image, is_featured, requires_prescription, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage, video_uri, description, indications, usage, side_effects, contraindications, is_ai_enriched")
+        .select("id, tenant_id, internal_code, barcode, name, active_principle, drug_type, manufacturer, presentation, price, original_price, promotional_price, stock, category, grouping_slug, variant_attribute, image, is_featured, requires_prescription, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage, video_uri, description, indications, usage, side_effects, contraindications, is_ai_enriched")
         .eq("tenant_id", tenantId)
         .order("is_featured", { ascending: false })
         .limit(50),
@@ -1702,7 +1702,7 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
     // 2. Server-side intelligent search fallback
     let query = supabase
       .from("products")
-      .select("id, tenant_id, internal_code, barcode, name, active_principle, drug_type, manufacturer, presentation, price, original_price, stock, category, grouping_slug, variant_attribute, image, is_featured, requires_prescription, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage, video_uri, description, indications, usage, side_effects, contraindications, is_ai_enriched", { count: "exact" })
+      .select("id, tenant_id, internal_code, barcode, name, active_principle, drug_type, manufacturer, presentation, price, original_price, promotional_price, stock, category, grouping_slug, variant_attribute, image, is_featured, requires_prescription, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage, video_uri, description, indications, usage, side_effects, contraindications, is_ai_enriched", { count: "exact" })
       .eq("tenant_id", tenantId);
 
     if (category && category !== "Todos") {
@@ -2070,13 +2070,22 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
       return res.status(400).json({ error: "Invalid products array" });
     }
     
-    // Ensure all products belong to the tenant
-    const dbProducts = products.map(p => ({
-      ...p,
-      tenant_id: tenantId,
-      // Fallback for tenantid just in case
-      tenantid: p.tenantid || tenantId
-    }));
+    // Ensure all products belong to the tenant and format promotional_price
+    const dbProducts = products.map(p => {
+      const rawPromo = p.promotional_price !== undefined && p.promotional_price !== null
+        ? p.promotional_price
+        : p.promotionalPrice;
+      const numPromo = rawPromo !== '' && rawPromo !== null && rawPromo !== undefined ? Number(rawPromo) : NaN;
+      const validPromo = !isNaN(numPromo) && numPromo > 0 ? numPromo : null;
+
+      return {
+        ...p,
+        tenant_id: tenantId,
+        // Fallback for tenantid just in case
+        tenantid: p.tenantid || tenantId,
+        promotional_price: validPromo
+      };
+    });
     
     const CHUNK_SIZE = 50;
     for (let i = 0; i < dbProducts.length; i += CHUNK_SIZE) {
@@ -2146,27 +2155,42 @@ app.get("/api/v1/tenants/:tenantId/products", async (req, res) => {
 });
 
 // Dedicated Complete Products Export Endpoint (Unlimited, Paginated Stream/Chunking)
-app.get("/api/v1/tenants/:tenantId/products/export", checkTenantAccess, async (req, res) => {
+const handleProductsExport = async (req: express.Request, res: express.Response) => {
   try {
-    const tenantId = req.params.tenantId;
-    const format = (req.query.format as string) || "csv"; // 'csv' or 'json'
+    const tenantId = req.params.tenantId || (req.query.tenantId as string);
+    if (!tenantId) {
+      return res.status(400).json({ error: "tenantId é obrigatório" });
+    }
 
+    const format = ((req.query.format as string) || "csv").toLowerCase(); // 'csv', 'xlsx', or 'json'
+
+    // Remoção total de limite de paginação: busca 100% dos produtos em lotes de 1.000 registros
     let allProducts: any[] = [];
     let from = 0;
     const step = 1000;
     let hasMore = true;
 
     while (hasMore) {
-      const { data, error } = await supabase
+      let { data, error } = await supabase
         .from("products")
         .select("*")
         .eq("tenant_id", tenantId)
         .order("id", { ascending: true })
         .range(from, from + step - 1);
 
-      if (error) throw error;
+      // Fallback: se houver erro com ordenação por 'id', tenta sem order
+      if (error) {
+        const fallback = await supabase
+          .from("products")
+          .select("*")
+          .eq("tenant_id", tenantId)
+          .range(from, from + step - 1);
+        if (fallback.error) throw fallback.error;
+        data = fallback.data;
+      }
+
       if (data && data.length > 0) {
-        allProducts = [...allProducts, ...data];
+        allProducts = allProducts.concat(data);
         if (data.length < step) {
           hasMore = false;
         } else {
@@ -2177,48 +2201,124 @@ app.get("/api/v1/tenants/:tenantId/products/export", checkTenantAccess, async (r
       }
     }
 
+    // Deduplicação por ID
+    const uniqueMap = new Map();
+    for (const p of allProducts) {
+      if (p && p.id) {
+        uniqueMap.set(p.id, p);
+      }
+    }
+    const finalProducts = uniqueMap.size > 0 ? Array.from(uniqueMap.values()) : allProducts;
+
+    // 1. Formato JSON
     if (format === "json") {
-      return res.json({ success: true, count: allProducts.length, data: allProducts });
+      return res.json({ 
+        success: true, 
+        count: finalProducts.length, 
+        data: finalProducts.map(p => ({
+          ...p,
+          promotionalPrice: p.promotional_price !== null && p.promotional_price !== undefined ? Number(p.promotional_price) : null,
+          PRECO_PROMOCIONAL: p.promotional_price !== null && p.promotional_price !== undefined ? Number(p.promotional_price) : null,
+          PROMOTIONAL_PRICE: p.promotional_price !== null && p.promotional_price !== undefined ? Number(p.promotional_price) : null
+        }))
+      });
     }
 
-    // Generate complete CSV
+    // 2. Formato XLSX (Excel nativo)
+    if (format === "xlsx" || format === "excel") {
+      const excelRows = finalProducts.map(p => {
+        const precoVenda = Number(p.price || 0);
+        const precoOriginal = Number(p.original_price || p.originalPrice || 0);
+        const promoVal = p.promotional_price !== null && p.promotional_price !== undefined 
+          ? Number(p.promotional_price) 
+          : (p.promotionalPrice !== null && p.promotionalPrice !== undefined ? Number(p.promotionalPrice) : null);
+
+        return {
+          'ID': p.id || '',
+          'CODIGO_INTERNO': p.internal_code || p.internalCode || '',
+          'EAN': p.barcode || '',
+          'NOME_PRODUTO': p.name || '',
+          'FABRICANTE': p.manufacturer || '',
+          'CATEGORIA': p.category || 'Geral',
+          'PRECO_VENDA': precoVenda,
+          'PRECO_ORIGINAL': precoOriginal,
+          'PRECO_PROMOCIONAL': promoVal !== null && promoVal > 0 ? promoVal : '',
+          'PROMOTIONAL_PRICE': promoVal !== null && promoVal > 0 ? promoVal : '',
+          'ESTOQUE': Number(p.stock ?? 0),
+          'PRINCIPIO_ATIVO': p.active_principle || p.activePrinciple || '',
+          'TIPO_MEDICAMENTO': p.drug_type || p.drugType || '',
+          'APRESENTACAO': p.presentation || '',
+          'DESCRICAO': p.description || '',
+          'RETENCAO_RECEITA': p.requires_prescription ? 'SIM' : 'NÃO',
+          'TIPO_PROMOCAO': p.promotion_type || 'NONE',
+          'DESTAQUE': p.is_featured ? 'SIM' : 'NÃO',
+          'DATA_CRIACAO': p.created_at || ''
+        };
+      });
+
+      const worksheet = XLSX.utils.json_to_sheet(excelRows);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Produtos");
+      const excelBuffer = XLSX.write(workbook, { bookType: "xlsx", type: "buffer" });
+
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename=produtos_${tenantId}_${new Date().toISOString().split('T')[0]}.xlsx`,
+      );
+      return res.send(excelBuffer);
+    }
+
+    // 3. Formato CSV (com BOM UTF-8 e colunas completas)
     const headers = [
       "ID",
-      "CodigoInterno",
+      "CODIGO_INTERNO",
       "EAN",
-      "Nome",
-      "Fabricante",
-      "Categoria",
-      "PrecoVenda",
-      "PrecoOriginal_PMC",
-      "PrecoPromocional",
-      "Estoque",
-      "PrincipioAtivo",
-      "TipoMedicamento",
-      "Apresentacao",
-      "Descricao",
-      "RetencaoReceita",
-      "TipoPromocao",
-      "Destaque",
-      "DataCriacao"
+      "NOME_PRODUTO",
+      "FABRICANTE",
+      "CATEGORIA",
+      "PRECO_VENDA",
+      "PRECO_ORIGINAL",
+      "PRECO_PROMOCIONAL",
+      "PROMOTIONAL_PRICE",
+      "ESTOQUE",
+      "PRINCIPIO_ATIVO",
+      "TIPO_MEDICAMENTO",
+      "APRESENTACAO",
+      "DESCRICAO",
+      "RETENCAO_RECEITA",
+      "TIPO_PROMOCAO",
+      "DESTAQUE",
+      "DATA_CRIACAO"
     ];
 
     const csvRows = [headers.join(";")];
 
-    for (const p of allProducts) {
+    for (const p of finalProducts) {
+      const precoVenda = Number(p.price || 0);
+      const precoOriginal = Number(p.original_price || p.originalPrice || 0);
+      const promoVal = p.promotional_price !== null && p.promotional_price !== undefined 
+        ? Number(p.promotional_price) 
+        : (p.promotionalPrice !== null && p.promotionalPrice !== undefined ? Number(p.promotionalPrice) : null);
+
+      const formattedPrecoVenda = precoVenda > 0 ? precoVenda.toFixed(2).replace('.', ',') : '0,00';
+      const formattedPrecoOriginal = precoOriginal > 0 ? precoOriginal.toFixed(2).replace('.', ',') : '';
+      const formattedPromo = promoVal !== null && promoVal > 0 ? promoVal.toFixed(2).replace('.', ',') : '';
+
       const row = [
         `"${String(p.id || '').replace(/"/g, '""')}"`,
-        `"${String(p.internal_code || '').replace(/"/g, '""')}"`,
+        `"${String(p.internal_code || p.internalCode || '').replace(/"/g, '""')}"`,
         `"${String(p.barcode || '').replace(/"/g, '""')}"`,
         `"${String(p.name || '').replace(/"/g, '""')}"`,
         `"${String(p.manufacturer || '').replace(/"/g, '""')}"`,
         `"${String(p.category || 'Geral').replace(/"/g, '""')}"`,
-        (Number(p.price) || 0).toFixed(2).replace('.', ','),
-        (Number(p.original_price) || 0).toFixed(2).replace('.', ','),
-        (Number(p.promotional_price) || 0).toFixed(2).replace('.', ','),
+        formattedPrecoVenda,
+        formattedPrecoOriginal,
+        formattedPromo, // Coluna explícita PRECO_PROMOCIONAL
+        formattedPromo, // Coluna explícita PROMOTIONAL_PRICE
         String(p.stock ?? 0),
-        `"${String(p.active_principle || '').replace(/"/g, '""')}"`,
-        `"${String(p.drug_type || '').replace(/"/g, '""')}"`,
+        `"${String(p.active_principle || p.activePrinciple || '').replace(/"/g, '""')}"`,
+        `"${String(p.drug_type || p.drugType || '').replace(/"/g, '""')}"`,
         `"${String(p.presentation || '').replace(/"/g, '""')}"`,
         `"${String(p.description || '').replace(/"/g, '""')}"`,
         p.requires_prescription ? 'SIM' : 'NAO',
@@ -2229,7 +2329,7 @@ app.get("/api/v1/tenants/:tenantId/products/export", checkTenantAccess, async (r
       csvRows.push(row.join(";"));
     }
 
-    const csvContent = "\uFEFF" + csvRows.join("\r\n"); // UTF-8 BOM for Excel
+    const csvContent = "\uFEFF" + csvRows.join("\r\n"); // UTF-8 BOM para Excel
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader(
       "Content-Disposition",
@@ -2240,7 +2340,14 @@ app.get("/api/v1/tenants/:tenantId/products/export", checkTenantAccess, async (r
     console.error("Erro na exportação de produtos:", err);
     res.status(500).json({ error: err.message });
   }
-});
+};
+
+app.get("/api/v1/tenants/:tenantId/products/export", checkTenantAccess, handleProductsExport);
+app.get("/api/tenants/:tenantId/products/export", checkTenantAccess, handleProductsExport);
+app.get("/api/products/export/:tenantId", checkTenantAccess, handleProductsExport);
+app.get("/api/v1/products/export/:tenantId", checkTenantAccess, handleProductsExport);
+app.get("/api/v1/store/:tenantId/products/export", handleProductsExport);
+app.get("/api/products/export", checkTenantAccess, handleProductsExport);
 
 app.get("/api/v1/products/:id", async (req, res) => {
   try {
@@ -3087,20 +3194,32 @@ app.get("/api/backups/export/:tenantId", checkTenantAccess, async (req, res) => 
           .status(404)
           .json({ error: "Nenhum dado encontrado para exportar." });
 
-      const headers = Object.keys(data[0]);
+      const enrichedData = data.map((p: any) => {
+        const promo = p.promotional_price !== undefined && p.promotional_price !== null
+          ? p.promotional_price
+          : (p.promotionalPrice !== undefined && p.promotionalPrice !== null ? p.promotionalPrice : '');
+        return {
+          ...p,
+          promotional_price: promo,
+          PRECO_PROMOCIONAL: promo,
+          PROMOTIONAL_PRICE: promo
+        };
+      });
+
+      const headers = Object.keys(enrichedData[0]);
       const csvRows = [headers.join(",")];
 
-      for (const row of data) {
+      for (const row of enrichedData) {
         const values = headers.map((header) => {
-          const val = row[header];
+          const val = row[header] !== undefined && row[header] !== null ? row[header] : "";
           const escaped = ("" + val).replace(/"/g, '""');
           return `"${escaped}"`;
         });
         csvRows.push(values.join(","));
       }
 
-      const csvContent = csvRows.join("\n");
-      res.setHeader("Content-Type", "text/csv");
+      const csvContent = "\uFEFF" + csvRows.join("\n");
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
       res.setHeader(
         "Content-Disposition",
         `attachment; filename=backup_${tenantId}.csv`,

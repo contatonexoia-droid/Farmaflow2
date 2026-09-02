@@ -828,7 +828,17 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
       setCustomDrugTypeMode(false);
       setCustomManufacturerMode(false);
       setSelectedDeptForEdit(getDepartmentForCategory(product.category, tenant.departments));
-      setEditingProduct({ ...product });
+      const rawPromo = product.promotionalPrice !== undefined && product.promotionalPrice !== null
+        ? product.promotionalPrice
+        : ((product as any).promotional_price !== undefined && (product as any).promotional_price !== null ? (product as any).promotional_price : undefined);
+      const parsedPromo = rawPromo !== '' && rawPromo !== undefined && rawPromo !== null && !isNaN(Number(rawPromo)) && Number(rawPromo) > 0
+        ? Number(rawPromo)
+        : undefined;
+      setEditingProduct({
+        ...product,
+        promotionalPrice: parsedPromo,
+        promotional_price: parsedPromo !== undefined ? parsedPromo : null
+      });
   };
 
   const runAutomaticMapping = async () => {
@@ -869,6 +879,9 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
         tenantId: tenant.id,
         name: '',
         price: 0,
+        originalPrice: 0,
+        promotionalPrice: undefined,
+        promotional_price: null,
         stock: 0,
         category: 'Geral',
         internalCode: '',
@@ -936,6 +949,13 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
           }
       }
 
+      // Tratamento e conversão de preço promocional
+      const rawPromo = editingProduct.promotionalPrice !== undefined && editingProduct.promotionalPrice !== null
+        ? editingProduct.promotionalPrice
+        : (editingProduct as any).promotional_price;
+      const numPromo = rawPromo !== '' && rawPromo !== null && rawPromo !== undefined ? Number(rawPromo) : NaN;
+      const validPromoPrice = !isNaN(numPromo) && numPromo > 0 ? numPromo : null;
+
       const productToSave: Product = {
           id: editingProduct.id || Math.random().toString(36).substr(2, 9),
           tenantId: editingProduct.tenantId || tenant.id,
@@ -955,7 +975,8 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
           isAiEnriched: Boolean(editingProduct.isAiEnriched),
           price: Number(editingProduct.price) || 0,
           originalPrice: Number(editingProduct.originalPrice) || 0,
-          promotionalPrice: Number(editingProduct.promotionalPrice) || 0,
+          promotionalPrice: validPromoPrice !== null ? validPromoPrice : undefined,
+          promotional_price: validPromoPrice,
           stock: Number(editingProduct.stock) || 0,
           category: editingProduct.category || 'Geral',
           groupingSlug: editingProduct.groupingSlug || '',
@@ -1408,6 +1429,8 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
           'Preço de Venda': p.price,
           'Preço Original / PMC': p.originalPrice || 0,
           'Preço Promocional': p.promotionalPrice || 0,
+          'PRECO_PROMOCIONAL': p.promotionalPrice || 0,
+          'PROMOTIONAL_PRICE': p.promotionalPrice || 0,
           'Estoque': p.stock,
           'Princípio Ativo': p.activePrinciple || '',
           'Tipo Legal': p.drugType || '',
@@ -2048,7 +2071,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
         const hasStockCol = hasColumn(['Estoque', 'Qtd', 'Quantidade', 'ESTOQUE_ATUAL', 'estoque']);
         const hasPriceCol = hasColumn(['valor', 'preco', 'preco_venda', 'preco venda', 'valor_venda', 'novo_preco', 'Preco', 'Valor', 'Preço', 'Venda', 'PRECO_VENDA']);
         const hasOriginalPriceCol = hasColumn(['PrecoOriginal', 'PreçoOriginal', 'De', 'Original', 'PrecoDe', 'PRECO_ORIGINAL', 'Preço original', 'Preco original', 'preco_original', 'pmc', 'PMC', 'preco_pmc', 'PRECO_PMC']);
-        const hasPromotionalPriceCol = hasColumn(['PrecoPromocional', 'PreçoPromocional', 'Promocional', 'PrecoPromo', 'PRECO_PROMOCIONAL', 'Preço promocional', 'Preco promocional', 'preco_promocional', 'valor_promocional', 'Por', 'PrecoPor', 'PRECO_POR']);
+        const hasPromotionalPriceCol = hasColumn(['PrecoPromocional', 'PreçoPromocional', 'Promocional', 'PrecoPromo', 'PRECO_PROMOCIONAL', 'PROMOTIONAL_PRICE', 'promotional_price', 'promotionalPrice', 'Preço promocional', 'Preco promocional', 'preco_promocional', 'valor_promocional', 'Por', 'PrecoPor', 'PRECO_POR']);
         const hasDescCol = hasColumn(['Descricao', 'Descrição', 'Detalhes', 'Info', 'DESCRICAO_COMERCIAL', 'DescricaoDetalhada', 'Obs']);
         const hasLabCol = hasColumn(['Laboratorio', 'Fabricante', 'Marca', 'FABRICANTE_LAB', 'fabricantes']);
         const hasActivePrincipleCol = hasColumn(['Principio Ativo', 'PrincipioAtivo', 'Princípio Ativo', 'Substancia', 'Formula', 'PRINCIPIO_ATIVO']);
@@ -2237,7 +2260,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
             let rowImage = getVal(['Imagem', 'Image', 'Foto', 'UrlImagem', 'ImagemURL', 'IMAGEM_PRINCIPAL']);
 
             const rowOriginalPrice = parseNumberSafe(getVal(['PrecoOriginal', 'PreçoOriginal', 'De', 'Original', 'PrecoDe', 'PRECO_ORIGINAL', 'Preço original', 'Preco original', 'preco_original', 'pmc', 'PMC', 'preco_pmc', 'PRECO_PMC']));
-            const rowPromotionalPrice = parseNumberSafe(getVal(['PrecoPromocional', 'PreçoPromocional', 'Promocional', 'PrecoPromo', 'PRECO_PROMOCIONAL', 'Preço promocional', 'Preco promocional', 'preco_promocional', 'valor_promocional', 'Por', 'PrecoPor', 'PRECO_POR']));
+            const rowPromotionalPrice = parseNumberSafe(getVal(['PrecoPromocional', 'PreçoPromocional', 'Promocional', 'PrecoPromo', 'PRECO_PROMOCIONAL', 'PROMOTIONAL_PRICE', 'promotional_price', 'promotionalPrice', 'Preço promocional', 'Preco promocional', 'preco_promocional', 'valor_promocional', 'Por', 'PrecoPor', 'PRECO_POR']));
             
             // Promotional & Price logic
             let finalPrice = rowPrice || 0;
@@ -3481,7 +3504,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                             <div className="grid grid-cols-2 gap-4 bg-gray-50 p-4 rounded-2xl border">
                                 <div className="space-y-1"><InputLabel label="Preço de Venda (R$) *" /><SmartNumberInput isFloat={true} className="w-full bg-white p-3 rounded-xl font-bold border text-gray-900" value={Number.isNaN(editingProduct.price) ? '' : (editingProduct.price ?? '')} onChangeValue={val => setEditingProduct({...editingProduct, price: val})} /></div>
                                 <div className="space-y-1"><InputLabel label="Preço Original / PMC (De:)" /><SmartNumberInput isFloat={true} className="w-full bg-white p-3 rounded-xl font-bold border text-gray-900" value={Number.isNaN(editingProduct.originalPrice) ? '' : (editingProduct.originalPrice ?? '')} onChangeValue={val => setEditingProduct({...editingProduct, originalPrice: val})} /></div>
-                                <div className="space-y-1"><InputLabel label="Preço Promocional (Por:)" /><SmartNumberInput isFloat={true} className="w-full bg-white p-3 rounded-xl font-bold border text-gray-900" value={Number.isNaN(editingProduct.promotionalPrice) ? '' : (editingProduct.promotionalPrice ?? '')} onChangeValue={val => setEditingProduct({...editingProduct, promotionalPrice: val})} /></div>
+                                <div className="space-y-1"><InputLabel label="Preço Promocional (Por:)" /><SmartNumberInput isFloat={true} className="w-full bg-white p-3 rounded-xl font-bold border text-gray-900" value={Number.isNaN(editingProduct.promotionalPrice) ? '' : (editingProduct.promotionalPrice ?? ((editingProduct as any).promotional_price ?? ''))} onChangeValue={val => { const numVal = typeof val === 'number' && !isNaN(val) && val > 0 ? val : null; setEditingProduct({...editingProduct, promotionalPrice: val, promotional_price: numVal}); }} /></div>
                                 <div className="space-y-1"><InputLabel label="Estoque" /><SmartNumberInput className="w-full bg-white p-3 rounded-xl font-bold border text-gray-900" value={Number.isNaN(editingProduct.stock) ? '' : (editingProduct.stock ?? '')} onChangeValue={val => setEditingProduct({...editingProduct, stock: val})} /></div>
                                 <div className="space-y-1 col-span-2"><InputLabel label="Código de Barras (EAN) *" /><input type="text" className="w-full bg-white p-3 rounded-xl font-bold border text-gray-900" value={editingProduct.barcode || ''} onChange={e => { const newEan = e.target.value; setEditingProduct({...editingProduct, barcode: newEan}); }} /></div>
                                 <div className="space-y-1 col-span-2"><InputLabel label="Código Interno (Ref)" /><input type="text" className="w-full bg-white p-3 rounded-xl font-bold border text-gray-900" value={editingProduct.internalCode || ''} onChange={e => setEditingProduct({...editingProduct, internalCode: e.target.value})} /></div>

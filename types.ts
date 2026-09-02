@@ -11,6 +11,7 @@ export interface Product {
   price: number;
   originalPrice?: number;
   promotionalPrice?: number;
+  promotional_price?: number | null;
   stock: number;
   category: string; // Estritamente Classe Terapêutica (Ex: 'Antibiótico')
   groupingSlug?: string; // Slug para agrupar variações (ex: fralda-huggies-supreme)
