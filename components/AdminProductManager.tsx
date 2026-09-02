@@ -2092,19 +2092,14 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
         const updatedProducts: Product[] = [];
         const importedProducts: Product[] = [];
         
-        const productsByCode = new Map<string, Product>();
         const productsByEan = new Map<string, Product>();
         
         products.forEach(p => {
-            if (p.internalCode && String(p.internalCode).trim() !== '') {
-                productsByCode.set(String(p.internalCode).trim(), p);
-            }
             if (p.barcode && String(p.barcode).trim() !== '') {
                 productsByEan.set(String(p.barcode).trim(), p);
             }
         });
 
-        const newProductsByCode = new Map<string, Product>();
         const newProductsByEan = new Map<string, Product>();
 
         let countUpdated = 0;
@@ -2214,41 +2209,29 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
             }
             console.log("[FarmaFlow Debug] EAN Processado da Planilha:", ean);
 
-            // Rejeita/pula se AMBOS (EAN e Código Interno) estiverem ausentes ou vazios
-            if ((!ean || ean.trim() === '') && (!code || code.trim() === '')) {
+            // Validação de EAN: O EAN é a chave OBRIGATÓRIA de cruzamento e identificação
+            if (!ean || ean.trim() === '') {
                 audit.push({ 
                     name: String(name), 
                     code: code || '', 
                     status: 'no-change', 
-                    details: "Pulado: Código de barras (EAN) e Código Interno ausentes" 
+                    details: "Pulado: Código de barras (EAN) ausente. O EAN é a chave obrigatória de identificação." 
                 });
                 continue;
             }
             
+            const cleanEan = String(ean).trim();
             let existingProduct: Product | undefined = undefined;
             let isNewProductUpdate = false;
             
-            if (code) {
-                existingProduct = productsByCode.get(String(code).trim());
+            // Cruzamento EXCLUSIVAMENTE por EAN (Código de Barras)
+            existingProduct = productsByEan.get(cleanEan);
+            if (existingProduct) {
+                // Encontrado por EAN
+            } else {
+                existingProduct = newProductsByEan.get(cleanEan);
                 if (existingProduct) {
-                    // Encontrado por Código Interno (Âncora de identidade absoluta)
-                } else {
-                    existingProduct = newProductsByCode.get(String(code).trim());
-                    if (existingProduct) {
-                        isNewProductUpdate = true;
-                    }
-                }
-            }
-            
-            if (!existingProduct && ean) {
-                existingProduct = productsByEan.get(String(ean).trim());
-                if (existingProduct) {
-                    // Encontrado por EAN
-                } else {
-                    existingProduct = newProductsByEan.get(String(ean).trim());
-                    if (existingProduct) {
-                        isNewProductUpdate = true;
-                    }
+                    isNewProductUpdate = true;
                 }
             }
 
@@ -2435,6 +2418,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                         price: newPrice,
                         originalPrice: newOriginalPrice,
                         promotionalPrice: newPromotionalPrice,
+                        promotional_price: newPromotionalPrice !== undefined ? newPromotionalPrice : null,
                         promotionType: newPromoType,
                         stock: newStock,
                         internalCode: newCode,
@@ -2474,7 +2458,6 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                     if (isNewProductUpdate) {
                         const idx = newProducts.findIndex(np => np.id === p.id);
                         if (idx > -1) newProducts[idx] = updatedProductData;
-                        if (newCode) newProductsByCode.set(newCode, updatedProductData);
                         if (newEan) newProductsByEan.set(newEan, updatedProductData);
                         importedProducts.push(updatedProductData);
                     } else {
@@ -2485,7 +2468,6 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                             updatedProducts.push(updatedProductData);
                             countUpdated++;
                         }
-                        if (newCode) productsByCode.set(newCode, updatedProductData);
                         if (newEan) productsByEan.set(newEan, updatedProductData);
                         importedProducts.push(updatedProductData);
                     }
@@ -2533,6 +2515,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                     isFeatured: false,
                     originalPrice: finalOriginalPrice || 0,
                     promotionalPrice: finalPromotionalPrice > 0 ? finalPromotionalPrice : undefined,
+                    promotional_price: finalPromotionalPrice > 0 ? finalPromotionalPrice : null,
                     promotionType: rowPromoType || 'NONE',
                     buyX: rowBuyX || 0,
                     payY: rowPayY || 0,
@@ -2542,11 +2525,10 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
 
                 newProducts.push(productData);
                 importedProducts.push(productData);
-                if (productData.internalCode) newProductsByCode.set(productData.internalCode, productData);
                 if (productData.barcode) newProductsByEan.set(productData.barcode, productData);
                 countCreated++;
 
-                audit.push({ name: String(name), code: String(productData.internalCode), status: 'created', details: `Novo item cadastrado (${rowStock} un.)` });
+                audit.push({ name: String(name), code: String(productData.internalCode || productData.barcode), status: 'created', details: `Novo item cadastrado (${rowStock} un.)` });
             }
         }
 
@@ -2695,7 +2677,14 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                     if (hasOriginalPriceCol) {
                         item.original_price = p.originalPrice;
                     }
-                    if (hasPromoTypeCol || hasOriginalPriceCol || hasPriceCol) {
+                    if (hasPromotionalPriceCol) {
+                        const rawPromo = (p as any).promotional_price !== undefined && (p as any).promotional_price !== null
+                            ? (p as any).promotional_price
+                            : p.promotionalPrice;
+                        const numPromo = rawPromo !== '' && rawPromo !== null && rawPromo !== undefined ? Number(rawPromo) : NaN;
+                        item.promotional_price = !isNaN(numPromo) && numPromo > 0 ? numPromo : null;
+                    }
+                    if (hasPromoTypeCol || hasOriginalPriceCol || hasPriceCol || hasPromotionalPriceCol) {
                         item.promotion_type = p.promotionType;
                     }
                     if (hasBuyXCol) item.buy_x = p.buyX;
@@ -2745,14 +2734,12 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
             // 2. Inserção de Novos Produtos (payload completo, salvaguardado contra sobreescrita se o barcode ou internal_code já existir no banco)
             if (newProducts.length > 0) {
                 const newBarcodes = Array.from(new Set(newProducts.map(p => p.barcode).filter(Boolean) as string[]));
-                const newCodes = Array.from(new Set(newProducts.map(p => p.internalCode).filter(Boolean) as string[]));
                 
                 const dbExistingByEan = new Map<string, any>();
-                const dbExistingByCode = new Map<string, any>();
                 
                 const CHUNK_SIZE_MATCH = 100;
                 
-                // Busca Dupla na Verificação: por EAN
+                // Busca no banco EXCLUSIVAMENTE por EAN (Código de Barras)
                 if (newBarcodes.length > 0) {
                     for (let i = 0; i < newBarcodes.length; i += CHUNK_SIZE_MATCH) {
                         const chunkBarcodes = newBarcodes.slice(i, i + CHUNK_SIZE_MATCH);
@@ -2767,32 +2754,6 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                                 if (item.barcode) {
                                     dbExistingByEan.set(String(item.barcode).trim(), item);
                                 }
-                                if (item.internal_code) {
-                                    dbExistingByCode.set(String(item.internal_code).trim(), item);
-                                }
-                            });
-                        }
-                    }
-                }
-
-                // Busca Dupla na Verificação: por Código Interno
-                if (newCodes.length > 0) {
-                    for (let i = 0; i < newCodes.length; i += CHUNK_SIZE_MATCH) {
-                        const chunkCodes = newCodes.slice(i, i + CHUNK_SIZE_MATCH);
-                        const { data: dbMatches, error: matchErr } = await supabase
-                            .from('products')
-                            .select('*')
-                            .eq('tenant_id', tenant.id)
-                            .in('internal_code', chunkCodes);
-                            
-                        if (!matchErr && dbMatches) {
-                            dbMatches.forEach(item => {
-                                if (item.barcode) {
-                                    dbExistingByEan.set(String(item.barcode).trim(), item);
-                                }
-                                if (item.internal_code) {
-                                    dbExistingByCode.set(String(item.internal_code).trim(), item);
-                                }
                             });
                         }
                     }
@@ -2800,17 +2761,15 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
 
                 const actualNewProducts: Product[] = [];
                 const actualUpdateFromNewProducts: any[] = [];
-                const seenNewCodesInBatch = new Set<string>();
                 const seenNewBarcodesInBatch = new Set<string>();
 
                 newProducts.forEach(p => {
                     const cleanBarcode = p.barcode ? String(p.barcode).trim() : '';
                     const cleanCode = p.internalCode ? String(p.internalCode).trim() : '';
                     
+                    // Match EXCLUSIVAMENTE por EAN, NUNCA por código interno
                     let existingDbItem = null;
-                    if (cleanCode && dbExistingByCode.has(cleanCode)) {
-                        existingDbItem = dbExistingByCode.get(cleanCode);
-                    } else if (cleanBarcode && dbExistingByEan.has(cleanBarcode)) {
+                    if (cleanBarcode && dbExistingByEan.has(cleanBarcode)) {
                         existingDbItem = dbExistingByEan.get(cleanBarcode);
                     }
 
@@ -2824,11 +2783,19 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                         };
                         
                         if (hasEanCol) updateItem.barcode = cleanBarcode || null;
+                        // Código interno é salvo apenas como dado descritivo deste produto para esta farmácia
                         if (hasCodeCol) updateItem.internal_code = cleanCode || existingDbItem.internal_code;
                         if (hasNameCol) updateItem.name = p.name;
                         if (hasPriceCol) updateItem.price = p.price;
                         if (hasOriginalPriceCol) updateItem.original_price = p.originalPrice;
-                        if (hasPromoTypeCol || hasOriginalPriceCol || hasPriceCol) updateItem.promotion_type = p.promotionType;
+                        if (hasPromotionalPriceCol) {
+                            const rawPromo = (p as any).promotional_price !== undefined && (p as any).promotional_price !== null
+                                ? (p as any).promotional_price
+                                : p.promotionalPrice;
+                            const numPromo = rawPromo !== '' && rawPromo !== null && rawPromo !== undefined ? Number(rawPromo) : NaN;
+                            updateItem.promotional_price = !isNaN(numPromo) && numPromo > 0 ? numPromo : null;
+                        }
+                        if (hasPromoTypeCol || hasOriginalPriceCol || hasPriceCol || hasPromotionalPriceCol) updateItem.promotion_type = p.promotionType;
                         if (hasStockCol) updateItem.stock = p.stock;
                         if (hasLabCol) updateItem.manufacturer = p.manufacturer;
                         if (hasDescCol) updateItem.description = p.description;
@@ -2843,17 +2810,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                         actualUpdateFromNewProducts.push(updateItem);
                         p.id = existingDbItem.id;
                     } else {
-                        // Higienização de Códigos Internos Duplicados:
-                        // Se houverem duplicatas na própria planilha que passaram como "novos",
-                        // só inserimos a primeira ocorrência do código interno para evitar o conflito de chave única.
-                        if (cleanCode) {
-                            if (seenNewCodesInBatch.has(cleanCode)) {
-                                console.warn(`[FarmaFlow Import] Pulando item duplicado na planilha com código interno: ${cleanCode}`);
-                                return;
-                            }
-                            seenNewCodesInBatch.add(cleanCode);
-                        }
-                        // Higienização de Códigos de Barras Duplicados:
+                        // Higienização de Códigos de Barras Duplicados no lote:
                         if (cleanBarcode) {
                             if (seenNewBarcodesInBatch.has(cleanBarcode)) {
                                 console.warn(`[FarmaFlow Import] Pulando item duplicado na planilha com código de barras: ${cleanBarcode}`);
@@ -2902,28 +2859,35 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
 
                 // Inserir de fato novos produtos
                 if (actualNewProducts.length > 0) {
-                    const insertPayload = actualNewProducts.map(p => ({
-                        id: p.id,
-                        tenant_id: tenant.id,
-                        barcode: (p.barcode && String(p.barcode).trim() !== '') ? String(p.barcode).trim() : null,
-                        internal_code: p.internalCode,
-                        name: p.name,
-                        price: p.price,
-                        stock: p.stock,
-                        category: p.category,
-                        manufacturer: p.manufacturer,
-                        active_principle: p.activePrinciple,
-                        drug_type: p.drugType,
-                        presentation: p.presentation,
-                        image: p.image,
-                        description: p.description,
-                        indications: p.indications,
-                        original_price: p.originalPrice,
-                        promotion_type: p.promotionType,
-                        buy_x: p.buyX,
-                        pay_y: p.payY,
-                        requires_prescription: p.requires_prescription
-                    }));
+                    const insertPayload = actualNewProducts.map(p => {
+                        const rawPromo = (p as any).promotional_price !== undefined && (p as any).promotional_price !== null
+                            ? (p as any).promotional_price
+                            : p.promotionalPrice;
+                        const numPromo = rawPromo !== '' && rawPromo !== null && rawPromo !== undefined ? Number(rawPromo) : NaN;
+                        return {
+                            id: p.id,
+                            tenant_id: tenant.id,
+                            barcode: (p.barcode && String(p.barcode).trim() !== '') ? String(p.barcode).trim() : null,
+                            internal_code: p.internalCode || null,
+                            name: p.name,
+                            price: p.price,
+                            stock: p.stock,
+                            category: p.category,
+                            manufacturer: p.manufacturer,
+                            active_principle: p.activePrinciple,
+                            drug_type: p.drugType,
+                            presentation: p.presentation,
+                            image: p.image,
+                            description: p.description,
+                            indications: p.indications,
+                            original_price: p.originalPrice,
+                            promotional_price: !isNaN(numPromo) && numPromo > 0 ? numPromo : null,
+                            promotion_type: p.promotionType,
+                            buy_x: p.buyX,
+                            pay_y: p.payY,
+                            requires_prescription: p.requires_prescription
+                        };
+                    });
 
                     await persistProductChunk(insertPayload);
                 }

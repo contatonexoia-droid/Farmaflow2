@@ -1950,10 +1950,10 @@ app.post("/api/v1/matrix/bulk-featured-products", async (req, res) => {
       if (resetError) throw resetError;
     }
 
-    // 1. Fetch matrix products to get their barcodes and internal codes
+    // 1. Fetch matrix products to get their barcodes (EAN)
     const { data: matrixProducts, error: matrixError } = await supabase
       .from("products")
-      .select("barcode, internal_code")
+      .select("barcode")
       .in("id", productIds);
 
     if (matrixError) throw matrixError;
@@ -1961,21 +1961,17 @@ app.post("/api/v1/matrix/bulk-featured-products", async (req, res) => {
       return res.status(404).json({ error: "Nenhum produto correspondente encontrado na Matriz." });
     }
 
-    // Gather all barcodes and internal_codes to match on
+    // Gather all barcodes to match on - Nunca usar internal_code entre farmácias
     const barcodes = matrixProducts.map(p => p.barcode ? String(p.barcode).trim() : null).filter(Boolean) as string[];
-    const internalCodes = matrixProducts.map(p => p.internal_code ? String(p.internal_code).trim() : null).filter(Boolean) as string[];
 
-    if (barcodes.length === 0 && internalCodes.length === 0) {
-      return res.status(400).json({ error: "Os produtos selecionados na Matriz não possuem código de barras (EAN) ou código interno para correspondência." });
+    if (barcodes.length === 0) {
+      return res.status(400).json({ error: "Os produtos selecionados na Matriz não possuem código de barras (EAN) para correspondência." });
     }
 
-    // 2. Query target products
+    // 2. Query target products strictly by barcode (EAN)
     const orClauses: string[] = [];
     barcodes.forEach(b => {
       orClauses.push(`barcode.eq.${b}`);
-    });
-    internalCodes.forEach(ic => {
-      orClauses.push(`internal_code.eq.${ic}`);
     });
 
     let query = supabase
@@ -2776,13 +2772,11 @@ if (!process.env.VERCEL) {
 
           let updatedCount = 0;
 
-          // Compara e corrige
+          // Compara e corrige EXCLUSIVAMENTE por EAN (barcode)
           for (const erpItem of erpStockDump) {
+            if (!erpItem.ean) continue;
             const nexoProduct = nexoProducts.find(
-              (p) =>
-                (erpItem.ean && p.barcode === erpItem.ean) ||
-                (erpItem.internalCode &&
-                  p.internal_code === erpItem.internalCode),
+              (p) => p.barcode && String(p.barcode).trim() === String(erpItem.ean).trim(),
             );
 
             if (nexoProduct && nexoProduct.stock !== erpItem.stock) {
@@ -3370,12 +3364,10 @@ async function processRestore(
     .eq("tenant_id", tenantId);
 
   const currentByBarcode = new Map();
-  const currentByInternalCode = new Map();
 
   if (currentProducts) {
     for (const p of currentProducts) {
-      if (p.barcode) currentByBarcode.set(p.barcode, p.id);
-      if (p.internal_code) currentByInternalCode.set(p.internal_code, p.id);
+      if (p.barcode) currentByBarcode.set(String(p.barcode).trim(), p.id);
     }
   }
 
@@ -3388,26 +3380,15 @@ async function processRestore(
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
 
-    // Deduplicar dentro do próprio chunk para evitar conflitos na mesma transação
+    // Deduplicar dentro do próprio chunk pelo EAN para evitar conflitos na mesma transação
     const seenBarcodes = new Set<string>();
-    const seenInternals = new Set<string>();
     const uniqueChunk = [];
 
     for (const p of chunk) {
       const barcode = p.barcode ? String(p.barcode).trim() : null;
-      const internal = p.internal_code
-        ? String(p.internal_code).trim()
-        : p.internalCode
-          ? String(p.internalCode).trim()
-          : null;
-
-      const key = barcode || internal || `no-barcode-${Math.random()}`;
 
       if (barcode && seenBarcodes.has(barcode)) continue;
-      if (internal && seenInternals.has(internal)) continue;
-
       if (barcode) seenBarcodes.add(barcode);
-      if (internal) seenInternals.add(internal);
       uniqueChunk.push(p);
     }
 
@@ -3420,11 +3401,17 @@ async function processRestore(
           ? String(p.internalCode).trim()
           : null;
 
+      // Correspondência EXCLUSIVA por EAN (barcode)
       if (barcode && currentByBarcode.has(barcode)) {
         existingId = currentByBarcode.get(barcode);
-      } else if (internalCode && currentByInternalCode.has(internalCode)) {
-        existingId = currentByInternalCode.get(internalCode);
       }
+
+      // Tratamento estrito de preço promocional
+      const rawPromo = p.promotional_price !== undefined && p.promotional_price !== null
+        ? p.promotional_price
+        : p.promotionalPrice;
+      const numPromo = rawPromo !== '' && rawPromo !== null && rawPromo !== undefined ? Number(rawPromo) : NaN;
+      const validPromo = !isNaN(numPromo) && numPromo > 0 ? numPromo : null;
 
       // Removemos o ID do backup para evitar colisões entre tenants
       const { id: backupId, updated_at, created_at, ...productPayload } = p;
@@ -3434,6 +3421,7 @@ async function processRestore(
         barcode,
         internal_code: internalCode,
         tenant_id: tenantId,
+        promotional_price: validPromo,
       };
 
       if (existingId) {
@@ -5691,6 +5679,9 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
        let originalPrice = Number(getValFromProduct(p, ['original_price', 'originalPrice', 'preco_original', 'preco_de', 'preco_tabela', 'preco_cadastro', 'preco_antigo', 'valor_original']));
        if (isNaN(originalPrice) || originalPrice < 0) originalPrice = 0;
 
+       let rawPromoPrice = Number(getValFromProduct(p, ['promotional_price', 'promotionalPrice', 'preco_promocional', 'preco_promo', 'promocional', 'valor_promocional', 'preco_por']));
+       const promotionalPrice = !isNaN(rawPromoPrice) && rawPromoPrice > 0 ? rawPromoPrice : null;
+
        const rawName = getValFromProduct(p, [
          'name', 'nome', 'descricao', 'descricao_produto', 'nome_produto', 'produto',
          'descrio', 'descr'
@@ -5724,6 +5715,7 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
           stock,
           price,
           original_price: originalPrice,
+          promotional_price: promotionalPrice,
           name: name,
           category: classified.subcategory,
           department: classified.department,
@@ -5777,11 +5769,13 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
             const existing = existingMap.get(item.barcode);
             let finalPrice = item.price;
             let finalOriginalPrice = item.original_price;
+            let finalPromotionalPrice = item.promotional_price !== null && item.promotional_price !== undefined ? item.promotional_price : existing.promotional_price;
             
             // Se o ignore_erp_prices estiver ativo, preserva os preços salvos no banco de dados
             if (ignoreErpPrices) {
                finalPrice = existing.price;
                finalOriginalPrice = existing.original_price;
+               finalPromotionalPrice = existing.promotional_price;
             }
             
             // Se a categoria existente for vazia ou genérica ('OUTROS', 'DIVERSOS', 'Geral', etc.), atualiza para a classificação oficial
@@ -5799,7 +5793,8 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
                internal_code: item.internal_code || existing.internal_code,
                stock: item.stock,
                price: finalPrice,
-               original_price: finalOriginalPrice
+               original_price: finalOriginalPrice,
+               promotional_price: finalPromotionalPrice
             });
          } else {
             // Novo produto: inserção completa incluindo o 'name'
