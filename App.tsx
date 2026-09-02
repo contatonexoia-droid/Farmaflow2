@@ -269,9 +269,8 @@ const SuggestionCard = ({
 
   // Configuração Dinâmica de Preço Relacionado a Promoções (Idêntico ao ProductCard)
   const hasDiscount = Boolean(
-    p.promotionType === "DISCOUNT" &&
-    p.originalPrice &&
-    p.originalPrice > p.price
+    (p.originalPrice && p.originalPrice > p.price) ||
+    (p.promotionalPrice && p.promotionalPrice > 0 && p.promotionalPrice < (p.originalPrice || p.price))
   );
   const isKit = p.promotionType === "BUY_X_PAY_Y";
   const isDiscountOnQty = p.promotionType === "DISCOUNT_ON_QTY";
@@ -299,7 +298,9 @@ const SuggestionCard = ({
     });
   }, [promotions, activePromoIds, p.id, p.category, p.manufacturer]);
 
-  let currentPrice = p.price;
+  let currentPrice = (p.promotionalPrice && p.promotionalPrice > 0 && p.promotionalPrice < p.price)
+    ? p.promotionalPrice
+    : p.price;
 
   if (activePromo) {
     if (
@@ -328,17 +329,13 @@ const SuggestionCard = ({
         p.price *
         (1 - activePromo.discountThresholds[0].discountPercentage / 100);
     }
-  } else if (p.promotionType === "DISCOUNT" && hasDiscount) {
-    currentPrice = p.price;
   } else if (isKit) {
     currentPrice = (p.price * (p.payY || 0)) / (p.buyX || 1);
   } else if (isDiscountOnQty) {
     currentPrice = p.price * (1 - (p.discountQtyPercentage || 0) / 100);
-  } else {
-    currentPrice = p.originalPrice || p.price;
   }
 
-  const showOriginalPrice = Boolean(activePromo || (hasDiscount && !activePromo));
+  const showOriginalPrice = Boolean(hasDiscount || currentPrice < (p.originalPrice || p.price));
   const finalOriginalPrice = showOriginalPrice
     ? Math.max(p.originalPrice || 0, p.price)
     : p.price;
@@ -4458,10 +4455,9 @@ const App: React.FC = () => {
                             </p>
                           </div>
                         </div>
-                      ) : selectedProduct.promotionType === "DISCOUNT" &&
-                        selectedProduct.originalPrice &&
+                      ) : (selectedProduct.originalPrice &&
                         selectedProduct.originalPrice >
-                          selectedProduct.price ? (
+                          (selectedProduct.promotionalPrice && selectedProduct.promotionalPrice > 0 ? selectedProduct.promotionalPrice : selectedProduct.price)) ? (
                         <div className="bg-red-600 p-5 rounded-3xl md:rounded-[2rem] text-white shadow-xl shadow-red-200 flex items-center gap-5 border border-red-500">
                           <div className="w-14 h-14 bg-white/20 rounded-2xl flex items-center justify-center shrink-0 border border-white/20">
                             <TrendingDown
@@ -4477,12 +4473,12 @@ const App: React.FC = () => {
                               Economize R${" "}
                               {(
                                 selectedProduct.originalPrice -
-                                selectedProduct.price
+                                (selectedProduct.promotionalPrice && selectedProduct.promotionalPrice > 0 ? selectedProduct.promotionalPrice : selectedProduct.price)
                               ).toFixed(2)}{" "}
                               comprando agora! (
                               {Math.round(
                                 ((selectedProduct.originalPrice -
-                                  selectedProduct.price) /
+                                  (selectedProduct.promotionalPrice && selectedProduct.promotionalPrice > 0 ? selectedProduct.promotionalPrice : selectedProduct.price)) /
                                   selectedProduct.originalPrice) *
                                   100,
                               )}
@@ -4732,25 +4728,27 @@ const App: React.FC = () => {
                                   : `A partir de ${activePromotionForSelected.discountThresholds?.[0]?.qty || "?"} unidades`}
                           </p>
                         </div>
-                      ) : selectedProduct.promotionType === "DISCOUNT" &&
-                        selectedProduct.originalPrice &&
-                        selectedProduct.originalPrice >
-                          selectedProduct.price ? (
+                      ) : (selectedProduct.originalPrice && selectedProduct.originalPrice > selectedProduct.price) ||
+                        (selectedProduct.promotionalPrice && selectedProduct.promotionalPrice > 0 && selectedProduct.promotionalPrice < (selectedProduct.originalPrice || selectedProduct.price)) ? (
                         <div className="flex flex-col">
-                          <span className="text-xs font-bold text-gray-400 line-through">
-                            R$ {selectedProduct.originalPrice.toFixed(2)}
-                          </span>
-                          <span className="text-3xl font-black text-emerald-600">
-                            R$ {selectedProduct.price.toFixed(2)}
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold text-gray-400 line-through">
+                              De: R$ {(selectedProduct.originalPrice || selectedProduct.price).toFixed(2)}
+                            </span>
+                            {selectedProduct.originalPrice && selectedProduct.originalPrice > (selectedProduct.promotionalPrice && selectedProduct.promotionalPrice > 0 ? selectedProduct.promotionalPrice : selectedProduct.price) && (
+                              <span className="bg-red-50 text-red-600 text-[10px] font-black px-2 py-0.5 rounded-full font-mono">
+                                Economize R$ {(selectedProduct.originalPrice - (selectedProduct.promotionalPrice && selectedProduct.promotionalPrice > 0 ? selectedProduct.promotionalPrice : selectedProduct.price)).toFixed(2)}
+                              </span>
+                            )}
+                          </div>
+                          <span className="text-3xl font-black text-red-600">
+                            Por: R$ {(selectedProduct.promotionalPrice && selectedProduct.promotionalPrice > 0 ? selectedProduct.promotionalPrice : selectedProduct.price).toFixed(2)}
                           </span>
                         </div>
                       ) : (
                         <p className="text-3xl font-black text-emerald-600">
                           R${" "}
-                          {(
-                            selectedProduct.originalPrice ||
-                            selectedProduct.price
-                          ).toFixed(2)}
+                          {selectedProduct.price.toFixed(2)}
                         </p>
                       )}
                     </div>

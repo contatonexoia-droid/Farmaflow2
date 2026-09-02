@@ -954,13 +954,14 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
           contraindications: editingProduct.contraindications || '',
           isAiEnriched: Boolean(editingProduct.isAiEnriched),
           price: Number(editingProduct.price) || 0,
+          originalPrice: Number(editingProduct.originalPrice) || 0,
+          promotionalPrice: Number(editingProduct.promotionalPrice) || 0,
           stock: Number(editingProduct.stock) || 0,
           category: editingProduct.category || 'Geral',
           groupingSlug: editingProduct.groupingSlug || '',
           variantAttribute: editingProduct.variantAttribute || '',
           isFeatured: Boolean(editingProduct.isFeatured),
           requires_prescription: Boolean(editingProduct.requires_prescription),
-          originalPrice: Number(editingProduct.originalPrice) || 0,
           promotionType: (editingProduct.promotionType as any) || 'NONE',
           buyX: Number(editingProduct.buyX) || 0,
           payY: Number(editingProduct.payY) || 0,
@@ -1390,6 +1391,37 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
       } finally {
           setIsGeneratingJPG(false);
       }
+  };
+
+  const handleExportAllProducts = () => {
+      if (!products || products.length === 0) {
+          alert("Não há produtos cadastrados para exportar.");
+          return;
+      }
+
+      const dataToExport = products.map(p => ({
+          'Código Interno': p.internalCode || '',
+          'EAN': p.barcode || '',
+          'Nome do Produto': p.name,
+          'Fabricante': p.manufacturer || '',
+          'Categoria': p.category || 'Geral',
+          'Preço de Venda': p.price,
+          'Preço Original / PMC': p.originalPrice || 0,
+          'Preço Promocional': p.promotionalPrice || 0,
+          'Estoque': p.stock,
+          'Princípio Ativo': p.activePrinciple || '',
+          'Tipo Legal': p.drugType || '',
+          'Apresentação': p.presentation || '',
+          'Retenção de Receita': p.requires_prescription ? 'SIM' : 'NÃO',
+          'Tipo Promoção': p.promotionType || 'NONE',
+          'Destaque': p.isFeatured ? 'SIM' : 'NÃO'
+      }));
+
+      const worksheet = XLSX.utils.json_to_sheet(dataToExport);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Produtos");
+      
+      XLSX.writeFile(workbook, `Catalogo_Produtos_${tenant.name.replace(/\s+/g, '_')}_${new Date().toISOString().split('T')[0]}.xlsx`);
   };
 
   const handleExportZeroStock = () => {
@@ -2015,7 +2047,8 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
 
         const hasStockCol = hasColumn(['Estoque', 'Qtd', 'Quantidade', 'ESTOQUE_ATUAL', 'estoque']);
         const hasPriceCol = hasColumn(['valor', 'preco', 'preco_venda', 'preco venda', 'valor_venda', 'novo_preco', 'Preco', 'Valor', 'Preço', 'Venda', 'PRECO_VENDA']);
-        const hasOriginalPriceCol = hasColumn(['PrecoOriginal', 'PreçoOriginal', 'De', 'Original', 'PrecoDe', 'PRECO_ORIGINAL', 'Preço original', 'Preco original', 'preco_original']);
+        const hasOriginalPriceCol = hasColumn(['PrecoOriginal', 'PreçoOriginal', 'De', 'Original', 'PrecoDe', 'PRECO_ORIGINAL', 'Preço original', 'Preco original', 'preco_original', 'pmc', 'PMC', 'preco_pmc', 'PRECO_PMC']);
+        const hasPromotionalPriceCol = hasColumn(['PrecoPromocional', 'PreçoPromocional', 'Promocional', 'PrecoPromo', 'PRECO_PROMOCIONAL', 'Preço promocional', 'Preco promocional', 'preco_promocional', 'valor_promocional', 'Por', 'PrecoPor', 'PRECO_POR']);
         const hasDescCol = hasColumn(['Descricao', 'Descrição', 'Detalhes', 'Info', 'DESCRICAO_COMERCIAL', 'DescricaoDetalhada', 'Obs']);
         const hasLabCol = hasColumn(['Laboratorio', 'Fabricante', 'Marca', 'FABRICANTE_LAB', 'fabricantes']);
         const hasActivePrincipleCol = hasColumn(['Principio Ativo', 'PrincipioAtivo', 'Princípio Ativo', 'Substancia', 'Formula', 'PRINCIPIO_ATIVO']);
@@ -2203,15 +2236,31 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
             }
             let rowImage = getVal(['Imagem', 'Image', 'Foto', 'UrlImagem', 'ImagemURL', 'IMAGEM_PRINCIPAL']);
 
-            const rowOriginalPrice = parseNumberSafe(getVal(['PrecoOriginal', 'PreçoOriginal', 'De', 'Original', 'PrecoDe', 'PRECO_ORIGINAL', 'Preço original', 'Preco original', 'preco_original']));
+            const rowOriginalPrice = parseNumberSafe(getVal(['PrecoOriginal', 'PreçoOriginal', 'De', 'Original', 'PrecoDe', 'PRECO_ORIGINAL', 'Preço original', 'Preco original', 'preco_original', 'pmc', 'PMC', 'preco_pmc', 'PRECO_PMC']));
+            const rowPromotionalPrice = parseNumberSafe(getVal(['PrecoPromocional', 'PreçoPromocional', 'Promocional', 'PrecoPromo', 'PRECO_PROMOCIONAL', 'Preço promocional', 'Preco promocional', 'preco_promocional', 'valor_promocional', 'Por', 'PrecoPor', 'PRECO_POR']));
             
-            // Promotional logic
+            // Promotional & Price logic
             let finalPrice = rowPrice || 0;
             let finalOriginalPrice = rowOriginalPrice || 0;
+            let finalPromotionalPrice = rowPromotionalPrice || 0;
             let rowPromoType: 'NONE' | 'DISCOUNT' | 'BUY_X_PAY_Y' | undefined = undefined;
 
-            if (finalPrice > 0 && finalOriginalPrice > 0) {
-                // Ambos preenchidos: price recebe preco_venda, original_price recebe preco_original
+            if (finalPromotionalPrice > 0) {
+                // Se houver Preço Promocional válido
+                if (finalPrice > 0 && finalPromotionalPrice < finalPrice) {
+                    finalOriginalPrice = finalOriginalPrice > 0 ? finalOriginalPrice : finalPrice;
+                    finalPrice = finalPromotionalPrice;
+                    rowPromoType = 'DISCOUNT';
+                    countPromotional++;
+                } else if (finalOriginalPrice > 0 && finalPromotionalPrice < finalOriginalPrice) {
+                    finalPrice = finalPromotionalPrice;
+                    rowPromoType = 'DISCOUNT';
+                    countPromotional++;
+                } else if (finalPrice === 0) {
+                    finalPrice = finalPromotionalPrice;
+                }
+            } else if (finalPrice > 0 && finalOriginalPrice > 0) {
+                // Ambos preenchidos: price recebe preco_venda, original_price recebe preco_original / PMC
                 if (finalPrice < finalOriginalPrice) {
                     rowPromoType = 'DISCOUNT';
                     countPromotional++;
@@ -2326,13 +2375,14 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                 const newName = hasNameCol && name ? String(name) : p.name;
                 const newCode = hasCodeCol && code !== undefined ? String(code) : (p.internalCode ? String(p.internalCode).trim() : undefined);
                 const newEan = hasEanCol && ean ? String(ean).trim() : (p.barcode && String(p.barcode).trim() !== '' ? String(p.barcode).trim() : undefined);
-                const newPrice = hasPriceCol && finalPrice > 0 ? finalPrice : p.price;
-                const newOriginalPrice = hasOriginalPriceCol ? (finalOriginalPrice > 0 ? finalOriginalPrice : 0) : p.originalPrice;
+                const newPrice = (hasPriceCol || hasPromotionalPriceCol || hasOriginalPriceCol) && finalPrice > 0 ? finalPrice : p.price;
+                const newOriginalPrice = (hasOriginalPriceCol || hasPromotionalPriceCol) ? (finalOriginalPrice > 0 ? finalOriginalPrice : 0) : p.originalPrice;
+                const newPromotionalPrice = hasPromotionalPriceCol ? (finalPromotionalPrice > 0 ? finalPromotionalPrice : undefined) : p.promotionalPrice;
                 
                 let newPromoType = p.promotionType;
                 if (hasPromoTypeCol && rowPromoType !== undefined) {
                     newPromoType = rowPromoType;
-                } else if (hasOriginalPriceCol || hasPriceCol) {
+                } else if (hasOriginalPriceCol || hasPriceCol || hasPromotionalPriceCol) {
                     if ((newOriginalPrice || 0) > 0 && newPrice < (newOriginalPrice || 0)) {
                         newPromoType = 'DISCOUNT';
                     } else if (newPromoType === 'DISCOUNT' && (!(newOriginalPrice || 0) || (newOriginalPrice || 0) <= newPrice)) {
@@ -2344,6 +2394,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                     p.internalCode !== newCode ||
                     p.price !== newPrice ||
                     (p.originalPrice || 0) !== newOriginalPrice ||
+                    (p.promotionalPrice || 0) !== (newPromotionalPrice || 0) ||
                     p.promotionType !== newPromoType ||
                     p.stock !== newStock ||
                     p.name !== newName ||
@@ -2360,6 +2411,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                         name: newName,
                         price: newPrice,
                         originalPrice: newOriginalPrice,
+                        promotionalPrice: newPromotionalPrice,
                         promotionType: newPromoType,
                         stock: newStock,
                         internalCode: newCode,
@@ -2457,6 +2509,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                     image: finalImage,
                     isFeatured: false,
                     originalPrice: finalOriginalPrice || 0,
+                    promotionalPrice: finalPromotionalPrice > 0 ? finalPromotionalPrice : undefined,
                     promotionType: rowPromoType || 'NONE',
                     buyX: rowBuyX || 0,
                     payY: rowPayY || 0,
@@ -3040,13 +3093,22 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                             </span>
                         )}
                     </div>
-                    <button 
-                        onClick={handleExportZeroStock}
-                        className="flex items-center gap-2 px-4 py-2.5 bg-white border-2 border-gray-200 text-gray-700 rounded-xl font-black text-xs uppercase tracking-wide hover:bg-gray-50 hover:border-gray-300 transition-all shadow-sm"
-                        title="Exportar lista de produtos com estoque zerado (Lista de Compras)"
-                    >
-                        <Download size={16} /> Exportar Faltas
-                    </button>
+                    <div className="flex items-center gap-2">
+                        <button 
+                            onClick={handleExportAllProducts}
+                            className="flex items-center gap-2 px-4 py-2.5 bg-emerald-50 border-2 border-emerald-200 text-emerald-700 rounded-xl font-black text-xs uppercase tracking-wide hover:bg-emerald-100 hover:border-emerald-300 transition-all shadow-sm"
+                            title="Exportar planilha Excel com todos os produtos cadastrados da farmácia"
+                        >
+                            <Download size={16} /> Exportar Produtos ({products.length})
+                        </button>
+                        <button 
+                            onClick={handleExportZeroStock}
+                            className="flex items-center gap-2 px-4 py-2.5 bg-white border-2 border-gray-200 text-gray-700 rounded-xl font-black text-xs uppercase tracking-wide hover:bg-gray-50 hover:border-gray-300 transition-all shadow-sm"
+                            title="Exportar lista de produtos com estoque zerado (Lista de Compras)"
+                        >
+                            <Download size={16} /> Exportar Faltas
+                        </button>
+                    </div>
                 </div>
 
                 <div className="flex flex-col md:flex-row md:flex-wrap xl:flex xl:flex-row xl:items-center xl:justify-between gap-4 w-full">
@@ -3417,8 +3479,9 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                                 <div className="bg-amber-50 p-4 rounded-2xl border border-amber-100"><label className="flex items-center gap-3 cursor-pointer"><input type="checkbox" checked={editingProduct.requires_prescription || false} onChange={e => setEditingProduct({...editingProduct, requires_prescription: e.target.checked})} className="w-5 h-5 accent-amber-500" /><div className="flex flex-col"><span className="text-xs font-black uppercase text-amber-800">Retenção de Receita</span><span className="text-[9px] font-bold text-amber-600">Exige receita original</span></div></label></div>
                             </div>
                             <div className="grid grid-cols-2 gap-4 bg-gray-50 p-4 rounded-2xl border">
-                                <div className="space-y-1"><InputLabel label="Preço (R$) *" /><SmartNumberInput isFloat={true} className="w-full bg-white p-3 rounded-xl font-bold border text-gray-900" value={Number.isNaN(editingProduct.price) ? '' : (editingProduct.price ?? '')} onChangeValue={val => setEditingProduct({...editingProduct, price: val})} /></div>
-                                <div className="space-y-1"><InputLabel label="Preço Original" /><SmartNumberInput isFloat={true} className="w-full bg-white p-3 rounded-xl font-bold border text-gray-900" value={Number.isNaN(editingProduct.originalPrice) ? '' : (editingProduct.originalPrice ?? '')} onChangeValue={val => setEditingProduct({...editingProduct, originalPrice: val})} /></div>
+                                <div className="space-y-1"><InputLabel label="Preço de Venda (R$) *" /><SmartNumberInput isFloat={true} className="w-full bg-white p-3 rounded-xl font-bold border text-gray-900" value={Number.isNaN(editingProduct.price) ? '' : (editingProduct.price ?? '')} onChangeValue={val => setEditingProduct({...editingProduct, price: val})} /></div>
+                                <div className="space-y-1"><InputLabel label="Preço Original / PMC (De:)" /><SmartNumberInput isFloat={true} className="w-full bg-white p-3 rounded-xl font-bold border text-gray-900" value={Number.isNaN(editingProduct.originalPrice) ? '' : (editingProduct.originalPrice ?? '')} onChangeValue={val => setEditingProduct({...editingProduct, originalPrice: val})} /></div>
+                                <div className="space-y-1"><InputLabel label="Preço Promocional (Por:)" /><SmartNumberInput isFloat={true} className="w-full bg-white p-3 rounded-xl font-bold border text-gray-900" value={Number.isNaN(editingProduct.promotionalPrice) ? '' : (editingProduct.promotionalPrice ?? '')} onChangeValue={val => setEditingProduct({...editingProduct, promotionalPrice: val})} /></div>
                                 <div className="space-y-1"><InputLabel label="Estoque" /><SmartNumberInput className="w-full bg-white p-3 rounded-xl font-bold border text-gray-900" value={Number.isNaN(editingProduct.stock) ? '' : (editingProduct.stock ?? '')} onChangeValue={val => setEditingProduct({...editingProduct, stock: val})} /></div>
                                 <div className="space-y-1 col-span-2"><InputLabel label="Código de Barras (EAN) *" /><input type="text" className="w-full bg-white p-3 rounded-xl font-bold border text-gray-900" value={editingProduct.barcode || ''} onChange={e => { const newEan = e.target.value; setEditingProduct({...editingProduct, barcode: newEan}); }} /></div>
                                 <div className="space-y-1 col-span-2"><InputLabel label="Código Interno (Ref)" /><input type="text" className="w-full bg-white p-3 rounded-xl font-bold border text-gray-900" value={editingProduct.internalCode || ''} onChange={e => setEditingProduct({...editingProduct, internalCode: e.target.value})} /></div>

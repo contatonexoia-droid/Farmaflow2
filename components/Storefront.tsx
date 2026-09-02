@@ -448,9 +448,8 @@ const ProductCard = React.memo(
     const cartItem = cartItems?.find((item) => item.id === product.id);
     const itemQuantity = cartItem ? (cartItem.quantity || 0) : 0;
     const hasDiscount = Boolean(
-      product.promotionType === "DISCOUNT" &&
-      product.originalPrice &&
-      product.originalPrice > product.price
+      (product.originalPrice && product.originalPrice > product.price) ||
+      (product.promotionalPrice && product.promotionalPrice > 0 && product.promotionalPrice < (product.originalPrice || product.price))
     );
     const isKit = Boolean(product.promotionType === "BUY_X_PAY_Y");
     const isDiscountOnQty = Boolean(product.promotionType === "DISCOUNT_ON_QTY");
@@ -758,15 +757,20 @@ const ProductCard = React.memo(
           )}
           <div className="flex flex-col gap-2 mt-auto">
             <div>
-              {showOriginalPrice && (
-                <p className="text-[9px] md:text-[11px] text-gray-400 font-bold line-through leading-none mb-0.5">
-                  R$ {finalOriginalPrice.toFixed(2)}
-                </p>
+              {showOriginalPrice && finalOriginalPrice > currentPrice && (
+                <div className="flex items-center gap-1.5 leading-none mb-0.5">
+                  <p className="text-[9px] md:text-[11px] text-gray-400 font-bold line-through">
+                    De: R$ {finalOriginalPrice.toFixed(2)}
+                  </p>
+                  <span className="bg-red-50 text-red-600 text-[8px] md:text-[9px] font-black px-1.5 py-0.2 rounded font-mono">
+                    -{Math.round(((finalOriginalPrice - currentPrice) / finalOriginalPrice) * 100)}%
+                  </span>
+                </div>
               )}
               <p
-                className={`font-black ${showOriginalPrice ? "text-red-600" : "text-gray-900"} ${isCompact ? "text-xs md:text-sm" : "text-sm md:text-lg"}`}
+                className={`font-black ${showOriginalPrice && finalOriginalPrice > currentPrice ? "text-red-600" : "text-gray-900"} ${isCompact ? "text-xs md:text-sm" : "text-sm md:text-lg"}`}
               >
-                R$ {currentPrice.toFixed(2)}
+                {showOriginalPrice && finalOriginalPrice > currentPrice ? "Por: " : ""}R$ {currentPrice.toFixed(2)}
               </p>
               {promoDescription && !isCompact && (
                 <p className="text-[8px] md:text-[9px] text-emerald-600 font-bold mt-1 leading-tight">
@@ -2981,11 +2985,12 @@ export const Storefront: React.FC<StorefrontProps> = ({
 
                               <div className="text-right flex flex-col items-end shrink-0">
                                 {(() => {
-                                  let currentPrice = p.price;
+                                  let currentPrice = (p.promotionalPrice && p.promotionalPrice > 0 && p.promotionalPrice < p.price)
+                                    ? p.promotionalPrice
+                                    : p.price;
                                   let hasDiscount = Boolean(
-                                    p.promotionType === "DISCOUNT" &&
-                                    p.originalPrice &&
-                                    p.originalPrice > p.price
+                                    (p.originalPrice && p.originalPrice > p.price) ||
+                                    (p.promotionalPrice && p.promotionalPrice > 0 && p.promotionalPrice < (p.originalPrice || p.price))
                                   );
 
                                   if (activePromo) {
@@ -3037,18 +3042,11 @@ export const Storefront: React.FC<StorefrontProps> = ({
                                             .discountPercentage /
                                             100);
                                     }
-                                  } else if (
-                                    p.promotionType === "DISCOUNT" &&
-                                    hasDiscount
-                                  ) {
-                                    currentPrice = p.price;
-                                  } else {
-                                    currentPrice = p.originalPrice || p.price;
                                   }
 
                                   const showOriginalPrice = Boolean(
-                                    activePromo ||
-                                    (hasDiscount && !activePromo)
+                                    hasDiscount ||
+                                    currentPrice < (p.originalPrice || p.price)
                                   );
                                   const origPrice = showOriginalPrice
                                     ? Math.max(p.originalPrice || 0, p.price)
@@ -3059,14 +3057,14 @@ export const Storefront: React.FC<StorefrontProps> = ({
                                       {showOriginalPrice &&
                                         origPrice > currentPrice && (
                                           <span className="text-[10px] text-gray-400 line-through font-bold">
-                                            R$ {origPrice.toFixed(2)}
+                                            De: R$ {origPrice.toFixed(2)}
                                           </span>
                                         )}
                                       <div className="flex items-center gap-2 md:gap-4">
                                         <p
                                           className={`font-black text-sm md:text-base whitespace-nowrap ${showOriginalPrice && origPrice > currentPrice ? "text-red-600" : "text-emerald-600"}`}
                                         >
-                                          R$ {currentPrice.toFixed(2)}
+                                          {showOriginalPrice && origPrice > currentPrice ? "Por: " : ""}R$ {currentPrice.toFixed(2)}
                                         </p>
                                         <div className="hidden md:flex w-8 h-8 rounded-full bg-gray-100 items-center justify-center text-gray-400 group-hover:bg-emerald-600 group-hover:text-white transition-all">
                                           <ChevronRight size={18} />

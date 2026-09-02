@@ -2107,8 +2107,9 @@ app.get("/api/v1/tenants/:tenantId/products", async (req, res) => {
     while (hasMore) {
       const { data, error } = await supabase
         .from("products")
-        .select("id, tenant_id, internal_code, barcode, name, active_principle, drug_type, manufacturer, presentation, price, original_price, stock, category, grouping_slug, variant_attribute, image, is_featured, requires_prescription, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage, video_uri, description, indications, usage, side_effects, contraindications, is_ai_enriched")
+        .select("id, tenant_id, internal_code, barcode, name, active_principle, drug_type, manufacturer, presentation, price, original_price, promotional_price, stock, category, grouping_slug, variant_attribute, image, is_featured, requires_prescription, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage, video_uri, description, indications, usage, side_effects, contraindications, is_ai_enriched")
         .eq("tenant_id", tenantId)
+        .order("id", { ascending: true })
         .range(from, from + step - 1);
 
       if (error) throw error;
@@ -2134,15 +2135,110 @@ app.get("/api/v1/tenants/:tenantId/products", async (req, res) => {
     const uniqueProducts = Array.from(uniqueMap.values());
 
     // Set Cache-Control Headers for Vercel Edge caching
-    // s-maxage=60: Cache in CDN for 60 seconds
-    // stale-while-revalidate=300: Serve stale cache up to 5 minutes while fetching fresh in background
     res.setHeader(
       "Cache-Control",
       "public, s-maxage=60, stale-while-revalidate=300",
     );
-    res.json({ data: uniqueProducts });
+    res.json({ data: uniqueProducts, total: uniqueProducts.length });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// Dedicated Complete Products Export Endpoint (Unlimited, Paginated Stream/Chunking)
+app.get("/api/v1/tenants/:tenantId/products/export", checkTenantAccess, async (req, res) => {
+  try {
+    const tenantId = req.params.tenantId;
+    const format = (req.query.format as string) || "csv"; // 'csv' or 'json'
+
+    let allProducts: any[] = [];
+    let from = 0;
+    const step = 1000;
+    let hasMore = true;
+
+    while (hasMore) {
+      const { data, error } = await supabase
+        .from("products")
+        .select("*")
+        .eq("tenant_id", tenantId)
+        .order("id", { ascending: true })
+        .range(from, from + step - 1);
+
+      if (error) throw error;
+      if (data && data.length > 0) {
+        allProducts = [...allProducts, ...data];
+        if (data.length < step) {
+          hasMore = false;
+        } else {
+          from += step;
+        }
+      } else {
+        hasMore = false;
+      }
+    }
+
+    if (format === "json") {
+      return res.json({ success: true, count: allProducts.length, data: allProducts });
+    }
+
+    // Generate complete CSV
+    const headers = [
+      "ID",
+      "CodigoInterno",
+      "EAN",
+      "Nome",
+      "Fabricante",
+      "Categoria",
+      "PrecoVenda",
+      "PrecoOriginal_PMC",
+      "PrecoPromocional",
+      "Estoque",
+      "PrincipioAtivo",
+      "TipoMedicamento",
+      "Apresentacao",
+      "Descricao",
+      "RetencaoReceita",
+      "TipoPromocao",
+      "Destaque",
+      "DataCriacao"
+    ];
+
+    const csvRows = [headers.join(";")];
+
+    for (const p of allProducts) {
+      const row = [
+        `"${String(p.id || '').replace(/"/g, '""')}"`,
+        `"${String(p.internal_code || '').replace(/"/g, '""')}"`,
+        `"${String(p.barcode || '').replace(/"/g, '""')}"`,
+        `"${String(p.name || '').replace(/"/g, '""')}"`,
+        `"${String(p.manufacturer || '').replace(/"/g, '""')}"`,
+        `"${String(p.category || 'Geral').replace(/"/g, '""')}"`,
+        (Number(p.price) || 0).toFixed(2).replace('.', ','),
+        (Number(p.original_price) || 0).toFixed(2).replace('.', ','),
+        (Number(p.promotional_price) || 0).toFixed(2).replace('.', ','),
+        String(p.stock ?? 0),
+        `"${String(p.active_principle || '').replace(/"/g, '""')}"`,
+        `"${String(p.drug_type || '').replace(/"/g, '""')}"`,
+        `"${String(p.presentation || '').replace(/"/g, '""')}"`,
+        `"${String(p.description || '').replace(/"/g, '""')}"`,
+        p.requires_prescription ? 'SIM' : 'NAO',
+        `"${String(p.promotion_type || 'NONE').replace(/"/g, '""')}"`,
+        p.is_featured ? 'SIM' : 'NAO',
+        `"${String(p.created_at || '').replace(/"/g, '""')}"`
+      ];
+      csvRows.push(row.join(";"));
+    }
+
+    const csvContent = "\uFEFF" + csvRows.join("\r\n"); // UTF-8 BOM for Excel
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename=produtos_${tenantId}_${new Date().toISOString().split('T')[0]}.csv`,
+    );
+    return res.send(csvContent);
+  } catch (err: any) {
+    console.error("Erro na exportação de produtos:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -2973,9 +3069,9 @@ app.get("/api/backups/export/:tenantId", checkTenantAccess, async (req, res) => 
     // Fetch Data with Pagination
     const [tenantResult, products, orders, reviews] = await Promise.all([
       supabase.from("tenants").select("*").eq("id", tenantId).single(),
-      fetchAll("products", tenantId),
-      fetchAll("orders", tenantId),
-      fetchAll("app_reviews", tenantId),
+      fetchAll("products", tenantId, "tenant_id", "id"),
+      fetchAll("orders", tenantId, "tenant_id", "id"),
+      fetchAll("app_reviews", tenantId, "tenant_id", "id"),
     ]);
 
     if (format === "csv") {

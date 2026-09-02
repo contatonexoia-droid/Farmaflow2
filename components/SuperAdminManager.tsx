@@ -197,7 +197,7 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
         if (exportTenantId === 'all') {
             productsToExport = await getAllProducts();
         } else {
-            productsToExport = await getProductsByTenant(exportTenantId);
+            productsToExport = await getProductsByTenant(exportTenantId, undefined, true);
             const tenantName = tenants.find(t => t.id === exportTenantId)?.name || exportTenantId;
             fileNameSuffix = tenantName.replace(/\s+/g, '_');
         }

@@ -672,8 +672,9 @@ export const getProductsByTenant = async (
         if (abortSignal?.aborted) throw new Error("AbortError");
         let query = supabase
           .from("products")
-          .select("id, tenant_id, internal_code, barcode, name, active_principle, drug_type, manufacturer, presentation, price, original_price, stock, category, grouping_slug, variant_attribute, image, is_featured, requires_prescription, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage, video_uri, description, indications, usage, side_effects, contraindications, is_ai_enriched")
+          .select("id, tenant_id, internal_code, barcode, name, active_principle, drug_type, manufacturer, presentation, price, original_price, promotional_price, stock, category, grouping_slug, variant_attribute, image, is_featured, requires_prescription, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage, video_uri, description, indications, usage, side_effects, contraindications, is_ai_enriched")
           .eq("tenant_id", tenantId)
+          .order("id", { ascending: true })
           .range(from, from + step - 1);
         if (abortSignal) {
           query = query.abortSignal(abortSignal);
@@ -720,26 +721,25 @@ export const getProductsByTenant = async (
       return uniqueCached;
     }
 
-    // Performance Optimization: TTFB/FCP Fast Path
-    // If there is no cache, fetch a small optimized payload from the init endpoint instantly
-    try {
-      const initResponse = await fetch(`/api/v1/store/${encodeURIComponent(tenantId)}/init`, { signal: abortSignal });
-      if (initResponse.ok) {
-        const initJson = await initResponse.json();
-        if (initJson.products) {
-          const initialProducts = deduplicateProducts(initJson.products.map(mapDbProductToApp));
-          
-          // Fire the heavy fetch in the background to load the remaining 9600+ items
-          if (onUpdate) {
+    // Performance Optimization: TTFB/FCP Fast Path APENAS quando há callback onUpdate (renderização progressiva do storefront)
+    if (onUpdate) {
+      try {
+        const initResponse = await fetch(`/api/v1/store/${encodeURIComponent(tenantId)}/init`, { signal: abortSignal });
+        if (initResponse.ok) {
+          const initJson = await initResponse.json();
+          if (initJson.products) {
+            const initialProducts = deduplicateProducts(initJson.products.map(mapDbProductToApp));
+            
+            // Dispara a carga completa em segundo plano para carregar todos os milhares de itens
             retryRequest(fetchFromDb)
               .then(onUpdate)
               .catch((e) => console.error("Background full-fetch failed", e));
+            return initialProducts;
           }
-          return initialProducts;
         }
+      } catch(err) {
+        console.warn("Init fast-path failed, falling back to slow full load.");
       }
-    } catch(err) {
-      console.warn("Init fast-path failed, falling back to slow full load.");
     }
 
     return await retryRequest(fetchFromDb);
@@ -2024,18 +2024,48 @@ export const exportBackupData = async (
   format: "sql" | "csv",
 ) => {
   try {
-    const [tenantResult, productsResult, ordersResult, reviewsResult] =
+    // Helper para buscar todos os registros com paginação contínua
+    const fetchAllPaginated = async (tableName: string, sortCol: string = "id") => {
+      let results: any[] = [];
+      let from = 0;
+      const step = 1000;
+      while (true) {
+        const { data, error } = await supabase
+          .from(tableName)
+          .select("*")
+          .eq("tenant_id", tenantId)
+          .order(sortCol, { ascending: true })
+          .range(from, from + step - 1);
+        if (error) {
+          // Se falhar no order, tenta sem order
+          const fallback = await supabase
+            .from(tableName)
+            .select("*")
+            .eq("tenant_id", tenantId)
+            .range(from, from + step - 1);
+          if (fallback.error) break;
+          if (!fallback.data || fallback.data.length === 0) break;
+          results = results.concat(fallback.data);
+          if (fallback.data.length < step) break;
+        } else {
+          if (!data || data.length === 0) break;
+          results = results.concat(data);
+          if (data.length < step) break;
+        }
+        from += step;
+      }
+      return results;
+    };
+
+    const [tenantResult, products, orders, reviews] =
       await Promise.all([
         supabase.from("tenants").select("*").eq("id", tenantId).single(),
-        supabase.from("products").select("*").eq("tenant_id", tenantId),
-        supabase.from("orders").select("*").eq("tenant_id", tenantId),
-        supabase.from("app_reviews").select("*").eq("tenant_id", tenantId),
+        fetchAllPaginated("products", "id"),
+        fetchAllPaginated("orders", "id"),
+        fetchAllPaginated("app_reviews", "id"),
       ]);
 
     const tenantData = tenantResult.data;
-    const products = productsResult.data || [];
-    const orders = ordersResult.data || [];
-    const reviews = reviewsResult.data || [];
 
     if (format === "csv") {
       const data = products;
