@@ -62,7 +62,6 @@ import {
 import { saveAppReview, logSearch, getProductsByTenant } from "../services/storage";
 import { CouponBanner } from "./CouponBanner";
 import { toast } from "react-hot-toast";
-import { useWindowVirtualizer } from "@tanstack/react-virtual";
 import {
   getDepartmentForCategory,
   FALLBACK_DEPARTMENT,
@@ -74,9 +73,9 @@ const GENERIC_PLACEHOLDER = "https://i.imgur.com/fLz8F3X.png";
 
 /**
  * Utilitário para corrigir URLs de imagem (Mixed Content & Proxy)
- * Resolve o problema de links HTTP (inseguros) em ambiente HTTPS e portas não padrão.
+ * Otimizado para miniaturas leves (w=240, q=75 em WebP nativo)
  */
-const fixImageUrl = (url?: string, width: number = 400): string | null => {
+const fixImageUrl = (url?: string, width: number = 240): string | null => {
   if (!url || url === "IGNORE" || url === "PENDENTE_CURADORIA") return null;
   if (url.startsWith("data:")) return url;
 
@@ -92,10 +91,10 @@ const fixImageUrl = (url?: string, width: number = 400): string | null => {
 
   // Otimização de Imagem: Utilizamos o proxy Weserv.nl para:
   // 1. Garantir HTTPS (evitar Mixed Content)
-  // 2. Converter para WebP (muito mais leve)
-  // 3. Redimensionar se necessário (aqui mantemos original ou limitamos para performance)
+  // 2. Converter para WebP (muito mais leve e rápido)
+  // 3. Redimensionar para tamanho ideal com compressão equilibrada (w=240, q=75)
   // 4. Cache agressivo via CDN
-  const proxyUrl = `https://wsrv.nl/?url=${encodeURIComponent(url)}&output=webp&q=80&w=${width}&we&default=${encodeURIComponent(GENERIC_PLACEHOLDER)}`;
+  const proxyUrl = `https://wsrv.nl/?url=${encodeURIComponent(url)}&output=webp&q=75&w=${width}&we&default=${encodeURIComponent(GENERIC_PLACEHOLDER)}`;
   return proxyUrl;
 };
 
@@ -542,7 +541,7 @@ const ProductCard = React.memo(
     const [imgError, setImgError] = useState(false);
     const [isAdding, setIsAdding] = useState(false);
 
-    let displayImage = fixImageUrl(product.image);
+    let displayImage = fixImageUrl(product.image, 240);
     const isGeneric =
       product.drugType?.trim().toLowerCase() === "genérico" ||
       product.drugType?.trim().toLowerCase() === "generico";
@@ -555,7 +554,7 @@ const ProductCard = React.memo(
           )
         : null;
       if (mfgKey && tenant.manufacturerLogos?.[mfgKey]) {
-        displayImage = fixImageUrl(tenant.manufacturerLogos[mfgKey]);
+        displayImage = fixImageUrl(tenant.manufacturerLogos[mfgKey], 240);
       } else {
         displayImage = GENERIC_PLACEHOLDER;
       }
@@ -608,19 +607,9 @@ const ProductCard = React.memo(
       }, 500);
     };
 
-    const handleMouseEnter = () => {
-      // Pre-fetch high-res image on hover
-      if (displayImage && displayImage !== GENERIC_PLACEHOLDER) {
-        const highResUrl = displayImage.replace("w=400", "w=800");
-        const img = new Image();
-        img.src = highResUrl;
-      }
-    };
-
     return (
       <div
         className={`bg-white rounded-[1.5rem] md:rounded-[2rem] border border-gray-100 overflow-hidden shadow-sm hover:shadow-xl transition-all duration-300 flex flex-col group h-full ${isOutOfStock ? "opacity-80" : ""} ${!isCompact ? "w-full" : ""} ${isCompact ? "min-w-[140px] md:min-w-[180px]" : ""} ${product.isFeatured ? "ring-2 ring-yellow-400 ring-inset" : ""} ${(product as any)._justUpdated ? "ring-2 ring-orange-400 ring-inset scale-[1.02]" : ""}`}
-        onMouseEnter={handleMouseEnter}
       >
         <div
           className={`relative cursor-pointer flex items-center justify-center overflow-hidden bg-white ${isCompact ? "h-24 md:h-32 p-2" : "h-32 md:h-44 p-3"}`}
@@ -634,19 +623,16 @@ const ProductCard = React.memo(
           )}
 
           {displayImage && !imgError ? (
-            <picture>
-              <source srcSet={displayImage} type="image/webp" />
-              <img
-                src={displayImage.replace("&output=webp", "&output=jpeg")}
-                className="max-w-full max-h-full object-contain group-hover:scale-105 transition-transform duration-500"
-                alt={product.name}
-                onError={() => setImgError(true)}
-                loading={priority ? "eager" : "lazy"}
-                decoding="async"
-                fetchPriority={priority ? "high" : "auto"}
-                referrerPolicy="no-referrer"
-              />
-            </picture>
+            <img
+              src={displayImage}
+              className="max-w-full max-h-full object-contain group-hover:scale-105 transition-transform duration-300"
+              alt={product.name}
+              onError={() => setImgError(true)}
+              loading={priority ? "eager" : "lazy"}
+              decoding="async"
+              fetchPriority={priority ? "high" : "low"}
+              referrerPolicy="no-referrer"
+            />
           ) : (
             <div className="w-full h-full flex items-center justify-center bg-gray-50 rounded-2xl">
               <Package className="text-gray-200" size={24} />
@@ -1012,6 +998,8 @@ const SmartBanner: React.FC<{
           src={customImage}
           alt={`Banner ${currentTheme}`}
           className="w-full h-full object-cover"
+          loading="lazy"
+          decoding="async"
           referrerPolicy="no-referrer"
         />
       </div>
@@ -1173,10 +1161,13 @@ export const Storefront: React.FC<StorefrontProps> = ({
   onBack,
   onSearch,
 }) => {
+  const INITIAL_PAGE_SIZE = 24;
+  const BATCH_PAGE_SIZE = 24;
   const [isLoading, setIsLoading] = useState(true);
-  const [isTransitioning, setIsTransitioning] = useState(false);
   const [matrizProducts, setMatrizProducts] = useState<Product[]>([]);
-  const [visibleCount, setVisibleCount] = useState(42);
+  const [visibleCount, setVisibleCount] = useState(INITIAL_PAGE_SIZE);
+  const searchCache = useRef<Record<string, Product[]>>({});
+  const sentinelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (tenant?.networkId && tenant.networkId !== tenant.id) {
@@ -1227,7 +1218,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
 
   // Reset pagination when search or filters change to keep initial results fast
   useEffect(() => {
-    setVisibleCount(42);
+    setVisibleCount(INITIAL_PAGE_SIZE);
   }, [filters.termo_busca, filters.categoria, filters.departamento, filters.promocao_id, filters.cupom_id]);
 
   const selectedDepartment = filters.departamento || "Todos";
@@ -1362,7 +1353,6 @@ export const Storefront: React.FC<StorefrontProps> = ({
   }, []);
 
   const selectDepartment = (dept: string) => {
-    setIsTransitioning(true);
     searchCache.current = {};
     window.scrollTo({ top: 0, behavior: "instant" });
     setIsDrawerOpen(false);
@@ -1387,12 +1377,9 @@ export const Storefront: React.FC<StorefrontProps> = ({
       url.searchParams.set("dept_id", dept);
     }
     window.history.replaceState({}, "", url.toString());
-    setTimeout(() => setIsTransitioning(false), 300);
   };
 
   const selectDepartmentAndCategory = (dept: string, cat: string) => {
-    setIsTransitioning(true);
-    searchCache.current = {};
     window.scrollTo({ top: 0, behavior: "instant" });
     setIsDrawerOpen(false);
     setFilters({
@@ -1419,12 +1406,9 @@ export const Storefront: React.FC<StorefrontProps> = ({
       url.searchParams.set("category_id", cat);
     }
     window.history.replaceState({}, "", url.toString());
-    setTimeout(() => setIsTransitioning(false), 300);
   };
 
   const selectCategory = (cat: string) => {
-    setIsTransitioning(true);
-    searchCache.current = {};
     window.scrollTo({ top: 0, behavior: "instant" });
     setIsDrawerOpen(false);
     setFilters((prev) => ({
@@ -1446,12 +1430,9 @@ export const Storefront: React.FC<StorefrontProps> = ({
       url.searchParams.set("category_id", cat);
     }
     window.history.replaceState({}, "", url.toString());
-    setTimeout(() => setIsTransitioning(false), 300);
   };
 
   const selectPromotion = (promoId: string | null) => {
-    setIsTransitioning(true);
-    searchCache.current = {};
     window.scrollTo({ top: 0, behavior: "instant" });
     setIsDrawerOpen(false);
     setFilters((prev) => ({
@@ -1475,7 +1456,6 @@ export const Storefront: React.FC<StorefrontProps> = ({
     url.searchParams.delete("dept_id");
     url.searchParams.delete("cupom_id");
     window.history.replaceState({}, "", url.toString());
-    setTimeout(() => setIsTransitioning(false), 300);
   };
 
   const selectCoupon = (coupon: CouponRule) => {
@@ -1501,8 +1481,6 @@ export const Storefront: React.FC<StorefrontProps> = ({
   };
 
   const resetFilters = useCallback(() => {
-    setIsTransitioning(true);
-    searchCache.current = {};
     window.scrollTo({ top: 0, behavior: "instant" });
     setIsDrawerOpen(false);
 
@@ -1523,8 +1501,6 @@ export const Storefront: React.FC<StorefrontProps> = ({
     url.searchParams.delete("category_id");
     url.searchParams.delete("cupom_id");
     window.history.replaceState({}, "", url.toString());
-
-    setTimeout(() => setIsTransitioning(false), 300);
   }, []);
 
   useEffect(() => {
@@ -1661,9 +1637,6 @@ export const Storefront: React.FC<StorefrontProps> = ({
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [cartBounce, setCartBounce] = useState(false);
 
-  // Cache de busca para evitar re-processamento pesado
-  const searchCache = useRef<Record<string, Product[]>>({});
-
   // Track last search to prevent loops
   const lastSearchRef = useRef({ term: "", count: -1 });
 
@@ -1726,7 +1699,6 @@ export const Storefront: React.FC<StorefrontProps> = ({
     filters.cupom_id,
   ]);
 
-  const [columns, setColumns] = useState(2);
   const [isScrolled, setIsScrolled] = useState(false);
 
   useEffect(() => {
@@ -1745,19 +1717,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
   }, []);
 
   useEffect(() => {
-    const updateColumns = () => {
-      const w = window.innerWidth;
-      if (w >= 1536) setColumns(7);
-      else if (w >= 1280) setColumns(6);
-      else if (w >= 1024) setColumns(5);
-      else if (w >= 768) setColumns(4);
-      else if (w >= 640) setColumns(3);
-      else setColumns(2);
-    };
-    updateColumns();
-    window.addEventListener("resize", updateColumns);
-    setIsLoading(false); // Finished initial setup
-    return () => window.removeEventListener("resize", updateColumns);
+    setIsLoading(false);
   }, []);
 
   // ... (review state)
@@ -1793,27 +1753,55 @@ export const Storefront: React.FC<StorefrontProps> = ({
     return () => clearTimeout(timer);
   }, [products.length, activePromotions.length]);
 
-  const deptsWithPromos = useMemo(() => {
-    const set = new Set<string>();
-    products.forEach((p) => {
-      if (p.promotionType && p.promotionType !== "NONE") {
-        const d = getDepartmentForCategory(p.category, tenant.departments);
-        set.add(d);
+  // Cache category -> department to avoid repetitive heavy taxonomy evaluations
+  const categoryDeptMap = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const p of products) {
+      if (p.category && !map.has(p.category)) {
+        map.set(p.category, getDepartmentForCategory(p.category, tenant.departments));
       }
-    });
-    return set;
+    }
+    return map;
   }, [products, tenant.departments]);
 
-  const departments = useMemo(() => {
-    // 1. Group products by department
-    const deptSet = new Set<string>();
-    products.forEach((p) => {
-      const d = getDepartmentForCategory(p.category, tenant.departments);
-      deptSet.add(d);
-    });
+  const getFastDept = useCallback(
+    (cat: string) => {
+      if (!cat) return "Outros";
+      const cached = categoryDeptMap.get(cat);
+      if (cached) return cached;
+      return getDepartmentForCategory(cat, tenant.departments);
+    },
+    [categoryDeptMap, tenant.departments]
+  );
 
-    // 2. Sort: With promos first, then alphabetical
-    const sortedDepts = Array.from(deptSet).sort((a, b) => {
+  // Index products by department for O(1) instant filtering
+  const productsByDept = useMemo(() => {
+    const map = new Map<string, Product[]>();
+    for (const p of products) {
+      if (!p || typeof p.price !== "number" || p.price <= 0) continue;
+      const dept = getFastDept(p.category);
+      let list = map.get(dept);
+      if (!list) {
+        list = [];
+        map.set(dept, list);
+      }
+      list.push(p);
+    }
+    return map;
+  }, [products, getFastDept]);
+
+  const deptsWithPromos = useMemo(() => {
+    const set = new Set<string>();
+    for (const p of products) {
+      if (p.promotionType && p.promotionType !== "NONE") {
+        set.add(getFastDept(p.category));
+      }
+    }
+    return set;
+  }, [products, getFastDept]);
+
+  const departments = useMemo(() => {
+    const sortedDepts = Array.from(productsByDept.keys()).sort((a, b) => {
       const aPromo = deptsWithPromos.has(a);
       const bPromo = deptsWithPromos.has(b);
       if (aPromo && !bPromo) return -1;
@@ -1822,41 +1810,33 @@ export const Storefront: React.FC<StorefrontProps> = ({
     });
 
     return ["Todos", ...sortedDepts];
-  }, [products, tenant.departments, deptsWithPromos]);
+  }, [productsByDept, deptsWithPromos]);
 
   const allCategoriesByDept = useMemo(() => {
     const map = new Map<string, string[]>();
-    products.forEach((p) => {
-      const d = getDepartmentForCategory(p.category, tenant.departments);
+    for (const p of products) {
+      if (!p.category) continue;
+      const d = getFastDept(p.category);
       if (!map.has(d)) {
         map.set(d, []);
       }
-      if (!map.get(d)!.includes(p.category)) {
-        map.get(d)!.push(p.category);
+      const list = map.get(d)!;
+      if (!list.includes(p.category)) {
+        list.push(p.category);
       }
-    });
-    // Sort logic
+    }
     const sortedMap = new Map<string, string[]>();
     map.forEach((cats, dept) => {
       sortedMap.set(dept, cats.sort());
     });
     return sortedMap;
-  }, [products, tenant.departments]);
+  }, [products, getFastDept]);
 
   const subCategories = useMemo(() => {
     if (selectedDepartment === "Todos") return [];
-
-    const cats = new Set<string>();
-    products.forEach((p) => {
-      if (
-        getDepartmentForCategory(p.category, tenant.departments) ===
-        selectedDepartment
-      ) {
-        cats.add(p.category);
-      }
-    });
-    return ["Todos", ...Array.from(cats).sort()];
-  }, [products, selectedDepartment]);
+    const list = allCategoriesByDept.get(selectedDepartment) || [];
+    return ["Todos", ...list];
+  }, [allCategoriesByDept, selectedDepartment]);
 
   const promoTargetEans = useMemo(() => {
     if (!matrizProducts.length) return new Map<string, string[]>();
@@ -1917,22 +1897,18 @@ export const Storefront: React.FC<StorefrontProps> = ({
       processedTerm = TYPO_MAP[processedTerm];
     }
 
-    let sourceList = selectedPromotion
-      ? products.filter((p) => isProductInRule(selectedPromotion, p))
-      : products;
+    let sourceList: Product[];
+    if (selectedPromotion) {
+      sourceList = products.filter((p) => isProductInRule(selectedPromotion, p));
+    } else if (selectedDepartment !== "Todos" && !processedTerm) {
+      // O(1) Recuperação direta do índice departamental
+      sourceList = productsByDept.get(selectedDepartment) || [];
+    } else {
+      sourceList = products;
+    }
 
     // Strict rule: Never show products with zero, negative or missing prices
     sourceList = sourceList.filter(p => typeof p.price === 'number' && p.price > 0);
-
-    // Cache department mappings for O(1) lookups during the filtering loop
-    const deptCache: Record<string, string> = {};
-    const getDeptCached = (cat: string) => {
-      if (!cat) return "Outros";
-      if (deptCache[cat] !== undefined) return deptCache[cat];
-      const dept = getDepartmentForCategory(cat, tenant.departments);
-      deptCache[cat] = dept;
-      return dept;
-    };
 
     const getPromoPriority = (p: Product) => {
       if (p.promotionType && p.promotionType !== "NONE") {
@@ -2072,7 +2048,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
         // 3. Department and Category filter checks (fail fast using Cached O(1) lookup)
         const matchesDepartment =
           selectedDepartment === "Todos" ||
-          getDeptCached(p.category) === selectedDepartment;
+          getFastDept(p.category) === selectedDepartment;
         if (!matchesDepartment) return null;
 
         const matchesCategory =
@@ -2446,17 +2422,14 @@ export const Storefront: React.FC<StorefrontProps> = ({
     activePromotions,
     activeCouponFilter,
     isProductInRule,
+    productsByDept,
+    getFastDept,
+    searchFallback,
   ]);
 
   const paginatedProducts = useMemo(() => {
     return filteredProducts.slice(0, visibleCount);
   }, [filteredProducts, visibleCount]);
-
-  const rowVirtualizer = useWindowVirtualizer({
-    count: Math.ceil(paginatedProducts.length / columns),
-    estimateSize: () => 380, // Estimated height of ProductCard + gap
-    overscan: 3,
-  });
 
   const crossSellSuggestions = useMemo(() => {
     if (products.length === 0) return [];
@@ -2744,7 +2717,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
       }));
   }, [debouncedSearchTerm, products, activePromotions]);
 
-  const handleAddToCartWrapper = (product: Product) => {
+  const handleAddToCartWrapper = useCallback((product: Product) => {
     onAddToCart(product, false, false);
     setToastMessage("Produto adicionado ao carrinho!");
     setCartBounce(true);
@@ -2754,15 +2727,25 @@ export const Storefront: React.FC<StorefrontProps> = ({
     setTimeout(() => {
       setCartBounce(false);
     }, 300);
-  };
+  }, [onAddToCart]);
 
-  const handleNotifyMe = (product: Product) => {
+  const handleNotifyMe = useCallback((product: Product) => {
     const msg = `Olá, gostaria de ser avisado quando o produto "${product.name}" estiver disponível novamente.`;
     window.open(
       `https://wa.me/55${tenant.whatsapp}?text=${encodeURIComponent(msg)}`,
       "_blank",
     );
-  };
+  }, [tenant.whatsapp]);
+
+  const handleCardAddToCart = useCallback((e: any, p: Product) => {
+    e?.stopPropagation?.();
+    handleAddToCartWrapper(p);
+  }, [handleAddToCartWrapper]);
+
+  const handleCardNotify = useCallback((e: any, p: Product) => {
+    e?.stopPropagation?.();
+    handleNotifyMe(p);
+  }, [handleNotifyMe]);
 
   const handleSubmitReview = async () => {
     if (reviewRating === 0)
@@ -2934,10 +2917,11 @@ export const Storefront: React.FC<StorefrontProps> = ({
                               className="p-3 md:p-5 hover:bg-gray-50 cursor-pointer flex items-center gap-3 md:gap-5 transition-colors group border-b border-gray-50 last:border-none"
                             >
                               <div className="w-12 h-12 md:w-14 md:h-14 rounded-xl md:rounded-2xl bg-gray-100 overflow-hidden flex-shrink-0 flex items-center justify-center border border-gray-200">
-                                {fixImageUrl(p.image) ? (
+                                {fixImageUrl(p.image, 100) ? (
                                   <img
-                                    src={fixImageUrl(p.image)!}
+                                    src={fixImageUrl(p.image, 100)!}
                                     loading="lazy"
+                                    decoding="async"
                                     className="w-full h-full object-cover"
                                     referrerPolicy="no-referrer"
                                   />
@@ -3465,7 +3449,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
             </div>
           )}
 
-        {isLoading || isTransitioning ? (
+        {isLoading ? (
           <div className="py-32 text-center text-gray-500 font-black animate-pulse flex flex-col items-center justify-center gap-4">
             <div
               className="w-8 h-8 border-4 border-gray-200 border-t-brand rounded-full animate-spin"
@@ -3495,65 +3479,31 @@ export const Storefront: React.FC<StorefrontProps> = ({
           </div>
         ) : (
           <>
-            <div
-              style={{
-                height: `${rowVirtualizer.getTotalSize()}px`,
-                width: "100%",
-                position: "relative",
-              }}
-            >
-              {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-                const startIndex = virtualRow.index * columns;
-                const rowProducts = paginatedProducts.slice(
-                  startIndex,
-                  startIndex + columns,
-                );
-
-                return (
-                  <div
-                    key={virtualRow.index}
-                    ref={rowVirtualizer.measureElement}
-                    data-index={virtualRow.index}
-                    style={{
-                      position: "absolute",
-                      top: 0,
-                      left: 0,
-                      width: "100%",
-                      transform: `translateY(${virtualRow.start}px)`,
-                    }}
-                    className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7 gap-5 md:gap-8 pb-5 md:pb-8"
-                  >
-                    {rowProducts.map((p, colIndex) => {
-                      const globalIndex = startIndex + colIndex;
-                      return (
-                        <ProductCard
-                          key={p.id}
-                          product={p}
-                          tenant={tenant}
-                          promotions={activePromotions}
-                          cartItems={cartItems}
-                          onProductClick={onProductClick}
-                          isProductInRule={isProductInRule}
-                          onAddToCart={(e, p) => {
-                            e.stopPropagation();
-                            handleAddToCartWrapper(p);
-                          }}
-                          onNotify={(e, p) => {
-                            e.stopPropagation();
-                            handleNotifyMe(p);
-                          }}
-                          priority={globalIndex < 6}
-                        />
-                      );
-                    })}
-                  </div>
-                );
-              })}
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7 gap-5 md:gap-8 pb-5 md:pb-8">
+              {paginatedProducts.map((p, index) => (
+                <ProductCard
+                  key={p.id}
+                  product={p}
+                  tenant={tenant}
+                  promotions={activePromotions}
+                  cartItems={cartItems}
+                  onProductClick={onProductClick}
+                  isProductInRule={isProductInRule}
+                  onAddToCart={handleCardAddToCart}
+                  onNotify={handleCardNotify}
+                  priority={index < 6}
+                />
+              ))}
             </div>
+
+            {/* Sentinela de Infinite Scroll nativo */}
+            {filteredProducts.length > visibleCount && (
+              <div ref={sentinelRef} className="w-full h-10 flex items-center justify-center my-2" />
+            )}
 
             {/* Controle de Paginação/Carregamento em Lotes por Demanda */}
             {filteredProducts.length > visibleCount && (
-              <div className="flex flex-col items-center justify-center mt-12 mb-6 gap-4 animate-in fade-in duration-300">
+              <div className="flex flex-col items-center justify-center mt-8 mb-6 gap-4 animate-in fade-in duration-300">
                 <p className="text-sm font-semibold text-gray-500">
                   Exibindo <span className="font-extrabold text-gray-800">{Math.min(visibleCount, filteredProducts.length)}</span> de <span className="font-extrabold text-gray-800">{filteredProducts.length}</span> produtos
                 </p>
@@ -3564,7 +3514,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
                   />
                 </div>
                 <button
-                  onClick={() => setVisibleCount(prev => Math.min(filteredProducts.length, prev + 42))}
+                  onClick={() => setVisibleCount((prev) => Math.min(filteredProducts.length, prev + BATCH_PAGE_SIZE))}
                   className="px-8 py-3.5 bg-emerald-600 text-white hover:bg-emerald-700 active:scale-95 transition-all rounded-full font-black uppercase tracking-widest text-xs shadow-lg cursor-pointer flex items-center gap-2 border border-transparent"
                 >
                   Carregar Mais Produtos
@@ -3602,14 +3552,8 @@ export const Storefront: React.FC<StorefrontProps> = ({
                   cartItems={cartItems}
                   onProductClick={onProductClick}
                   isProductInRule={isProductInRule}
-                  onAddToCart={(e, p) => {
-                    e.stopPropagation();
-                    handleAddToCartWrapper(p);
-                  }}
-                  onNotify={(e, p) => {
-                    e.stopPropagation();
-                    handleNotifyMe(p);
-                  }}
+                  onAddToCart={handleCardAddToCart}
+                  onNotify={handleCardNotify}
                   isCompact={true}
                 />
               ))}
