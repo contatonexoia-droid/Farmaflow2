@@ -22,6 +22,17 @@
       ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
     </style>
     <script>
+      (function() {
+        try {
+          var p = window.location.pathname || '';
+          if (p.startsWith('/admin') || p.startsWith('/login')) {
+            var ml = document.getElementById('manifest-link');
+            if (ml) {
+              ml.href = '/manifest.json?context=admin';
+            }
+          }
+        } catch (e) {}
+      })();
       window.deferredPWAInstallPrompt = null;
       window.addEventListener('beforeinstallprompt', (e) => {
         e.preventDefault();

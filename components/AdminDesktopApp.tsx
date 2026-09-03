@@ -80,6 +80,13 @@ export const AdminDesktopApp: React.FC<AdminDesktopAppProps> = ({ tenant }) => {
       setBrowser("Outro");
     }
 
+    // 5. Garantir que no contexto administrativo o link do manifesto PWA esteja com context=admin
+    const targetHref = `/api/v1/manifest/${tenant.id || "admin"}?context=admin`;
+    const manifestLink = document.getElementById("manifest-link") as HTMLLinkElement | null;
+    if (manifestLink && manifestLink.getAttribute("href") !== targetHref) {
+      manifestLink.href = targetHref;
+    }
+
     return () => {
       window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
       window.removeEventListener("pwa-prompt-ready", handleCustomPromptReady);
@@ -88,6 +95,13 @@ export const AdminDesktopApp: React.FC<AdminDesktopAppProps> = ({ tenant }) => {
   }, [tenant.id]);
 
   const handleInstallClick = async () => {
+    // Revalidar manifesto antes do prompt
+    const targetHref = `/api/v1/manifest/${tenant.id || "admin"}?context=admin`;
+    const manifestLink = document.getElementById("manifest-link") as HTMLLinkElement | null;
+    if (manifestLink && manifestLink.getAttribute("href") !== targetHref) {
+      manifestLink.href = targetHref;
+    }
+
     if (!deferredPrompt) {
       // If the automatic prompt is not available, scroll down to the manual steps
       const element = document.getElementById("manual-steps");

@@ -328,9 +328,12 @@ app.get("/sw.js", (req, res) => {
 });
 
 // Dynamic PWA manifest route to prevent collisions of multiple shops on the same domain
+// and differentiate between Customer Storefront (Loja Online) and Merchant Admin Panel (Painel de Gestão)
 app.get(["/api/v1/manifest/:tenantId", "/manifest.json"], async (req, res) => {
   try {
-    const tenantQueryValue = req.params.tenantId;
+    const rawParam = req.params.tenantId;
+    const rawQueryTenant = (req.query.tenant as string) || (req.query.tenantId as string) || (req.query.p as string);
+    const tenantQueryValue = (rawParam && rawParam !== "admin" && rawParam !== "default") ? rawParam : rawQueryTenant;
     let tenantData: any = null;
 
     if (typeof tenantQueryValue === "string") {
@@ -351,12 +354,63 @@ app.get(["/api/v1/manifest/:tenantId", "/manifest.json"], async (req, res) => {
       }
     }
 
+    // Determine if request comes from administrative context (Lojista / Painel Gestão)
+    const isExplicitAdmin = 
+      req.query.context === "admin" || 
+      req.query.mode === "admin" || 
+      req.query.admin === "true" || 
+      req.query.scope === "admin" ||
+      rawParam === "admin";
+
+    const referer = ((req.headers.referer || req.headers.referrer || "") as string).toLowerCase();
+    const isRefererAdmin = Boolean(
+      referer && (referer.includes("/admin") || referer.includes("/login"))
+    );
+
+    const isAdmin = Boolean(isExplicitAdmin || isRefererAdmin);
+
     const name = tenantData?.name || "FarmaFlow AI";
-    const primaryColor = tenantData?.primary_color || tenantData?.primarycolor || "#3B82F6";
+    const primaryColor = tenantData?.primary_color || tenantData?.primarycolor || "#059669";
     const segment = tenantData?.slug || tenantData?.id || "default";
 
     res.setHeader("Content-Type", "application/manifest+json");
     res.setHeader("Cache-Control", "public, max-age=60, s-maxage=300, stale-while-revalidate=600");
+
+    if (isAdmin) {
+      // --- MANIFESTO ADMINISTRATIVO (Lojista / Gestão / Retaguarda / Caixa) ---
+      const adminName = tenantData?.name ? `${tenantData.name} - Gestão` : "FarmaFlow Gestão";
+      const adminShortName = tenantData?.name ? `${tenantData.name.slice(0, 12)} Gestão` : "Painel Gestão";
+      const adminStartUrl = segment !== "default" ? `/admin?tenant=${segment}` : "/admin";
+      const adminId = segment !== "default" ? `/admin/${segment}` : "/admin";
+
+      return res.json({
+        id: adminId,
+        name: adminName,
+        short_name: adminShortName,
+        description: `Painel de Gestão e Administração da ${tenantData?.name || "Farmácia"} - FarmaFlow`,
+        start_url: adminStartUrl,
+        scope: "/",
+        display: "standalone",
+        background_color: "#f8fafc",
+        theme_color: primaryColor,
+        icons: [
+          {
+            src: tenantData?.logo || "/icon-192.svg",
+            sizes: "192x192",
+            type: tenantData?.logo?.endsWith(".svg") ? "image/svg+xml" : "image/png",
+            purpose: "any maskable"
+          },
+          {
+            src: tenantData?.logo || "/icon-512.svg",
+            sizes: "512x512",
+            type: tenantData?.logo?.endsWith(".svg") ? "image/svg+xml" : "image/png",
+            purpose: "any maskable"
+          }
+        ]
+      });
+    }
+
+    // --- MANIFESTO DO CLIENTE FINAL (Loja Online / Vitrine de Compras) ---
     res.json({
       id: segment === "default" ? "/?tenant=default" : `/loja/${segment}/`,
       name: name,
@@ -383,11 +437,50 @@ app.get(["/api/v1/manifest/:tenantId", "/manifest.json"], async (req, res) => {
       ]
     });
   } catch (err: any) {
+    const rawParam = req.params.tenantId;
+    const isExplicitAdmin = 
+      req.query.context === "admin" || 
+      req.query.mode === "admin" || 
+      req.query.admin === "true" || 
+      rawParam === "admin";
+    const referer = ((req.headers.referer || req.headers.referrer || "") as string).toLowerCase();
+    const isRefererAdmin = Boolean(
+      referer && (referer.includes("/admin") || referer.includes("/login"))
+    );
+    const isAdmin = Boolean(isExplicitAdmin || isRefererAdmin);
+
     res.setHeader("Content-Type", "application/manifest+json");
+    if (isAdmin) {
+      return res.json({
+        id: "/admin",
+        name: "FarmaFlow Gestão",
+        short_name: "Painel Gestão",
+        description: "Painel de Gestão e Administração FarmaFlow",
+        start_url: "/admin",
+        scope: "/",
+        display: "standalone",
+        background_color: "#f8fafc",
+        theme_color: "#059669",
+        icons: [
+          {
+            src: "/icon-192.svg",
+            sizes: "192x192",
+            type: "image/svg+xml"
+          },
+          {
+            src: "/icon-512.svg",
+            sizes: "512x512",
+            type: "image/svg+xml"
+          }
+        ]
+      });
+    }
+
     res.json({
       id: "/?tenant=default",
       name: "FarmaFlow AI",
       short_name: "FarmaFlow",
+      description: "Plataforma de Farmácias Online",
       start_url: "/",
       scope: "/",
       display: "standalone",
@@ -397,6 +490,11 @@ app.get(["/api/v1/manifest/:tenantId", "/manifest.json"], async (req, res) => {
         {
           src: "/icon-192.svg",
           sizes: "192x192",
+          type: "image/svg+xml"
+        },
+        {
+          src: "/icon-512.svg",
+          sizes: "512x512",
           type: "image/svg+xml"
         }
       ]

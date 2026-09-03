@@ -807,13 +807,46 @@ const App: React.FC = () => {
 
   // --- DYNAMIC MANIFEST UPDATE ---
   useEffect(() => {
-    if (currentTenant) {
-      const manifestLink = document.getElementById("manifest-link") as HTMLLinkElement;
-      if (manifestLink) {
-        manifestLink.href = `/api/v1/manifest/${currentTenant.id}`;
+    // Detecta se o usuário está no contexto administrativo/gestão ou vitrine do cliente
+    const isAdminContext =
+      view === ViewMode.ADMIN_PHARMACY ||
+      view === ViewMode.ADMIN_SUPER ||
+      view === ViewMode.LOGIN ||
+      session.type === "PHARMACY_ADMIN" ||
+      session.type === "SUPER_ADMIN" ||
+      window.location.pathname.startsWith("/admin") ||
+      window.location.pathname.startsWith("/login");
+
+    const tenantId =
+      currentTenant?.id ||
+      (session.type === "PHARMACY_ADMIN" ? session.tenantId : null) ||
+      "default";
+
+    const targetHref = isAdminContext
+      ? `/api/v1/manifest/${tenantId}?context=admin`
+      : tenantId !== "default"
+        ? `/api/v1/manifest/${tenantId}`
+        : `/manifest.json`;
+
+    // Atualiza dinamicamente o link do manifesto no <head> recriando o elemento para forçar reavaliação nos navegadores
+    const existingLink = document.getElementById("manifest-link") as HTMLLinkElement | null;
+    if (existingLink) {
+      if (existingLink.getAttribute("href") !== targetHref) {
+        existingLink.remove();
+        const newLink = document.createElement("link");
+        newLink.id = "manifest-link";
+        newLink.rel = "manifest";
+        newLink.href = targetHref;
+        document.head.appendChild(newLink);
       }
+    } else {
+      const newLink = document.createElement("link");
+      newLink.id = "manifest-link";
+      newLink.rel = "manifest";
+      newLink.href = targetHref;
+      document.head.appendChild(newLink);
     }
-  }, [currentTenant?.id]);
+  }, [currentTenant?.id, view, session.type, (session as any).tenantId]);
 
   // --- PWA INSTALL TRACKING ---
   useEffect(() => {
@@ -2309,9 +2342,9 @@ const App: React.FC = () => {
             }) || null;
         }
 
-        // 3º: Como fallback, tenta obter pelo parâmetro de URL "?p"
+        // 3º: Como fallback, tenta obter pelo parâmetro de URL "?p" ou "?tenant"
         const params = new URLSearchParams(window.location.search);
-        const pParam = params.get("p");
+        const pParam = params.get("p") || params.get("tenant");
 
         if (!targetTenant && pParam) {
           const tenants = await getTenants();
@@ -2356,6 +2389,44 @@ const App: React.FC = () => {
             : targetTenant.id;
           sessionStorage.setItem("farmaflow_current_slug", cleanSlug);
           setCurrentTenant(targetTenant);
+
+          const pathParam = window.location.pathname.replace(/^\//, "");
+          const isAdminRoute =
+            path === "/admin" ||
+            path.startsWith("/admin/") ||
+            pathParam === "admin" ||
+            pathParam.startsWith("admin/");
+          const isLoginRoute =
+            path === "/login" ||
+            path.startsWith("/login/") ||
+            pathParam === "login" ||
+            pathParam.startsWith("login/");
+
+          if (isAdminRoute || isLoginRoute) {
+            if (isLoginRoute || session.type === "GUEST") {
+              setView(ViewMode.LOGIN);
+              window.history.replaceState({ view: ViewMode.LOGIN, adminTab }, "");
+            } else if (session.type === "SUPER_ADMIN") {
+              setView(ViewMode.ADMIN_SUPER);
+              window.history.replaceState({ view: ViewMode.ADMIN_SUPER, adminTab }, "");
+            } else if (session.type === "PHARMACY_ADMIN") {
+              const [prods, ords, promos, coups] = await Promise.all([
+                getProductsByTenant(targetTenant.id, setProducts),
+                getOrdersByTenant(targetTenant.id),
+                getPromotionsByTenant(targetTenant.id, targetTenant.networkId),
+                getCouponsByTenant(targetTenant.id, targetTenant.networkId),
+              ]);
+              setProducts(prods);
+              setOrders(ords);
+              setPromotions(promos);
+              setCoupons(coups);
+              setView(ViewMode.ADMIN_PHARMACY);
+              window.history.replaceState({ view: ViewMode.ADMIN_PHARMACY, adminTab }, "");
+            }
+            setIsLoading(false);
+            return;
+          }
+
           setView(ViewMode.CATALOG);
 
           const [prods, promos, coups] = await Promise.all([
@@ -2437,6 +2508,44 @@ const App: React.FC = () => {
             );
           });
           if (tenant) {
+            const currentPathParam = window.location.pathname.replace(/^\//, "");
+            const isAdminRoute =
+              path === "/admin" ||
+              path.startsWith("/admin/") ||
+              currentPathParam === "admin" ||
+              currentPathParam.startsWith("admin/");
+            const isLoginRoute =
+              path === "/login" ||
+              path.startsWith("/login/") ||
+              currentPathParam === "login" ||
+              currentPathParam.startsWith("login/");
+
+            if (isAdminRoute || isLoginRoute) {
+              setCurrentTenant(tenant);
+              if (isLoginRoute || session.type === "GUEST") {
+                setView(ViewMode.LOGIN);
+                window.history.replaceState({ view: ViewMode.LOGIN, adminTab }, "");
+              } else if (session.type === "SUPER_ADMIN") {
+                setView(ViewMode.ADMIN_SUPER);
+                window.history.replaceState({ view: ViewMode.ADMIN_SUPER, adminTab }, "");
+              } else if (session.type === "PHARMACY_ADMIN") {
+                const [prods, ords, promos, coups] = await Promise.all([
+                  getProductsByTenant(tenant.id, setProducts),
+                  getOrdersByTenant(tenant.id),
+                  getPromotionsByTenant(tenant.id, tenant.networkId),
+                  getCouponsByTenant(tenant.id, tenant.networkId),
+                ]);
+                setProducts(prods);
+                setOrders(ords);
+                setPromotions(promos);
+                setCoupons(coups);
+                setView(ViewMode.ADMIN_PHARMACY);
+                window.history.replaceState({ view: ViewMode.ADMIN_PHARMACY, adminTab }, "");
+              }
+              setIsLoading(false);
+              return;
+            }
+
             setCurrentTenant(tenant);
             setView(ViewMode.CATALOG);
 
@@ -2505,9 +2614,71 @@ const App: React.FC = () => {
           tenantIdentifier = currentTenant.id;
         }
 
-        if (pathParam === "login" || tenantIdentifier === "login") {
-          setView(ViewMode.LOGIN);
-          window.history.replaceState({ view: ViewMode.LOGIN, adminTab }, "");
+        const isAdminPath =
+          pathParam === "admin" ||
+          pathParam.startsWith("admin/") ||
+          path === "/admin" ||
+          path.startsWith("/admin/");
+        const isLoginPath =
+          pathParam === "login" ||
+          pathParam.startsWith("login/") ||
+          path === "/login" ||
+          path.startsWith("/login/");
+
+        if (isAdminPath || isLoginPath) {
+          const tParam = params.get("tenant") || params.get("p");
+          let adminTenant = currentTenant;
+          if (!adminTenant && (tParam || session.type === "PHARMACY_ADMIN")) {
+            const tenants = await getTenants();
+            const searchId = tParam || (session.type === "PHARMACY_ADMIN" ? session.tenantId : null);
+            if (searchId) {
+              adminTenant = tenants.find((t) => {
+                const cleanSlug = t.slug
+                  ? t.slug
+                      .toLowerCase()
+                      .normalize("NFD")
+                      .replace(/[\u0300-\u036f]/g, "")
+                      .replace(/[^a-z0-9\s-]/g, "")
+                      .trim()
+                      .replace(/\s+/g, "-")
+                  : "";
+                return (
+                  t.id === searchId ||
+                  t.slug === searchId ||
+                  cleanSlug === searchId
+                );
+              }) || null;
+              if (adminTenant) {
+                setCurrentTenant(adminTenant);
+              }
+            }
+          }
+
+          if (isLoginPath || session.type === "GUEST") {
+            setView(ViewMode.LOGIN);
+            window.history.replaceState({ view: ViewMode.LOGIN, adminTab }, "");
+          } else if (session.type === "SUPER_ADMIN") {
+            setView(ViewMode.ADMIN_SUPER);
+            window.history.replaceState({ view: ViewMode.ADMIN_SUPER, adminTab }, "");
+          } else if (session.type === "PHARMACY_ADMIN") {
+            const targetId = adminTenant?.id || session.tenantId;
+            if (targetId) {
+              const [prods, ords, promos, coups] = await Promise.all([
+                getProductsByTenant(targetId, setProducts),
+                getOrdersByTenant(targetId),
+                getPromotionsByTenant(targetId, adminTenant?.networkId),
+                getCouponsByTenant(targetId, adminTenant?.networkId),
+              ]);
+              setProducts(prods);
+              setOrders(ords);
+              setPromotions(promos);
+              setCoupons(coups);
+            }
+            setView(ViewMode.ADMIN_PHARMACY);
+            window.history.replaceState({ view: ViewMode.ADMIN_PHARMACY, adminTab }, "");
+          }
+          setIsLoading(false);
+          return;
         } else if (tenantIdentifier && tenantIdentifier !== "") {
           const tenants = await getTenants();
           const tenant = tenants.find((t) => {
