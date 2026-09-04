@@ -2093,19 +2093,27 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
         const importedProducts: Product[] = [];
         
         const productsByEan = new Map<string, Product>();
+        const productsByCode = new Map<string, Product>();
         
         products.forEach(p => {
             if (p.barcode && String(p.barcode).trim() !== '') {
                 productsByEan.set(String(p.barcode).trim(), p);
             }
+            if (p.internalCode && String(p.internalCode).trim() !== '') {
+                productsByCode.set(String(p.internalCode).trim().toLowerCase(), p);
+            }
         });
 
         const newProductsByEan = new Map<string, Product>();
+        const newProductsByCode = new Map<string, Product>();
 
         let countUpdated = 0;
         let countCreated = 0;
         let countNoChange = 0;
         let countPromotional = 0;
+        let countEmptyRows = 0;
+        let countDuplicatesMerged = 0;
+        const ignoredDetails: { linha: number; motivo: string; item: string; codigo: string; ean: string }[] = [];
 
         let trackedDepartments = tenant.departments ? JSON.parse(JSON.stringify(tenant.departments)) : [];
         let departmentsChanged = false;
@@ -2191,7 +2199,17 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
             const getVal = (keys: string[]) => getValFromRow(row, keys);
 
             const name = getVal(['Nome', 'Produto', 'Descricao', 'NOME_PRODUTO', 'Nome produto']);
-            if (!name) continue;
+            if (!name || String(name).trim() === '') {
+                countEmptyRows++;
+                ignoredDetails.push({
+                    linha: i + 2,
+                    motivo: 'Linha vazia ou sem nome de produto',
+                    item: 'N/A',
+                    codigo: 'N/A',
+                    ean: 'N/A'
+                });
+                continue;
+            }
 
             const rawCode = getVal(['Código', 'Codigo', 'Cod', 'REF', 'ID', 'Código Interno', 'Codigo Interno', 'COD_INTERNO', 'referencia', 'ref.']);
             const rawEan = getVal(['ean', 'ean_barras', 'barcode', 'codigo_de_barras', 'codigo barras', 'cod barras', 'EAN', 'Barras', 'CodigoBarras', 'EAN_BARRAS']);
@@ -2207,31 +2225,47 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
             if (ean.includes('.')) {
                 ean = ean.split('.')[0];
             }
-            console.log("[FarmaFlow Debug] EAN Processado da Planilha:", ean);
 
-            // Validação de EAN: O EAN é a chave OBRIGATÓRIA de cruzamento e identificação
-            if (!ean || ean.trim() === '') {
-                audit.push({ 
-                    name: String(name), 
-                    code: code || '', 
-                    status: 'no-change', 
-                    details: "Pulado: Código de barras (EAN) ausente. O EAN é a chave obrigatória de identificação." 
-                });
-                continue;
-            }
-            
             const cleanEan = String(ean).trim();
+            const cleanCode = code ? String(code).trim() : '';
             let existingProduct: Product | undefined = undefined;
             let isNewProductUpdate = false;
             
-            // Cruzamento EXCLUSIVAMENTE por EAN (Código de Barras)
-            existingProduct = productsByEan.get(cleanEan);
-            if (existingProduct) {
-                // Encontrado por EAN
-            } else {
-                existingProduct = newProductsByEan.get(cleanEan);
-                if (existingProduct) {
-                    isNewProductUpdate = true;
+            // Cruzamento inteligente: prioritário por EAN, com fallback abrangente por Código Interno
+            if (cleanEan) {
+                existingProduct = productsByEan.get(cleanEan);
+                if (!existingProduct) {
+                    existingProduct = newProductsByEan.get(cleanEan);
+                    if (existingProduct) {
+                        isNewProductUpdate = true;
+                        countDuplicatesMerged++;
+                        ignoredDetails.push({
+                            linha: i + 2,
+                            motivo: 'Código de barras duplicado na planilha (dados mesclados com a ocorrência anterior)',
+                            item: String(name),
+                            codigo: cleanCode || 'N/A',
+                            ean: cleanEan
+                        });
+                    }
+                }
+            }
+            
+            // Fallback por Código Interno se não encontrado por EAN
+            if (!existingProduct && cleanCode) {
+                existingProduct = productsByCode.get(cleanCode.toLowerCase());
+                if (!existingProduct) {
+                    existingProduct = newProductsByCode.get(cleanCode.toLowerCase());
+                    if (existingProduct) {
+                        isNewProductUpdate = true;
+                        countDuplicatesMerged++;
+                        ignoredDetails.push({
+                            linha: i + 2,
+                            motivo: 'Código interno duplicado na planilha (dados mesclados com a ocorrência anterior)',
+                            item: String(name),
+                            codigo: cleanCode,
+                            ean: cleanEan || 'Sem EAN'
+                        });
+                    }
                 }
             }
 
@@ -2526,6 +2560,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                 newProducts.push(productData);
                 importedProducts.push(productData);
                 if (productData.barcode) newProductsByEan.set(productData.barcode, productData);
+                if (productData.internalCode) newProductsByCode.set(productData.internalCode.toLowerCase(), productData);
                 countCreated++;
 
                 audit.push({ name: String(name), code: String(productData.internalCode || productData.barcode), status: 'created', details: `Novo item cadastrado (${rowStock} un.)` });
@@ -2574,11 +2609,201 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
             }
         }
         
+        if (departmentsChanged) {
+            await onTenantUpdate({ ...tenant, departments: trackedDepartments });
+        }
+
+        // Lógica de Persistência em Lote no Banco de Dados (Supabase via API Bulk com fallback resiliente)
+        let totalSavedInDb = 0;
+        let totalFailedInDb = 0;
+        const dbFailures: { name?: string; barcode?: string; code?: string; reason?: string }[] = [];
+
+        try {
+            const CHUNK_SIZE = 250;
+            const itemsToPersist = finalProducts.map(p => {
+                const rawPromo = (p as any).promotional_price !== undefined && (p as any).promotional_price !== null
+                    ? (p as any).promotional_price
+                    : p.promotionalPrice;
+                const numPromo = rawPromo !== '' && rawPromo !== null && rawPromo !== undefined ? Number(rawPromo) : NaN;
+                
+                return {
+                    id: p.id,
+                    tenant_id: tenant.id,
+                    barcode: (p.barcode && String(p.barcode).trim() !== '') ? String(p.barcode).trim() : null,
+                    internal_code: p.internalCode || null,
+                    name: p.name,
+                    price: Number(p.price) || 0,
+                    stock: Number(p.stock) || 0,
+                    category: p.category || 'Geral',
+                    manufacturer: p.manufacturer || 'Outros',
+                    active_principle: p.activePrinciple || '',
+                    drug_type: p.drugType || '',
+                    presentation: p.presentation || '',
+                    image: p.image || null,
+                    description: p.description || '',
+                    indications: p.indications || '',
+                    original_price: Number(p.originalPrice) || 0,
+                    promotional_price: !isNaN(numPromo) && numPromo > 0 ? numPromo : null,
+                    promotion_type: p.promotionType || 'NONE',
+                    buy_x: Number(p.buyX) || 0,
+                    pay_y: Number(p.payY) || 0,
+                    requires_prescription: Boolean(p.requires_prescription)
+                };
+            });
+
+            for (let i = 0; i < itemsToPersist.length; i += CHUNK_SIZE) {
+                const chunk = itemsToPersist.slice(i, i + CHUNK_SIZE);
+                const currentPct = Math.round(50 + ((i + chunk.length) / itemsToPersist.length) * 45);
+                setImportProgress(currentPct);
+
+                try {
+                    const token = (await supabase.auth.getSession()).data.session?.access_token;
+                    const res = await fetch(`/api/v1/tenants/${tenant.id}/products/bulk`, {
+                        method: "PUT",
+                        headers: {
+                            "Content-Type": "application/json",
+                            ...(token ? { Authorization: `Bearer ${token}` } : {})
+                        },
+                        body: JSON.stringify({ products: chunk })
+                    });
+
+                    if (res.ok) {
+                        const data = await res.json();
+                        totalSavedInDb += (data.savedCount || chunk.length);
+                        if (data.failedCount > 0 && Array.isArray(data.failedDetails)) {
+                            totalFailedInDb += data.failedCount;
+                            dbFailures.push(...data.failedDetails);
+                        }
+                    } else {
+                        console.info(`[FarmaFlow Import] Endpoint bulk retornou ${res.status}, acionando sincronização direta com resolução de conflitos...`);
+                        
+                        const is23505 = (err: any) => {
+                            if (!err) return false;
+                            return err.code === '23505' ||
+                                   String(err.message || '').includes('23505') ||
+                                   String(err.message || '').includes('unique constraint') ||
+                                   String(err.details || '').includes('already exists');
+                        };
+
+                        const { error: upsertErr } = await supabase.from('products').upsert(chunk, { onConflict: 'id', ignoreDuplicates: false });
+                        if (!upsertErr) {
+                            totalSavedInDb += chunk.length;
+                        } else {
+                            if (!is23505(upsertErr)) {
+                                console.warn("[FarmaFlow Import] Ajustando lote de produtos:", upsertErr.message);
+                            }
+                            // Fallback individual item por item com UPDATE silencioso em caso de 23505
+                            for (const item of chunk) {
+                                const { error: singleErr } = await supabase.from('products').upsert([item], { onConflict: 'id' });
+                                if (!singleErr) {
+                                    totalSavedInDb++;
+                                    continue;
+                                }
+
+                                if (is23505(singleErr)) {
+                                    // 23505: produto já existe no banco. Faz UPDATE silencioso dos dados
+                                    const { id, tenant_id, ...updatePayload } = item;
+                                    let resolved = false;
+
+                                    if (item.barcode) {
+                                        const { error: updErr } = await supabase.from('products').update(updatePayload).eq('tenant_id', tenant.id).eq('barcode', item.barcode);
+                                        if (!updErr) resolved = true;
+                                    }
+                                    if (!resolved && item.internal_code) {
+                                        const { error: updErr } = await supabase.from('products').update(updatePayload).eq('tenant_id', tenant.id).eq('internal_code', item.internal_code);
+                                        if (!updErr) resolved = true;
+                                    }
+
+                                    if (resolved) {
+                                        totalSavedInDb++;
+                                        continue;
+                                    }
+                                }
+
+                                totalFailedInDb++;
+                                dbFailures.push({ name: item.name, barcode: item.barcode || undefined, code: item.internal_code || undefined, reason: singleErr.message });
+                            }
+                        }
+                    }
+                } catch (chunkErr: any) {
+                    const is23505 = (err: any) => {
+                        if (!err) return false;
+                        return err.code === '23505' ||
+                               String(err.message || '').includes('23505') ||
+                               String(err.message || '').includes('unique constraint');
+                    };
+
+                    for (const item of chunk) {
+                        try {
+                            const { error: singleErr } = await supabase.from('products').upsert([item], { onConflict: 'id' });
+                            if (!singleErr) {
+                                totalSavedInDb++;
+                                continue;
+                            }
+
+                            if (is23505(singleErr)) {
+                                const { id, tenant_id, ...updatePayload } = item;
+                                let resolved = false;
+                                if (item.barcode) {
+                                    const { error: updErr } = await supabase.from('products').update(updatePayload).eq('tenant_id', tenant.id).eq('barcode', item.barcode);
+                                    if (!updErr) resolved = true;
+                                }
+                                if (!resolved && item.internal_code) {
+                                    const { error: updErr } = await supabase.from('products').update(updatePayload).eq('tenant_id', tenant.id).eq('internal_code', item.internal_code);
+                                    if (!updErr) resolved = true;
+                                }
+                                if (resolved) {
+                                    totalSavedInDb++;
+                                    continue;
+                                }
+                            }
+
+                            totalFailedInDb++;
+                            dbFailures.push({ name: item.name, barcode: item.barcode || undefined, code: item.internal_code || undefined, reason: singleErr.message });
+                        } catch (e: any) {
+                            totalFailedInDb++;
+                            dbFailures.push({ name: item.name, barcode: item.barcode || undefined, code: item.internal_code || undefined, reason: e?.message || 'Falha desconhecida' });
+                        }
+                    }
+                }
+            }
+
+            // Atualiza o estado da aplicação e o cache localforage
+            onProductsStateUpdate(finalProducts);
+            await saveProductsByTenant(tenant.id, finalProducts).catch(() => {});
+        } catch (dbErr) {
+            console.error("[FarmaFlow Debug] Falha geral no processamento do banco de dados:", dbErr);
+            await onProductsUpdate(finalProducts);
+        }
+
+        // Montagem do Relatório de Auditoria Pós-Salvamento com Dados Verificados
+        if (dbFailures.length > 0) {
+            dbFailures.forEach(f => {
+                audit.push({
+                    name: f.name || 'Produto com erro',
+                    code: f.code || f.barcode || 'N/A',
+                    status: 'deleted',
+                    details: `Falha ao gravar no banco: ${f.reason}`
+                });
+            });
+        }
+
+        if (ignoredDetails.length > 0) {
+            ignoredDetails.slice(0, 100).forEach(d => {
+                audit.push({
+                    name: d.item,
+                    code: d.codigo || d.ean || 'N/A',
+                    status: 'no-change',
+                    details: `Linha ${d.linha}: ${d.motivo}`
+                });
+            });
+        }
+
         audit.unshift({
             name: 'RESUMO DA IMPORTAÇÃO',
             code: '---',
-            status: 'updated',
-            details: `Total processados: ${total} | Atualizados: ${countUpdated} | Novos: ${countCreated} | Sem alterações (já atualizados): ${countNoChange}${importMode === 'REPLACE' ? ` | Removidos: ${countDeleted}` : ''}`
+            status: totalFailedInDb === 0 ? 'updated' : 'deleted',
+            details: `Total no arquivo: ${total} | Gravados no banco: ${totalSavedInDb} (Novos: ${countCreated}, Atualizados: ${countUpdated}) | Sem alterações: ${countNoChange} | Linhas vazias/unificadas: ${countEmptyRows + countDuplicatesMerged} (Vazias: ${countEmptyRows}, Unificadas: ${countDuplicatesMerged})${totalFailedInDb > 0 ? ` | Erros de gravação: ${totalFailedInDb}` : ''}${importMode === 'REPLACE' ? ` | Removidos: ${countDeleted}` : ''}`
         });
 
         if (countPromotional > 0) {
@@ -2591,24 +2816,54 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
         }
 
         setAuditReport(audit);
+
+        // Registro detalhado no console do navegador
+        console.group("📊 [FarmaFlow Importação] Relatório Detalhado de Processamento");
+        console.log(`Linhas lidas do arquivo: ${total}`);
+        console.log(`✅ Itens gravados com sucesso no banco: ${totalSavedInDb}`);
+        console.log(`🆕 Novos produtos cadastrados: ${countCreated}`);
+        console.log(`🔄 Produtos existentes atualizados: ${countUpdated}`);
+        console.log(`⏭️ Produtos sem alteração: ${countNoChange}`);
+        console.log(`⚠️ Linhas vazias ignoradas: ${countEmptyRows}`);
+        console.log(`🔀 Códigos duplicados mesclados na planilha: ${countDuplicatesMerged}`);
+        if (totalFailedInDb > 0) {
+            console.warn(`❌ Falhas de gravação no banco de dados: ${totalFailedInDb}`);
+        }
+        if (ignoredDetails.length > 0) {
+            console.groupCollapsed(`Detalhes de linhas vazias / duplicadas (${ignoredDetails.length})`);
+            console.table(ignoredDetails.slice(0, 500));
+            console.groupEnd();
+        }
+        if (dbFailures.length > 0) {
+            console.group(`Detalhes de falhas no banco de dados (${dbFailures.length})`);
+            console.table(dbFailures);
+            console.groupEnd();
+        }
+        console.groupEnd();
         
         try {
-            // Limit audit items to prevent localStorage QuotaExceededError on huge imports
+            // Limitar itens para evitar QuotaExceededError no localStorage
             const MAX_AUDIT_ITEMS = 1000;
             const auditToSave = audit.length > MAX_AUDIT_ITEMS 
-                ? [...audit.slice(0, MAX_AUDIT_ITEMS), { name: '...', code: '...', status: 'no-change', details: `+ ${audit.length - MAX_AUDIT_ITEMS} outros itens (ocultos para economizar espaço)` }]
+                ? [...audit.slice(0, MAX_AUDIT_ITEMS), { name: '...', code: '...', status: 'no-change', details: `+ ${audit.length - MAX_AUDIT_ITEMS} outros itens (ocultos no histórico para economizar memória)` }]
                 : audit;
 
             const sessionLog = {
                 id: Math.random().toString(36).substr(2, 6).toUpperCase(),
                 tenantId: tenant.id,
                 timestamp: Date.now(),
+                totalProcessed: total,
+                totalSaved: totalSavedInDb,
+                newItems: countCreated,
+                updatedItems: countUpdated,
+                emptyRows: countEmptyRows,
+                duplicatesMerged: countDuplicatesMerged,
+                failedCount: totalFailedInDb,
                 items: auditToSave
             };
             const currentHistoryRaw = localStorage.getItem('ff_import_history');
             let historyArr = currentHistoryRaw ? JSON.parse(currentHistoryRaw) : [];
             
-            // Keep only last 5 sessions to save space
             if (historyArr.length > 5) {
                 historyArr = historyArr.slice(-5);
             }
@@ -2616,7 +2871,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
             historyArr.push(sessionLog);
             localStorage.setItem('ff_import_history', JSON.stringify(historyArr));
 
-            // Salva de forma persistente no Supabase
+            // Salva de forma persistente no Supabase integration_logs com status real
             (async () => {
                 try {
                     const { error } = await supabase
@@ -2625,7 +2880,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                             tenant_id: tenant.id,
                             endpoint: 'spreadsheet_import',
                             payload: sessionLog,
-                            status: 'SUCCESS'
+                            status: totalFailedInDb === 0 ? 'SUCCESS' : 'WARNING'
                         });
                     if (error) {
                         console.error("Erro ao salvar log de importação no Supabase:", error);
@@ -2635,270 +2890,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                 }
             })();
         } catch (e) {
-            console.warn("Não foi possível salvar o histórico de importação no localStorage (Quota excedida).", e);
-            // Try to save just a summary if it fails
-            try {
-                const summaryLog = {
-                    id: Math.random().toString(36).substr(2, 6).toUpperCase(),
-                    tenantId: tenant.id,
-                    timestamp: Date.now(),
-                    items: [{ name: 'Resumo da Importação', code: 'N/A', status: 'updated', details: `Importação de ${audit.length} itens concluída. Detalhes omitidos por falta de espaço.` }]
-                };
-                localStorage.setItem('ff_import_history', JSON.stringify([summaryLog]));
-            } catch (e2) {
-                console.error("Falha crítica ao salvar histórico.", e2);
-            }
-        }
-        
-        if (departmentsChanged) {
-            await onTenantUpdate({ ...tenant, departments: trackedDepartments });
-        }
-
-        // Lógica de Atualização Seletiva (Supabase) conforme regra de negócio solicitada
-        try {
-            // 1. Atualizações Seletivas (apenas campos específicos para produtos existentes)
-            if (updatedProducts.length > 0) {
-                const updatePayload = updatedProducts.map(p => {
-                    const item: any = {
-                        id: p.id,
-                        tenant_id: tenant.id
-                    };
-                    
-                    if (hasEanCol) item.barcode = (p.barcode && String(p.barcode).trim() !== '') ? String(p.barcode).trim() : null;
-                    if (hasCodeCol) item.internal_code = p.internalCode;
-                    if (hasNameCol) item.name = p.name;
-                    if (hasPriceCol) item.price = p.price;
-                    if (hasDeptCol || hasSubcatCol) item.category = p.category;
-                    if (hasLabCol) item.manufacturer = p.manufacturer;
-                    if (hasStockCol) item.stock = p.stock;
-                    if (hasActivePrincipleCol) item.active_principle = p.activePrinciple;
-                    if (hasLegalTypeCol) item.drug_type = p.drugType;
-                    if (hasDescCol) item.description = p.description;
-                    if (hasOriginalPriceCol) {
-                        item.original_price = p.originalPrice;
-                    }
-                    if (hasPromotionalPriceCol) {
-                        const rawPromo = (p as any).promotional_price !== undefined && (p as any).promotional_price !== null
-                            ? (p as any).promotional_price
-                            : p.promotionalPrice;
-                        const numPromo = rawPromo !== '' && rawPromo !== null && rawPromo !== undefined ? Number(rawPromo) : NaN;
-                        item.promotional_price = !isNaN(numPromo) && numPromo > 0 ? numPromo : null;
-                    }
-                    if (hasPromoTypeCol || hasOriginalPriceCol || hasPriceCol || hasPromotionalPriceCol) {
-                        item.promotion_type = p.promotionType;
-                    }
-                    if (hasBuyXCol) item.buy_x = p.buyX;
-                    if (hasPayYCol) item.pay_y = p.payY;
-                    if (hasPrescriptionCol) item.requires_prescription = p.requires_prescription;
-                    
-                    if (hasImageColumn) {
-                        item.image = p.image || null;
-                    }
-                    
-                    return item;
-                });
-
-                const persistProductChunk = async (items: any[]) => {
-                    if (!items || items.length === 0) return;
-                    const CHUNK_SIZE = 200;
-                    const token = (await supabase.auth.getSession()).data.session?.access_token;
-                    for (let i = 0; i < items.length; i += CHUNK_SIZE) {
-                        const chunk = items.slice(i, i + CHUNK_SIZE);
-                        try {
-                            const res = await fetch(`/api/v1/tenants/${tenant.id}/products/bulk`, {
-                                method: "PUT",
-                                headers: {
-                                    "Content-Type": "application/json",
-                                    ...(token ? { Authorization: `Bearer ${token}` } : {})
-                                },
-                                body: JSON.stringify({ products: chunk })
-                            });
-                            if (!res.ok) {
-                                const { error } = await supabase.from('products').upsert(chunk, { onConflict: 'id', ignoreDuplicates: false });
-                                if (error) console.error("[FarmaFlow Debug] Erro no fallback de upsert:", error);
-                            }
-                        } catch (err) {
-                            console.error("[FarmaFlow Debug] Erro de rede ao salvar lote de produtos:", err);
-                            try {
-                                await supabase.from('products').upsert(chunk, { onConflict: 'id', ignoreDuplicates: false });
-                            } catch (fallbackErr) {
-                                console.error("[FarmaFlow Debug] Fallback falhou:", fallbackErr);
-                            }
-                        }
-                    }
-                };
-
-                await persistProductChunk(updatePayload);
-            }
-
-            // 2. Inserção de Novos Produtos (payload completo, salvaguardado contra sobreescrita se o barcode ou internal_code já existir no banco)
-            if (newProducts.length > 0) {
-                const newBarcodes = Array.from(new Set(newProducts.map(p => p.barcode).filter(Boolean) as string[]));
-                
-                const dbExistingByEan = new Map<string, any>();
-                
-                const CHUNK_SIZE_MATCH = 100;
-                
-                // Busca no banco EXCLUSIVAMENTE por EAN (Código de Barras)
-                if (newBarcodes.length > 0) {
-                    for (let i = 0; i < newBarcodes.length; i += CHUNK_SIZE_MATCH) {
-                        const chunkBarcodes = newBarcodes.slice(i, i + CHUNK_SIZE_MATCH);
-                        const { data: dbMatches, error: matchErr } = await supabase
-                            .from('products')
-                            .select('*')
-                            .eq('tenant_id', tenant.id)
-                            .in('barcode', chunkBarcodes);
-                            
-                        if (!matchErr && dbMatches) {
-                            dbMatches.forEach(item => {
-                                if (item.barcode) {
-                                    dbExistingByEan.set(String(item.barcode).trim(), item);
-                                }
-                            });
-                        }
-                    }
-                }
-
-                const actualNewProducts: Product[] = [];
-                const actualUpdateFromNewProducts: any[] = [];
-                const seenNewBarcodesInBatch = new Set<string>();
-
-                newProducts.forEach(p => {
-                    const cleanBarcode = p.barcode ? String(p.barcode).trim() : '';
-                    const cleanCode = p.internalCode ? String(p.internalCode).trim() : '';
-                    
-                    // Match EXCLUSIVAMENTE por EAN, NUNCA por código interno
-                    let existingDbItem = null;
-                    if (cleanBarcode && dbExistingByEan.has(cleanBarcode)) {
-                        existingDbItem = dbExistingByEan.get(cleanBarcode);
-                    }
-
-                    if (existingDbItem) {
-                        // Preserva o nome limpo do banco no estado do frontend
-                        p.name = existingDbItem.name || p.name;
-                        
-                        const updateItem: any = {
-                            id: existingDbItem.id,
-                            tenant_id: tenant.id
-                        };
-                        
-                        if (hasEanCol) updateItem.barcode = cleanBarcode || null;
-                        // Código interno é salvo apenas como dado descritivo deste produto para esta farmácia
-                        if (hasCodeCol) updateItem.internal_code = cleanCode || existingDbItem.internal_code;
-                        if (hasNameCol) updateItem.name = p.name;
-                        if (hasPriceCol) updateItem.price = p.price;
-                        if (hasOriginalPriceCol) updateItem.original_price = p.originalPrice;
-                        if (hasPromotionalPriceCol) {
-                            const rawPromo = (p as any).promotional_price !== undefined && (p as any).promotional_price !== null
-                                ? (p as any).promotional_price
-                                : p.promotionalPrice;
-                            const numPromo = rawPromo !== '' && rawPromo !== null && rawPromo !== undefined ? Number(rawPromo) : NaN;
-                            updateItem.promotional_price = !isNaN(numPromo) && numPromo > 0 ? numPromo : null;
-                        }
-                        if (hasPromoTypeCol || hasOriginalPriceCol || hasPriceCol || hasPromotionalPriceCol) updateItem.promotion_type = p.promotionType;
-                        if (hasStockCol) updateItem.stock = p.stock;
-                        if (hasLabCol) updateItem.manufacturer = p.manufacturer;
-                        if (hasDescCol) updateItem.description = p.description;
-                        if (hasActivePrincipleCol) updateItem.active_principle = p.activePrinciple;
-                        if (hasLegalTypeCol) updateItem.drug_type = p.drugType;
-                        if (hasDeptCol || hasSubcatCol) updateItem.category = p.category;
-                        if (hasPrescriptionCol) updateItem.requires_prescription = p.requires_prescription;
-                        if (hasBuyXCol) updateItem.buy_x = p.buyX;
-                        if (hasPayYCol) updateItem.pay_y = p.payY;
-                        if (hasImageColumn) updateItem.image = p.image || null;
-
-                        actualUpdateFromNewProducts.push(updateItem);
-                        p.id = existingDbItem.id;
-                    } else {
-                        // Higienização de Códigos de Barras Duplicados no lote:
-                        if (cleanBarcode) {
-                            if (seenNewBarcodesInBatch.has(cleanBarcode)) {
-                                console.warn(`[FarmaFlow Import] Pulando item duplicado na planilha com código de barras: ${cleanBarcode}`);
-                                return;
-                            }
-                            seenNewBarcodesInBatch.add(cleanBarcode);
-                        }
-                        actualNewProducts.push(p);
-                    }
-                });
-
-                const persistProductChunk = async (items: any[]) => {
-                    if (!items || items.length === 0) return;
-                    const CHUNK_SIZE = 200;
-                    const token = (await supabase.auth.getSession()).data.session?.access_token;
-                    for (let i = 0; i < items.length; i += CHUNK_SIZE) {
-                        const chunk = items.slice(i, i + CHUNK_SIZE);
-                        try {
-                            const res = await fetch(`/api/v1/tenants/${tenant.id}/products/bulk`, {
-                                method: "PUT",
-                                headers: {
-                                    "Content-Type": "application/json",
-                                    ...(token ? { Authorization: `Bearer ${token}` } : {})
-                                },
-                                body: JSON.stringify({ products: chunk })
-                            });
-                            if (!res.ok) {
-                                const { error } = await supabase.from('products').upsert(chunk, { onConflict: 'id', ignoreDuplicates: false });
-                                if (error) console.error("[FarmaFlow Debug] Erro no fallback de upsert:", error);
-                            }
-                        } catch (err) {
-                            console.error("[FarmaFlow Debug] Erro de rede ao salvar lote de produtos:", err);
-                            try {
-                                await supabase.from('products').upsert(chunk, { onConflict: 'id', ignoreDuplicates: false });
-                            } catch (fallbackErr) {
-                                console.error("[FarmaFlow Debug] Fallback falhou:", fallbackErr);
-                            }
-                        }
-                    }
-                };
-
-                // Executar atualizações seletivas para os itens que já existiam no banco
-                if (actualUpdateFromNewProducts.length > 0) {
-                    await persistProductChunk(actualUpdateFromNewProducts);
-                }
-
-                // Inserir de fato novos produtos
-                if (actualNewProducts.length > 0) {
-                    const insertPayload = actualNewProducts.map(p => {
-                        const rawPromo = (p as any).promotional_price !== undefined && (p as any).promotional_price !== null
-                            ? (p as any).promotional_price
-                            : p.promotionalPrice;
-                        const numPromo = rawPromo !== '' && rawPromo !== null && rawPromo !== undefined ? Number(rawPromo) : NaN;
-                        return {
-                            id: p.id,
-                            tenant_id: tenant.id,
-                            barcode: (p.barcode && String(p.barcode).trim() !== '') ? String(p.barcode).trim() : null,
-                            internal_code: p.internalCode || null,
-                            name: p.name,
-                            price: p.price,
-                            stock: p.stock,
-                            category: p.category,
-                            manufacturer: p.manufacturer,
-                            active_principle: p.activePrinciple,
-                            drug_type: p.drugType,
-                            presentation: p.presentation,
-                            image: p.image,
-                            description: p.description,
-                            indications: p.indications,
-                            original_price: p.originalPrice,
-                            promotional_price: !isNaN(numPromo) && numPromo > 0 ? numPromo : null,
-                            promotion_type: p.promotionType,
-                            buy_x: p.buyX,
-                            pay_y: p.payY,
-                            requires_prescription: p.requires_prescription
-                        };
-                    });
-
-                    await persistProductChunk(insertPayload);
-                }
-            }
-
-            // Atualiza apenas o estado local
-            onProductsStateUpdate(finalProducts);
-        } catch (dbErr) {
-            console.error("[FarmaFlow Debug] Falha na comunicação com Supabase:", dbErr);
-            // Fallback
-            await onProductsUpdate(finalProducts);
+            console.warn("Não foi possível salvar o histórico de importação no localStorage.", e);
         }
         
         // Atualização de Cache e Estado Global
