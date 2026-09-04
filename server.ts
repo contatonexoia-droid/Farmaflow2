@@ -2233,47 +2233,40 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
         is_ai_enriched: Boolean(p.is_ai_enriched ?? p.isAiEnriched)
       };
 
-      // Unifica produtos com mesmo código de barras ou código interno no mesmo lote (mantém a linha mais recente)
+      // Unifica produtos com mesmo código de barras (EAN) no mesmo lote (mantém a linha mais recente)
       let mergedIdx: number | undefined = undefined;
       if (cleanBarcode && seenBarcodesInBatch.has(cleanBarcode)) {
         mergedIdx = seenBarcodesInBatch.get(cleanBarcode)!;
-      } else if (cleanCode && seenCodesInBatch.has(cleanCode.toLowerCase())) {
-        mergedIdx = seenCodesInBatch.get(cleanCode.toLowerCase())!;
       }
 
       if (mergedIdx !== undefined) {
         sanitizedProducts[mergedIdx] = { ...sanitizedProducts[mergedIdx], ...item };
-        duplicateBarcodesMerged.push({ barcode: cleanBarcode || cleanCode || '', name: item.name });
+        duplicateBarcodesMerged.push({ barcode: cleanBarcode || '', name: item.name });
         continue;
       }
 
       const newIdx = sanitizedProducts.length;
       if (cleanBarcode) seenBarcodesInBatch.set(cleanBarcode, newIdx);
-      if (cleanCode) seenCodesInBatch.set(cleanCode.toLowerCase(), newIdx);
 
       sanitizedProducts.push(item);
     }
 
-    // 2. Busca cruzada abrangente no banco (barcode, internal_code e id) para reuso de IDs e prevenção do erro 23505
+    // 2. Busca estritamente por EAN (barcode) e ID no banco de dados da farmácia
+    // O código interno NUNCA é utilizado para buscar ou corresponder produtos entre planilhas
     const barcodesToLookup = sanitizedProducts
       .map(p => p.barcode)
       .filter((b): b is string => Boolean(b && b.length > 0));
-
-    const codesToLookup = sanitizedProducts
-      .map(p => p.internal_code)
-      .filter((c): c is string => Boolean(c && c.length > 0));
 
     const idsToLookup = sanitizedProducts
       .map(p => p.id)
       .filter((id): id is string => Boolean(id && id.length > 0));
 
     const dbExistingByBarcode = new Map<string, { id: string; barcode: string | null; internal_code: string | null; name: string }>();
-    const dbExistingByCode = new Map<string, { id: string; barcode: string | null; internal_code: string | null; name: string }>();
     const dbExistingById = new Map<string, { id: string; barcode: string | null; internal_code: string | null; name: string }>();
 
     const LOOKUP_CHUNK = 500;
 
-    // Busca por código de barras
+    // Busca estritamente por código de barras (EAN)
     if (barcodesToLookup.length > 0) {
       for (let i = 0; i < barcodesToLookup.length; i += LOOKUP_CHUNK) {
         const barcodeChunk = barcodesToLookup.slice(i, i + LOOKUP_CHUNK);
@@ -2286,27 +2279,6 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
         if (dbMatches) {
           dbMatches.forEach(row => {
             if (row.barcode) dbExistingByBarcode.set(String(row.barcode).trim(), row);
-            if (row.internal_code) dbExistingByCode.set(String(row.internal_code).trim().toLowerCase(), row);
-            dbExistingById.set(row.id, row);
-          });
-        }
-      }
-    }
-
-    // Busca por código interno
-    if (codesToLookup.length > 0) {
-      for (let i = 0; i < codesToLookup.length; i += LOOKUP_CHUNK) {
-        const codeChunk = codesToLookup.slice(i, i + LOOKUP_CHUNK);
-        const { data: dbMatches } = await supabaseAdmin
-          .from("products")
-          .select("id, barcode, internal_code, name")
-          .eq("tenant_id", tenantId)
-          .in("internal_code", codeChunk);
-
-        if (dbMatches) {
-          dbMatches.forEach(row => {
-            if (row.barcode) dbExistingByBarcode.set(String(row.barcode).trim(), row);
-            if (row.internal_code) dbExistingByCode.set(String(row.internal_code).trim().toLowerCase(), row);
             dbExistingById.set(row.id, row);
           });
         }
@@ -2326,49 +2298,32 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
         if (dbMatches) {
           dbMatches.forEach(row => {
             if (row.barcode) dbExistingByBarcode.set(String(row.barcode).trim(), row);
-            if (row.internal_code) dbExistingByCode.set(String(row.internal_code).trim().toLowerCase(), row);
             dbExistingById.set(row.id, row);
           });
         }
       }
     }
 
-    // 3. Classifica produtos entre UPDATE (já existentes no banco) e INSERT (genuinamente novos)
+    // 3. Classifica produtos entre UPDATE (já existentes por EAN ou ID) e INSERT (genuinamente novos)
     const productsToUpdate: any[] = [];
     const productsToInsert: any[] = [];
 
     for (const p of sanitizedProducts) {
       let existingMatch: { id: string; barcode: string | null; internal_code: string | null; name: string } | undefined = undefined;
 
+      // Correspondência estritamente por EAN (barcode) ou ID existente
       if (p.barcode && dbExistingByBarcode.has(p.barcode)) {
         existingMatch = dbExistingByBarcode.get(p.barcode);
-      } else if (p.internal_code && dbExistingByCode.has(p.internal_code.toLowerCase())) {
-        existingMatch = dbExistingByCode.get(p.internal_code.toLowerCase());
       } else if (p.id && dbExistingById.has(p.id)) {
         existingMatch = dbExistingById.get(p.id);
       }
 
       if (existingMatch) {
-        // Produto já existe no banco: adota o ID real da farmácia para UPDATE limpo
+        // Produto já existe na farmácia: adota o ID real da farmácia para UPDATE limpo
         p.id = existingMatch.id;
-        
-        // Salvaguarda contra colisão cruzada: se o internal_code ou barcode pertencer a outro produto diferente no banco, preserva o atual
-        if (p.internal_code) {
-          const conflictingByCode = dbExistingByCode.get(p.internal_code.toLowerCase());
-          if (conflictingByCode && conflictingByCode.id !== existingMatch.id) {
-            p.internal_code = existingMatch.internal_code;
-          }
-        }
-        if (p.barcode) {
-          const conflictingByBarcode = dbExistingByBarcode.get(p.barcode);
-          if (conflictingByBarcode && conflictingByBarcode.id !== existingMatch.id) {
-            p.barcode = existingMatch.barcode;
-          }
-        }
-
         productsToUpdate.push(p);
       } else {
-        // Novo produto genuíno
+        // Novo produto genuíno (EAN não encontrado na farmácia)
         productsToInsert.push(p);
       }
     }
@@ -2411,10 +2366,11 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
           }
 
           if (is23505Error(itemErr)) {
-            // Conflito 23505 esperado: atualiza silenciosamente os dados sem os campos de chave única
+            // Conflito de restrição de chave única (ex: internal_code colidiu no banco):
+            // Atualiza silenciosamente os dados mantendo o registro sem alterar os campos que colidiram
             const safeUpdatePayload = { ...updatePayload };
-            delete safeUpdatePayload.barcode;
             delete safeUpdatePayload.internal_code;
+            delete safeUpdatePayload.barcode;
 
             const { error: safeErr } = await supabaseAdmin
               .from("products")
@@ -2439,7 +2395,7 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
       }
     }
 
-    // 4B. Inserção de Novos Produtos com fallback silencioso para UPDATE se houver concorrência (23505)
+    // 4B. Inserção de Novos Produtos com correspondência estrita por EAN e tratamento de 23505
     for (let i = 0; i < productsToInsert.length; i += CHUNK_SIZE) {
       const chunk = productsToInsert.slice(i, i + CHUNK_SIZE);
       const cleanChunk = chunk.map(({ tenantid, ...rest }) => rest);
@@ -2448,7 +2404,7 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
       if (!error) {
         savedCount += cleanChunk.length;
       } else {
-        // Fallback item por item com conversão silenciosa de 23505 em UPDATE
+        // Fallback item por item com verificação estritamente por EAN
         for (const item of cleanChunk) {
           const { error: itemErr } = await supabaseAdmin.from("products").insert([item]);
           if (!itemErr) {
@@ -2457,31 +2413,39 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
           }
 
           if (is23505Error(itemErr)) {
-            // Tratamento Adequado de Conflitos: produto já existe no banco. Faz UPDATE silencioso dos dados.
             try {
-              let matchQuery = supabaseAdmin.from("products").select("id").eq("tenant_id", tenantId);
-              if (item.barcode && item.internal_code) {
-                matchQuery = matchQuery.or(`barcode.eq.${item.barcode},internal_code.eq.${item.internal_code}`);
-              } else if (item.barcode) {
-                matchQuery = matchQuery.eq("barcode", item.barcode);
-              } else if (item.internal_code) {
-                matchQuery = matchQuery.eq("internal_code", item.internal_code);
+              // 1. Se o produto tem EAN e ele já existe no banco, atualiza estritamente este produto pelo EAN
+              if (item.barcode) {
+                const { data: conflictRows } = await supabaseAdmin
+                  .from("products")
+                  .select("id")
+                  .eq("tenant_id", tenantId)
+                  .eq("barcode", item.barcode)
+                  .limit(1);
+
+                if (conflictRows && conflictRows.length > 0) {
+                  const existingTargetId = conflictRows[0].id;
+                  const { id, tenant_id, ...updatePayload } = item;
+                  const { error: updErr } = await supabaseAdmin
+                    .from("products")
+                    .update(updatePayload)
+                    .eq("id", existingTargetId)
+                    .eq("tenant_id", tenantId);
+
+                  if (!updErr) {
+                    savedCount++;
+                    continue;
+                  }
+                }
               }
 
-              const { data: conflictRows } = await matchQuery.limit(1);
-              if (conflictRows && conflictRows.length > 0) {
-                const existingTargetId = conflictRows[0].id;
-                const { id, tenant_id, ...updatePayload } = item;
-                const { error: updErr } = await supabaseAdmin
-                  .from("products")
-                  .update(updatePayload)
-                  .eq("id", existingTargetId)
-                  .eq("tenant_id", tenantId);
-
-                if (!updErr) {
-                  savedCount++;
-                  continue;
-                }
+              // 2. Se o conflito 23505 decorre de internal_code duplicado de outro produto com EAN diferente:
+              // NUNCA sobrescrevemos outro produto! Liberamos o internal_code e inserimos o produto novo
+              const safeNewItem = { ...item, internal_code: null };
+              const { error: insRetryErr } = await supabaseAdmin.from("products").insert([safeNewItem]);
+              if (!insRetryErr) {
+                savedCount++;
+                continue;
               }
             } catch {
               // Tratado silenciosamente

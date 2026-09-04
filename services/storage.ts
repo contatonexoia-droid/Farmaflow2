@@ -841,7 +841,6 @@ export const saveProductsByTenant = async (
     const uniqueProducts = Array.from(uniqueProductsMap.values());
 
     const currentByBarcode = new Map<string, string>();
-    const currentByInternalCode = new Map<string, string>();
 
     // Otimização: Apenas consulta o banco se houver produtos sem ID ou novos
     const barcodesToCheck = uniqueProducts
@@ -851,14 +850,13 @@ export const saveProductsByTenant = async (
     if (barcodesToCheck.length > 0 && barcodesToCheck.length <= 100) {
       const { data: matchedDb } = await supabase
         .from("products")
-        .select("id, barcode, internal_code")
+        .select("id, barcode")
         .eq("tenant_id", tenantId)
         .in("barcode", barcodesToCheck);
 
       if (matchedDb) {
         matchedDb.forEach((p) => {
           if (p.barcode) currentByBarcode.set(p.barcode.trim().toLowerCase(), p.id);
-          if (p.internal_code) currentByInternalCode.set(p.internal_code.trim().toLowerCase(), p.id);
         });
       }
     }

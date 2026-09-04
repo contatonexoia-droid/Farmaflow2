@@ -2092,20 +2092,17 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
         const updatedProducts: Product[] = [];
         const importedProducts: Product[] = [];
         
+        // Identificador Único Absoluto: Cruzamento estritamente por EAN (Código de Barras)
+        // O código interno NUNCA é utilizado como critério de busca ou correspondência entre planilhas
         const productsByEan = new Map<string, Product>();
-        const productsByCode = new Map<string, Product>();
         
         products.forEach(p => {
             if (p.barcode && String(p.barcode).trim() !== '') {
                 productsByEan.set(String(p.barcode).trim(), p);
             }
-            if (p.internalCode && String(p.internalCode).trim() !== '') {
-                productsByCode.set(String(p.internalCode).trim().toLowerCase(), p);
-            }
         });
 
         const newProductsByEan = new Map<string, Product>();
-        const newProductsByCode = new Map<string, Product>();
 
         let countUpdated = 0;
         let countCreated = 0;
@@ -2231,7 +2228,8 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
             let existingProduct: Product | undefined = undefined;
             let isNewProductUpdate = false;
             
-            // Cruzamento inteligente: prioritário por EAN, com fallback abrangente por Código Interno
+            // Identificador Único Absoluto: Cruzamento estritamente por EAN (Código de Barras)
+            // O código interno NUNCA é utilizado para buscar ou cruzar produtos entre planilhas
             if (cleanEan) {
                 existingProduct = productsByEan.get(cleanEan);
                 if (!existingProduct) {
@@ -2241,29 +2239,10 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                         countDuplicatesMerged++;
                         ignoredDetails.push({
                             linha: i + 2,
-                            motivo: 'Código de barras duplicado na planilha (dados mesclados com a ocorrência anterior)',
+                            motivo: 'Código de barras (EAN) duplicado na planilha (dados mesclados com a ocorrência anterior)',
                             item: String(name),
                             codigo: cleanCode || 'N/A',
                             ean: cleanEan
-                        });
-                    }
-                }
-            }
-            
-            // Fallback por Código Interno se não encontrado por EAN
-            if (!existingProduct && cleanCode) {
-                existingProduct = productsByCode.get(cleanCode.toLowerCase());
-                if (!existingProduct) {
-                    existingProduct = newProductsByCode.get(cleanCode.toLowerCase());
-                    if (existingProduct) {
-                        isNewProductUpdate = true;
-                        countDuplicatesMerged++;
-                        ignoredDetails.push({
-                            linha: i + 2,
-                            motivo: 'Código interno duplicado na planilha (dados mesclados com a ocorrência anterior)',
-                            item: String(name),
-                            codigo: cleanCode,
-                            ean: cleanEan || 'Sem EAN'
                         });
                     }
                 }
@@ -2560,7 +2539,6 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                 newProducts.push(productData);
                 importedProducts.push(productData);
                 if (productData.barcode) newProductsByEan.set(productData.barcode, productData);
-                if (productData.internalCode) newProductsByCode.set(productData.internalCode.toLowerCase(), productData);
                 countCreated++;
 
                 audit.push({ name: String(name), code: String(productData.internalCode || productData.barcode), status: 'created', details: `Novo item cadastrado (${rowStock} un.)` });
@@ -2708,10 +2686,11 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                                     if (item.barcode) {
                                         const { error: updErr } = await supabase.from('products').update(updatePayload).eq('tenant_id', tenant.id).eq('barcode', item.barcode);
                                         if (!updErr) resolved = true;
-                                    }
-                                    if (!resolved && item.internal_code) {
-                                        const { error: updErr } = await supabase.from('products').update(updatePayload).eq('tenant_id', tenant.id).eq('internal_code', item.internal_code);
-                                        if (!updErr) resolved = true;
+                                    } else {
+                                        // Sem EAN: se conflitou no código interno, não sobrescreve outro produto! Insere com código liberado
+                                        const safeItem = { ...item, internal_code: null };
+                                        const { error: insErr } = await supabase.from('products').insert([safeItem]);
+                                        if (!insErr) resolved = true;
                                     }
 
                                     if (resolved) {
@@ -2747,10 +2726,10 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                                 if (item.barcode) {
                                     const { error: updErr } = await supabase.from('products').update(updatePayload).eq('tenant_id', tenant.id).eq('barcode', item.barcode);
                                     if (!updErr) resolved = true;
-                                }
-                                if (!resolved && item.internal_code) {
-                                    const { error: updErr } = await supabase.from('products').update(updatePayload).eq('tenant_id', tenant.id).eq('internal_code', item.internal_code);
-                                    if (!updErr) resolved = true;
+                                } else {
+                                    const safeItem = { ...item, internal_code: null };
+                                    const { error: insErr } = await supabase.from('products').insert([safeItem]);
+                                    if (!insErr) resolved = true;
                                 }
                                 if (resolved) {
                                     totalSavedInDb++;
