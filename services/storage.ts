@@ -1542,7 +1542,9 @@ export const mapCouponFromDB = (c: any): CouponRule => ({
   minPurchaseValue: Number(c.min_purchase_value ?? c.minpurchasevalue ?? 0),
   targetType: c.target_type || c.targettype || "ALL",
   targetValue: c.target_value || c.targetvalue || "",
-  specificProductIds: c.specific_product_ids || c.specificproductids || [],
+  specificProductIds: c.specific_product_ids || c.specificproductids || c.applicable_products || [],
+  applicableProducts: c.specific_product_ids || c.specificproductids || c.applicable_products || [],
+  filtersMetadata: c.filters_metadata || c.filtersmetadata || null,
   maxUses: c.max_uses ?? c.maxuses,
   currentUses: c.current_uses ?? c.currentuses,
   startDate: c.start_date || c.startdate,
@@ -1599,23 +1601,22 @@ export const getCouponsByTenant = async (
 };
 
 export const saveCoupon = async (coupon: CouponRule) => {
+  const specificIds = coupon.specificProductIds || coupon.applicableProducts || [];
   const dbCoupon: any = {
     id: coupon.id,
     tenant_id: coupon.tenantId,
     code: coupon.code,
     discount_type: coupon.discountType,
     discount_value: coupon.discountValue,
-    coupon_scope: coupon.couponScope,
-    min_purchase_value: coupon.minPurchaseValue,
-    usage_limit: coupon.usageLimit,
-    times_used: coupon.timesUsed,
-    first_purchase_only: coupon.firstPurchaseOnly,
-    applicable_products: coupon.applicableProducts,
-    applicable_categories: coupon.applicableCategories,
-    applicable_manufacturers: coupon.applicableManufacturers,
+    target_type: coupon.targetType || "ALL",
+    target_value: coupon.targetValue || null,
+    specific_product_ids: specificIds,
+    filters_metadata: coupon.filtersMetadata || null,
+    coupon_scope: coupon.couponScope || "SPECIFIC_PRODUCT",
+    min_purchase_value: coupon.minPurchaseValue || 0,
     start_date: coupon.startDate,
     end_date: coupon.endDate,
-    is_active: coupon.isActive,
+    is_active: coupon.isActive !== false,
     scope: coupon.scope || "SINGLE_STORE",
   };
 

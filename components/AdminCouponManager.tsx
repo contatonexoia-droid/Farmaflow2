@@ -54,44 +54,75 @@ const ProductRow = React.memo(({
   onToggle: (id: string) => void;
   style?: React.CSSProperties;
 }) => {
+  const stockQty = Number(product.stock ?? 0);
+
   return (
     <div 
       style={style}
-      className={`flex items-center border-b border-gray-50 hover:bg-gray-50 transition-colors ${isSelected ? 'bg-blue-50/30' : ''}`}
+      onClick={() => onToggle(product.id)}
+      className={`flex items-center border-b border-gray-100 hover:bg-blue-50/40 transition-colors cursor-pointer select-none ${
+        isSelected ? 'bg-blue-50/70 font-medium' : 'bg-white'
+      }`}
     >
-      <div className="p-3 w-10 flex-shrink-0">
+      <div className="p-3 w-10 flex-shrink-0 flex items-center justify-center" onClick={e => e.stopPropagation()}>
         <input 
           type="checkbox" 
           checked={isSelected}
           onChange={() => onToggle(product.id)}
-          className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+          className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
         />
       </div>
       <div className="p-3 w-12 flex-shrink-0">
-        <img src={product.image} alt="" className="w-8 h-8 rounded-lg object-cover bg-gray-100" referrerPolicy="no-referrer" />
+        <img 
+          src={product.image || "https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=100&auto=format&fit=crop&q=60"} 
+          alt="" 
+          className="w-8 h-8 rounded-lg object-cover bg-gray-100 border border-gray-100" 
+          referrerPolicy="no-referrer" 
+        />
       </div>
       <div className="p-3 flex-1 min-w-0">
-        <div className="text-xs font-bold text-gray-900 truncate">{product.name}</div>
-        <div className="text-[9px] text-gray-400 font-medium truncate">{product.category} | {product.manufacturer}</div>
+        <div className="text-xs font-bold text-gray-900 truncate" title={product.name}>{product.name}</div>
+        <div className="text-[9px] text-gray-400 font-medium truncate">
+          {product.category || 'Geral'} {product.manufacturer ? `| ${product.manufacturer}` : ''}
+        </div>
       </div>
-      <div className="p-3 w-32 flex-shrink-0 text-[10px] font-mono text-gray-500 truncate">{product.barcode || product.internalCode}</div>
-      <div className="p-3 w-20 flex-shrink-0 text-xs font-black text-gray-900 text-right">R$ {product.price.toFixed(2)}</div>
-      <div className="p-3 w-16 flex-shrink-0 text-center">
+      <div className="p-3 w-28 flex-shrink-0 text-[10px] font-mono text-gray-500 truncate" title={product.barcode || product.internalCode || ''}>
+        {product.barcode || product.internalCode || '-'}
+      </div>
+      <div className="p-3 w-20 flex-shrink-0 text-center">
+        <span 
+          className={`inline-flex items-center justify-center px-2 py-0.5 rounded-full text-[10px] font-black ${
+            stockQty > 3 
+              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200/60' 
+              : stockQty > 0 
+                ? 'bg-amber-50 text-amber-700 border border-amber-200/60' 
+                : 'bg-red-50 text-red-600 border border-red-200/60'
+          }`}
+        >
+          {stockQty} un
+        </span>
+      </div>
+      <div className="p-3 w-24 flex-shrink-0 text-xs font-black text-gray-900 text-right">
+        R$ {Number(product.price || 0).toFixed(2)}
+      </div>
+      <div className="p-3 w-16 flex-shrink-0 text-center" onClick={e => e.stopPropagation()}>
         {isSelected ? (
           <button 
+            type="button"
             onClick={() => onToggle(product.id)}
-            className="p-1.5 text-red-400 hover:bg-red-50 rounded-lg transition-all"
+            className="p-1.5 text-red-500 hover:bg-red-50 rounded-lg transition-all"
             title="Remover da seleção"
           >
-            <MinusCircle size={14} />
+            <MinusCircle size={16} />
           </button>
         ) : (
           <button 
+            type="button"
             onClick={() => onToggle(product.id)}
-            className="p-1.5 text-blue-400 hover:bg-blue-50 rounded-lg transition-all"
+            className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg transition-all"
             title="Adicionar à seleção"
           >
-            <Plus size={14} />
+            <Plus size={16} />
           </button>
         )}
       </div>
@@ -474,7 +505,13 @@ const AdminCouponManager: React.FC<AdminCouponManagerProps> = ({ tenant, product
   }, [filters]);
 
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
+  const [showOnlySelected, setShowOnlySelected] = useState(false);
   const parentRef = useRef<HTMLDivElement>(null);
+
+  // Set of selected IDs as strings for quick and reliable lookup
+  const selectedProductIdsSet = useMemo(() => {
+    return new Set((selectedProductIds || []).map(String));
+  }, [selectedProductIds]);
 
   // Extract unique manufacturers and categories for targeting
   const manufacturers = useMemo(() => {
@@ -495,18 +532,22 @@ const AdminCouponManager: React.FC<AdminCouponManagerProps> = ({ tenant, product
       discountValue: 10,
       targetType: 'ALL',
       targetValue: '',
+      couponScope: 'SPECIFIC_PRODUCT',
       isActive: true,
       specificProductIds: [],
       filtersMetadata: { categories: [], manufacturers: [], search: '', minPrice: undefined, maxPrice: undefined }
     });
     setSelectedProductIds([]);
+    setShowOnlySelected(false);
     setFilters({ categories: [], manufacturers: [], search: '', minPrice: '', maxPrice: '' });
     setIsEditing(true);
   };
 
   const handleEdit = (coupon: CouponRule) => {
     setEditingCoupon({ ...coupon });
-    setSelectedProductIds(coupon.specificProductIds || []);
+    const productIds = coupon.specificProductIds || (coupon as any).applicable_products || coupon.applicableProducts || [];
+    setSelectedProductIds((productIds || []).map(String));
+    setShowOnlySelected(false);
     
     // Restore filters from metadata if available
     if (coupon.filtersMetadata) {
@@ -527,41 +568,59 @@ const AdminCouponManager: React.FC<AdminCouponManagerProps> = ({ tenant, product
   // Filtered products for the preview grid - using debounced filters
   const filteredProducts = useMemo(() => {
     return products.filter(p => {
+      const pIdStr = String(p.id);
+      if (showOnlySelected && !selectedProductIdsSet.has(pIdStr)) return false;
       if (debouncedFilters.categories.length > 0 && !debouncedFilters.categories.includes(p.category)) return false;
       if (debouncedFilters.manufacturers.length > 0 && !debouncedFilters.manufacturers.includes(p.manufacturer || '')) return false;
       if (debouncedFilters.search) {
-        const s = debouncedFilters.search.toLowerCase();
-        if (!p.name.toLowerCase().includes(s) && !p.barcode?.includes(s) && !p.internalCode?.includes(s)) return false;
+        const s = debouncedFilters.search.toLowerCase().trim();
+        const matchesName = (p.name || '').toLowerCase().includes(s);
+        const matchesBarcode = (p.barcode || '').includes(s);
+        const matchesCode = (p.internalCode || '').includes(s);
+        if (!matchesName && !matchesBarcode && !matchesCode) return false;
       }
       if (debouncedFilters.minPrice && p.price < parseFloat(debouncedFilters.minPrice)) return false;
       if (debouncedFilters.maxPrice && p.price > parseFloat(debouncedFilters.maxPrice)) return false;
       return true;
     });
-  }, [products, debouncedFilters]);
+  }, [products, debouncedFilters, showOnlySelected, selectedProductIdsSet]);
 
   // Virtualizer for the product list
   const rowVirtualizer = useVirtualizer({
     count: filteredProducts.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 52, // Estimated height of each row
+    estimateSize: () => 56, // Estimated height of each row
     overscan: 10,
   });
 
-  const toggleProductSelection = useCallback((id: string) => {
-    setSelectedProductIds(prev => 
-      prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]
-    );
+  const toggleProductSelection = useCallback((rawId: string | number) => {
+    const id = String(rawId);
+    setSelectedProductIds(prev => {
+      const current = (prev || []).map(String);
+      return current.includes(id) 
+        ? current.filter(i => i !== id) 
+        : [...current, id];
+    });
   }, []);
 
   const selectAllFiltered = useCallback(() => {
-    const filteredIds = filteredProducts.map(p => p.id);
-    setSelectedProductIds(prev => Array.from(new Set([...prev, ...filteredIds])));
+    const filteredIds = filteredProducts.map(p => String(p.id));
+    setSelectedProductIds(prev => {
+      const set = new Set((prev || []).map(String));
+      filteredIds.forEach(id => set.add(id));
+      return Array.from(set);
+    });
   }, [filteredProducts]);
 
   const deselectAllFiltered = useCallback(() => {
-    const filteredIds = filteredProducts.map(p => p.id);
-    setSelectedProductIds(prev => prev.filter(id => !filteredIds.includes(id)));
+    const filteredIdsToRemove = new Set(filteredProducts.map(p => String(p.id)));
+    setSelectedProductIds(prev => (prev || []).map(String).filter(id => !filteredIdsToRemove.has(id)));
   }, [filteredProducts]);
+
+  const isAllFilteredSelected = useMemo(() => {
+    if (filteredProducts.length === 0) return false;
+    return filteredProducts.every(p => selectedProductIdsSet.has(String(p.id)));
+  }, [filteredProducts, selectedProductIdsSet]);
 
   const handleSaveAttempt = () => {
     if (!editingCoupon?.code) {
@@ -586,13 +645,21 @@ const AdminCouponManager: React.FC<AdminCouponManagerProps> = ({ tenant, product
   const handleSave = async () => {
     setIsSaving(true);
     try {
-      const couponToSave = {
+      const normalizedSelectedIds = Array.from(new Set(selectedProductIds.map(String)));
+
+      const couponToSave: CouponRule = {
         ...editingCoupon,
         id: editingCoupon.id || `coupon_${Date.now()}`,
-        code: editingCoupon.code?.toUpperCase(),
-        targetType: editingCoupon.couponScope === 'GLOBAL' ? 'ALL' : editingCoupon.targetType,
+        tenantId: tenant.id,
+        code: (editingCoupon.code || '').toUpperCase().trim(),
+        discountType: editingCoupon.discountType || 'PERCENTAGE',
+        discountValue: Number(editingCoupon.discountValue || 0),
+        couponScope: editingCoupon.couponScope || 'SPECIFIC_PRODUCT',
+        minPurchaseValue: editingCoupon.couponScope === 'GLOBAL' ? Number(editingCoupon.minPurchaseValue || 0) : undefined,
+        targetType: editingCoupon.couponScope === 'GLOBAL' ? 'ALL' : (editingCoupon.targetType || 'ALL'),
         targetValue: (editingCoupon.couponScope !== 'GLOBAL' && (editingCoupon.targetType === 'CATEGORY' || editingCoupon.targetType === 'MANUFACTURER')) ? editingCoupon.targetValue : undefined,
-        specificProductIds: (editingCoupon.couponScope !== 'GLOBAL' && editingCoupon.targetType === 'SPECIFIC_SELECTION') ? selectedProductIds : [],
+        specificProductIds: (editingCoupon.couponScope !== 'GLOBAL' && editingCoupon.targetType === 'SPECIFIC_SELECTION') ? normalizedSelectedIds : [],
+        applicableProducts: (editingCoupon.couponScope !== 'GLOBAL' && editingCoupon.targetType === 'SPECIFIC_SELECTION') ? normalizedSelectedIds : [],
         filtersMetadata: {
           ...(editingCoupon.filtersMetadata || {}),
           ...(editingCoupon.targetType === 'SPECIFIC_SELECTION' ? {
@@ -605,8 +672,9 @@ const AdminCouponManager: React.FC<AdminCouponManagerProps> = ({ tenant, product
         },
         startDate: editingCoupon.startDate || new Date().toISOString(),
         endDate: editingCoupon.endDate || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+        isActive: editingCoupon.isActive !== false,
         scope: editingCoupon.scope || 'SINGLE_STORE',
-      } as CouponRule;
+      };
 
       await saveCoupon(couponToSave);
       
@@ -992,35 +1060,74 @@ const AdminCouponManager: React.FC<AdminCouponManagerProps> = ({ tenant, product
                     </div>
 
                     <div className="flex flex-col">
-                      <div className="p-3 bg-gray-50 border-b border-gray-100 flex items-center justify-between">
-                        <div className="flex items-center gap-4">
-                          <div className="flex items-center gap-2 cursor-pointer hover:bg-gray-200/50 p-1.5 rounded-lg transition-colors">
+                      <div className="p-3 bg-gray-50 border-b border-gray-100 flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex items-center gap-3">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (isAllFilteredSelected) {
+                                deselectAllFiltered();
+                              } else {
+                                selectAllFiltered();
+                              }
+                            }}
+                            className="flex items-center gap-2 cursor-pointer bg-white hover:bg-gray-100 border border-gray-200 px-2.5 py-1.5 rounded-lg transition-colors select-none shadow-sm"
+                            title={isAllFilteredSelected ? "Desmarcar todos os produtos do filtro" : "Selecionar todos os produtos do filtro"}
+                          >
                             <input 
                               type="checkbox" 
-                              checked={filteredProducts.length > 0 && filteredProducts.every(p => selectedProductIds.includes(p.id))}
-                              onChange={e => e.target.checked ? selectAllFiltered() : deselectAllFiltered()}
-                              className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                              checked={isAllFilteredSelected}
+                              onChange={() => {}} // Handled by button container
+                              className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer pointer-events-none"
                             />
-                            <span className="text-[10px] font-black uppercase text-gray-500">Selecionar Todos</span>
-                          </div>
-                          <span className="text-[10px] font-black uppercase text-blue-600 bg-blue-50 px-2 py-1 rounded-md">
-                            {selectedProductIds.length} selecionados
+                            <span className="text-[10px] font-black uppercase text-gray-700">
+                              {isAllFilteredSelected ? "Desmarcar Todos" : "Selecionar Todos"}
+                            </span>
+                          </button>
+
+                          <span className="text-[10px] font-black uppercase text-blue-700 bg-blue-100/80 px-2.5 py-1 rounded-md">
+                            {selectedProductIds.length} selecionado{selectedProductIds.length === 1 ? '' : 's'}
+                          </span>
+
+                          {selectedProductIds.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => setSelectedProductIds([])}
+                              className="text-[10px] font-black uppercase text-red-500 hover:text-red-700 hover:underline transition-all"
+                            >
+                              Limpar Seleção
+                            </button>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setShowOnlySelected(!showOnlySelected)}
+                            className={`text-[10px] font-black uppercase px-2.5 py-1.5 rounded-lg transition-all border ${
+                              showOnlySelected 
+                                ? 'bg-blue-600 text-white border-blue-600 shadow-sm' 
+                                : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
+                            }`}
+                          >
+                            {showOnlySelected ? 'Ver Todos' : `Apenas Selecionados (${selectedProductIds.length})`}
+                          </button>
+                          <span className="text-[10px] font-black uppercase text-gray-400">
+                            {filteredProducts.length} encontrado{filteredProducts.length === 1 ? '' : 's'} no filtro
                           </span>
                         </div>
-                        <span className="text-[10px] font-black uppercase text-gray-400">
-                          {filteredProducts.length} encontrados no filtro
-                        </span>
                       </div>
 
                       {/* Header */}
                       <div className="overflow-x-auto custom-scrollbar">
-                        <div className="min-w-[600px]">
+                        <div className="min-w-[640px]">
                           <div className="bg-white border-b border-gray-100 flex items-center flex-shrink-0 z-20">
                             <div className="p-3 text-[9px] font-black uppercase text-gray-400 tracking-widest w-10 flex-shrink-0"></div>
                             <div className="p-3 text-[9px] font-black uppercase text-gray-400 tracking-widest w-12 flex-shrink-0">Foto</div>
-                            <div className="p-3 text-[9px] font-black uppercase text-gray-400 tracking-widest flex-1">Produto</div>
-                            <div className="p-3 text-[9px] font-black uppercase text-gray-400 tracking-widest w-32 flex-shrink-0">EAN</div>
-                            <div className="p-3 text-[9px] font-black uppercase text-gray-400 tracking-widest w-20 flex-shrink-0 text-right">Preço</div>
+                            <div className="p-3 text-[9px] font-black uppercase text-gray-400 tracking-widest flex-1 min-w-0">Produto</div>
+                            <div className="p-3 text-[9px] font-black uppercase text-gray-400 tracking-widest w-28 flex-shrink-0">EAN</div>
+                            <div className="p-3 text-[9px] font-black uppercase text-gray-400 tracking-widest w-20 flex-shrink-0 text-center">Estoque</div>
+                            <div className="p-3 text-[9px] font-black uppercase text-gray-400 tracking-widest w-24 flex-shrink-0 text-right">Preço</div>
                             <div className="p-3 text-[9px] font-black uppercase text-gray-400 tracking-widest w-16 flex-shrink-0 text-center">Ação</div>
                           </div>
 
@@ -1034,11 +1141,12 @@ const AdminCouponManager: React.FC<AdminCouponManagerProps> = ({ tenant, product
                             >
                               {rowVirtualizer.getVirtualItems().map((virtualRow) => {
                                 const product = filteredProducts[virtualRow.index];
+                                if (!product) return null;
                                 return (
                                   <ProductRow 
-                                    key={virtualRow.key}
+                                    key={product.id || virtualRow.key}
                                     product={product}
-                                    isSelected={selectedProductIds.includes(product.id)}
+                                    isSelected={selectedProductIdsSet.has(String(product.id))}
                                     onToggle={toggleProductSelection}
                                     style={{
                                       position: 'absolute',
@@ -1054,7 +1162,9 @@ const AdminCouponManager: React.FC<AdminCouponManagerProps> = ({ tenant, product
                             </div>
                             {filteredProducts.length === 0 && (
                               <div className="p-8 text-center text-gray-400 text-xs font-bold">
-                                Nenhum produto encontrado com os filtros aplicados.
+                                {showOnlySelected
+                                  ? 'Nenhum produto selecionado até o momento.'
+                                  : 'Nenhum produto encontrado com os filtros aplicados.'}
                               </div>
                             )}
                           </div>
@@ -1142,10 +1252,14 @@ const AdminCouponManager: React.FC<AdminCouponManagerProps> = ({ tenant, product
                 <Check size={32} />
               </div>
               <h3 className="text-xl font-black text-gray-900 mb-2">Confirmar Cupom</h3>
-              <p className="text-sm text-gray-500 mb-6">
-                Você está prestes a ativar o cupom <strong className="text-gray-900">{editingCoupon.code}</strong>.
-                Deseja continuar?
+              <p className="text-sm text-gray-500 mb-4">
+                Você está prestes a salvar e ativar o cupom <strong className="text-gray-900">{editingCoupon.code}</strong>.
               </p>
+              {editingCoupon.targetType === 'SPECIFIC_SELECTION' && (
+                <div className="p-3 bg-blue-50 border border-blue-100 rounded-xl mb-6 text-xs font-bold text-blue-700">
+                  {selectedProductIds.length} produto{selectedProductIds.length === 1 ? '' : 's'} selecionado{selectedProductIds.length === 1 ? '' : 's'} para este cupom
+                </div>
+              )}
               <div className="flex gap-3">
                 <button
                   onClick={() => setShowConfirmation(false)}

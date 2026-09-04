@@ -8634,7 +8634,24 @@ app.post("/api/v1/tenants/:tenantId/vouchers", checkTenantAccess, async (req, re
     if (payload.tenant_id !== tenantId) {
         return res.status(403).json({ error: "Tenant mismatch" });
     }
-    const { data, error } = await supabaseAdmin.from("coupons").upsert(payload).select().single();
+    const cleanCoupon: any = {
+      id: payload.id,
+      tenant_id: tenantId,
+      code: payload.code,
+      discount_type: payload.discount_type,
+      discount_value: payload.discount_value,
+      target_type: payload.target_type || "ALL",
+      target_value: payload.target_value || null,
+      specific_product_ids: payload.specific_product_ids || payload.applicable_products || [],
+      filters_metadata: payload.filters_metadata || null,
+      coupon_scope: payload.coupon_scope || "SPECIFIC_PRODUCT",
+      min_purchase_value: payload.min_purchase_value || 0,
+      start_date: payload.start_date,
+      end_date: payload.end_date,
+      is_active: payload.is_active !== false,
+      scope: payload.scope || "SINGLE_STORE",
+    };
+    const { data, error } = await supabaseAdmin.from("coupons").upsert(cleanCoupon).select().single();
     if (error) throw error;
     res.json(data);
   } catch (e: any) {

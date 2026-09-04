@@ -574,10 +574,12 @@ export const checkProductMatchesRule = (
   }
 
   if (rule.targetType === "SPECIFIC_SELECTION") {
-    if (rule.specificProductIds?.includes(p.id)) return true;
+    const ids = rule.specificProductIds || (rule as any).applicableProducts || [];
+    if (ids.includes(p.id)) return true;
+    if (p.barcode && ids.includes(p.barcode)) return true;
     if (isNetworkScope && p.barcode) {
       const targetEans = matrizProducts
-        .filter((mp) => rule.specificProductIds?.includes(mp.id) && mp.barcode)
+        .filter((mp) => ids.includes(mp.id) && mp.barcode)
         .map((mp) => mp.barcode);
       if (p.barcode && targetEans.includes(p.barcode)) return true;
     }
