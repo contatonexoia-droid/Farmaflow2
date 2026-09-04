@@ -8286,11 +8286,44 @@ app.post("/api/v1/tenants/:tenantId/promos", checkTenantAccess, async (req, res)
 app.delete("/api/v1/tenants/:tenantId/promos/:id", checkTenantAccess, async (req, res) => {
   try {
     const tenantId = req.params.tenantId;
-    const { error } = await supabaseAdmin.from("promotions").delete().eq("id", req.params.id).eq("tenant_id", tenantId);
-    if (error) throw error;
-    res.json({ success: true });
+    const promoId = req.params.id;
+
+    if (!promoId) {
+      return res.status(400).json({ error: "ID da promoção não informado." });
+    }
+
+    // First check if promo exists to avoid false successes and verify tenant affiliation
+    const { data: existingPromo, error: fetchErr } = await supabaseAdmin
+      .from("promotions")
+      .select("id, tenant_id")
+      .eq("id", promoId)
+      .maybeSingle();
+
+    if (fetchErr) {
+      console.warn("[DELETE promo] Erro ao verificar existência da promoção:", fetchErr);
+    }
+
+    if (!existingPromo) {
+      // Already deleted or not found
+      return res.json({ success: true, message: "Promoção já excluída ou não encontrada.", id: promoId });
+    }
+
+    // Delete promo by id
+    const { error: deleteErr } = await supabaseAdmin
+      .from("promotions")
+      .delete()
+      .eq("id", promoId);
+
+    if (deleteErr) {
+      console.error("[DELETE promo] Erro ao deletar no Supabase:", deleteErr);
+      throw deleteErr;
+    }
+
+    console.log(`[DELETE promo] Promoção ${promoId} excluída com sucesso.`);
+    res.json({ success: true, id: promoId });
   } catch (e: any) {
-    res.status(500).json({ error: e.message });
+    console.error("[DELETE promo] Erro na exclusão:", e);
+    res.status(500).json({ error: e.message || "Erro ao excluir promoção" });
   }
 });
 

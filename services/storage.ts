@@ -7,6 +7,7 @@ import {
   AppReview,
   PromotionRule,
   CouponRule,
+  FlashDealsScheduleConfig,
 } from "../types";
 
 /**
@@ -1227,58 +1228,89 @@ export const deleteOrder = async (orderId: string) => {
   }
 };
 
-export const mapDbPromotionToApp = (p: any): PromotionRule => ({
-  id: p.id,
-  tenantId: p.tenant_id || p.tenantid,
-  name: p.name || "",
-  type: p.type || "BUY_X_PAY_Y",
-  targetType: p.target_type || p.targettype || "PRODUCT",
-  targetValue: p.target_value || p.targetvalue || "",
-  buyX: p.buy_x ?? p.buyx ?? (p.filters_metadata || p.filtersmetadata)?.buyX ?? (p.type === "BUY_X_PAY_Y" ? 3 : undefined),
-  payY: p.pay_y ?? p.payy ?? (p.filters_metadata || p.filtersmetadata)?.payY ?? (p.type === "BUY_X_PAY_Y" ? 2 : undefined),
-  lightningDiscountPercentage:
-    p.lightning_discount_percentage || p.lightningdiscountpercentage,
-  discountThresholds: p.discount_thresholds || p.discountthresholds || [],
-  comboProducts:
-    p.combo_products ||
-    p.comboproducts ||
-    (p.filters_metadata || p.filtersmetadata)?.comboProducts ||
-    p.specific_product_ids ||
-    p.specificproductids ||
-    [],
-  comboPrice:
-    p.bundle_price ??
-    p.combo_price ??
-    (p.filters_metadata || p.filtersmetadata)?.comboPrice ??
-    (p.type === "VARIABLE_COMBO" || p.type === "COMBO_VARIABLE" ? (p.pay_y ?? p.payy) : undefined),
-  bundle_price:
-    p.bundle_price ??
-    p.combo_price ??
-    (p.filters_metadata || p.filtersmetadata)?.comboPrice,
-  comboDiscountPercentage:
-    p.combo_discount_percentage || p.combodiscountpercentage,
-  specificProductIds:
-    p.specific_product_ids ||
-    p.specificproductids ||
-    p.combo_products ||
-    p.comboproducts ||
-    [],
-  filtersMetadata: p.filters_metadata || p.filtersmetadata,
-  highlightInCategoriesBar:
-    p.highlight_in_categories_bar ??
-    (p.filters_metadata || p.filtersmetadata)?.highlightInCategoriesBar,
-  highlightColor:
-    p.highlight_color ??
-    (p.filters_metadata || p.filtersmetadata)?.highlightColor,
-  highlightIcon:
-    p.highlight_icon ??
-    (p.filters_metadata || p.filtersmetadata)?.highlightIcon,
-  scheduleConfig: (p.filters_metadata || p.filtersmetadata)?.scheduleConfig,
-  startDate: p.start_date || p.startdate,
-  endDate: p.end_date || p.enddate,
-  isActive: p.is_active !== false && p.isactive !== false,
-  scope: p.scope || "SINGLE_STORE",
-});
+export const mapDbPromotionToApp = (p: any): PromotionRule => {
+  let safeScheduleConfig: FlashDealsScheduleConfig | undefined = undefined;
+  const rawSchedule = (p.filters_metadata || p.filtersmetadata)?.scheduleConfig;
+  if (rawSchedule) {
+    if (typeof rawSchedule === "string") {
+      try {
+        const parsed = JSON.parse(rawSchedule);
+        if (parsed && typeof parsed === "object") {
+          safeScheduleConfig = {
+            frequency: parsed.frequency || "DAILY",
+            startTime: typeof parsed.startTime === "string" ? parsed.startTime : "00:00",
+            endTime: typeof parsed.endTime === "string" ? parsed.endTime : "23:59",
+            daysOfWeek: Array.isArray(parsed.daysOfWeek) ? parsed.daysOfWeek : undefined,
+            daysOfMonth: Array.isArray(parsed.daysOfMonth) ? parsed.daysOfMonth : undefined,
+          };
+        }
+      } catch {
+        safeScheduleConfig = undefined;
+      }
+    } else if (typeof rawSchedule === "object") {
+      safeScheduleConfig = {
+        frequency: rawSchedule.frequency || "DAILY",
+        startTime: typeof rawSchedule.startTime === "string" ? rawSchedule.startTime : "00:00",
+        endTime: typeof rawSchedule.endTime === "string" ? rawSchedule.endTime : "23:59",
+        daysOfWeek: Array.isArray(rawSchedule.daysOfWeek) ? rawSchedule.daysOfWeek : undefined,
+        daysOfMonth: Array.isArray(rawSchedule.daysOfMonth) ? rawSchedule.daysOfMonth : undefined,
+      };
+    }
+  }
+
+  return {
+    id: p.id,
+    tenantId: p.tenant_id || p.tenantid,
+    name: p.name || "",
+    type: p.type || "BUY_X_PAY_Y",
+    targetType: p.target_type || p.targettype || "PRODUCT",
+    targetValue: p.target_value || p.targetvalue || "",
+    buyX: p.buy_x ?? p.buyx ?? (p.filters_metadata || p.filtersmetadata)?.buyX ?? (p.type === "BUY_X_PAY_Y" ? 3 : undefined),
+    payY: p.pay_y ?? p.payy ?? (p.filters_metadata || p.filtersmetadata)?.payY ?? (p.type === "BUY_X_PAY_Y" ? 2 : undefined),
+    lightningDiscountPercentage:
+      p.lightning_discount_percentage || p.lightningdiscountpercentage,
+    discountThresholds: p.discount_thresholds || p.discountthresholds || [],
+    comboProducts:
+      p.combo_products ||
+      p.comboproducts ||
+      (p.filters_metadata || p.filtersmetadata)?.comboProducts ||
+      p.specific_product_ids ||
+      p.specificproductids ||
+      [],
+    comboPrice:
+      p.bundle_price ??
+      p.combo_price ??
+      (p.filters_metadata || p.filtersmetadata)?.comboPrice ??
+      (p.type === "VARIABLE_COMBO" || p.type === "COMBO_VARIABLE" ? (p.pay_y ?? p.payy) : undefined),
+    bundle_price:
+      p.bundle_price ??
+      p.combo_price ??
+      (p.filters_metadata || p.filtersmetadata)?.comboPrice,
+    comboDiscountPercentage:
+      p.combo_discount_percentage || p.combodiscountpercentage,
+    specificProductIds:
+      p.specific_product_ids ||
+      p.specificproductids ||
+      p.combo_products ||
+      p.comboproducts ||
+      [],
+    filtersMetadata: p.filters_metadata || p.filtersmetadata,
+    highlightInCategoriesBar:
+      p.highlight_in_categories_bar ??
+      (p.filters_metadata || p.filtersmetadata)?.highlightInCategoriesBar,
+    highlightColor:
+      p.highlight_color ??
+      (p.filters_metadata || p.filtersmetadata)?.highlightColor,
+    highlightIcon:
+      p.highlight_icon ??
+      (p.filters_metadata || p.filtersmetadata)?.highlightIcon,
+    scheduleConfig: safeScheduleConfig,
+    startDate: p.start_date || p.startdate,
+    endDate: p.end_date || p.enddate,
+    isActive: p.is_active !== false && p.isactive !== false,
+    scope: p.scope || "SINGLE_STORE",
+  };
+};
 
 
 export const getAuthHeaders = async (tenantId: string) => {
@@ -1463,28 +1495,39 @@ export const savePromotion = async (promotion: PromotionRule) => {
 };
 
 export const deletePromotion = async (id: string, tenantId: string) => {
+  if (!id) {
+    throw new Error("ID da promoção é obrigatório para exclusão.");
+  }
+
   try {
     const res = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/promos/${encodeURIComponent(id)}`, {
-        method: 'DELETE',
-        headers: await getAuthHeaders(tenantId)
+      method: 'DELETE',
+      headers: await getAuthHeaders(tenantId)
     });
-    if (!res.ok) {
-      const { error: sbErr } = await supabase.from('promotions').delete().eq('id', id).eq('tenant_id', tenantId);
-      if (sbErr) {
-        let errMessage = 'Falha ao excluir promoção';
-        try {
-          const errData = await res.json();
-          errMessage = errData.error || errData.message || JSON.stringify(errData);
-        } catch {
-          errMessage = await res.text();
-        }
-        throw new Error(errMessage || sbErr.message);
-      }
+
+    if (res.ok) {
+      const data = await res.json().catch(() => ({ success: true }));
+      return { success: true, id, ...data };
     }
+
+    // Direct Supabase fallback by id
+    const { error: sbErr } = await supabase.from('promotions').delete().eq('id', id);
+    if (sbErr) {
+      let errMessage = 'Falha ao excluir promoção';
+      try {
+        const errData = await res.json();
+        errMessage = errData.error || errData.message || JSON.stringify(errData);
+      } catch {
+        errMessage = await res.text();
+      }
+      throw new Error(errMessage || sbErr.message);
+    }
+    return { success: true, id };
   } catch (e: any) {
     try {
-      const { error: sbErr } = await supabase.from('promotions').delete().eq('id', id).eq('tenant_id', tenantId);
+      const { error: sbErr } = await supabase.from('promotions').delete().eq('id', id);
       if (sbErr) throw sbErr;
+      return { success: true, id };
     } catch (finalErr: any) {
       throw new Error(handleNetworkError(finalErr || e, "Excluir Promoção"));
     }

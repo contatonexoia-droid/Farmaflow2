@@ -1363,9 +1363,13 @@ const App: React.FC = () => {
         async () => {
           // Re-fetch all promotions for simplicity
           const promos = await getPromotionsByTenant(currentTenant.id, currentTenant.networkId);
-          setPromotions(promos);
+          if (Array.isArray(promos)) {
+            setPromotions(promos);
+          }
           const coups = await getCouponsByTenant(currentTenant.id, currentTenant.networkId);
-          setCoupons(coups);
+          if (Array.isArray(coups)) {
+            setCoupons(coups);
+          }
         },
       )
       .subscribe();
@@ -1374,16 +1378,18 @@ const App: React.FC = () => {
     const interval = setInterval(async () => {
       try {
         const promos = await getPromotionsByTenant(currentTenant.id, currentTenant.networkId);
-        // Since we're doing deep object comparison, let's just do a stringify check to avoid unnecessary re-renders
-        // But since setPromotions uses referential equality if we do a direct assignment, we'll use a functional update with loose equality
-        setPromotions((prev) =>
-          JSON.stringify(prev) !== JSON.stringify(promos) ? promos : prev,
-        );
+        if (Array.isArray(promos)) {
+          setPromotions((prev) =>
+            JSON.stringify(prev) !== JSON.stringify(promos) ? promos : prev,
+          );
+        }
 
         const coups = await getCouponsByTenant(currentTenant.id, currentTenant.networkId);
-        setCoupons((prev) =>
-          JSON.stringify(prev) !== JSON.stringify(coups) ? coups : prev,
-        );
+        if (Array.isArray(coups)) {
+          setCoupons((prev) =>
+            JSON.stringify(prev) !== JSON.stringify(coups) ? coups : prev,
+          );
+        }
       } catch (e) {
         console.error("Error polling promotions/coupons run:", e);
       }

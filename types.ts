@@ -468,36 +468,43 @@ export const isPromotionActive = (
 
     const sch = p.scheduleConfig;
 
-    if (
-      sch.frequency === "WEEKLY" &&
-      sch.daysOfWeek &&
-      sch.daysOfWeek.length > 0
-    ) {
-      if (!sch.daysOfWeek.includes(currentDayOfWeek)) return false;
-    }
-    if (
-      sch.frequency === "MONTHLY" &&
-      sch.daysOfMonth &&
-      sch.daysOfMonth.length > 0
-    ) {
-      if (!sch.daysOfMonth.includes(currentDayOfMonth)) return false;
-    }
+    if (sch && typeof sch === "object") {
+      if (
+        sch.frequency === "WEEKLY" &&
+        Array.isArray(sch.daysOfWeek) &&
+        sch.daysOfWeek.length > 0
+      ) {
+        if (!sch.daysOfWeek.includes(currentDayOfWeek)) return false;
+      }
+      if (
+        sch.frequency === "MONTHLY" &&
+        Array.isArray(sch.daysOfMonth) &&
+        sch.daysOfMonth.length > 0
+      ) {
+        if (!sch.daysOfMonth.includes(currentDayOfMonth)) return false;
+      }
 
-    if (sch.startTime && sch.endTime) {
-      const [startH, startM] = sch.startTime.split(":").map(Number);
-      const [endH, endM] = sch.endTime.split(":").map(Number);
+      if (
+        typeof sch.startTime === "string" &&
+        typeof sch.endTime === "string" &&
+        sch.startTime.includes(":") &&
+        sch.endTime.includes(":")
+      ) {
+        const [startH, startM] = sch.startTime.split(":").map(Number);
+        const [endH, endM] = sch.endTime.split(":").map(Number);
 
-      const currentSeconds = currentHour * 3600 + currentMinute * 60 + currentSecond;
-      const startSeconds = startH * 3600 + (startM || 0) * 60;
-      const endSeconds = endH * 3600 + (endM || 0) * 60;
+        const currentSeconds = currentHour * 3600 + currentMinute * 60 + currentSecond;
+        const startSeconds = (startH || 0) * 3600 + (startM || 0) * 60;
+        const endSeconds = (endH || 0) * 3600 + (endM || 0) * 60;
 
-      if (startSeconds > endSeconds) {
-        if (currentSeconds < startSeconds && currentSeconds >= endSeconds) {
-          return false;
-        }
-      } else {
-        if (currentSeconds < startSeconds || currentSeconds >= endSeconds) {
-          return false;
+        if (startSeconds > endSeconds) {
+          if (currentSeconds < startSeconds && currentSeconds >= endSeconds) {
+            return false;
+          }
+        } else {
+          if (currentSeconds < startSeconds || currentSeconds >= endSeconds) {
+            return false;
+          }
         }
       }
     }

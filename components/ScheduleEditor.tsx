@@ -72,7 +72,7 @@ export const ScheduleEditor = ({
               </label>
               <input
                 type="time"
-                value={act.startTime}
+                value={act.startTime || "00:00"}
                 onChange={(e) =>
                   onChange({ ...act, startTime: e.target.value })
                 }
@@ -85,7 +85,7 @@ export const ScheduleEditor = ({
               </label>
               <input
                 type="time"
-                value={act.endTime}
+                value={act.endTime || "23:59"}
                 onChange={(e) => onChange({ ...act, endTime: e.target.value })}
                 className="w-full px-3 py-2 rounded-xl border border-orange-200 text-sm font-medium focus:border-orange-500 focus:ring-0 bg-white"
               />

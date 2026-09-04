@@ -43,7 +43,14 @@ export const CouponBanner: React.FC<CouponBannerProps> = ({
           validLightningOffer = p;
           let end = p.endDate ? new Date(p.endDate) : null;
 
-          if (p.scheduleConfig && p.scheduleConfig.startTime && p.scheduleConfig.endTime) {
+          if (
+            p.scheduleConfig &&
+            typeof p.scheduleConfig === "object" &&
+            typeof p.scheduleConfig.startTime === "string" &&
+            typeof p.scheduleConfig.endTime === "string" &&
+            p.scheduleConfig.startTime.includes(":") &&
+            p.scheduleConfig.endTime.includes(":")
+          ) {
             const spFormatter = new Intl.DateTimeFormat('en-US', {
               timeZone: 'America/Sao_Paulo',
               hour12: false,
@@ -60,8 +67,8 @@ export const CouponBanner: React.FC<CouponBannerProps> = ({
             const currentMinute = parseInt(getP('minute'), 10) || now.getMinutes();
             const currentSecond = parseInt(getP('second'), 10) || now.getSeconds();
 
-            const [startH, startM] = p.scheduleConfig.startTime.split(':').map(Number);
-            const [endH, endM] = p.scheduleConfig.endTime.split(':').map(Number);
+            const [startH, startM] = (p.scheduleConfig.startTime || "00:00").split(':').map(Number);
+            const [endH, endM] = (p.scheduleConfig.endTime || "23:59").split(':').map(Number);
 
             const currentSeconds =
               currentHour * 3600 + currentMinute * 60 + currentSecond;

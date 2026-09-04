@@ -35,6 +35,7 @@ import {
   Clock,
   Zap,
   Timer,
+  Loader2,
 } from "lucide-react";
 import {
   savePromotion,
@@ -565,6 +566,8 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
     useState<Partial<PromotionRule> | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [showConfirmation, setShowConfirmation] = useState(false);
+  const [promoToDelete, setPromoToDelete] = useState<PromotionRule | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
   const [networkBranches, setNetworkBranches] = useState<PharmacyConfig[]>([]);
 
   useEffect(() => {
@@ -981,18 +984,38 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
     }
   };
 
-  const handleDelete = async (id: string) => {
-    if (!window.confirm("Tem certeza que deseja excluir esta promoção?"))
-      return;
+  const handleDeleteClick = (promo: PromotionRule) => {
+    setPromoToDelete(promo);
+  };
+
+  const confirmDelete = async () => {
+    if (!promoToDelete || isDeleting) return;
+
+    setIsDeleting(true);
+    const promoId = promoToDelete.id;
+    const targetTenantId = promoToDelete.tenantId || tenant.id;
 
     try {
-      await deletePromotion(id, tenant.id);
-      const updatedPromos = await getPromotionsByTenant(tenant.id);
-      onPromotionsUpdate(updatedPromos);
+      // 1. Aguarda confirmação de exclusão do servidor com o ID correto
+      await deletePromotion(promoId, targetTenantId);
+
+      // 2. Re-busca do backend com tenant.id e tenant.networkId para sincronização garantida
+      const updatedPromos = await getPromotionsByTenant(tenant.id, tenant.networkId);
+
+      // 3. Atualiza estado apenas após confirmação do servidor
+      if (updatedPromos !== null && Array.isArray(updatedPromos)) {
+        onPromotionsUpdate(updatedPromos);
+      } else {
+        onPromotionsUpdate(promotions.filter((p) => p.id !== promoId));
+      }
+
       toast.success("Promoção excluída com sucesso!");
+      setPromoToDelete(null);
     } catch (error: any) {
       console.error("Error deleting promotion:", error);
-      toast.error(error.message || "Erro ao excluir promoção.");
+      toast.error(error.message || "Erro ao excluir promoção do servidor.");
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -2229,6 +2252,56 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
         </div>
       )}
 
+      {/* Modal de Confirmação de Exclusão (sem window.confirm) */}
+      {promoToDelete && (
+        <div className="fixed inset-0 z-[300] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl w-full max-w-md overflow-hidden shadow-2xl animate-in zoom-in-95 duration-200 p-6 sm:p-8 space-y-6">
+            <div className="w-16 h-16 bg-red-100 text-red-600 rounded-2xl flex items-center justify-center mx-auto shadow-inner">
+              <Trash2 size={32} />
+            </div>
+
+            <div className="text-center space-y-2">
+              <h3 className="text-xl font-black text-gray-900 tracking-tight">
+                Excluir Promoção?
+              </h3>
+              <p className="text-sm text-gray-500 leading-relaxed">
+                Tem certeza que deseja excluir permanentemente a promoção{" "}
+                <span className="font-bold text-gray-900">
+                  "{promoToDelete.name}"
+                </span>
+                ? Esta alteração será refletida no banco de dados e na loja online.
+              </p>
+            </div>
+
+            <div className="flex items-center gap-3 pt-2">
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={() => setPromoToDelete(null)}
+                className="flex-1 px-4 py-3 rounded-xl border border-gray-200 text-gray-700 font-bold text-sm hover:bg-gray-50 transition-colors disabled:opacity-50 cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={confirmDelete}
+                className="flex-1 px-4 py-3 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-sm transition-all shadow-lg hover:shadow-red-500/25 flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
+              >
+                {isDeleting ? (
+                  <>
+                    <Loader2 size={18} className="animate-spin" />
+                    Excluindo...
+                  </>
+                ) : (
+                  "Sim, Excluir"
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {promotions.length === 0 ? (
           <div className="col-span-full py-20 text-center bg-gray-50 rounded-3xl border-2 border-dashed border-gray-200">
@@ -2285,8 +2358,9 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
                         <Edit2 size={18} />
                       </button>
                       <button
-                        onClick={() => handleDelete(promo.id)}
+                        onClick={() => handleDeleteClick(promo)}
                         className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-all"
+                        title="Excluir Promoção"
                       >
                         <Trash2 size={18} />
                       </button>
@@ -2354,7 +2428,7 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
                           : "..."}
                       </div>
                     )}
-                    {promo.scheduleConfig && (
+                    {promo.scheduleConfig && typeof promo.scheduleConfig === "object" && (
                       <div className="pt-2 flex items-center gap-2 text-[10px] text-orange-500 font-black uppercase tracking-wider">
                         <Clock size={12} />
                         {promo.scheduleConfig.frequency === "DAILY"
@@ -2363,8 +2437,8 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
                             ? "Semanal"
                             : "Mensal"}
                         <span className="opacity-50">|</span>
-                        {promo.scheduleConfig.startTime} -{" "}
-                        {promo.scheduleConfig.endTime}
+                        {promo.scheduleConfig.startTime || "00:00"} -{" "}
+                        {promo.scheduleConfig.endTime || "23:59"}
                       </div>
                     )}
                   </div>
