@@ -1161,8 +1161,8 @@ export const Storefront: React.FC<StorefrontProps> = ({
   onBack,
   onSearch,
 }) => {
-  const INITIAL_PAGE_SIZE = 24;
-  const BATCH_PAGE_SIZE = 24;
+  const INITIAL_PAGE_SIZE = 60;
+  const BATCH_PAGE_SIZE = 48;
   const [isLoading, setIsLoading] = useState(true);
   const [matrizProducts, setMatrizProducts] = useState<Product[]>([]);
   const [visibleCount, setVisibleCount] = useState(INITIAL_PAGE_SIZE);
@@ -2431,6 +2431,32 @@ export const Storefront: React.FC<StorefrontProps> = ({
     return filteredProducts.slice(0, visibleCount);
   }, [filteredProducts, visibleCount]);
 
+  // Infinite scroll fluido com IntersectionObserver antecipado (pré-carregamento invisível com rootMargin)
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel || typeof IntersectionObserver === "undefined") return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const [entry] = entries;
+        if (entry && entry.isIntersecting) {
+          setVisibleCount((prev) => {
+            if (prev >= filteredProducts.length) return prev;
+            return Math.min(filteredProducts.length, prev + BATCH_PAGE_SIZE);
+          });
+        }
+      },
+      {
+        root: null,
+        rootMargin: "0px 0px 650px 0px", // Gatilho 650px antes do final da página para transição contínua
+        threshold: 0,
+      }
+    );
+
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [filteredProducts.length, visibleCount]);
+
   const crossSellSuggestions = useMemo(() => {
     if (products.length === 0) return [];
 
@@ -3496,9 +3522,9 @@ export const Storefront: React.FC<StorefrontProps> = ({
               ))}
             </div>
 
-            {/* Sentinela de Infinite Scroll nativo */}
+            {/* Sentinela de Infinite Scroll nativo com pré-carregamento invisível */}
             {filteredProducts.length > visibleCount && (
-              <div ref={sentinelRef} className="w-full h-10 flex items-center justify-center my-2" />
+              <div ref={sentinelRef} className="w-full h-10 flex items-center justify-center my-2 pointer-events-none opacity-0" aria-hidden="true" />
             )}
 
             {/* Controle de Paginação/Carregamento em Lotes por Demanda */}
