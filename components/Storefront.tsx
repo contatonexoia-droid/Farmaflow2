@@ -5,6 +5,8 @@ import React, {
   useRef,
   useDeferredValue,
   useCallback,
+  useTransition,
+  startTransition,
 } from "react";
 import { flushSync } from "react-dom";
 import {
@@ -419,43 +421,99 @@ const getPromoIcon = (iconName?: string) => {
   }
 };
 
-const ProductCard = React.memo(
-  ({
-    product,
-    tenant,
-    promotions = [],
-    onProductClick,
-    onAddToCart,
-    onNotify,
-    isCompact,
-    priority = false,
-    isProductInRule,
-    cartItems = [],
-  }: {
-    product: Product;
-    tenant: PharmacyConfig;
-    promotions?: PromotionRule[];
-    onProductClick: (p: Product) => void;
-    onAddToCart: (e: any, p: Product) => void;
-    onNotify: (e: any, p: Product) => void;
-    isCompact?: boolean;
-    priority?: boolean;
-    isProductInRule?: (rule: PromotionRule | CouponRule, p: Product) => boolean;
-    cartItems?: CartItem[];
-  }) => {
-    const isOutOfStock = product.stock <= 0;
-    const cartItem = cartItems?.find((item) => item.id === product.id);
-    const itemQuantity = cartItem ? (cartItem.quantity || 0) : 0;
-    const hasDiscount = Boolean(
-      (product.originalPrice && product.originalPrice > product.price) ||
-      (product.promotionalPrice && product.promotionalPrice > 0 && product.promotionalPrice < (product.originalPrice || product.price))
-    );
-    const isKit = Boolean(product.promotionType === "BUY_X_PAY_Y");
-    const isDiscountOnQty = Boolean(product.promotionType === "DISCOUNT_ON_QTY");
+interface ProductCardProps {
+  product: Product;
+  tenant: PharmacyConfig;
+  promotions?: PromotionRule[];
+  onProductClick: (p: Product) => void;
+  onAddToCart: (e: any, p: Product) => void;
+  onNotify: (e: any, p: Product) => void;
+  isCompact?: boolean;
+  priority?: boolean;
+  isProductInRule?: (rule: PromotionRule | CouponRule, p: Product) => boolean;
+  cartItems?: CartItem[];
+}
 
-    const activePromo = promotions.find((p) => {
-      // The promotions array passed here generally comes from activePromotions,
-      // but to be absolutely safe without needing real-time currentTime:
+const areProductCardPropsEqual = (
+  prev: ProductCardProps,
+  next: ProductCardProps
+): boolean => {
+  // Check core product identity and properties
+  if (prev.product !== next.product) {
+    const p1 = prev.product;
+    const p2 = next.product;
+    if (
+      p1.id !== p2.id ||
+      p1.price !== p2.price ||
+      p1.stock !== p2.stock ||
+      p1.name !== p2.name ||
+      p1.image !== p2.image ||
+      p1.presentation !== p2.presentation ||
+      p1.isFeatured !== p2.isFeatured ||
+      p1.promotionalPrice !== p2.promotionalPrice ||
+      p1.originalPrice !== p2.originalPrice ||
+      p1.promotionType !== p2.promotionType ||
+      (p1 as any)._justUpdated !== (p2 as any)._justUpdated
+    ) {
+      return false;
+    }
+  }
+
+  // Display modes & priority
+  if (prev.priority !== next.priority) return false;
+  if (prev.isCompact !== next.isCompact) return false;
+  if (prev.tenant.primaryColor !== next.tenant.primaryColor) return false;
+
+  // Cart quantity check: only re-render if THIS item's cart quantity changed
+  const prevQty = prev.cartItems?.find((item) => item.id === prev.product.id)?.quantity || 0;
+  const nextQty = next.cartItems?.find((item) => item.id === next.product.id)?.quantity || 0;
+  if (prevQty !== nextQty) return false;
+
+  // Promotions check: only re-render if the applicable promotion for this product changed
+  if (prev.promotions !== next.promotions || prev.isProductInRule !== next.isProductInRule) {
+    const findPromoId = (promos?: PromotionRule[], isRuleFn?: (r: any, p: any) => boolean) => {
+      if (!promos || promos.length === 0) return null;
+      for (let i = 0; i < promos.length; i++) {
+        const pr = promos[i];
+        if (isRuleFn ? isRuleFn(pr, prev.product) : pr.specificProductIds?.includes(prev.product.id)) {
+          return pr.id;
+        }
+      }
+      return null;
+    };
+    if (findPromoId(prev.promotions, prev.isProductInRule) !== findPromoId(next.promotions, next.isProductInRule)) {
+      return false;
+    }
+  }
+
+  return true;
+};
+
+const ProductCardComponent = ({
+  product,
+  tenant,
+  promotions = [],
+  onProductClick,
+  onAddToCart,
+  onNotify,
+  isCompact,
+  priority = false,
+  isProductInRule,
+  cartItems = [],
+}: ProductCardProps) => {
+  const isOutOfStock = product.stock <= 0;
+  const cartItem = cartItems?.find((item) => item.id === product.id);
+  const itemQuantity = cartItem ? (cartItem.quantity || 0) : 0;
+  const hasDiscount = Boolean(
+    (product.originalPrice && product.originalPrice > product.price) ||
+    (product.promotionalPrice && product.promotionalPrice > 0 && product.promotionalPrice < (product.originalPrice || product.price))
+  );
+  const isKit = Boolean(product.promotionType === "BUY_X_PAY_Y");
+  const isDiscountOnQty = Boolean(product.promotionType === "DISCOUNT_ON_QTY");
+
+  const activePromo = useMemo(() => {
+    if (!promotions || promotions.length === 0) return null;
+    return promotions.find((p) => {
       if (isProductInRule) {
         return isProductInRule(p, product);
       }
@@ -475,7 +533,8 @@ const ProductCard = React.memo(
       )
         return true;
       return false;
-    });
+    }) || null;
+  }, [promotions, product, isProductInRule]);
 
     let currentPrice = product.price;
     let fallbackOriginalPrice = product.originalPrice ?? product.price;
@@ -801,8 +860,9 @@ const ProductCard = React.memo(
         </div>
       </div>
     );
-  },
-);
+};
+
+const ProductCard = React.memo(ProductCardComponent, areProductCardPropsEqual);
 
 const SearchInput = ({
   initialValue,
@@ -1148,6 +1208,60 @@ const HighlightText: React.FC<{ text: string; query: string }> = ({
   );
 };
 
+interface PromoLookup {
+  idSet: Set<string>;
+  barcodeSet: Set<string>;
+  matches: (p: Product) => boolean;
+}
+
+const buildPromoLookup = (
+  rule: PromotionRule | CouponRule,
+  matrizProducts: Product[] = [],
+  tenantId?: string
+): PromoLookup => {
+  const isNetworkScope = rule.scope === "NETWORK" || (tenantId && rule.tenantId !== tenantId);
+  let rawIds: string[] = [];
+  if ("type" in rule && (rule.type === "VARIABLE_COMBO" || (rule.type as string) === "COMBO_VARIABLE")) {
+    rawIds = (rule.comboProducts && rule.comboProducts.length > 0)
+      ? rule.comboProducts
+      : (rule.specificProductIds || []);
+  } else if (rule.targetType === "SPECIFIC_SELECTION") {
+    rawIds = rule.specificProductIds || (rule as any).applicableProducts || [];
+  } else if (rule.targetType === "PRODUCT" && rule.targetValue) {
+    rawIds = [rule.targetValue];
+  }
+
+  const idSet = new Set<string>(rawIds);
+  const barcodeSet = new Set<string>();
+
+  if (isNetworkScope && matrizProducts.length > 0 && idSet.size > 0) {
+    for (let i = 0; i < matrizProducts.length; i++) {
+      const mp = matrizProducts[i];
+      if (mp.barcode && idSet.has(mp.id)) {
+        barcodeSet.add(mp.barcode);
+      }
+    }
+  }
+
+  const norm = (s?: string) => (s || "").toLowerCase().trim();
+  const targetCat = rule.targetType === "CATEGORY" ? norm(rule.targetValue) : null;
+  const targetMfg = rule.targetType === "MANUFACTURER" ? norm(rule.targetValue) : null;
+  const isAll = rule.targetType === "ALL";
+
+  const matches = (p: Product): boolean => {
+    if (!p || !p.id) return false;
+    if (isAll) return true;
+    if (idSet.has(p.id)) return true;
+    if (p.barcode && idSet.has(p.barcode)) return true;
+    if (isNetworkScope && p.barcode && barcodeSet.has(p.barcode)) return true;
+    if (targetCat && norm(p.category) === targetCat) return true;
+    if (targetMfg && norm(p.manufacturer) === targetMfg) return true;
+    return false;
+  };
+
+  return { idSet, barcodeSet, matches };
+};
+
 export const Storefront: React.FC<StorefrontProps> = ({
   tenant,
   products,
@@ -1161,8 +1275,10 @@ export const Storefront: React.FC<StorefrontProps> = ({
   onBack,
   onSearch,
 }) => {
-  const INITIAL_PAGE_SIZE = 60;
-  const BATCH_PAGE_SIZE = 48;
+  const INITIAL_PAGE_SIZE = 24;
+  const BATCH_PAGE_SIZE = 24;
+  const [isPendingFilter, startFilterTransition] = useTransition();
+  const [pendingPromoId, setPendingPromoId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [matrizProducts, setMatrizProducts] = useState<Product[]>([]);
   const [visibleCount, setVisibleCount] = useState(INITIAL_PAGE_SIZE);
@@ -1432,18 +1548,24 @@ export const Storefront: React.FC<StorefrontProps> = ({
     window.history.replaceState({}, "", url.toString());
   };
 
-  const selectPromotion = (promoId: string | null) => {
+  const selectPromotion = useCallback((promoId: string | null) => {
+    setPendingPromoId(promoId ?? "clear");
+    startFilterTransition(() => {
+      setFilters((prev) => ({
+        ...prev,
+        promocao_id: promoId,
+        departamento: "Todos",
+        categoria: "Todos",
+        cupom_id: null,
+        termo_busca: "", // Intenção soberana limpa termo de busca
+      }));
+      setDebouncedSearchTerm("");
+      setVisibleCount(INITIAL_PAGE_SIZE);
+      setPendingPromoId(null);
+    });
+
     window.scrollTo({ top: 0, behavior: "instant" });
     setIsDrawerOpen(false);
-    setFilters((prev) => ({
-      ...prev,
-      promocao_id: promoId,
-      departamento: "Todos",
-      categoria: "Todos",
-      cupom_id: null,
-      termo_busca: "", // Intenção soberana limpa termo de busca
-    }));
-    setDebouncedSearchTerm("");
 
     // URL management
     const url = new URL(window.location.href);
@@ -1456,20 +1578,26 @@ export const Storefront: React.FC<StorefrontProps> = ({
     url.searchParams.delete("dept_id");
     url.searchParams.delete("cupom_id");
     window.history.replaceState({}, "", url.toString());
-  };
+  }, [startFilterTransition, INITIAL_PAGE_SIZE]);
 
-  const selectCoupon = (coupon: CouponRule) => {
+  const selectCoupon = useCallback((coupon: CouponRule) => {
+    setPendingPromoId(coupon.id);
+    startFilterTransition(() => {
+      setFilters((prev) => ({
+        ...prev,
+        cupom_id: coupon.id,
+        promocao_id: null,
+        departamento: "Todos",
+        categoria: "Todos",
+        termo_busca: "", // Intenção soberana limpa termo de busca
+      }));
+      setDebouncedSearchTerm("");
+      setVisibleCount(INITIAL_PAGE_SIZE);
+      setPendingPromoId(null);
+    });
+
     window.scrollTo({ top: 0, behavior: "instant" });
     setIsDrawerOpen(false);
-    setFilters((prev) => ({
-      ...prev,
-      cupom_id: coupon.id,
-      promocao_id: null,
-      departamento: "Todos",
-      categoria: "Todos",
-      termo_busca: "", // Intenção soberana limpa termo de busca
-    }));
-    setDebouncedSearchTerm("");
 
     // URL management
     const url = new URL(window.location.href);
@@ -1478,21 +1606,26 @@ export const Storefront: React.FC<StorefrontProps> = ({
     url.searchParams.delete("dept_id");
     url.searchParams.delete("category_id");
     window.history.replaceState({}, "", url.toString());
-  };
+  }, [startFilterTransition, INITIAL_PAGE_SIZE]);
 
   const resetFilters = useCallback(() => {
+    setPendingPromoId("reset");
+    startFilterTransition(() => {
+      // Do a single state update for all properties
+      setFilters({
+        departamento: "Todos",
+        categoria: "Todos",
+        promocao_id: null,
+        cupom_id: null,
+        termo_busca: "",
+      });
+      setDebouncedSearchTerm("");
+      setVisibleCount(INITIAL_PAGE_SIZE);
+      setPendingPromoId(null);
+    });
+
     window.scrollTo({ top: 0, behavior: "instant" });
     setIsDrawerOpen(false);
-
-    // Do a single state update for all properties
-    setFilters({
-      departamento: "Todos",
-      categoria: "Todos",
-      promocao_id: null,
-      cupom_id: null,
-      termo_busca: "",
-    });
-    setDebouncedSearchTerm("");
 
     // Clear URL parameters
     const url = new URL(window.location.href);
@@ -1501,7 +1634,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
     url.searchParams.delete("category_id");
     url.searchParams.delete("cupom_id");
     window.history.replaceState({}, "", url.toString());
-  }, []);
+  }, [startFilterTransition, INITIAL_PAGE_SIZE]);
 
   useEffect(() => {
     if (inheritedPromotions.length > 0 && !initialPromoCheck.current) {
@@ -1853,9 +1986,52 @@ export const Storefront: React.FC<StorefrontProps> = ({
     return map;
   }, [activePromotions, activeCouponFilter, matrizProducts, tenant.id]);
 
+  // 1. Memoized O(1) set-based lookup for active promotions and coupons
+  const activePromosLookupMap = useMemo(() => {
+    const map = new Map<string, PromoLookup>();
+    if (activePromotions) {
+      for (let i = 0; i < activePromotions.length; i++) {
+        const promo = activePromotions[i];
+        map.set(promo.id, buildPromoLookup(promo, matrizProducts, tenant.id));
+      }
+    }
+    if (activeCouponFilter) {
+      map.set(activeCouponFilter.id, buildPromoLookup(activeCouponFilter, matrizProducts, tenant.id));
+    }
+    return map;
+  }, [activePromotions, activeCouponFilter, matrizProducts, tenant.id]);
+
+  // 2. Memoized O(1) set-based lookup for the currently selected promotion (Variable Combo, etc.)
+  const selectedPromoLookup = useMemo(() => {
+    if (!selectedPromotion) return null;
+    return activePromosLookupMap.get(selectedPromotion.id) || buildPromoLookup(selectedPromotion, matrizProducts, tenant.id);
+  }, [selectedPromotion, activePromosLookupMap, matrizProducts, tenant.id]);
+
+  // 3. Dedicated memoized list of products for the active variable combo / promotion
+  // Prevents re-scanning thousands of items and recalculating discounts on accidental re-renders
+  const comboVariableProducts = useMemo<Product[]>(() => {
+    if (!selectedPromotion || !selectedPromoLookup) return [];
+    const list: Product[] = [];
+    for (let i = 0; i < products.length; i++) {
+      const p = products[i];
+      if (p && typeof p.price === "number" && p.price > 0 && selectedPromoLookup.matches(p)) {
+        list.push(p);
+      }
+    }
+    return list;
+  }, [selectedPromotion, selectedPromoLookup, products]);
+
   const isProductInRule = useCallback((rule: PromotionRule | CouponRule, p: Product) => {
+    if (!rule || !p) return false;
+    if (selectedPromotion && rule.id === selectedPromotion.id && selectedPromoLookup) {
+      return selectedPromoLookup.matches(p);
+    }
+    const lookup = activePromosLookupMap.get(rule.id);
+    if (lookup) {
+      return lookup.matches(p);
+    }
     return checkProductMatchesRule(rule, p, matrizProducts, tenant.id);
-  }, [matrizProducts, tenant.id]);
+  }, [selectedPromotion, selectedPromoLookup, activePromosLookupMap, matrizProducts, tenant.id]);
 
   const searchFallback = useMemo(() => {
     const term = normalizeStr(debouncedSearchTerm);
@@ -1899,7 +2075,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
 
     let sourceList: Product[];
     if (selectedPromotion) {
-      sourceList = products.filter((p) => isProductInRule(selectedPromotion, p));
+      sourceList = comboVariableProducts;
     } else if (selectedDepartment !== "Todos" && !processedTerm) {
       // O(1) Recuperação direta do índice departamental
       sourceList = productsByDept.get(selectedDepartment) || [];
@@ -1908,7 +2084,9 @@ export const Storefront: React.FC<StorefrontProps> = ({
     }
 
     // Strict rule: Never show products with zero, negative or missing prices
-    sourceList = sourceList.filter(p => typeof p.price === 'number' && p.price > 0);
+    if (!selectedPromotion) {
+      sourceList = sourceList.filter(p => typeof p.price === 'number' && p.price > 0);
+    }
 
     const getPromoPriority = (p: Product) => {
       if (p.promotionType && p.promotionType !== "NONE") {
@@ -1918,7 +2096,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
 
       // If a promotion is selected, only consider it for priority
       if (selectedPromotion && selectedPromotion.isActive) {
-        if (isProductInRule(selectedPromotion, p)) {
+        if (selectedPromoLookup ? selectedPromoLookup.matches(p) : isProductInRule(selectedPromotion, p)) {
           return selectedPromotion.type === "BUY_X_PAY_Y" ||
             selectedPromotion.type === "FIXED_COMBO"
             ? 3
@@ -1931,7 +2109,8 @@ export const Storefront: React.FC<StorefrontProps> = ({
         // If we already have a focused promotion, we don't care about others
         if (selectedPromotion && promo.id === selectedPromotion.id) continue;
 
-        if (isProductInRule(promo, p)) {
+        const lookup = activePromosLookupMap.get(promo.id);
+        if (lookup ? lookup.matches(p) : isProductInRule(promo, p)) {
           return promo.type === "BUY_X_PAY_Y" || promo.type === "FIXED_COMBO"
             ? 3
             : 2;
@@ -1946,9 +2125,10 @@ export const Storefront: React.FC<StorefrontProps> = ({
       let isPartOfActivePromo = false;
 
       if (activeCouponFilter) {
-        isPartOfActivePromo = isProductInRule(activeCouponFilter, p);
+        const lookup = activePromosLookupMap.get(activeCouponFilter.id);
+        isPartOfActivePromo = lookup ? lookup.matches(p) : isProductInRule(activeCouponFilter, p);
       } else if (selectedPromotion) {
-        isPartOfActivePromo = isProductInRule(selectedPromotion, p);
+        isPartOfActivePromo = selectedPromoLookup ? selectedPromoLookup.matches(p) : isProductInRule(selectedPromotion, p);
       }
 
       // Prioridade 1: Destaques Manuais (agora condicional se promo ativa)
@@ -2419,7 +2599,10 @@ export const Storefront: React.FC<StorefrontProps> = ({
     selectedDepartment,
     selectedCategory,
     selectedPromotion,
+    comboVariableProducts,
+    selectedPromoLookup,
     activePromotions,
+    activePromosLookupMap,
     activeCouponFilter,
     isProductInRule,
     productsByDept,
@@ -2455,7 +2638,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
 
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [filteredProducts.length, visibleCount]);
+  }, [filteredProducts.length, BATCH_PAGE_SIZE]);
 
   const crossSellSuggestions = useMemo(() => {
     if (products.length === 0) return [];
@@ -3147,6 +3330,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
                 colorMap[promo.highlightColor || "orange"] ||
                 colorMap["orange"];
               const isSelected = selectedPromotion?.id === promo.id;
+              const isPendingThis = isPendingFilter && (pendingPromoId === promo.id || (pendingPromoId === "clear" && isSelected));
 
               return (
                 <button
@@ -3174,14 +3358,18 @@ export const Storefront: React.FC<StorefrontProps> = ({
                           : bgClass.split(" ")[0].replace("bg-", "text-")
                       }
                     >
-                      <Icon
-                        size={28}
-                        className={
-                          isSelected
-                            ? ""
-                            : "opacity-80 group-hover:scale-110 transition-transform"
-                        }
-                      />
+                      {isPendingThis ? (
+                        <div className="w-6 h-6 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                      ) : (
+                        <Icon
+                          size={28}
+                          className={
+                            isSelected
+                              ? ""
+                              : "opacity-80 group-hover:scale-110 transition-transform"
+                          }
+                        />
+                      )}
                     </div>
                   </div>
                   <span
@@ -3409,9 +3597,19 @@ export const Storefront: React.FC<StorefrontProps> = ({
               <div className="flex items-center gap-3 relative z-10 w-full md:w-auto">
                 <button
                   onClick={() => selectPromotion(null)}
-                  className="flex-1 md:flex-none px-6 py-3 bg-white border-2 border-red-100 text-red-500 rounded-xl font-black text-xs hover:bg-red-50 transition-all flex items-center justify-center gap-2 active:scale-95"
+                  disabled={isPendingFilter}
+                  className="flex-1 md:flex-none px-6 py-3 bg-white border-2 border-red-100 text-red-500 rounded-xl font-black text-xs hover:bg-red-50 transition-all flex items-center justify-center gap-2 active:scale-95 disabled:opacity-50"
                 >
-                  Remover Filtro <X size={14} />
+                  {isPendingFilter && pendingPromoId === "clear" ? (
+                    <>
+                      <div className="w-3.5 h-3.5 border-2 border-red-500 border-t-transparent rounded-full animate-spin" />
+                      <span>Removendo...</span>
+                    </>
+                  ) : (
+                    <>
+                      Remover Filtro <X size={14} />
+                    </>
+                  )}
                 </button>
               </div>
             </div>
@@ -3505,7 +3703,15 @@ export const Storefront: React.FC<StorefrontProps> = ({
           </div>
         ) : (
           <>
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7 gap-5 md:gap-8 pb-5 md:pb-8">
+            {isPendingFilter && (
+              <div className="w-full flex items-center justify-center py-3 mb-4 bg-emerald-50/80 border border-emerald-100 rounded-2xl animate-in fade-in duration-200">
+                <div className="flex items-center gap-2.5 text-emerald-800 font-bold text-xs">
+                  <div className="w-4 h-4 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin" />
+                  <span>Carregando produtos da promoção...</span>
+                </div>
+              </div>
+            )}
+            <div className={`grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7 gap-5 md:gap-8 pb-5 md:pb-8 transition-opacity duration-200 ${isPendingFilter ? "opacity-60 pointer-events-none" : "opacity-100"}`}>
               {paginatedProducts.map((p, index) => (
                 <ProductCard
                   key={p.id}

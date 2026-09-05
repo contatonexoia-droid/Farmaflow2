@@ -530,26 +530,72 @@ export const matchProductToSlot = (
   return false;
 };
 
+// Cache rule Sets for instant O(1) membership validation (eliminates slow array scans)
+interface RuleCachedSets {
+  idSet: Set<string>;
+  barcodeSet: Set<string>;
+  matrizLength: number;
+}
+const ruleSetsCache = new WeakMap<PromotionRule | CouponRule, RuleCachedSets>();
+
+export const getRuleEligibleSets = (
+  rule: PromotionRule | CouponRule,
+  matrizProducts: Product[] = [],
+  tenantId?: string,
+): { idSet: Set<string>; barcodeSet: Set<string> } => {
+  const isNetworkScope = rule.scope === "NETWORK" || (tenantId && rule.tenantId !== tenantId);
+  const cached = ruleSetsCache.get(rule);
+  if (cached && cached.matrizLength === matrizProducts.length) {
+    return cached;
+  }
+
+  let rawIds: string[] = [];
+  if ("type" in rule && (rule.type === "VARIABLE_COMBO" || (rule.type as string) === "COMBO_VARIABLE")) {
+    rawIds = (rule.comboProducts && rule.comboProducts.length > 0)
+      ? rule.comboProducts
+      : (rule.specificProductIds || []);
+  } else if (rule.targetType === "SPECIFIC_SELECTION") {
+    rawIds = rule.specificProductIds || (rule as any).applicableProducts || [];
+  } else if (rule.targetType === "PRODUCT" && rule.targetValue) {
+    rawIds = [rule.targetValue];
+  }
+
+  const idSet = new Set<string>(rawIds);
+  const barcodeSet = new Set<string>();
+
+  // If network scope, index matching barcodes from matrizProducts once in O(M)
+  if (isNetworkScope && matrizProducts.length > 0 && idSet.size > 0) {
+    for (let i = 0; i < matrizProducts.length; i++) {
+      const mp = matrizProducts[i];
+      if (mp.barcode && idSet.has(mp.id)) {
+        barcodeSet.add(mp.barcode);
+      }
+    }
+  }
+
+  const entry: RuleCachedSets = {
+    idSet,
+    barcodeSet,
+    matrizLength: matrizProducts.length,
+  };
+  ruleSetsCache.set(rule, entry);
+  return entry;
+};
+
 export const checkProductMatchesRule = (
   rule: PromotionRule | CouponRule,
   p: Product,
   matrizProducts: Product[] = [],
   tenantId?: string,
 ): boolean => {
+  if (!p || !p.id) return false;
   // Se a regra for de rede ou pertencer a um tenant diferente do produto, é escopo rede
   const isNetworkScope = rule.scope === "NETWORK" || (tenantId && rule.tenantId !== tenantId);
 
   if ("type" in rule && (rule.type === "VARIABLE_COMBO" || (rule.type as string) === "COMBO_VARIABLE")) {
-    const pIds = (rule.comboProducts && rule.comboProducts.length > 0)
-      ? rule.comboProducts
-      : rule.specificProductIds || [];
-    if (pIds.includes(p.id)) return true;
-    if (isNetworkScope && p.barcode) {
-      const targetEans = matrizProducts
-        .filter((mp) => pIds.includes(mp.id) && mp.barcode)
-        .map((mp) => mp.barcode);
-      if (p.barcode && targetEans.includes(p.barcode)) return true;
-    }
+    const { idSet, barcodeSet } = getRuleEligibleSets(rule, matrizProducts, tenantId);
+    if (idSet.has(p.id)) return true;
+    if (isNetworkScope && p.barcode && barcodeSet.has(p.barcode)) return true;
     return false;
   }
 
@@ -557,8 +603,8 @@ export const checkProductMatchesRule = (
     if (rule.targetValue === p.id) return true;
     // Se for escopo de rede, targetValue é o ID do produto na matriz. Comparamos pelo código de barras (EAN)
     if (isNetworkScope && p.barcode) {
-      const matrizProd = matrizProducts.find((mp) => mp.id === rule.targetValue);
-      if (matrizProd && matrizProd.barcode === p.barcode) return true;
+      const { barcodeSet } = getRuleEligibleSets(rule, matrizProducts, tenantId);
+      if (barcodeSet.has(p.barcode)) return true;
     }
     return false;
   }
@@ -574,15 +620,10 @@ export const checkProductMatchesRule = (
   }
 
   if (rule.targetType === "SPECIFIC_SELECTION") {
-    const ids = rule.specificProductIds || (rule as any).applicableProducts || [];
-    if (ids.includes(p.id)) return true;
-    if (p.barcode && ids.includes(p.barcode)) return true;
-    if (isNetworkScope && p.barcode) {
-      const targetEans = matrizProducts
-        .filter((mp) => ids.includes(mp.id) && mp.barcode)
-        .map((mp) => mp.barcode);
-      if (p.barcode && targetEans.includes(p.barcode)) return true;
-    }
+    const { idSet, barcodeSet } = getRuleEligibleSets(rule, matrizProducts, tenantId);
+    if (idSet.has(p.id)) return true;
+    if (p.barcode && idSet.has(p.barcode)) return true;
+    if (isNetworkScope && p.barcode && barcodeSet.has(p.barcode)) return true;
     return false;
   }
 
