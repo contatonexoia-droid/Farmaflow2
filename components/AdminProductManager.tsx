@@ -448,6 +448,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
   const [importType, setImportType] = useState<'simple' | 'ai'>('simple');
   const [importStockMode, setImportStockMode] = useState<'ADD' | 'SET' | 'SUBTRACT'>('SET'); 
   const [importMode, setImportMode] = useState<'UPDATE' | 'REPLACE'>('UPDATE');
+  const [preserveNamesOnImport, setPreserveNamesOnImport] = useState(true);
   const [preserveImagesOnImport, setPreserveImagesOnImport] = useState(false);
   const [imageSnapshot, setImageSnapshot] = useState<Record<string, string | undefined> | null>(() => {
       try {
@@ -2391,7 +2392,10 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                         changeTxt = `Definido como ${rowStock} un.`;
                     }
                 }
-                const newName = hasNameCol && name ? String(name) : p.name;
+                // Preserva o nome do produto já existente no catálogo para manter a padronização
+                const newName = (preserveNamesOnImport && p.name && String(p.name).trim() !== '')
+                    ? p.name
+                    : (hasNameCol && name ? String(name) : p.name);
                 const newCode = hasCodeCol && code !== undefined ? String(code) : (p.internalCode ? String(p.internalCode).trim() : undefined);
                 const newEan = hasEanCol && ean ? String(ean).trim() : (p.barcode && String(p.barcode).trim() !== '' ? String(p.barcode).trim() : undefined);
                 const newPrice = (hasPriceCol || hasPromotionalPriceCol || hasOriginalPriceCol) && finalPrice > 0 ? finalPrice : p.price;
@@ -3850,6 +3854,19 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                                     </div>
                                 </div>
                             )}
+
+                            <div className="space-y-3">
+                                <label className="text-xs font-black uppercase text-gray-400 tracking-widest ml-2">Padrão de Nomes</label>
+                                <div className="flex items-center gap-3 bg-blue-50 p-4 rounded-2xl cursor-pointer border border-blue-100" onClick={() => setPreserveNamesOnImport(!preserveNamesOnImport)}>
+                                    <div className={`w-6 h-6 rounded-md flex items-center justify-center border-2 transition-all ${preserveNamesOnImport ? 'bg-blue-600 border-blue-600 text-white' : 'border-blue-300 bg-white'}`}>
+                                        {preserveNamesOnImport && <CheckCircle2 size={16} />}
+                                    </div>
+                                    <div>
+                                        <p className="text-sm font-bold text-blue-950">Preservar nomes existentes no catálogo</p>
+                                        <p className="text-[10px] font-medium text-blue-700">Mantém o padrão dos nomes já cadastrados ao atualizar estoque e preços. O nome da planilha só é usado para cadastrar novos produtos.</p>
+                                    </div>
+                                </div>
+                            </div>
 
                             <div className="space-y-3">
                                 <label className="text-xs font-black uppercase text-gray-400 tracking-widest ml-2">Proteção de Imagens</label>
