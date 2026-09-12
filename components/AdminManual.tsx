@@ -7,11 +7,11 @@ import {
   Settings, Sparkles, Star, Zap, BrainCircuit, Search, Bell,
   ChevronDown, ChevronUp, LayoutDashboard, Tag, Activity,
   Play, Video, Package, CheckCircle2, Clock, ShieldCheck, Info,
-  Percent, DollarSign, Ticket, Target
+  Percent, DollarSign, Ticket, Target, Truck, Bot, MessageSquare, MapPin
 } from 'lucide-react';
 
 // ==========================================
-// CONSTANTES DE VÍDEO E CAPÍTULOS DE PROMOÇÕES E CUPONS
+// CONSTANTES DE VÍDEO E CAPÍTULOS DE PROMOÇÕES, CUPONS E CONFIGURAÇÕES
 // Configure os segundos exatos de cada capítulo do tutorial abaixo:
 // ==========================================
 export const YOUTUBE_PROMOTIONS_VIDEO_ID = 'iUf3dLSzCZg';
@@ -23,6 +23,11 @@ export const YOUTUBE_COUPONS_VIDEO_ID = 'aXDi9XWagVA';
 export const TIME_CUPOM_CRIACAO = 0;        // 00:00 - Criação & Tipos de Desconto (% vs R$)
 export const TIME_CUPOM_REGRAS = 55;        // 00:55 - Regras de Aplicação & Limites
 export const TIME_CUPOM_SEGMENTACAO = 115;  // 01:55 - Segmentação de Produtos
+
+export const YOUTUBE_CONFIG_VIDEO_ID = 'DdmNTb_BOsM';
+export const TIME_CONFIG_FRETE = 0;           // 00:00 - Configurações de Entrega & Frete por KM
+export const TIME_CONFIG_ETIQUETAS = 75;      // 01:15 - Atendimento (Etiquetas e Atalhos de Resposta)
+export const TIME_CONFIG_AGENTE_IA = 155;     // 02:35 - Agente de IA (Atendente Automático)
 
 const formatTimestamp = (seconds: number): string => {
   const mins = Math.floor(seconds / 60);
@@ -110,6 +115,46 @@ const COUPON_CHAPTERS: CouponChapter[] = [
   }
 ];
 
+interface ConfigChapter {
+  id: 'FRETE' | 'ETIQUETAS' | 'AGENTE_IA';
+  title: string;
+  shortLabel: string;
+  iconText: string;
+  seconds: number;
+  badge: string;
+  themeColor: 'blue' | 'purple' | 'emerald';
+}
+
+const CONFIG_CHAPTERS: ConfigChapter[] = [
+  {
+    id: 'FRETE',
+    title: 'Entrega & Frete por KM',
+    shortLabel: 'Entrega & Frete',
+    iconText: '🚚',
+    seconds: TIME_CONFIG_FRETE,
+    badge: 'Logística & CEP',
+    themeColor: 'blue'
+  },
+  {
+    id: 'ETIQUETAS',
+    title: 'Atendimento (Etiquetas & Atalhos)',
+    shortLabel: 'Etiquetas & Atalhos',
+    iconText: '🏷️',
+    seconds: TIME_CONFIG_ETIQUETAS,
+    badge: 'Organização do Fluxo',
+    themeColor: 'purple'
+  },
+  {
+    id: 'AGENTE_IA',
+    title: 'Agente de IA (Atendente Automático)',
+    shortLabel: 'Agente de IA',
+    iconText: '🤖',
+    seconds: TIME_CONFIG_AGENTE_IA,
+    badge: 'Atendimento 24/7',
+    themeColor: 'emerald'
+  }
+];
+
 const AccordionItem = ({ title, icon, children, isOpen, onToggle }: { title: string, icon: React.ReactNode, children: React.ReactNode, isOpen: boolean, onToggle: () => void }) => {
   return (
     <div className={`bg-white rounded-[2rem] border transition-all duration-300 ${isOpen ? 'border-emerald-200 shadow-xl' : 'border-gray-100 shadow-sm hover:border-emerald-100'}`}>
@@ -142,7 +187,7 @@ const AccordionItem = ({ title, icon, children, isOpen, onToggle }: { title: str
 
 export const AdminManual: React.FC = () => {
   const [openSection, setOpenSection] = useState<number>(0);
-  const [tutorialTab, setTutorialTab] = useState<'PROMOTIONS' | 'COUPONS'>('PROMOTIONS');
+  const [tutorialTab, setTutorialTab] = useState<'PROMOTIONS' | 'COUPONS' | 'CONFIG'>('PROMOTIONS');
 
   // Estados do vídeo de Promoções
   const [activePromoChapter, setActivePromoChapter] = useState<'LEVE_X_PAGUE_Y' | 'COMBO_FIXO' | 'OFERTA_RELAMPAGO'>('LEVE_X_PAGUE_Y');
@@ -157,6 +202,13 @@ export const AdminManual: React.FC = () => {
     `https://www.youtube.com/embed/${YOUTUBE_COUPONS_VIDEO_ID}?enablejsapi=1`
   );
   const couponIframeRef = useRef<HTMLIFrameElement>(null);
+
+  // Estados do vídeo de Configurações, Frete e Atendimento IA
+  const [activeConfigChapter, setActiveConfigChapter] = useState<'FRETE' | 'ETIQUETAS' | 'AGENTE_IA'>('FRETE');
+  const [configVideoSrc, setConfigVideoSrc] = useState<string>(
+    `https://www.youtube.com/embed/${YOUTUBE_CONFIG_VIDEO_ID}?enablejsapi=1`
+  );
+  const configIframeRef = useRef<HTMLIFrameElement>(null);
 
   const handleJumpToPromoChapter = (chapter: PromotionChapter) => {
     setActivePromoChapter(chapter.id);
@@ -216,6 +268,35 @@ export const AdminManual: React.FC = () => {
     }
   };
 
+  const handleJumpToConfigChapter = (chapter: ConfigChapter) => {
+    setActiveConfigChapter(chapter.id);
+    const newSrc = `https://www.youtube.com/embed/${YOUTUBE_CONFIG_VIDEO_ID}?enablejsapi=1&start=${chapter.seconds}&autoplay=1`;
+    setConfigVideoSrc(newSrc);
+
+    if (configIframeRef.current?.contentWindow) {
+      try {
+        configIframeRef.current.contentWindow.postMessage(
+          JSON.stringify({
+            event: 'command',
+            func: 'seekTo',
+            args: [chapter.seconds, true]
+          }),
+          '*'
+        );
+        configIframeRef.current.contentWindow.postMessage(
+          JSON.stringify({
+            event: 'command',
+            func: 'playVideo',
+            args: []
+          }),
+          '*'
+        );
+      } catch {
+        // Fallback garantido pela atualização do iframe src
+      }
+    }
+  };
+
   return (
     <div className="space-y-8 animate-in fade-in duration-700 pb-20 w-full">
       <div className="bg-white p-8 md:p-12 rounded-[3rem] border border-gray-100 shadow-sm">
@@ -251,24 +332,24 @@ export const AdminManual: React.FC = () => {
             </div>
 
             {/* SELETOR EM ABAS */}
-            <div className="flex items-center gap-2 p-1.5 bg-white rounded-2xl border border-slate-200 shadow-sm self-start sm:self-auto">
+            <div className="flex flex-wrap items-center gap-2 p-1.5 bg-white rounded-2xl border border-slate-200 shadow-sm self-start sm:self-auto">
               <button
                 id="tab-btn-promotions"
                 onClick={() => setTutorialTab('PROMOTIONS')}
-                className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-xs md:text-sm transition-all duration-200 ${
+                className={`flex items-center gap-2 px-3.5 py-2 md:px-4 md:py-2.5 rounded-xl font-bold text-xs md:text-sm transition-all duration-200 ${
                   tutorialTab === 'PROMOTIONS'
                     ? 'bg-emerald-600 text-white shadow-md shadow-emerald-200'
                     : 'text-gray-600 hover:text-gray-900 hover:bg-slate-50'
                 }`}
               >
                 <Sparkles size={16} />
-                <span>Campanhas Promocionais</span>
+                <span>Promoções</span>
               </button>
 
               <button
                 id="tab-btn-coupons"
                 onClick={() => setTutorialTab('COUPONS')}
-                className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-xs md:text-sm transition-all duration-200 ${
+                className={`flex items-center gap-2 px-3.5 py-2 md:px-4 md:py-2.5 rounded-xl font-bold text-xs md:text-sm transition-all duration-200 ${
                   tutorialTab === 'COUPONS'
                     ? 'bg-emerald-600 text-white shadow-md shadow-emerald-200'
                     : 'text-gray-600 hover:text-gray-900 hover:bg-slate-50'
@@ -276,6 +357,19 @@ export const AdminManual: React.FC = () => {
               >
                 <Tag size={16} />
                 <span>Cupons de Desconto</span>
+              </button>
+
+              <button
+                id="tab-btn-config"
+                onClick={() => setTutorialTab('CONFIG')}
+                className={`flex items-center gap-2 px-3.5 py-2 md:px-4 md:py-2.5 rounded-xl font-bold text-xs md:text-sm transition-all duration-200 ${
+                  tutorialTab === 'CONFIG'
+                    ? 'bg-emerald-600 text-white shadow-md shadow-emerald-200'
+                    : 'text-gray-600 hover:text-gray-900 hover:bg-slate-50'
+                }`}
+              >
+                <Settings size={16} />
+                <span>Configurações & Atendimento IA</span>
               </button>
             </div>
           </div>
@@ -813,6 +907,285 @@ export const AdminManual: React.FC = () => {
               </div>
             </div>
           )}
+
+          {/* ======================================================== */}
+          {/* ABA 3: CONFIGURAÇÕES, FRETE, ATENDIMENTO & AGENTE IA */}
+          {/* ======================================================== */}
+          {tutorialTab === 'CONFIG' && (
+            <div className="animate-in fade-in duration-300">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 bg-emerald-600 text-white rounded-2xl flex items-center justify-center shadow-md shadow-emerald-200 shrink-0">
+                    <Settings size={24} />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-emerald-100 text-emerald-800">
+                        Vídeo Aula 03
+                      </span>
+                      <span className="text-xs text-gray-500 font-bold flex items-center gap-1">
+                        <Clock size={12} /> Configurações, Frete, Atendimento e IA
+                      </span>
+                    </div>
+                    <h4 className="text-lg md:text-xl font-black text-gray-900 mt-0.5">
+                      Configurações de Loja, Frete por KM, Atendimento e Agente IA
+                    </h4>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 text-xs font-bold text-gray-500 bg-white px-3.5 py-2 rounded-xl border border-slate-200 self-start md:self-auto">
+                  <Video size={14} className="text-emerald-600" />
+                  <span>Vídeo Oficial (YouTube)</span>
+                </div>
+              </div>
+
+              {/* CONTAINER DO VÍDEO YOUTUBE RESPONSIVO 16:9 */}
+              <div className="relative w-full aspect-video rounded-3xl overflow-hidden shadow-2xl border-4 border-white bg-slate-900 mb-6">
+                <iframe
+                  ref={configIframeRef}
+                  src={configVideoSrc}
+                  title="Tutorial FarmaFlow - Configurações, Frete, Atendimento e Agente IA"
+                  className="absolute inset-0 w-full h-full"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                  allowFullScreen
+                />
+              </div>
+
+              {/* SELETOR DE CAPÍTULOS RÁPIDOS */}
+              <div className="bg-white rounded-2xl p-4 md:p-5 border border-slate-200 shadow-sm mb-8">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3 pb-3 border-b border-slate-100">
+                  <div className="flex items-center gap-2">
+                    <span className="flex h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+                    <span className="text-xs font-black uppercase tracking-wider text-gray-700">
+                      Capítulos Rápidos da Aula:
+                    </span>
+                  </div>
+                  <span className="text-[11px] text-gray-400 font-medium">
+                    Clique em um capítulo para avançar diretamente o player:
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  {CONFIG_CHAPTERS.map((chapter) => {
+                    const isActive = activeConfigChapter === chapter.id;
+                    return (
+                      <button
+                        key={chapter.id}
+                        id={`btn-config-chapter-${chapter.id.toLowerCase()}`}
+                        onClick={() => handleJumpToConfigChapter(chapter)}
+                        className={`flex items-center justify-between px-3.5 py-3 rounded-xl text-left transition-all duration-200 border ${
+                          isActive
+                            ? 'bg-emerald-600 text-white border-emerald-600 shadow-md shadow-emerald-200'
+                            : 'bg-slate-50 hover:bg-slate-100 text-gray-700 border-slate-200/80 hover:border-slate-300'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <span className="text-base shrink-0">{chapter.iconText}</span>
+                          <div className="min-w-0">
+                            <p className={`text-xs font-black truncate ${isActive ? 'text-white' : 'text-gray-900'}`}>
+                              {chapter.shortLabel}
+                            </p>
+                            <p className={`text-[10px] font-medium truncate ${isActive ? 'text-emerald-100' : 'text-gray-500'}`}>
+                              {chapter.badge}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 ml-2 shrink-0">
+                          <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ${
+                            isActive ? 'bg-emerald-700 text-white' : 'bg-white text-gray-600 border border-slate-200'
+                          }`}>
+                            {formatTimestamp(chapter.seconds)}
+                          </span>
+                          <Play size={12} className={isActive ? 'fill-white' : 'fill-gray-400 text-gray-400'} />
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* GUIA OPERACIONAL: 3 CARDS EXPLICATIVOS COM BOAS PRÁTICAS */}
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-base font-black text-gray-900 flex items-center gap-2">
+                    <CheckCircle2 size={18} className="text-emerald-600" />
+                    Guia Operacional: Configurações, Logística e Atendimento Inteligente
+                  </h4>
+                  <span className="text-xs text-gray-400 font-medium hidden sm:inline">
+                    Orientações essenciais do sistema
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  {/* CARD 1: ENTREGA & FRETE POR KM */}
+                  <div className={`bg-white rounded-3xl p-6 border-2 transition-all ${
+                    activeConfigChapter === 'FRETE' 
+                      ? 'border-blue-500 shadow-md ring-4 ring-blue-50' 
+                      : 'border-slate-200/80 shadow-sm'
+                  }`}>
+                    <div className="flex items-center justify-between mb-4">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-10 h-10 rounded-xl bg-blue-100 text-blue-700 flex items-center justify-center font-bold text-lg">
+                          🚚
+                        </div>
+                        <div>
+                          <h5 className="font-black text-gray-900 text-base leading-tight">Entrega & Frete por KM</h5>
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-blue-600">Raio, Faixas & Georreferência</span>
+                        </div>
+                      </div>
+                      <button 
+                        onClick={() => handleJumpToConfigChapter(CONFIG_CHAPTERS[0])}
+                        className="p-1.5 rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 transition-colors"
+                        title="Assistir trecho no vídeo"
+                      >
+                        <Play size={14} className="fill-blue-600" />
+                      </button>
+                    </div>
+
+                    <p className="text-xs text-gray-600 leading-relaxed mb-4">
+                      Precificação logística justa e automática calculando a distância exata em quilômetros entre a farmácia e o endereço do cliente.
+                    </p>
+
+                    <div className="space-y-3 pt-3 border-t border-slate-100">
+                      <div>
+                        <h6 className="text-[11px] font-black uppercase tracking-wider text-gray-700 mb-1.5 flex items-center gap-1.5">
+                          <CheckCircle2 size={13} className="text-blue-600" />
+                          Configurações Logísticas:
+                        </h6>
+                        <ul className="text-xs text-gray-600 space-y-1.5 pl-4 list-disc">
+                          <li><strong>Endereço Base da Loja:</strong> Insira rigorosamente o CEP, rua, número e bairro da drogaria. Este ponto ancora a origem de todo cálculo de rota.</li>
+                          <li><strong>Faixas Escalonadas de KM:</strong> Estabeleça preços por distância (ex: 0 a 3 km = R$ 5,00; 3 a 6 km = R$ 9,00; 6 a 10 km = R$ 14,00).</li>
+                          <li><strong>Pedido Mínimo de Entrega:</strong> Valor mínimo no carrinho para liberar o despacho via motoboy e evitar prejuízos em rotas longas.</li>
+                          <li><strong>Frete Grátis com Gatilho:</strong> Estabeleça uma meta de compra (ex: compras acima de R$ 100,00) para elevar o ticket médio.</li>
+                        </ul>
+                      </div>
+
+                      <div className="pt-2">
+                        <h6 className="text-[11px] font-black uppercase tracking-wider text-blue-700 mb-1.5 flex items-center gap-1.5">
+                          <ShieldCheck size={13} className="text-blue-600" />
+                          Boas Práticas de Frete:
+                        </h6>
+                        <p className="text-xs text-gray-600 leading-relaxed bg-blue-50/50 p-2.5 rounded-xl border border-blue-100">
+                          Sempre valide se o CEP da drogaria está correto para que o cálculo de distância georreferenciada calcule a quilometragem viária exata do motoboy até a residência do cliente.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* CARD 2: ETIQUETAS E ATALHOS */}
+                  <div className={`bg-white rounded-3xl p-6 border-2 transition-all ${
+                    activeConfigChapter === 'ETIQUETAS' 
+                      ? 'border-purple-500 shadow-md ring-4 ring-purple-50' 
+                      : 'border-slate-200/80 shadow-sm'
+                  }`}>
+                    <div className="flex items-center justify-between mb-4">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-10 h-10 rounded-xl bg-purple-100 text-purple-700 flex items-center justify-center font-bold text-lg">
+                          🏷️
+                        </div>
+                        <div>
+                          <h5 className="font-black text-gray-900 text-base leading-tight">Etiquetas & Atalhos</h5>
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-purple-600">Fluxo Visual & Respostas Rápidas</span>
+                        </div>
+                      </div>
+                      <button 
+                        onClick={() => handleJumpToConfigChapter(CONFIG_CHAPTERS[1])}
+                        className="p-1.5 rounded-lg bg-purple-50 text-purple-600 hover:bg-purple-100 transition-colors"
+                        title="Assistir trecho no vídeo"
+                      >
+                        <Play size={14} className="fill-purple-600" />
+                      </button>
+                    </div>
+
+                    <p className="text-xs text-gray-600 leading-relaxed mb-4">
+                      Organização por etapas do funil de atendimento e velocidade recorde no WhatsApp com atalhos de mensagem rápida.
+                    </p>
+
+                    <div className="space-y-3 pt-3 border-t border-slate-100">
+                      <div>
+                        <h6 className="text-[11px] font-black uppercase tracking-wider text-gray-700 mb-1.5 flex items-center gap-1.5">
+                          <CheckCircle2 size={13} className="text-purple-600" />
+                          Recursos de Atendimento:
+                        </h6>
+                        <ul className="text-xs text-gray-600 space-y-1.5 pl-4 list-disc">
+                          <li><strong>Etiquetas Coloridas de Status:</strong> Segmente conversas por fases (ex: "Aguardando Receita", "Em Separação", "Saiu p/ Entrega", "Concluído").</li>
+                          <li><strong>Atalhos de Mensagem Rápida (/):</strong> Digite <code>/</code> na caixa de texto para disparar respostas salvas (ex: <code>/pix</code>, <code>/horario</code>, <code>/entrega</code>).</li>
+                          <li><strong>Filtros Dinâmicos de Conversa:</strong> Localize clientes em espera ou pedidos pendentes clicando na respectiva etiqueta.</li>
+                          <li><strong>Padronização de Atendimento:</strong> Equipe de atendentes alinhada com mensagens padronizadas e sem erros de português.</li>
+                        </ul>
+                      </div>
+
+                      <div className="pt-2">
+                        <h6 className="text-[11px] font-black uppercase tracking-wider text-purple-700 mb-1.5 flex items-center gap-1.5">
+                          <ShieldCheck size={13} className="text-purple-600" />
+                          Boas Práticas de Atendimento:
+                        </h6>
+                        <p className="text-xs text-gray-600 leading-relaxed bg-purple-50/50 p-2.5 rounded-xl border border-purple-100">
+                          Crie uma etiqueta específica para <strong>"Uso Contínuo / Recompra"</strong> para listar clientes com tratamentos crônicos e disparar lembretes periódicos de reposição a cada 30 dias.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* CARD 3: AGENTE DE IA */}
+                  <div className={`bg-white rounded-3xl p-6 border-2 transition-all ${
+                    activeConfigChapter === 'AGENTE_IA' 
+                      ? 'border-emerald-500 shadow-md ring-4 ring-emerald-50' 
+                      : 'border-slate-200/80 shadow-sm'
+                  }`}>
+                    <div className="flex items-center justify-between mb-4">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-10 h-10 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold text-lg">
+                          🤖
+                        </div>
+                        <div>
+                          <h5 className="font-black text-gray-900 text-base leading-tight">Agente de IA (Atendente Virtual)</h5>
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-600">Atendimento 24/7 & Conversão</span>
+                        </div>
+                      </div>
+                      <button 
+                        onClick={() => handleJumpToConfigChapter(CONFIG_CHAPTERS[2])}
+                        className="p-1.5 rounded-lg bg-emerald-50 text-emerald-600 hover:bg-emerald-100 transition-colors"
+                        title="Assistir trecho no vídeo"
+                      >
+                        <Play size={14} className="fill-emerald-600" />
+                      </button>
+                    </div>
+
+                    <p className="text-xs text-gray-600 leading-relaxed mb-4">
+                      Atendente virtual inteligente integrado ao seu catálogo de produtos que atende, tira dúvidas e monta carrinhos automaticamente.
+                    </p>
+
+                    <div className="space-y-3 pt-3 border-t border-slate-100">
+                      <div>
+                        <h6 className="text-[11px] font-black uppercase tracking-wider text-gray-700 mb-1.5 flex items-center gap-1.5">
+                          <CheckCircle2 size={13} className="text-emerald-600" />
+                          Configurações do Agente:
+                        </h6>
+                        <ul className="text-xs text-gray-600 space-y-1.5 pl-4 list-disc">
+                          <li><strong>Instruções e Personalidade (Prompt):</strong> Configure a postura e tom de voz (ex: "Você é a farmacêutica virtual da Drogaria FarmaFlow, prestativa e atenciosa").</li>
+                          <li><strong>Horários de Atuação:</strong> Escolha se a IA responde 24h por dia ou se assume automaticamente apenas durante o fechamento da loja física.</li>
+                          <li><strong>Consulta ao Catálogo em Tempo Real:</strong> A IA localiza medicamentos por princípio ativo, genéricos equivalentes e disponibilidade de estoque.</li>
+                          <li><strong>Segurança Farmacêutica:</strong> Bloqueio programado para nunca prescrever controlados sem receita, solicitando envio de foto para o farmacêutico humano.</li>
+                        </ul>
+                      </div>
+
+                      <div className="pt-2">
+                        <h6 className="text-[11px] font-black uppercase tracking-wider text-emerald-700 mb-1.5 flex items-center gap-1.5">
+                          <ShieldCheck size={13} className="text-emerald-600" />
+                          Boas Práticas de IA:
+                        </h6>
+                        <p className="text-xs text-gray-600 leading-relaxed bg-emerald-50/50 p-2.5 rounded-xl border border-emerald-100">
+                          Antes de ativar o Agente em produção, faça simulações de perguntas comuns de clientes no painel de testes para calibrar as respostas e dados da sua loja.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="space-y-6 lg:mx-8">
@@ -1159,17 +1532,135 @@ export const AdminManual: React.FC = () => {
           >
             <div className="space-y-8">
               <p className="text-gray-600 font-medium leading-relaxed">
-                Aqui são parametrizadas as leis do seu negócio no ambiente online. Do visual ao comportamento, e também a trilha de auditoria geral (anti-fraude operacional).
+                Aqui são parametrizadas as leis do seu negócio no ambiente online. Do visual ao comportamento, frete georreferenciado por KM, central de atendimento inteligente e a trilha de auditoria geral (anti-fraude operacional).
               </p>
 
+              {/* BANNER DA VÍDEO AULA 03 */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-5 rounded-2xl bg-emerald-50/80 border border-emerald-200/80 shadow-sm">
+                <div className="flex items-center gap-3.5">
+                  <div className="w-11 h-11 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0 shadow-md shadow-emerald-200">
+                    <Video size={22} />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider bg-emerald-200 text-emerald-900">
+                        Vídeo Aula 03
+                      </span>
+                      <h5 className="text-sm font-black text-emerald-950">Tutorial em Vídeo Disponível</h5>
+                    </div>
+                    <p className="text-xs text-emerald-800 mt-0.5">
+                      Assista à aula completa cobrindo Configurações de Entrega & Frete por KM, Central de Atendimento (Etiquetas e Atalhos) e o Agente de IA.
+                    </p>
+                  </div>
+                </div>
+
+                <button 
+                  onClick={() => {
+                    setTutorialTab('CONFIG');
+                    const el = document.getElementById('tutorial-video-central');
+                    if (el) el.scrollIntoView({ behavior: 'smooth' });
+                  }}
+                  className="text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 px-4 py-2.5 rounded-xl transition-all shadow-md shadow-emerald-200 shrink-0 flex items-center gap-2 self-start sm:self-auto hover:scale-105"
+                >
+                  <Play size={13} className="fill-white" /> Assistir Vídeo Aula 03
+                </button>
+              </div>
+
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                <div className="bg-gray-50 p-6 rounded-3xl">
-                  <h4 className="font-bold text-gray-900 mb-3 flex items-center gap-2">
-                    <Activity size={18} className="text-red-500"/> Histórico de Auditoria 24h
-                  </h4>
-                  <p className="text-sm text-gray-600 leading-relaxed">
-                    Localizado na aba Histórico do painel lateral. Este é um registro de <strong className="text-gray-800">Write-Ahead</strong>. Mantém e acopla logs irreversíveis (das últimas 24 horas) toda vez que as configurações da loja ou pedidos são alterados. Permite que o franqueado ou gestor apure quem/quando o sistema foi alterado indevidamente.
-                  </p>
+                {/* CARD FRETE POR KM */}
+                <div className="bg-gray-50 p-6 rounded-3xl flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between mb-3">
+                      <h4 className="font-bold text-gray-900 flex items-center gap-2">
+                        <Truck size={18} className="text-blue-500"/> Logística & Frete por KM
+                      </h4>
+                      <span className="text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">00:00</span>
+                    </div>
+                    <p className="text-sm text-gray-600 leading-relaxed mb-3">
+                      O cálculo de frete georreferenciado calcula a rota viária real da drogaria até a casa do cliente. Cadastre o CEP de origem da loja e configure faixas progressivas de KM ou acréscimo por distância.
+                    </p>
+                    <ul className="space-y-1.5 text-xs text-gray-600 pl-3 border-l-2 border-blue-400">
+                      <li><strong>Endereço Base:</strong> CEP e número corretos da drogaria.</li>
+                      <li><strong>Faixas de KM:</strong> Preço escalonado por raio de atendimento.</li>
+                      <li><strong>Pedido Mínimo:</strong> Proteção contra entregas deficitárias.</li>
+                    </ul>
+                  </div>
+
+                  <button
+                    onClick={() => {
+                      setTutorialTab('CONFIG');
+                      handleJumpToConfigChapter(CONFIG_CHAPTERS[0]);
+                      const el = document.getElementById('tutorial-video-central');
+                      if (el) el.scrollIntoView({ behavior: 'smooth' });
+                    }}
+                    className="mt-4 text-[11px] font-bold text-blue-600 hover:text-blue-800 flex items-center gap-1 self-start"
+                  >
+                    <Play size={11} className="fill-blue-600" /> Ver no Vídeo Tutorial
+                  </button>
+                </div>
+
+                {/* CARD ATENDIMENTO */}
+                <div className="bg-gray-50 p-6 rounded-3xl flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between mb-3">
+                      <h4 className="font-bold text-gray-900 flex items-center gap-2">
+                        <Tag size={18} className="text-purple-500"/> Atendimento: Etiquetas & Atalhos
+                      </h4>
+                      <span className="text-[10px] font-bold text-purple-600 bg-purple-50 px-2 py-0.5 rounded-full">01:15</span>
+                    </div>
+                    <p className="text-sm text-gray-600 leading-relaxed mb-3">
+                      Organize o fluxo de conversas do WhatsApp com etiquetas visuais por etapas (Aguardando Receita, Em Separação, Saiu p/ Entrega) e acelere respostas com atalhos <code>/</code> salvos no sistema.
+                    </p>
+                    <ul className="space-y-1.5 text-xs text-gray-600 pl-3 border-l-2 border-purple-400">
+                      <li><strong>Etiquetas Coloridas:</strong> Classificação rápida de pedidos.</li>
+                      <li><strong>Atalhos com Barra (/):</strong> Envio instantâneo de chaves PIX e dados.</li>
+                      <li><strong>Busca & Filtros:</strong> Localização de clientes por tag.</li>
+                    </ul>
+                  </div>
+
+                  <button
+                    onClick={() => {
+                      setTutorialTab('CONFIG');
+                      handleJumpToConfigChapter(CONFIG_CHAPTERS[1]);
+                      const el = document.getElementById('tutorial-video-central');
+                      if (el) el.scrollIntoView({ behavior: 'smooth' });
+                    }}
+                    className="mt-4 text-[11px] font-bold text-purple-600 hover:text-purple-800 flex items-center gap-1 self-start"
+                  >
+                    <Play size={11} className="fill-purple-600" /> Ver no Vídeo Tutorial
+                  </button>
+                </div>
+
+                {/* CARD AGENTE IA */}
+                <div className="bg-gray-50 p-6 rounded-3xl flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between mb-3">
+                      <h4 className="font-bold text-gray-900 flex items-center gap-2">
+                        <Bot size={18} className="text-emerald-500"/> Agente de IA (Atendente 24/7)
+                      </h4>
+                      <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full">02:35</span>
+                    </div>
+                    <p className="text-sm text-gray-600 leading-relaxed mb-3">
+                      Automatize o primeiro contato dos clientes com inteligência artificial treinada no seu catálogo farmacêutico, tirando dúvidas sobre medicamentos, buscando genéricos e montando carrinhos.
+                    </p>
+                    <ul className="space-y-1.5 text-xs text-gray-600 pl-3 border-l-2 border-emerald-400">
+                      <li><strong>Prompt da Drogaria:</strong> Personalidade e tom de voz exclusivo.</li>
+                      <li><strong>Horário Flexível:</strong> Operação 24h ou durante o fechamento.</li>
+                      <li><strong>Segurança:</strong> Transfere receitas controladas a humanos.</li>
+                    </ul>
+                  </div>
+
+                  <button
+                    onClick={() => {
+                      setTutorialTab('CONFIG');
+                      handleJumpToConfigChapter(CONFIG_CHAPTERS[2]);
+                      const el = document.getElementById('tutorial-video-central');
+                      if (el) el.scrollIntoView({ behavior: 'smooth' });
+                    }}
+                    className="mt-4 text-[11px] font-bold text-emerald-600 hover:text-emerald-800 flex items-center gap-1 self-start"
+                  >
+                    <Play size={11} className="fill-emerald-600" /> Ver no Vídeo Tutorial
+                  </button>
                 </div>
 
                 <div className="bg-gray-50 p-6 rounded-3xl">
@@ -1185,13 +1676,22 @@ export const AdminManual: React.FC = () => {
 
                 <div className="bg-gray-50 p-6 rounded-3xl">
                   <h4 className="font-bold text-gray-900 mb-3 flex items-center gap-2">
-                    <BrainCircuit size={18} className="text-emerald-500"/> Regras e Fluxos
+                    <BrainCircuit size={18} className="text-emerald-500"/> Regras de Checkout & Notificações
                   </h4>
                   <ul className="space-y-3 text-sm text-gray-600">
-                    <li><strong className="text-gray-800">Ponto de Contato (WhatsApp):</strong> Preencha o número oficial da expedição (ex: 55 DDD NÚMERO). É para esta exata chave que a automação apontará o checkout do cliente com o ID.</li>
-                    <li><strong className="text-gray-800">Ticket e Logística:</strong> Cadastre rigorosamente o "Pedido Mínimo de Entrega" (R$) para evitar entregas deficitárias, além de poder embutir a Taxa de Entrega padrão.</li>
-                    <li><strong className="text-gray-800">Som de Alerta:</strong> A escolha do som no banco ou upload próprio para garantir a perfuração de ruído no salão de loja a cada pedido.</li>
+                    <li><strong className="text-gray-800">Ponto de Contato (WhatsApp):</strong> Preencha o número oficial da expedição (ex: 55 DDD NÚMERO) para onde o checkout envia os pedidos.</li>
+                    <li><strong className="text-gray-800">Pedido Mínimo de Entrega:</strong> Valor mínimo no carrinho para viabilizar saídas de entrega.</li>
+                    <li><strong className="text-gray-800">Som de Alerta:</strong> Escolha ou upload de áudio de notificação a cada novo pedido que entra.</li>
                   </ul>
+                </div>
+
+                <div className="bg-gray-50 p-6 rounded-3xl">
+                  <h4 className="font-bold text-gray-900 mb-3 flex items-center gap-2">
+                    <Activity size={18} className="text-red-500"/> Histórico de Auditoria 24h
+                  </h4>
+                  <p className="text-sm text-gray-600 leading-relaxed">
+                    Localizado na aba Histórico do painel lateral. Este é um registro de <strong className="text-gray-800">Write-Ahead</strong>. Mantém e acopla logs irreversíveis (das últimas 24 horas) toda vez que as configurações da loja ou pedidos são alterados. Permite que o franqueado ou gestor apure quem/quando o sistema foi alterado indevidamente.
+                  </p>
                 </div>
               </div>
             </div>
