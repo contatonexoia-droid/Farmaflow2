@@ -1302,6 +1302,15 @@ export const mapDbPromotionToApp = (p: any): PromotionRule => {
     highlightIcon:
       p.highlight_icon ??
       (p.filters_metadata || p.filtersmetadata)?.highlightIcon,
+    show_banner_card:
+      p.show_banner_card ??
+      (p.filters_metadata || p.filtersmetadata)?.show_banner_card ??
+      (p.filters_metadata || p.filtersmetadata)?.showBannerCard,
+    banner_headline:
+      p.banner_headline ??
+      p.bannerheadline ??
+      (p.filters_metadata || p.filtersmetadata)?.banner_headline ??
+      (p.filters_metadata || p.filtersmetadata)?.bannerHeadline,
     scheduleConfig: safeScheduleConfig,
     startDate: p.start_date || p.startdate,
     endDate: p.end_date || p.enddate,
@@ -1454,7 +1463,11 @@ export const savePromotion = async (promotion: PromotionRule) => {
       highlightColor: promotion.highlightColor,
       highlightIcon: promotion.highlightIcon,
       scheduleConfig: promotion.scheduleConfig,
+      show_banner_card: promotion.show_banner_card,
+      banner_headline: promotion.banner_headline,
     },
+    show_banner_card: promotion.show_banner_card,
+    banner_headline: promotion.banner_headline,
     start_date: promotion.startDate,
     end_date: promotion.endDate,
     is_active: promotion.isActive,

@@ -927,10 +927,114 @@ const SmartBanner: React.FC<{
   selectedCategory: string;
   onCategorySelect: (cat: string) => void;
   tenant: PharmacyConfig;
-}> = ({ searchTerm, selectedCategory, onCategorySelect, tenant }) => {
+  promotions?: PromotionRule[];
+  products?: Product[];
+  onSelectPromotion?: (promoId: string | null) => void;
+  isProductInRule?: (rule: PromotionRule | CouponRule, p: Product) => boolean;
+}> = ({
+  searchTerm,
+  selectedCategory,
+  onCategorySelect,
+  tenant,
+  promotions = [],
+  products = [],
+  onSelectPromotion,
+  isProductInRule,
+}) => {
   const [bannerState, setBannerState] = useState<
     "health" | "beauty" | "kids" | "default"
   >("default");
+
+  // Trava de segurança: verifica se uma promoção possui ao menos 1 produto participante com estoque > 0
+  const promoHasStock = useCallback(
+    (promo: PromotionRule): boolean => {
+      if (!promo || !products || products.length === 0) return false;
+      return products.some((p) => {
+        if (!p || (p.stock ?? 0) <= 0) return false;
+        if (isProductInRule) {
+          try {
+            return isProductInRule(promo, p);
+          } catch {
+            return false;
+          }
+        }
+        if (
+          promo.targetType === "SPECIFIC_SELECTION" ||
+          promo.type === "VARIABLE_COMBO"
+        ) {
+          const ids = promo.comboProducts?.length
+            ? promo.comboProducts
+            : promo.specificProductIds || [];
+          return (
+            ids.includes(p.id) || (p.barcode ? ids.includes(p.barcode) : false)
+          );
+        }
+        if (promo.targetType === "PRODUCT") {
+          return (
+            p.id === promo.targetValue ||
+            (p.barcode ? p.barcode === promo.targetValue : false)
+          );
+        }
+        if (promo.targetType === "CATEGORY") {
+          const norm = (s?: string) => (s || "").toLowerCase().trim();
+          return norm(p.category) === norm(promo.targetValue);
+        }
+        if (promo.targetType === "MANUFACTURER") {
+          const norm = (s?: string) => (s || "").toLowerCase().trim();
+          return norm(p.manufacturer) === norm(promo.targetValue);
+        }
+        return false;
+      });
+    },
+    [products, isProductInRule],
+  );
+
+  // Busca a promoção ativa com estoque para o banner
+  const activePromoForBanner = useMemo(() => {
+    if (!promotions || promotions.length === 0) return null;
+
+    // 1. Promoção explicitamente configurada com show_banner_card === true que tenha estoque > 0
+    const explicitPromos = promotions.filter(
+      (p) => p.show_banner_card === true && promoHasStock(p),
+    );
+    if (explicitPromos.length > 0) return explicitPromos[0];
+
+    // 2. Promoção ativa (onde show_banner_card !== false) com estoque > 0
+    const candidatePromos = promotions.filter(
+      (p) => p.show_banner_card !== false && promoHasStock(p),
+    );
+    const beautyOrBuyX = candidatePromos.find((p) => {
+      if (p.type === "BUY_X_PAY_Y") return true;
+      const val = (p.targetValue || "").toLowerCase();
+      const name = (p.name || "").toLowerCase();
+      return (
+        val.includes("higiene") ||
+        val.includes("beleza") ||
+        val.includes("perfumaria") ||
+        name.includes("higiene") ||
+        name.includes("beleza") ||
+        name.includes("desodorante") ||
+        name.includes("autocuidado")
+      );
+    });
+    if (beautyOrBuyX) return beautyOrBuyX;
+
+    if (candidatePromos.length > 0) return candidatePromos[0];
+
+    return null;
+  }, [promotions, promoHasStock]);
+
+  // Texto dinâmico: banner_headline customizado ou fallback para promo.name / promo.title
+  const promoHeadline = useMemo(() => {
+    if (!activePromoForBanner) return "";
+    const headline = activePromoForBanner.banner_headline?.trim();
+    if (headline) return headline;
+    return (
+      activePromoForBanner.name ||
+      (activePromoForBanner as any).title ||
+      "Oferta Especial"
+    );
+  }, [activePromoForBanner]);
 
   useEffect(() => {
     if (!tenant.enableSmartBanners) {
@@ -976,8 +1080,11 @@ const SmartBanner: React.FC<{
       setBannerState("kids");
     } else if (
       isHygiene &&
-      tenant.smartBanners?.["beauty"]?.enabled !== false
+      tenant.smartBanners?.["beauty"]?.enabled !== false &&
+      !!activePromoForBanner
     ) {
+      setBannerState("beauty");
+    } else if (activePromoForBanner?.show_banner_card === true) {
       setBannerState("beauty");
     } else {
       setBannerState("default");
@@ -987,13 +1094,17 @@ const SmartBanner: React.FC<{
     selectedCategory,
     tenant.enableSmartBanners,
     tenant.smartBanners,
+    activePromoForBanner,
   ]);
 
   useEffect(() => {
     if (!tenant.enableSmartBanners) return;
     if (searchTerm || selectedCategory !== "Todos") return;
 
-    const isBeautyEnabled = tenant.smartBanners?.["beauty"]?.enabled !== false;
+    // Só alterna para o banner de promoção ("beauty") se houver promoção com estoque > 0
+    const isBeautyEnabled =
+      tenant.smartBanners?.["beauty"]?.enabled !== false &&
+      !!activePromoForBanner;
     const isDefaultEnabled =
       tenant.smartBanners?.["default"]?.enabled !== false;
 
@@ -1012,6 +1123,7 @@ const SmartBanner: React.FC<{
     tenant.smartBanners,
     searchTerm,
     selectedCategory,
+    activePromoForBanner,
   ]);
 
   const defaultBanners = {
@@ -1021,8 +1133,19 @@ const SmartBanner: React.FC<{
       bg: "bg-blue-50 text-blue-700 border-blue-100",
     },
     beauty: {
-      text: "✨ Rotina de autocuidado: Leve 3 desodorantes, pague 2.",
-      action: () => onCategorySelect("Higiene"),
+      text: promoHeadline || "✨ Rotina de autocuidado: Oferta Especial",
+      action: () => {
+        if (activePromoForBanner && onSelectPromotion) {
+          onSelectPromotion(activePromoForBanner.id);
+        } else if (
+          activePromoForBanner?.targetType === "CATEGORY" &&
+          activePromoForBanner.targetValue
+        ) {
+          onCategorySelect(activePromoForBanner.targetValue);
+        } else {
+          onCategorySelect("Higiene");
+        }
+      },
       bg: "bg-purple-50 text-purple-700 border-purple-100",
     },
     kids: {
@@ -1039,11 +1162,26 @@ const SmartBanner: React.FC<{
 
   const currentTheme = bannerState;
 
-  if (!tenant.enableSmartBanners) return null;
+  if (
+    !tenant.enableSmartBanners &&
+    (!activePromoForBanner || activePromoForBanner.show_banner_card !== true)
+  ) {
+    return null;
+  }
 
   const isCurrentBannerEnabled =
     tenant.smartBanners?.[currentTheme]?.enabled !== false;
-  if (!isCurrentBannerEnabled) return null;
+  if (
+    !isCurrentBannerEnabled &&
+    (!activePromoForBanner || activePromoForBanner.show_banner_card !== true)
+  ) {
+    return null;
+  }
+
+  // Trava de Segurança contra Tela Vazia: se for o tema de promoção ("beauty") e não houver promoção com estoque > 0, oculta silenciosamente sem gerar erros!
+  if (currentTheme === "beauty" && !activePromoForBanner) {
+    return null;
+  }
 
   const customImage = tenant.smartBanners?.[currentTheme]?.imageUrl;
   const fallbackBanner = defaultBanners[currentTheme];
@@ -3636,6 +3774,10 @@ export const Storefront: React.FC<StorefrontProps> = ({
             selectedCategory={selectedCategory}
             onCategorySelect={(cat) => selectCategory(cat)}
             tenant={tenant}
+            promotions={activePromotions}
+            products={products}
+            onSelectPromotion={(promoId) => selectPromotion(promoId)}
+            isProductInRule={isProductInRule}
           />
         )}
         {(selectedCategory !== "Todos" || searchTerm || selectedPromotion) &&

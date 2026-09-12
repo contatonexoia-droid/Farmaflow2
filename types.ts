@@ -381,12 +381,16 @@ export interface PromotionRule {
     payY?: number;
     comboProducts?: string[];
     comboPrice?: number;
+    show_banner_card?: boolean;
+    banner_headline?: string;
   };
   networkId?: string;
   targetBranchIds?: string[];
   highlightInCategoriesBar?: boolean;
   highlightColor?: string;
   highlightIcon?: string;
+  show_banner_card?: boolean;
+  banner_headline?: string;
   buyX?: number;
   payY?: number;
   lightningDiscountPercentage?: number; // For LIGHTNING_OFFER

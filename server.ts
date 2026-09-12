@@ -8554,7 +8554,20 @@ app.post("/api/v1/tenants/:tenantId/promos", checkTenantAccess, async (req, res)
     if (payload.tenant_id !== tenantId) {
         return res.status(403).json({ error: "Tenant mismatch" });
     }
-    const { data, error } = await supabaseAdmin.from("promotions").upsert(payload).select().single();
+
+    if (!payload.filters_metadata) payload.filters_metadata = {};
+    if (payload.show_banner_card !== undefined) payload.filters_metadata.show_banner_card = payload.show_banner_card;
+    if (payload.banner_headline !== undefined) payload.filters_metadata.banner_headline = payload.banner_headline;
+
+    let { data, error } = await supabaseAdmin.from("promotions").upsert(payload).select().single();
+    if (error && (error.message?.includes("show_banner_card") || error.message?.includes("banner_headline") || error.code === "PGRST204")) {
+      const safePayload = { ...payload };
+      delete safePayload.show_banner_card;
+      delete safePayload.banner_headline;
+      const retryResult = await supabaseAdmin.from("promotions").upsert(safePayload).select().single();
+      data = retryResult.data;
+      error = retryResult.error;
+    }
     if (error) throw error;
     res.json(data);
   } catch (e: any) {

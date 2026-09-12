@@ -693,6 +693,8 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
       discountThresholds: [],
       comboProducts: [],
       specificProductIds: [],
+      show_banner_card: false,
+      banner_headline: "",
       filtersMetadata: {
         category: [],
         manufacturer: [],
@@ -700,6 +702,8 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
         minPrice: "",
         maxPrice: "",
         minStock: "",
+        show_banner_card: false,
+        banner_headline: "",
       },
     });
     setSelectedProductIds([]);
@@ -715,7 +719,17 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
   };
 
   const handleEdit = (promo: PromotionRule) => {
-    setEditingPromo({ ...promo });
+    setEditingPromo({
+      ...promo,
+      show_banner_card:
+        promo.show_banner_card ??
+        promo.filtersMetadata?.show_banner_card ??
+        false,
+      banner_headline:
+        promo.banner_headline ??
+        promo.filtersMetadata?.banner_headline ??
+        "",
+    });
     setSelectedProductIds(
       promo.comboProducts && promo.comboProducts.length > 0
         ? promo.comboProducts
@@ -944,12 +958,16 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
         targetValue: isVarCombo ? "COMBO VARIÁVEL" : editingPromo?.targetValue,
         lightningDiscountPercentage: editingPromo?.type === "LIGHTNING_OFFER" ? (editingPromo?.lightningDiscountPercentage || 0) : editingPromo?.lightningDiscountPercentage,
         specificProductIds: selectedProductIds,
+        show_banner_card: editingPromo?.show_banner_card ?? false,
+        banner_headline: editingPromo?.banner_headline?.trim() || undefined,
         filtersMetadata: {
           ...(editingPromo?.filtersMetadata || {}),
           buyX: finalBuyX,
           payY: finalPayY,
           comboPrice: isVarCombo ? varComboPrice : editingPromo?.comboPrice,
           comboProducts: isVarCombo ? selectedProductIds : editingPromo?.comboProducts,
+          show_banner_card: editingPromo?.show_banner_card ?? false,
+          banner_headline: editingPromo?.banner_headline?.trim() || undefined,
           ...(editingPromo?.targetType === "SPECIFIC_SELECTION" || isVarCombo ? filters : {})
         },
         createdAt: editingPromo?.createdAt || new Date().toISOString(),
@@ -2130,6 +2148,56 @@ const AdminPromotionManager: React.FC<AdminPromotionManagerProps> = ({
                         <option value="Percent">Porcentagem (Percent)</option>
                       </select>
                     </div>
+                  </div>
+                )}
+
+                {/* Banner de Destaque na Vitrine */}
+                <div className="flex items-center gap-3 p-4 bg-purple-50 rounded-2xl border border-purple-100 mt-4">
+                  <input
+                    type="checkbox"
+                    id="showBannerCard"
+                    checked={editingPromo.show_banner_card || false}
+                    onChange={(e) =>
+                      setEditingPromo({
+                        ...editingPromo,
+                        show_banner_card: e.target.checked,
+                      })
+                    }
+                    className="w-5 h-5 rounded border-purple-300 text-purple-600 focus:ring-purple-500"
+                  />
+                  <div className="flex flex-col flex-1">
+                    <label
+                      htmlFor="showBannerCard"
+                      className="text-sm font-bold text-purple-900 cursor-pointer"
+                    >
+                      Exibir Banner de Destaque na Vitrine
+                    </label>
+                    <span className="text-xs text-purple-700/70">
+                      Exibe um banner promocional na loja online (ocultado automaticamente se nenhum produto participante tiver estoque disponível)
+                    </span>
+                  </div>
+                </div>
+
+                {editingPromo.show_banner_card && (
+                  <div className="space-y-2 mt-3 p-4 border border-purple-100 bg-purple-50/40 rounded-2xl animate-in fade-in slide-in-from-top-2">
+                    <label className="text-[11px] font-black uppercase text-purple-800 tracking-widest ml-1 block">
+                      Texto de Chamada do Banner (Headline)
+                    </label>
+                    <input
+                      type="text"
+                      value={editingPromo.banner_headline || ""}
+                      onChange={(e) =>
+                        setEditingPromo({
+                          ...editingPromo,
+                          banner_headline: e.target.value,
+                        })
+                      }
+                      placeholder={`Ex: ✨ ${editingPromo.name || "Rotina de autocuidado: Leve 3 e pague 2"}`}
+                      className="w-full px-4 py-3 rounded-xl border-2 border-purple-100 focus:border-purple-500 focus:ring-0 transition-all font-medium text-sm bg-white"
+                    />
+                    <p className="text-[11px] text-purple-700/80 ml-1">
+                      💡 Se você deixar em branco, o sistema usará o nome da promoção ({editingPromo.name ? `"${editingPromo.name}"` : "Nome da Promoção"}) automaticamente.
+                    </p>
                   </div>
                 )}
               </section>
