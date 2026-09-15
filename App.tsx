@@ -3484,7 +3484,7 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen bg-[#fcfdfe]">
       <Toaster position="top-right" richColors />
-      {view !== ViewMode.LOGIN && (
+      {view !== ViewMode.LOGIN && view !== ViewMode.CATALOG && (
         <Navbar
           currentView={view}
           onViewChange={handleViewChange}

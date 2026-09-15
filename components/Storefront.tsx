@@ -3243,7 +3243,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
       )}
 
       {/* 1. Header Fixo Unificado (Fluxo Sequencial) */}
-      <header className="sticky top-0 z-40 w-full bg-white shadow-sm border-b border-slate-100 flex flex-col">
+      <header className="sticky top-0 z-50 w-full bg-white shadow-sm border-b border-slate-100 flex flex-col">
         {/* Nível 1 (Topo): Menu hambúrguer, logotipo/nome da farmácia e ícone do carrinho */}
         <div className="h-14 flex items-center justify-between px-4 max-w-[1600px] w-full mx-auto bg-white">
           <div className="flex items-center gap-2.5 min-w-0">
