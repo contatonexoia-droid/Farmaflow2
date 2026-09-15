@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { Activity, Clock, ShieldCheck, ShieldAlert, Monitor, Terminal, RefreshCw, CheckCircle2, AlertCircle } from 'lucide-react';
+import { supabase } from '../services/supabase';
 
 interface Integration {
   id: string;
@@ -22,33 +23,102 @@ export const StatusMonitor: React.FC<StatusMonitorProps> = ({ tenantId }) => {
   const [integrations, setIntegrations] = useState<Integration[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
 
-  const fetchStatus = async () => {
+  const fetchStatus = useCallback(async () => {
     try {
       setRefreshing(true);
+      setErrorMessage(null);
       const url = tenantId 
         ? `/api/v1/integration/status?tenantId=${encodeURIComponent(tenantId)}` 
         : '/api/v1/integration/status';
-      const response = await fetch(url);
-      if (response.ok) {
-        const { data } = await response.json();
-        setIntegrations(data || []);
+      
+      let fetchedData: Integration[] | null = null;
+
+      try {
+        const response = await fetch(url);
+        if (response.ok) {
+          const json = await response.json();
+          fetchedData = json.data || [];
+        }
+      } catch (fetchErr: any) {
+        console.warn("[StatusMonitor] Falha na rota API direta, tentando fallback via Supabase:", fetchErr?.message);
       }
-    } catch (error) {
+
+      // Se a rota REST falhar ou não retornar dados, fallback para consulta direta no Supabase
+      if (!fetchedData) {
+        try {
+          let query = supabase.from('agent_integrations').select('*');
+          if (tenantId) {
+            query = query.eq('tenant_id', tenantId);
+          }
+          const { data: agentRows, error: agentErr } = await query;
+          
+          let tenantQuery = supabase.from('tenants').select('id, name, slug, last_seen, agent_last_seen');
+          if (tenantId) {
+            tenantQuery = tenantQuery.eq('id', tenantId);
+          }
+          const { data: tenantRows } = await tenantQuery;
+
+          const tenantMap = new Map<string, any>();
+          if (tenantRows) {
+            for (const t of tenantRows) {
+              tenantMap.set(t.id, t);
+            }
+          }
+
+          const fallbackList: Integration[] = [];
+          if (agentRows && agentRows.length > 0) {
+            for (const row of agentRows) {
+              const t = tenantMap.get(row.tenant_id);
+              fallbackList.push({
+                id: row.id,
+                tenant_id: row.tenant_id,
+                machine_id: row.machine_id || 'Servidor Local',
+                is_active: row.is_active ?? true,
+                last_seen: row.last_seen || t?.agent_last_seen || t?.last_seen || null,
+                tenants: t ? { id: t.id, name: t.name, slug: t.slug } : undefined
+              });
+            }
+          } else if (tenantRows && tenantRows.length > 0) {
+            for (const t of tenantRows) {
+              fallbackList.push({
+                id: t.id,
+                tenant_id: t.id,
+                machine_id: 'Servidor Local',
+                is_active: true,
+                last_seen: t.agent_last_seen || t.last_seen || null,
+                tenants: { id: t.id, name: t.name, slug: t.slug }
+              });
+            }
+          }
+          fetchedData = fallbackList;
+        } catch (dbErr: any) {
+          console.warn("[StatusMonitor] Fallback Supabase também falhou:", dbErr?.message);
+        }
+      }
+
+      if (fetchedData !== null) {
+        setIntegrations(fetchedData);
+      } else {
+        setErrorMessage("Não foi possível conectar ao servidor de status no momento.");
+      }
+    } catch (error: any) {
       console.error("Erro ao buscar status:", error);
+      setErrorMessage(error?.message || "Erro ao buscar status de conexão.");
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, [tenantId]);
 
   useEffect(() => {
     fetchStatus();
     // Atualiza a cada 20 segundos
     const interval = setInterval(fetchStatus, 20000);
     return () => clearInterval(interval);
-  }, [tenantId]);
+  }, [fetchStatus]);
 
   const formatRelativeTime = (lastSeen: string | null): string => {
     if (!lastSeen) return 'Sem sinal registrado';
@@ -181,6 +251,20 @@ export const StatusMonitor: React.FC<StatusMonitorProps> = ({ tenantId }) => {
           </button>
         </div>
       </div>
+
+      {errorMessage && (
+        <div className="flex items-center gap-2 p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800">
+          <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+          <span>{errorMessage}</span>
+          <button
+            type="button"
+            onClick={fetchStatus}
+            className="ml-auto underline font-bold hover:text-amber-950 cursor-pointer"
+          >
+            Tentar novamente
+          </button>
+        </div>
+      )}
 
       {/* Search Filter (if multiple integrations) */}
       {integrations.length > 2 && (
