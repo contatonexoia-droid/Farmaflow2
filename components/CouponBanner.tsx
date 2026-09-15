@@ -10,6 +10,8 @@ interface CouponBannerProps {
   onFilterByPromotion?: (promotion: PromotionRule) => void;
   backgroundColor?: string;
   onExpire?: () => void;
+  compact?: boolean;
+  isSticky?: boolean;
 }
 
 export const CouponBanner: React.FC<CouponBannerProps> = ({
@@ -19,6 +21,8 @@ export const CouponBanner: React.FC<CouponBannerProps> = ({
   onFilterByPromotion,
   backgroundColor,
   onExpire,
+  compact = false,
+  isSticky = false,
 }) => {
   const [activeCoupon, setActiveCoupon] = useState<CouponRule | null>(null);
   const [activeLightningOffer, setActiveLightningOffer] =
@@ -173,18 +177,37 @@ export const CouponBanner: React.FC<CouponBannerProps> = ({
   if (!isCouponValid && !isLightningValid) return null;
 
   return (
-    <div className="relative z-[60] w-full flex flex-col lg:flex-row shadow-md animate-in slide-in-from-top-4">
+    <div
+      className={`w-full flex flex-col lg:flex-row transition-all duration-300 ease-in-out relative z-10 ${
+        compact
+          ? "shadow-sm border-b border-black/10"
+          : "shadow-sm animate-in slide-in-from-top-4"
+      }`}
+    >
       {isLightningValid && activeLightningOffer && (
         <div
-          className={`flex-1 px-4 py-3 sm:py-4 lg:py-4 lg:px-8 flex items-center justify-between text-xs sm:text-sm font-medium overflow-hidden bg-gradient-to-r from-red-600 to-orange-500 text-white transition-all`}
+          className={`flex-1 px-4 ${
+            compact ? "py-2 sm:py-2.5" : "py-3 sm:py-4 lg:py-4"
+          } lg:px-8 flex items-center justify-between text-xs sm:text-sm font-medium overflow-hidden bg-gradient-to-r from-red-600 to-orange-500 text-white transition-all duration-300 ease-in-out`}
           onClick={() => onFilterByPromotion?.(activeLightningOffer)}
         >
-          <div className="flex flex-col lg:flex-row items-center justify-between w-full mx-auto gap-3 lg:gap-6 cursor-pointer hover:opacity-95 transition-opacity group">
-            <div className="flex flex-col lg:flex-row lg:items-center gap-1 lg:gap-4 text-center lg:text-left w-full lg:w-auto">
-              <strong className="font-black tracking-wide uppercase text-[12px] sm:text-sm lg:text-xl shrink-0 leading-tight">
-                ⚡ OFERTA RELÂMPAGO:
+          <div className="flex items-center justify-between w-full mx-auto gap-3 lg:gap-6 cursor-pointer hover:opacity-95 transition-opacity group">
+            <div className="flex items-center gap-2 text-left min-w-0">
+              <strong
+                className={`font-black tracking-wide uppercase ${
+                  compact ? "text-[12px] sm:text-sm" : "text-[12px] sm:text-sm lg:text-xl"
+                } shrink-0 leading-tight flex items-center gap-1.5`}
+              >
+                <Zap size={compact ? 15 : 18} className="animate-pulse shrink-0" />
+                <span>OFERTA RELÂMPAGO:</span>
               </strong>
-              <span className="font-bold opacity-90 text-[11px] sm:text-sm lg:text-lg leading-tight">
+              <span
+                className={`font-bold opacity-90 ${
+                  compact
+                    ? "text-[11px] sm:text-xs truncate"
+                    : "text-[11px] sm:text-sm lg:text-lg"
+                } leading-tight`}
+              >
                 {activeLightningOffer.lightningDiscountPercentage
                   ? `Aproveite ${activeLightningOffer.lightningDiscountPercentage}% OFF em produtos selecionados!`
                   : activeLightningOffer.buyX && activeLightningOffer.payY
@@ -194,18 +217,33 @@ export const CouponBanner: React.FC<CouponBannerProps> = ({
             </div>
 
             {timeLeft && (
-              <div className="flex flex-col lg:flex-row items-center justify-center gap-1.5 lg:gap-4 shrink-0 w-full lg:w-auto">
-                <span className="text-[10px] sm:text-xs lg:text-sm font-semibold opacity-90 uppercase tracking-wider text-center">
-                  A oferta encerra em:
+              <div className="flex items-center justify-end gap-2 shrink-0">
+                <span
+                  className={`text-[10px] sm:text-xs font-semibold opacity-90 uppercase tracking-wider ${
+                    compact ? "hidden sm:inline" : "hidden lg:inline"
+                  }`}
+                >
+                  Termina em:
                 </span>
-                <div className="flex items-center gap-2 bg-black/20 px-4 py-2 lg:px-5 lg:py-2 rounded-full border border-white/20">
-                  <Timer size={16} className="animate-pulse opacity-80" />
-                  <span className="font-black tabular-nums tracking-widest text-[12px] sm:text-sm lg:text-lg">
+                <div
+                  className={`flex items-center gap-1.5 bg-black/20 ${
+                    compact
+                      ? "px-2.5 py-1 text-[11px] sm:text-xs"
+                      : "px-4 py-2 lg:px-5 lg:py-2 text-[12px] sm:text-sm lg:text-lg"
+                  } rounded-full border border-white/20`}
+                >
+                  <Timer size={compact ? 13 : 16} className="animate-pulse opacity-80" />
+                  <span className="font-black tabular-nums tracking-widest">
                     {String(timeLeft.hours).padStart(2, "0")}:
                     {String(timeLeft.minutes).padStart(2, "0")}:
                     {String(timeLeft.seconds).padStart(2, "0")}
                   </span>
                 </div>
+                {compact && (
+                  <span className="hidden md:inline-flex items-center text-xs font-black underline decoration-white/50 hover:decoration-white ml-1">
+                    Ver Ofertas <ExternalLink size={12} className="ml-1" />
+                  </span>
+                )}
               </div>
             )}
           </div>
@@ -214,7 +252,11 @@ export const CouponBanner: React.FC<CouponBannerProps> = ({
 
       {isCouponValid && activeCoupon && (
         <div
-          className={`px-4 py-3 sm:py-4 lg:py-4 lg:px-6 flex items-center justify-between text-xs sm:text-sm font-medium overflow-hidden text-white transition-all ${isLightningValid && activeLightningOffer ? "lg:w-[40%] bg-emerald-600" : "w-full flex-1"}`}
+          className={`px-4 ${
+            compact ? "py-2 sm:py-2.5" : "py-3 sm:py-4 lg:py-4"
+          } lg:px-6 flex items-center justify-between text-xs sm:text-sm font-medium overflow-hidden text-white transition-all duration-300 ease-in-out ${
+            isLightningValid && activeLightningOffer ? "lg:w-[40%] bg-emerald-600" : "w-full flex-1"
+          }`}
           style={
             !(isLightningValid && activeLightningOffer) && backgroundColor
               ? { backgroundColor }
@@ -224,36 +266,37 @@ export const CouponBanner: React.FC<CouponBannerProps> = ({
           }
           onClick={() => onFilterByCoupon?.(activeCoupon)}
         >
-          <div className="w-full flex items-center justify-center lg:justify-center cursor-pointer hover:opacity-90 transition-opacity group">
-            <div className="flex flex-col lg:flex-row items-center justify-center text-center w-full gap-1.5 lg:gap-6">
-              <strong className="font-black tracking-wide uppercase text-[12px] sm:text-sm lg:text-lg whitespace-nowrap">
+          <div className="w-full flex items-center justify-between lg:justify-center cursor-pointer hover:opacity-90 transition-opacity group">
+            <div className="flex items-center justify-between lg:justify-center text-left lg:text-center w-full gap-2 lg:gap-6">
+              <strong
+                className={`font-black tracking-wide uppercase ${
+                  compact ? "text-[11px] sm:text-xs" : "text-[12px] sm:text-sm lg:text-lg"
+                } truncate`}
+              >
                 🎁 GANHE{" "}
                 {activeCoupon.discountType === "PERCENTAGE"
                   ? `${activeCoupon.discountValue}%`
                   : `R$ ${activeCoupon.discountValue.toFixed(2)}`}{" "}
-                DE DESCONTO AGORA!
+                OFF
               </strong>
 
-              <div className="flex flex-col lg:flex-row items-center gap-1.5 lg:gap-4 mt-1 lg:mt-0">
-                <div className="flex flex-col lg:flex-row items-center gap-1.5 lg:gap-3">
-                  <span className="text-[11px] sm:text-base font-semibold opacity-90 whitespace-nowrap">
-                    Aplique o código no carrinho:
-                  </span>
-                  <button
-                    onClick={handleCopy}
-                    className="bg-white/20 hover:bg-white/30 px-3 py-1.5 lg:px-4 lg:py-1.5 rounded-md font-black tracking-wider flex items-center gap-2 transition-all border border-white/10 group-hover:border-white/40 text-xs sm:text-sm lg:text-base shadow-sm"
-                    title="Clique para copiar"
-                  >
-                    {activeCoupon.code}
-                    {copied ? (
-                      <Check size={16} className="text-white" />
-                    ) : (
-                      <Copy size={16} className="text-white/70" />
-                    )}
-                  </button>
-                </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={handleCopy}
+                  className={`bg-white/20 hover:bg-white/30 ${
+                    compact ? "px-2 py-1 text-xs" : "px-3 py-1.5 lg:px-4 lg:py-1.5 text-xs sm:text-sm lg:text-base"
+                  } rounded-md font-black tracking-wider flex items-center gap-1.5 transition-all border border-white/10 group-hover:border-white/40 shadow-sm`}
+                  title="Clique para copiar"
+                >
+                  {activeCoupon.code}
+                  {copied ? (
+                    <Check size={compact ? 12 : 16} className="text-white" />
+                  ) : (
+                    <Copy size={compact ? 12 : 16} className="text-white/70" />
+                  )}
+                </button>
 
-                {activeCoupon.targetType !== "ALL" && (
+                {activeCoupon.targetType !== "ALL" && !compact && (
                   <a
                     href={`#produtos-cupom`}
                     onClick={(e) => {
@@ -261,9 +304,9 @@ export const CouponBanner: React.FC<CouponBannerProps> = ({
                       e.stopPropagation();
                       onFilterByCoupon?.(activeCoupon);
                     }}
-                    className="text-[11px] sm:text-sm lg:text-base font-bold underline decoration-white/50 underline-offset-4 hover:decoration-white hover:opacity-100 opacity-90 transition-all whitespace-nowrap mt-1 lg:mt-0"
+                    className="text-[11px] sm:text-sm lg:text-base font-bold underline decoration-white/50 underline-offset-4 hover:decoration-white hover:opacity-100 opacity-90 transition-all whitespace-nowrap hidden sm:inline"
                   >
-                    👉 Ver produtos do cupom
+                    👉 Ver produtos
                   </a>
                 )}
               </div>

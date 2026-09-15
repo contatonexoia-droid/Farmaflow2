@@ -60,6 +60,8 @@ import {
   Clock,
   ChevronDown,
   Info,
+  Zap,
+  Timer,
 } from "lucide-react";
 import { saveAppReview, logSearch, getProductsByTenant } from "../services/storage";
 import { CouponBanner } from "./CouponBanner";
@@ -98,6 +100,86 @@ const fixImageUrl = (url?: string, width: number = 240): string | null => {
   // 4. Cache agressivo via CDN
   const proxyUrl = `https://wsrv.nl/?url=${encodeURIComponent(url)}&output=webp&q=75&w=${width}&we&default=${encodeURIComponent(GENERIC_PLACEHOLDER)}`;
   return proxyUrl;
+};
+
+/**
+ * Calcula o tempo regressivo restante de uma promoção com agendamento/horário (ex: Oferta Relâmpago)
+ */
+const getPromoCountdown = (promo: PromotionRule | null): string | null => {
+  if (!promo) return null;
+  const now = new Date();
+  let offerEndTime: number | null = null;
+  const end = promo.endDate ? new Date(promo.endDate) : null;
+
+  if (
+    promo.scheduleConfig &&
+    typeof promo.scheduleConfig === "object" &&
+    typeof promo.scheduleConfig.startTime === "string" &&
+    typeof promo.scheduleConfig.endTime === "string" &&
+    promo.scheduleConfig.startTime.includes(":") &&
+    promo.scheduleConfig.endTime.includes(":")
+  ) {
+    try {
+      const spFormatter = new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/Sao_Paulo",
+        hour12: false,
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      });
+      const parts = spFormatter.formatToParts(now);
+      const getP = (type: string) =>
+        parts.find((pt) => pt.type === type)?.value || "";
+
+      const currentHourRaw = parseInt(getP("hour"), 10) || now.getHours();
+      const currentHour = currentHourRaw === 24 ? 0 : currentHourRaw;
+      const currentMinute = parseInt(getP("minute"), 10) || now.getMinutes();
+      const currentSecond = parseInt(getP("second"), 10) || now.getSeconds();
+
+      const [startH, startM] = (promo.scheduleConfig.startTime || "00:00")
+        .split(":")
+        .map(Number);
+      const [endH, endM] = (promo.scheduleConfig.endTime || "23:59")
+        .split(":")
+        .map(Number);
+
+      const currentSeconds =
+        currentHour * 3600 + currentMinute * 60 + currentSecond;
+      const startSeconds = startH * 3600 + (startM || 0) * 60;
+      const endSeconds = endH * 3600 + (endM || 0) * 60;
+
+      let msRemaining = 0;
+      if (startSeconds > endSeconds) {
+        if (currentSeconds >= startSeconds) {
+          msRemaining = (24 * 3600 - currentSeconds + endSeconds) * 1000;
+        } else {
+          msRemaining = (endSeconds - currentSeconds) * 1000;
+        }
+      } else {
+        msRemaining = (endSeconds - currentSeconds) * 1000;
+      }
+
+      offerEndTime = now.getTime() + msRemaining;
+      if (end && offerEndTime > end.getTime()) {
+        offerEndTime = end.getTime();
+      }
+    } catch {
+      if (end) offerEndTime = end.getTime();
+    }
+  } else {
+    if (end) offerEndTime = end.getTime();
+  }
+
+  if (offerEndTime) {
+    const diff = offerEndTime - now.getTime();
+    if (diff > 0) {
+      const h = Math.floor(diff / (1000 * 60 * 60));
+      const m = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+      const s = Math.floor((diff % (1000 * 60)) / 1000);
+      return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+    }
+  }
+  return null;
 };
 
 // Mapa de afinidade terapêutica refinado para incluir Perfumaria e Conveniência obrigatoriamente
@@ -1971,6 +2053,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
   ]);
 
   const [isScrolled, setIsScrolled] = useState(false);
+  const [lightningTimeRemaining, setLightningTimeRemaining] = useState<string | null>(null);
 
   useEffect(() => {
     let ticking = false;
@@ -1986,6 +2069,20 @@ export const Storefront: React.FC<StorefrontProps> = ({
     window.addEventListener("scroll", handleScroll, { passive: true });
     return () => window.removeEventListener("scroll", handleScroll);
   }, []);
+
+  useEffect(() => {
+    const updateCountdown = () => {
+      if (selectedPromotion && selectedPromotion.type === "LIGHTNING_OFFER") {
+        setLightningTimeRemaining(getPromoCountdown(selectedPromotion));
+      } else {
+        setLightningTimeRemaining(null);
+      }
+    };
+
+    updateCountdown();
+    const interval = setInterval(updateCountdown, 1000);
+    return () => clearInterval(interval);
+  }, [selectedPromotion]);
 
   useEffect(() => {
     setIsLoading(false);
@@ -3122,7 +3219,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
   };
 
   return (
-    <div className="bg-gray-50/50 min-h-screen pb-24 font-sans relative overflow-x-hidden">
+    <div className="bg-gray-50/50 min-h-screen pb-24 font-sans relative">
       {onBack && (
         <div className="bg-gray-900 text-white text-[10px] md:text-xs py-1.5 px-4 flex items-center justify-center z-[60] relative">
           <button
@@ -3133,28 +3230,16 @@ export const Storefront: React.FC<StorefrontProps> = ({
           </button>
         </div>
       )}
-      {((topBannerCoupons && topBannerCoupons.length > 0) ||
-        (activePromotions && activePromotions.length > 0)) && (
-        <CouponBanner
-          coupons={topBannerCoupons || []}
-          promotions={activePromotions || []}
-          backgroundColor={tenant.couponBannerColor}
-          onFilterByCoupon={(coupon) => {
-            selectCoupon(coupon);
-            window.scrollTo({ top: 400, behavior: "smooth" });
+
+      {/* 1. Container Fixo Unificado (Sticky Header Wrapper) */}
+      <div className="sticky top-0 z-40 w-full bg-white shadow-sm">
+        {/* Camada Superior: Cabeçalho da farmácia e Barra de Pesquisa */}
+        <header
+          className="relative z-30 transition-all duration-300 py-3 sm:py-4 px-4 md:px-8"
+          style={{
+            background: `linear-gradient(90deg, #1a0505 0%, ${tenant.primaryColor} 100%)`,
           }}
-          onFilterByPromotion={(promo) => {
-            selectPromotion(promo.id);
-            window.scrollTo({ top: 400, behavior: "smooth" });
-          }}
-        />
-      )}
-      <header
-        className={`relative z-30 transition-all duration-300 py-4 md:py-6 px-4 md:px-8`}
-        style={{
-          background: `linear-gradient(90deg, #1a0505 0%, ${tenant.primaryColor} 100%)`,
-        }}
-      >
+        >
         <div
           className={`w-full max-w-[1600px] mx-auto flex flex-col md:flex-row md:items-center md:justify-between gap-4 md:gap-8`}
         >
@@ -3190,10 +3275,10 @@ export const Storefront: React.FC<StorefrontProps> = ({
             ref={searchRef}
           >
             <div
-              className={`transition-all duration-300 ${isScrolled ? "fixed top-[79px] left-0 right-0 z-[40] bg-white/95 backdrop-blur-md shadow-[0_4px_6px_-1px_rgba(0,0,0,0.1)] px-4 py-3 border-b border-gray-100" : "absolute inset-0 w-full z-40"}`}
+              className="absolute inset-0 w-full z-40"
             >
               <div
-                className={`w-full mx-auto ${isScrolled ? "max-w-2xl lg:max-w-4xl" : "h-full"}`}
+                className="w-full mx-auto h-full"
               >
                 <div className="relative w-full">
                   <SearchInput
@@ -3421,6 +3506,114 @@ export const Storefront: React.FC<StorefrontProps> = ({
         </div>
       </header>
 
+      {/* Camada Inferior (Condicional): Faixa promocional ativa ou Banner de Ofertas */}
+      {selectedPromotion && !activeCouponFilter ? (
+        <div className="w-full bg-gradient-to-r from-red-600 via-red-600 to-orange-500 text-white px-3 sm:px-4 md:px-8 py-2 sm:py-2.5 border-b border-red-700 shadow-md flex items-center justify-between gap-2 sm:gap-3 transition-all duration-300">
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-lg bg-white/20 flex items-center justify-center shrink-0">
+              {selectedPromotion.type === "LIGHTNING_OFFER" ? (
+                <Zap size={14} className="animate-pulse text-yellow-300" />
+              ) : (
+                <Percent size={14} className="text-white" />
+              )}
+            </div>
+            <div className="flex items-center gap-1.5 sm:gap-2 truncate text-xs sm:text-sm font-black">
+              <span className="truncate">
+                {selectedPromotion.type === "LIGHTNING_OFFER" ? (
+                  selectedPromotion.lightningDiscountPercentage ? (
+                    `⚡ ${selectedPromotion.lightningDiscountPercentage}% OFF na Oferta Relâmpago`
+                  ) : (
+                    `⚡ ${selectedPromotion.name}`
+                  )
+                ) : selectedPromotion.type === "VARIABLE_COMBO" ? (
+                  `🏷️ Combo: Leve o conjunto por R$ ${Number(
+                    selectedPromotion.comboPrice ?? selectedPromotion.payY ?? 0,
+                  )
+                    .toFixed(2)
+                    .replace(".", ",")}`
+                ) : selectedPromotion.type === "BUY_X_PAY_Y" ? (
+                  `🔥 Leve ${selectedPromotion.buyX} Pague ${selectedPromotion.payY}`
+                ) : (
+                  `🏷️ ${selectedPromotion.name}`
+                )}
+              </span>
+              {selectedPromotion.type === "LIGHTNING_OFFER" && lightningTimeRemaining && (
+                <span className="shrink-0 flex items-center gap-1 bg-black/25 px-2 py-0.5 rounded-full text-[10px] sm:text-xs font-mono font-bold tracking-tight">
+                  <Timer size={12} className="animate-pulse opacity-90" />
+                  <span className="hidden sm:inline">Termina em:</span> {lightningTimeRemaining}
+                </span>
+              )}
+            </div>
+          </div>
+
+          <button
+            onClick={() => selectPromotion(null)}
+            disabled={isPendingFilter}
+            className="shrink-0 px-2.5 py-1 sm:px-4 sm:py-1.5 bg-white/20 hover:bg-white/30 border border-white/30 text-white rounded-xl font-black text-xs transition-all flex items-center gap-1.5 shadow-sm active:scale-95 disabled:opacity-50"
+            title="Remover Filtro"
+          >
+            {isPendingFilter && pendingPromoId === "clear" ? (
+              <>
+                <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                <span className="hidden sm:inline">Removendo...</span>
+              </>
+            ) : (
+              <>
+                <span className="hidden sm:inline">Remover Filtro</span>
+                <span className="sm:hidden text-[11px]">Ver Todos</span>
+                <X size={13} />
+              </>
+            )}
+          </button>
+        </div>
+      ) : activeCouponFilter ? (
+        <div className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 text-white px-3 sm:px-4 md:px-8 py-2 sm:py-2.5 border-b border-blue-700 shadow-md flex items-center justify-between gap-2 sm:gap-3 transition-all duration-300">
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-lg bg-white/20 flex items-center justify-center shrink-0">
+              <Tag size={14} className="text-white" />
+            </div>
+            <div className="min-w-0">
+              <p className="text-xs sm:text-sm font-black truncate leading-tight">
+                🎁 Cupom: <span className="underline decoration-white/60">{activeCouponFilter?.code}</span>
+                {activeCouponFilter?.discountType === "PERCENTAGE"
+                  ? ` (${activeCouponFilter.discountValue}% OFF)`
+                  : activeCouponFilter?.discountValue
+                    ? ` (R$ ${activeCouponFilter.discountValue.toFixed(2)} OFF)`
+                    : ""}{" "}
+                | Ativo
+              </p>
+            </div>
+          </div>
+
+          <button
+            onClick={() => resetFilters()}
+            className="shrink-0 px-2.5 py-1 sm:px-4 sm:py-1.5 bg-white/20 hover:bg-white/30 border border-white/30 text-white rounded-xl font-black text-xs transition-all flex items-center gap-1.5 shadow-sm active:scale-95"
+            title="Remover Filtro"
+          >
+            <span className="hidden sm:inline">Remover Filtro</span>
+            <span className="sm:hidden text-[11px]">Ver Todos</span>
+            <X size={13} />
+          </button>
+        </div>
+      ) : ((topBannerCoupons && topBannerCoupons.length > 0) ||
+          (activePromotions && activePromotions.length > 0)) ? (
+        <CouponBanner
+          coupons={topBannerCoupons || []}
+          promotions={activePromotions || []}
+          backgroundColor={tenant.couponBannerColor}
+          compact={isScrolled}
+          onFilterByCoupon={(coupon) => {
+            selectCoupon(coupon);
+            window.scrollTo({ top: 400, behavior: "smooth" });
+          }}
+          onFilterByPromotion={(promo) => {
+            selectPromotion(promo.id);
+            window.scrollTo({ top: 400, behavior: "smooth" });
+          }}
+        />
+      ) : null}
+      </div>
+
       <section className="w-full max-w-[1600px] lg:max-w-none mx-auto lg:mx-0 px-4 md:px-8 lg:px-0 mt-6 md:mt-8 [content-visibility:auto] [contain-intrinsic-size:300px]">
         <div
           className="relative overflow-hidden rounded-[2rem] md:rounded-[3rem] lg:rounded-none p-8 md:p-12 text-center text-white shadow-xl flex flex-col items-center justify-center gap-4 md:gap-6 animate-in zoom-in-95 duration-700"
@@ -3636,123 +3829,6 @@ export const Storefront: React.FC<StorefrontProps> = ({
             </div>
           )}
 
-        {activeCouponFilter && (
-          <div className="mb-8 animate-in slide-in-from-top duration-500">
-            <div className="bg-blue-50 border-2 border-blue-100 rounded-[2rem] p-6 flex flex-col md:flex-row items-center justify-between gap-6 shadow-sm relative overflow-hidden">
-              <div className="absolute top-0 right-0 w-32 h-32 bg-blue-100/50 rounded-full -mr-16 -mt-16 blur-2xl"></div>
-              <div className="flex items-center gap-5 relative z-10">
-                <div className="w-16 h-16 bg-blue-600 text-white rounded-2xl flex items-center justify-center shrink-0 shadow-lg shadow-blue-200">
-                  <Tag size={32} />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2 mb-1">
-                    <h3 className="text-xl font-black text-gray-900 tracking-tight">
-                      Cupom: {activeCouponFilter?.code}
-                    </h3>
-                    <span className="bg-blue-600 text-white text-[10px] font-black px-2 py-0.5 rounded-full uppercase tracking-widest">
-                      Ativo
-                    </span>
-                  </div>
-                  {activeCouponFilter?.couponScope === "GLOBAL" ? (
-                    <p className="text-gray-500 font-bold text-sm">
-                      ✨ Ganhe desconto nas compras acima de{" "}
-                      <span className="font-black text-blue-700">
-                        {new Intl.NumberFormat("pt-BR", {
-                          style: "currency",
-                          currency: "BRL",
-                        }).format(activeCouponFilter?.minPurchaseValue || 0)}
-                      </span>{" "}
-                      no total do carrinho!
-                    </p>
-                  ) : (
-                    <p className="text-gray-500 font-bold text-sm">
-                      Mostrando apenas produtos que aceitam este cupom.
-                    </p>
-                  )}
-                </div>
-              </div>
-              <div className="flex items-center gap-3 relative z-10 w-full md:w-auto">
-                {activeCouponFilter?.couponScope !== "GLOBAL" && (
-                  <button
-                    onClick={() => {
-                      navigator.clipboard.writeText(
-                        activeCouponFilter?.code || "",
-                      );
-                      toast.success("Cupom copiado!");
-                    }}
-                    className="flex-1 md:flex-none px-6 py-3 bg-blue-600 text-white rounded-xl font-black text-xs hover:bg-blue-700 transition-all flex items-center justify-center gap-2 shadow-md shadow-blue-100 active:scale-95"
-                  >
-                    Copiar Código <Copy size={14} />
-                  </button>
-                )}
-                <button
-                  onClick={() => resetFilters()}
-                  className="flex-1 md:flex-none px-6 py-3 bg-white border-2 border-blue-100 text-blue-600 rounded-xl font-black text-xs hover:bg-blue-50 transition-all flex items-center justify-center gap-2 active:scale-95"
-                >
-                  Limpar Filtro <X size={14} />
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-        {selectedPromotion && !activeCouponFilter && (
-          <div className="mb-8 animate-in slide-in-from-top duration-500">
-            <div
-              className={`bg-red-50 border-2 border-red-100 rounded-[2rem] p-6 flex flex-col md:flex-row items-center justify-between gap-6 shadow-sm relative overflow-hidden`}
-            >
-              <div className="absolute top-0 right-0 w-32 h-32 bg-red-100/50 rounded-full -mr-16 -mt-16 blur-2xl"></div>
-              <div className="flex items-center gap-5 relative z-10">
-                <div
-                  className={`w-16 h-16 bg-red-500 text-white rounded-2xl flex items-center justify-center shrink-0 shadow-lg shadow-red-200`}
-                >
-                  <Percent size={32} />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2 mb-1">
-                    <h3 className="text-xl font-black text-gray-900 tracking-tight">
-                      {selectedPromotion.name}
-                    </h3>
-                    <span
-                      className={`bg-red-500 text-white text-[10px] font-black px-2 py-0.5 rounded-full uppercase tracking-widest`}
-                    >
-                      Oferta Ativa
-                    </span>
-                  </div>
-                  <p className="text-gray-500 font-bold text-sm">
-                    {selectedPromotion.type === "VARIABLE_COMBO"
-                      ? `Exibindo os itens do Combo Variável (Leve o conjunto por R$ ${Number(selectedPromotion.comboPrice ?? selectedPromotion.payY ?? 0).toFixed(2).replace(".", ",")})`
-                      : selectedPromotion.type === "LIGHTNING_OFFER" &&
-                        selectedPromotion.lightningDiscountPercentage
-                        ? `Exibindo apenas itens com ${selectedPromotion.lightningDiscountPercentage}% OFF`
-                        : selectedPromotion.type === "LIGHTNING_OFFER" &&
-                            selectedPromotion.buyX &&
-                            selectedPromotion.payY
-                          ? `Exibindo produtos da oferta (Leve ${selectedPromotion.buyX} por R$ ${selectedPromotion.payY.toFixed(2).replace(".", ",")})`
-                          : `Mostrando apenas produtos desta promoção.`}
-                  </p>
-                </div>
-              </div>
-              <div className="flex items-center gap-3 relative z-10 w-full md:w-auto">
-                <button
-                  onClick={() => selectPromotion(null)}
-                  disabled={isPendingFilter}
-                  className="flex-1 md:flex-none px-6 py-3 bg-white border-2 border-red-100 text-red-500 rounded-xl font-black text-xs hover:bg-red-50 transition-all flex items-center justify-center gap-2 active:scale-95 disabled:opacity-50"
-                >
-                  {isPendingFilter && pendingPromoId === "clear" ? (
-                    <>
-                      <div className="w-3.5 h-3.5 border-2 border-red-500 border-t-transparent rounded-full animate-spin" />
-                      <span>Removendo...</span>
-                    </>
-                  ) : (
-                    <>
-                      Remover Filtro <X size={14} />
-                    </>
-                  )}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
         {searchFallback && (
           <div className="mb-6 p-4 md:p-6 bg-blue-50 border border-blue-100 rounded-2xl flex items-start gap-4">
              <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center shrink-0 text-blue-500">
