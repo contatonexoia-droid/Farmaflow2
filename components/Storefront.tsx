@@ -3248,11 +3248,12 @@ export const Storefront: React.FC<StorefrontProps> = ({
         <div className="h-14 flex items-center justify-between px-4 max-w-[1600px] w-full mx-auto bg-white">
           <div className="flex items-center gap-2.5 min-w-0">
             <button
-              onClick={() => {
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
                 setIsDrawerOpen(true);
-                window.dispatchEvent(new CustomEvent("ffToggleStoreDrawer"));
               }}
-              className="p-2 -ml-1.5 text-gray-700 hover:bg-gray-100 rounded-xl transition-colors shrink-0"
+              className="p-2 -ml-1.5 text-gray-700 hover:bg-gray-100 active:bg-gray-200 rounded-xl transition-colors shrink-0 cursor-pointer"
               aria-label="Abrir menu de categorias"
             >
               <Menu size={22} />
@@ -4162,6 +4163,23 @@ export const Storefront: React.FC<StorefrontProps> = ({
 
             {/* Content */}
             <div className="flex-1 overflow-y-auto no-scrollbar p-6 space-y-3">
+              {/* Opção Todos */}
+              <button
+                type="button"
+                onClick={() => {
+                  selectDepartment("Todos");
+                  setIsDrawerOpen(false);
+                }}
+                className={`w-full px-5 py-3.5 rounded-2xl border text-left font-black text-xs uppercase tracking-wider transition-all flex items-center justify-between shadow-sm ${
+                  filters.departamento === "Todos"
+                    ? "bg-emerald-600 text-white border-emerald-600 shadow-emerald-600/20"
+                    : "bg-white text-gray-800 border-gray-100 hover:border-gray-200 hover:bg-gray-50"
+                }`}
+              >
+                <span>Todos os Departamentos</span>
+                <ChevronRight size={16} className={filters.departamento === "Todos" ? "text-white" : "text-gray-400"} />
+              </button>
+
               {departments
                 .filter((d) => d !== "Todos")
                 .map((dept) => {
