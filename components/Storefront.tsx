@@ -62,6 +62,7 @@ import {
   Info,
   Zap,
   Timer,
+  Menu,
 } from "lucide-react";
 import { saveAppReview, logSearch, getProductsByTenant } from "../services/storage";
 import { CouponBanner } from "./CouponBanner";
@@ -984,18 +985,19 @@ const SearchInput = ({
   return (
     <form
       onSubmit={handleSubmit}
-      className="relative w-full max-w-2xl mx-auto z-50"
+      className="relative w-full max-w-3xl mx-auto"
     >
       <button
         type="submit"
-        className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 bg-transparent border-none"
+        className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 bg-transparent border-none transition-colors"
+        aria-label="Buscar"
       >
-        <Search size={16} />
+        <Search size={18} />
       </button>
       <input
         type="text"
         placeholder="O que você precisa hoje?"
-        className="w-full bg-white pl-12 pr-6 py-2.5 md:py-3 rounded-full font-bold shadow-md outline-none focus:ring-4 focus:ring-white/20 transition-all text-gray-900 border-none text-sm"
+        className="w-full bg-slate-100 hover:bg-slate-50 focus:bg-white pl-11 pr-4 py-2 sm:py-2.5 rounded-full font-medium shadow-inner outline-none focus:ring-2 focus:ring-red-500/20 focus:border-red-500 transition-all text-gray-900 border border-slate-200 text-sm"
         value={localValue}
         onChange={handleChange}
         onFocus={onFocus}
@@ -1654,6 +1656,10 @@ export const Storefront: React.FC<StorefrontProps> = ({
     [inheritedCoupons, filters.cupom_id],
   );
 
+  const activeLightningOffer = useMemo(() => {
+    return activePromotions.find((p) => p.type === "LIGHTNING_OFFER") || null;
+  }, [activePromotions]);
+
   const activeGlobalCoupon = useMemo(() => {
     if (!inheritedCoupons || !Array.isArray(inheritedCoupons)) return null;
     return (
@@ -2072,8 +2078,13 @@ export const Storefront: React.FC<StorefrontProps> = ({
 
   useEffect(() => {
     const updateCountdown = () => {
-      if (selectedPromotion && selectedPromotion.type === "LIGHTNING_OFFER") {
-        setLightningTimeRemaining(getPromoCountdown(selectedPromotion));
+      const targetOffer =
+        selectedPromotion && selectedPromotion.type === "LIGHTNING_OFFER"
+          ? selectedPromotion
+          : activeLightningOffer;
+
+      if (targetOffer) {
+        setLightningTimeRemaining(getPromoCountdown(targetOffer));
       } else {
         setLightningTimeRemaining(null);
       }
@@ -2082,7 +2093,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
     updateCountdown();
     const interval = setInterval(updateCountdown, 1000);
     return () => clearInterval(interval);
-  }, [selectedPromotion]);
+  }, [selectedPromotion, activeLightningOffer]);
 
   useEffect(() => {
     setIsLoading(false);
@@ -3231,57 +3242,84 @@ export const Storefront: React.FC<StorefrontProps> = ({
         </div>
       )}
 
-      {/* 1. Container Fixo Unificado (Sticky Header Wrapper) */}
-      <div className="sticky top-0 z-40 w-full bg-white shadow-sm">
-        {/* Camada Superior: Cabeçalho da farmácia e Barra de Pesquisa */}
-        <header
-          className="relative z-30 transition-all duration-300 py-3 sm:py-4 px-4 md:px-8"
-          style={{
-            background: `linear-gradient(90deg, #1a0505 0%, ${tenant.primaryColor} 100%)`,
-          }}
-        >
-        <div
-          className={`w-full max-w-[1600px] mx-auto flex flex-col md:flex-row md:items-center md:justify-between gap-4 md:gap-8`}
-        >
-          <div className={`flex items-center gap-3 md:gap-4 shrink-0`}>
-            <div
-              className={`bg-white rounded-full flex items-center justify-center overflow-hidden border-2 w-10 h-10 md:w-12 md:h-12 border-white/20 shadow-xl`}
+      {/* 1. Header Fixo Unificado (Fluxo Sequencial) */}
+      <header className="sticky top-0 z-40 w-full bg-white shadow-sm border-b border-slate-100 flex flex-col">
+        {/* Nível 1 (Topo): Menu hambúrguer, logotipo/nome da farmácia e ícone do carrinho */}
+        <div className="h-14 flex items-center justify-between px-4 max-w-[1600px] w-full mx-auto bg-white">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <button
+              onClick={() => {
+                setIsDrawerOpen(true);
+                window.dispatchEvent(new CustomEvent("ffToggleStoreDrawer"));
+              }}
+              className="p-2 -ml-1.5 text-gray-700 hover:bg-gray-100 rounded-xl transition-colors shrink-0"
+              aria-label="Abrir menu de categorias"
             >
+              <Menu size={22} />
+            </button>
+
+            <div className="w-9 h-9 rounded-xl flex items-center justify-center overflow-hidden border border-gray-200/80 shadow-xs bg-white shrink-0">
               {tenant.logo ? (
                 <img
                   src={fixImageUrl(tenant.logo)!}
-                  className="w-full h-full object-contain"
+                  className="w-full h-full object-contain p-0.5"
                   alt={tenant.name}
                   referrerPolicy="no-referrer"
                 />
               ) : (
-                <span
-                  className="font-black text-lg md:text-xl"
-                  style={{ color: tenant.primaryColor }}
+                <div
+                  className="w-full h-full flex items-center justify-center font-black text-sm text-white"
+                  style={{ backgroundColor: tenant.primaryColor }}
                 >
                   {tenant.name.charAt(0)}
-                </span>
+                </div>
               )}
             </div>
-            <h1
-              className={`font-black tracking-tight leading-none text-white drop-shadow-sm text-xl md:text-2xl lg:text-3xl`}
-            >
-              {tenant.name}
-            </h1>
+
+            <div className="flex flex-col min-w-0">
+              <span className="text-sm sm:text-base font-black text-gray-900 leading-tight truncate">
+                {tenant.name || "FarmaFlow"}
+              </span>
+              <span
+                className="text-[9px] sm:text-[10px] font-black uppercase tracking-widest leading-none flex items-center gap-1"
+                style={{ color: tenant.primaryColor }}
+              >
+                <ShoppingBag size={10} /> Catálogo Digital
+              </span>
+            </div>
           </div>
 
-          <div
-            className={`w-full flex-1 max-w-2xl md:max-w-2xl lg:max-w-4xl h-[48px] md:h-[56px] relative mx-auto md:mx-0`}
-            ref={searchRef}
-          >
-            <div
-              className="absolute inset-0 w-full z-40"
-            >
-              <div
-                className="w-full mx-auto h-full"
+          <div className="flex items-center gap-1 sm:gap-2 shrink-0">
+            {onBack && (
+              <button
+                onClick={onBack}
+                className="flex items-center gap-1 px-2.5 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg text-xs font-bold transition-colors"
+                title="Voltar ao Painel Administrativo"
               >
-                <div className="relative w-full">
-                  <SearchInput
+                <ArrowLeft size={13} />
+                <span className="hidden sm:inline">Voltar ao Painel</span>
+              </button>
+            )}
+
+            <button
+              onClick={onOpenCart}
+              className="flex items-center justify-center p-2 text-gray-700 hover:bg-gray-100 hover:text-red-600 rounded-xl transition-colors relative"
+              aria-label="Ver carrinho"
+            >
+              <ShoppingCart size={22} />
+              {cartCount > 0 && (
+                <span className="absolute top-0.5 -right-0.5 bg-red-600 text-white min-w-[18px] h-[18px] px-1 rounded-full flex items-center justify-center text-[10px] font-black shadow-xs">
+                  {cartCount}
+                </span>
+              )}
+            </button>
+          </div>
+        </div>
+
+        {/* Nível 2 (Barra de Busca): O input de pesquisa em fluxo normal */}
+        <div className="w-full px-4 pb-2 bg-white" ref={searchRef}>
+          <div className="max-w-3xl mx-auto w-full relative">
+            <SearchInput
                     initialValue={searchTerm}
                     onChange={(val) => {
                       setFilters((prev) => {
@@ -3496,37 +3534,22 @@ export const Storefront: React.FC<StorefrontProps> = ({
                       </div>
                     </div>
                   )}
-                </div>
-              </div>
-            </div>
           </div>
-
-          {/* Spacer for centered layout on desktop */}
-          <div className="hidden md:block flex-shrink-0 w-[40px] md:w-[150px] lg:w-[300px]"></div>
         </div>
-      </header>
 
-      {/* Camada Inferior (Condicional): Faixa promocional ativa ou Banner de Ofertas */}
-      {selectedPromotion && !activeCouponFilter ? (
-        <div className="w-full bg-gradient-to-r from-red-600 via-red-600 to-orange-500 text-white px-3 sm:px-4 md:px-8 py-2 sm:py-2.5 border-b border-red-700 shadow-md flex items-center justify-between gap-2 sm:gap-3 transition-all duration-300">
-          <div className="flex items-center gap-2 min-w-0">
-            <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-lg bg-white/20 flex items-center justify-center shrink-0">
-              {selectedPromotion.type === "LIGHTNING_OFFER" ? (
-                <Zap size={14} className="animate-pulse text-yellow-300" />
-              ) : (
-                <Percent size={14} className="text-white" />
-              )}
-            </div>
-            <div className="flex items-center gap-1.5 sm:gap-2 truncate text-xs sm:text-sm font-black">
+        {/* Nível 3 (Faixa de Oferta Relâmpago / Alerta Promocional) */}
+        {selectedPromotion && !activeCouponFilter ? (
+          <div className="bg-gradient-to-r from-amber-500 to-red-600 text-white px-4 py-1.5 flex items-center justify-between text-xs font-medium shadow-inner">
+            <div className="flex items-center gap-2 min-w-0 truncate">
               <span className="truncate">
                 {selectedPromotion.type === "LIGHTNING_OFFER" ? (
                   selectedPromotion.lightningDiscountPercentage ? (
-                    `⚡ ${selectedPromotion.lightningDiscountPercentage}% OFF na Oferta Relâmpago`
+                    `⚡ Oferta Relâmpago: ${selectedPromotion.lightningDiscountPercentage}% OFF`
                   ) : (
                     `⚡ ${selectedPromotion.name}`
                   )
                 ) : selectedPromotion.type === "VARIABLE_COMBO" ? (
-                  `🏷️ Combo: Leve o conjunto por R$ ${Number(
+                  `🏷️ Combo: Leve por R$ ${Number(
                     selectedPromotion.comboPrice ?? selectedPromotion.payY ?? 0,
                   )
                     .toFixed(2)
@@ -3537,82 +3560,93 @@ export const Storefront: React.FC<StorefrontProps> = ({
                   `🏷️ ${selectedPromotion.name}`
                 )}
               </span>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
               {selectedPromotion.type === "LIGHTNING_OFFER" && lightningTimeRemaining && (
-                <span className="shrink-0 flex items-center gap-1 bg-black/25 px-2 py-0.5 rounded-full text-[10px] sm:text-xs font-mono font-bold tracking-tight">
-                  <Timer size={12} className="animate-pulse opacity-90" />
-                  <span className="hidden sm:inline">Termina em:</span> {lightningTimeRemaining}
+                <span className="flex items-center gap-1 font-mono font-bold bg-black/20 px-2 py-0.5 rounded-full text-[11px]">
+                  <Timer size={11} className="animate-pulse" />
+                  {lightningTimeRemaining}
                 </span>
               )}
+              <button
+                onClick={() => selectPromotion(null)}
+                disabled={isPendingFilter}
+                className="px-2 py-0.5 bg-white/20 hover:bg-white/30 rounded-lg text-[11px] font-bold transition-all flex items-center gap-1 active:scale-95 disabled:opacity-50"
+                title="Ver todos os produtos"
+              >
+                <span>Ver Todos</span>
+                <X size={12} />
+              </button>
             </div>
           </div>
-
-          <button
-            onClick={() => selectPromotion(null)}
-            disabled={isPendingFilter}
-            className="shrink-0 px-2.5 py-1 sm:px-4 sm:py-1.5 bg-white/20 hover:bg-white/30 border border-white/30 text-white rounded-xl font-black text-xs transition-all flex items-center gap-1.5 shadow-sm active:scale-95 disabled:opacity-50"
-            title="Remover Filtro"
-          >
-            {isPendingFilter && pendingPromoId === "clear" ? (
-              <>
-                <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                <span className="hidden sm:inline">Removendo...</span>
-              </>
-            ) : (
-              <>
-                <span className="hidden sm:inline">Remover Filtro</span>
-                <span className="sm:hidden text-[11px]">Ver Todos</span>
-                <X size={13} />
-              </>
-            )}
-          </button>
-        </div>
-      ) : activeCouponFilter ? (
-        <div className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 text-white px-3 sm:px-4 md:px-8 py-2 sm:py-2.5 border-b border-blue-700 shadow-md flex items-center justify-between gap-2 sm:gap-3 transition-all duration-300">
-          <div className="flex items-center gap-2 min-w-0">
-            <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-lg bg-white/20 flex items-center justify-center shrink-0">
-              <Tag size={14} className="text-white" />
-            </div>
-            <div className="min-w-0">
-              <p className="text-xs sm:text-sm font-black truncate leading-tight">
-                🎁 Cupom: <span className="underline decoration-white/60">{activeCouponFilter?.code}</span>
-                {activeCouponFilter?.discountType === "PERCENTAGE"
+        ) : activeCouponFilter ? (
+          <div className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white px-4 py-1.5 flex items-center justify-between text-xs font-medium shadow-inner">
+            <div className="flex items-center gap-2 min-w-0 truncate">
+              <Tag size={13} className="shrink-0" />
+              <span className="truncate">
+                Cupom: <strong className="underline">{activeCouponFilter.code}</strong>
+                {activeCouponFilter.discountType === "PERCENTAGE"
                   ? ` (${activeCouponFilter.discountValue}% OFF)`
-                  : activeCouponFilter?.discountValue
+                  : activeCouponFilter.discountValue
                     ? ` (R$ ${activeCouponFilter.discountValue.toFixed(2)} OFF)`
-                    : ""}{" "}
-                | Ativo
-              </p>
+                    : ""}
+              </span>
+            </div>
+
+            <button
+              onClick={() => resetFilters()}
+              className="px-2 py-0.5 bg-white/20 hover:bg-white/30 rounded-lg text-[11px] font-bold transition-all flex items-center gap-1 shrink-0 active:scale-95"
+              title="Remover filtro de cupom"
+            >
+              <span>Ver Todos</span>
+              <X size={12} />
+            </button>
+          </div>
+        ) : activeLightningOffer ? (
+          <div
+            onClick={() => selectPromotion(activeLightningOffer.id)}
+            className="bg-gradient-to-r from-amber-500 to-red-600 text-white px-4 py-1.5 flex items-center justify-between text-xs font-medium shadow-inner cursor-pointer hover:brightness-105 transition-all"
+          >
+            <div className="flex items-center gap-2 min-w-0 truncate">
+              <span className="truncate font-semibold">
+                ⚡ Oferta Relâmpago:{" "}
+                {activeLightningOffer.lightningDiscountPercentage
+                  ? `${activeLightningOffer.lightningDiscountPercentage}% OFF`
+                  : activeLightningOffer.name}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              {lightningTimeRemaining && (
+                <span className="flex items-center gap-1 font-mono font-bold bg-black/20 px-2 py-0.5 rounded-full text-[11px]">
+                  <Timer size={11} className="animate-pulse" />
+                  {lightningTimeRemaining}
+                </span>
+              )}
+              <span className="px-2 py-0.5 bg-white/20 hover:bg-white/30 rounded-lg text-[11px] font-bold transition-all flex items-center gap-1">
+                Ver Ofertas <ChevronRight size={12} />
+              </span>
             </div>
           </div>
-
-          <button
-            onClick={() => resetFilters()}
-            className="shrink-0 px-2.5 py-1 sm:px-4 sm:py-1.5 bg-white/20 hover:bg-white/30 border border-white/30 text-white rounded-xl font-black text-xs transition-all flex items-center gap-1.5 shadow-sm active:scale-95"
-            title="Remover Filtro"
-          >
-            <span className="hidden sm:inline">Remover Filtro</span>
-            <span className="sm:hidden text-[11px]">Ver Todos</span>
-            <X size={13} />
-          </button>
-        </div>
-      ) : ((topBannerCoupons && topBannerCoupons.length > 0) ||
-          (activePromotions && activePromotions.length > 0)) ? (
-        <CouponBanner
-          coupons={topBannerCoupons || []}
-          promotions={activePromotions || []}
-          backgroundColor={tenant.couponBannerColor}
-          compact={isScrolled}
-          onFilterByCoupon={(coupon) => {
-            selectCoupon(coupon);
-            window.scrollTo({ top: 400, behavior: "smooth" });
-          }}
-          onFilterByPromotion={(promo) => {
-            selectPromotion(promo.id);
-            window.scrollTo({ top: 400, behavior: "smooth" });
-          }}
-        />
-      ) : null}
-      </div>
+        ) : ((topBannerCoupons && topBannerCoupons.length > 0) ||
+            (activePromotions && activePromotions.length > 0)) ? (
+          <CouponBanner
+            coupons={topBannerCoupons || []}
+            promotions={activePromotions || []}
+            backgroundColor={tenant.couponBannerColor}
+            compact={true}
+            onFilterByCoupon={(coupon) => {
+              selectCoupon(coupon);
+              window.scrollTo({ top: 0, behavior: "smooth" });
+            }}
+            onFilterByPromotion={(promo) => {
+              selectPromotion(promo.id);
+              window.scrollTo({ top: 0, behavior: "smooth" });
+            }}
+          />
+        ) : null}
+      </header>
 
       <section className="w-full max-w-[1600px] lg:max-w-none mx-auto lg:mx-0 px-4 md:px-8 lg:px-0 mt-6 md:mt-8 [content-visibility:auto] [contain-intrinsic-size:300px]">
         <div
