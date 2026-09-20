@@ -30,7 +30,90 @@ import {
 import ProductScanner from './ProductScanner';
 import { Product, PharmacyConfig, PromotionRule } from '../types';
 
-export type TagLayoutFormat = 'gondola_pimaco' | 'baiana_destaque' | 'cartaz_a5' | 'cartaz_a4';
+export const TAG_LAYOUTS = {
+  gondola: {
+    itemsPerPage: 30,
+    gridClass: "grid-cols-3 grid-rows-10 gap-x-[2mm] gap-y-[0mm]",
+    tagHeight: "h-[26mm]",
+    orientation: "portrait",
+  },
+  baiana: {
+    itemsPerPage: 8, // 2 colunas x 4 linhas
+    gridClass: "grid-cols-2 grid-rows-4 gap-x-[4mm] gap-y-[3mm]",
+    tagHeight: "h-[65mm]",
+    orientation: "portrait",
+  },
+  cartaz_a5: {
+    itemsPerPage: 2, // 2 cartazes por folha A4
+    gridClass: "grid-cols-1 grid-rows-2 gap-y-[6mm]",
+    tagHeight: "h-[135mm]",
+    orientation: "portrait",
+  },
+  cartaz_a4: {
+    itemsPerPage: 1, // 1 cartaz preenchendo a folha inteira
+    gridClass: "grid-cols-1 grid-rows-1",
+    tagHeight: "h-[277mm]",
+    orientation: "portrait",
+  },
+} as const;
+
+export const FORMAT_CONFIG = TAG_LAYOUTS;
+
+export type TagLayoutKey = keyof typeof TAG_LAYOUTS;
+export type TagLayoutFormat = TagLayoutKey | 'gondola_pimaco' | 'baiana_destaque';
+
+export const normalizeLayoutKey = (format: TagLayoutFormat): TagLayoutKey => {
+  if (format === 'gondola_pimaco') return 'gondola';
+  if (format === 'baiana_destaque') return 'baiana';
+  if (format in TAG_LAYOUTS) return format as TagLayoutKey;
+  return 'gondola';
+};
+
+const getPagePaddingStyle = (key: TagLayoutKey) => {
+  switch (key) {
+    case 'gondola':
+      // 10 linhas x 26mm = 260mm. Folha A4 tem 297mm. (297 - 260) / 2 = 18.5mm
+      // 3 colunas: (210mm - 8mm padding - 4mm gaps) / 3 = 66mm
+      return {
+        paddingTop: '18.5mm',
+        paddingBottom: '18.5mm',
+        paddingLeft: '4mm',
+        paddingRight: '4mm',
+      };
+    case 'baiana':
+      // 4 linhas x 65mm = 260mm + 3 x 3mm gaps = 269mm. (297 - 269) / 2 = 14mm
+      // 2 colunas: (210mm - 10mm padding - 4mm gap) / 2 = 98mm
+      return {
+        paddingTop: '14mm',
+        paddingBottom: '14mm',
+        paddingLeft: '5mm',
+        paddingRight: '5mm',
+      };
+    case 'cartaz_a5':
+      // 2 linhas x 135mm = 270mm + 6mm gap = 276mm. (297 - 276) / 2 = 10.5mm
+      return {
+        paddingTop: '10.5mm',
+        paddingBottom: '10.5mm',
+        paddingLeft: '8mm',
+        paddingRight: '8mm',
+      };
+    case 'cartaz_a4':
+      // 1 cartaz de 277mm em folha de 297mm. (297 - 277) / 2 = 10mm
+      return {
+        paddingTop: '10mm',
+        paddingBottom: '10mm',
+        paddingLeft: '8mm',
+        paddingRight: '8mm',
+      };
+    default:
+      return {
+        paddingTop: '10mm',
+        paddingBottom: '10mm',
+        paddingLeft: '8mm',
+        paddingRight: '8mm',
+      };
+  }
+};
 
 export interface PriceTagItem {
   id: string; // product id
@@ -135,7 +218,7 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
   const [tagItems, setTagItems] = useState<PriceTagItem[]>([]);
 
   // --- Configurações Globais da Etiqueta ---
-  const [layoutFormat, setLayoutFormat] = useState<TagLayoutFormat>('gondola_pimaco');
+  const [layoutFormat, setLayoutFormat] = useState<TagLayoutFormat>('gondola');
   const [showBarcode, setShowBarcode] = useState(true);
   const [showInternalCode, setShowInternalCode] = useState(true);
   const [showPrintDate, setShowPrintDate] = useState(true);
@@ -383,6 +466,20 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
     return list;
   }, [tagItems]);
 
+  // Modelo ativo normalizado e sua respectiva configuração rígida
+  const activeLayoutKey = normalizeLayoutKey(layoutFormat);
+  const currentLayoutConfig = TAG_LAYOUTS[activeLayoutKey];
+
+  // Paginação Rígida Anti-Corte: divide rigorosamente a lista em páginas conforme a capacidade do modelo
+  const paginatedPages = useMemo(() => {
+    const itemsPerPage = currentLayoutConfig.itemsPerPage;
+    const pages: { item: PriceTagItem; index: number }[][] = [];
+    for (let i = 0; i < expandedTagList.length; i += itemsPerPage) {
+      pages.push(expandedTagList.slice(i, i + itemsPerPage));
+    }
+    return pages.length > 0 ? pages : [[]];
+  }, [expandedTagList, currentLayoutConfig.itemsPerPage]);
+
   return (
     <div className="space-y-8 pb-16">
       {/* CABEÇALHO DO MÓDULO */}
@@ -629,48 +726,58 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
               {/* Modelo 1: Gôndola Padrão */}
               <button
                 type="button"
-                onClick={() => setLayoutFormat('gondola_pimaco')}
+                onClick={() => setLayoutFormat('gondola')}
                 className={`p-3.5 rounded-2xl border-2 text-left transition-all flex flex-col justify-between cursor-pointer ${
-                  layoutFormat === 'gondola_pimaco'
+                  activeLayoutKey === 'gondola'
                     ? 'border-emerald-600 bg-emerald-50/50 shadow-sm'
                     : 'border-gray-100 hover:border-gray-200 bg-white'
                 }`}
               >
                 <div>
-                  <div className="w-8 h-8 rounded-xl bg-emerald-100 text-emerald-800 flex items-center justify-center font-black text-xs mb-2">
-                    A4
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="w-8 h-8 rounded-xl bg-emerald-100 text-emerald-800 flex items-center justify-center font-black text-xs">
+                      30
+                    </div>
+                    <span className="text-[10px] font-black uppercase text-emerald-700 bg-emerald-100/60 px-2 py-0.5 rounded-full">
+                      3x10
+                    </span>
                   </div>
                   <h4 className="text-xs font-black text-gray-900">Gôndola Padrão</h4>
                   <p className="text-[10px] font-medium text-gray-500 mt-0.5 leading-tight">
-                    Folha Pimaco (Grade 3x10 ou similar ~100x30mm)
+                    30 etiquetas por folha A4 (h: 26mm)
                   </p>
                 </div>
                 <span className="text-[9px] font-black uppercase text-emerald-700 mt-3 block">
-                  Recomendado para Prateleiras
+                  Prateleiras e Gôndolas
                 </span>
               </button>
 
               {/* Modelo 2: Etiqueta Baiana / Testeira */}
               <button
                 type="button"
-                onClick={() => setLayoutFormat('baiana_destaque')}
+                onClick={() => setLayoutFormat('baiana')}
                 className={`p-3.5 rounded-2xl border-2 text-left transition-all flex flex-col justify-between cursor-pointer ${
-                  layoutFormat === 'baiana_destaque'
+                  activeLayoutKey === 'baiana'
                     ? 'border-emerald-600 bg-emerald-50/50 shadow-sm'
                     : 'border-gray-100 hover:border-gray-200 bg-white'
                 }`}
               >
                 <div>
-                  <div className="w-8 h-8 rounded-xl bg-amber-100 text-amber-800 flex items-center justify-center font-black text-xs mb-2">
-                    TOP
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="w-8 h-8 rounded-xl bg-amber-100 text-amber-800 flex items-center justify-center font-black text-xs">
+                      8
+                    </div>
+                    <span className="text-[10px] font-black uppercase text-amber-700 bg-amber-100/60 px-2 py-0.5 rounded-full">
+                      2x4
+                    </span>
                   </div>
                   <h4 className="text-xs font-black text-gray-900">Etiqueta Baiana</h4>
                   <p className="text-[10px] font-medium text-gray-500 mt-0.5 leading-tight">
-                    Tarja colorida de cabeçalho DE/POR de alto impacto
+                    8 etiquetas por folha A4 (h: 65mm)
                   </p>
                 </div>
                 <span className="text-[9px] font-black uppercase text-amber-700 mt-3 block">
-                  Pontas de Gôndola
+                  Pontas e Destaques
                 </span>
               </button>
 
@@ -679,18 +786,23 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
                 type="button"
                 onClick={() => setLayoutFormat('cartaz_a5')}
                 className={`p-3.5 rounded-2xl border-2 text-left transition-all flex flex-col justify-between cursor-pointer ${
-                  layoutFormat === 'cartaz_a5'
+                  activeLayoutKey === 'cartaz_a5'
                     ? 'border-emerald-600 bg-emerald-50/50 shadow-sm'
                     : 'border-gray-100 hover:border-gray-200 bg-white'
                 }`}
               >
                 <div>
-                  <div className="w-8 h-8 rounded-xl bg-blue-100 text-blue-800 flex items-center justify-center font-black text-xs mb-2">
-                    A5
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="w-8 h-8 rounded-xl bg-blue-100 text-blue-800 flex items-center justify-center font-black text-xs">
+                      2
+                    </div>
+                    <span className="text-[10px] font-black uppercase text-blue-700 bg-blue-100/60 px-2 py-0.5 rounded-full">
+                      1x2
+                    </span>
                   </div>
                   <h4 className="text-xs font-black text-gray-900">Cartaz A5</h4>
                   <p className="text-[10px] font-medium text-gray-500 mt-0.5 leading-tight">
-                    Meia folha A4 para cestos e balcão
+                    2 cartazes por folha A4 (h: 135mm)
                   </p>
                 </div>
                 <span className="text-[9px] font-black uppercase text-blue-700 mt-3 block">
@@ -703,18 +815,23 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
                 type="button"
                 onClick={() => setLayoutFormat('cartaz_a4')}
                 className={`p-3.5 rounded-2xl border-2 text-left transition-all flex flex-col justify-between cursor-pointer ${
-                  layoutFormat === 'cartaz_a4'
+                  activeLayoutKey === 'cartaz_a4'
                     ? 'border-emerald-600 bg-emerald-50/50 shadow-sm'
                     : 'border-gray-100 hover:border-gray-200 bg-white'
                 }`}
               >
                 <div>
-                  <div className="w-8 h-8 rounded-xl bg-red-100 text-red-800 flex items-center justify-center font-black text-xs mb-2">
-                    A4
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="w-8 h-8 rounded-xl bg-red-100 text-red-800 flex items-center justify-center font-black text-xs">
+                      1
+                    </div>
+                    <span className="text-[10px] font-black uppercase text-red-700 bg-red-100/60 px-2 py-0.5 rounded-full">
+                      1x1
+                    </span>
                   </div>
                   <h4 className="text-xs font-black text-gray-900">Cartaz A4</h4>
                   <p className="text-[10px] font-medium text-gray-500 mt-0.5 leading-tight">
-                    Folha inteira para vitrine e entrada da loja
+                    1 cartaz folha inteira A4 (h: 277mm)
                   </p>
                 </div>
                 <span className="text-[9px] font-black uppercase text-red-700 mt-3 block">
@@ -1018,12 +1135,13 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
                   <p className="text-xs text-gray-400 font-medium">
                     Modelo selecionado:{' '}
                     <strong className="text-gray-700">
-                      {layoutFormat === 'gondola_pimaco' && 'Gôndola Padrão (Folha A4 em Grade)'}
-                      {layoutFormat === 'baiana_destaque' && 'Etiqueta Baiana / Testeira Destaque'}
-                      {layoutFormat === 'cartaz_a5' && 'Cartaz Promocional A5 (Meia Folha)'}
-                      {layoutFormat === 'cartaz_a4' && 'Cartaz Promocional A4 (Folha Inteira)'}
+                      {activeLayoutKey === 'gondola' && 'Gôndola Padrão (Grade 3x10 • 30 por folha)'}
+                      {activeLayoutKey === 'baiana' && 'Etiqueta Baiana / Testeira (Grade 2x4 • 8 por folha)'}
+                      {activeLayoutKey === 'cartaz_a5' && 'Cartaz Promocional A5 (Grade 1x2 • 2 por folha)'}
+                      {activeLayoutKey === 'cartaz_a4' && 'Cartaz Promocional A4 (1 por folha inteira)'}
                     </strong>{' '}
-                    • {totalTagsToPrint} etiqueta(s)
+                    • {totalTagsToPrint} etiqueta(s) em{' '}
+                    <strong className="text-emerald-700">{paginatedPages.length} folha(s) A4</strong>
                   </p>
                 </div>
               </div>
@@ -1060,339 +1178,363 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
             {/* Área de Renderização da Folha / Preview com rolagem */}
             <div className="flex-1 overflow-y-auto p-4 sm:p-8 bg-gray-100/80 custom-scrollbar print:p-0 print:bg-white print:overflow-visible">
               
-              {/* CONTAINER DA FOLHA DE IMPRESSÃO (Folha A4 simulada) */}
+              {/* CONTAINER DA FOLHA DE IMPRESSÃO (Folha A4 simulada com paginação rígida anti-corte) */}
               <div 
                 id="printable-price-tags-sheet" 
-                className="bg-white mx-auto shadow-md print:shadow-none print:m-0 print:w-full"
-                style={{
-                  maxWidth: '210mm',
-                  minHeight: '297mm',
-                  padding: layoutFormat === 'gondola_pimaco' ? '8mm' : '10mm',
-                  boxSizing: 'border-box'
-                }}
+                className="space-y-8 print:space-y-0 print:m-0"
               >
-                {/* 1. LAYOUT: GÔNDOLA PADRÃO (PIMACO / GRADE 3 COLUNAS) */}
-                {layoutFormat === 'gondola_pimaco' && (
-                  <div className="grid grid-cols-3 gap-2 sm:gap-2.5 print:grid-cols-3 print:gap-2">
-                    {expandedTagList.map(({ item }, idx) => (
+                {paginatedPages.map((pageItems, pageIdx) => {
+                  const pagePadding = getPagePaddingStyle(activeLayoutKey);
+                  return (
+                    <div key={`page-${pageIdx}`} className="print-page-wrapper">
+                      {/* Indicador visual de folha na tela (oculto na impressão) */}
+                      <div className="flex items-center justify-between text-xs font-bold text-gray-500 mb-2 px-1 print:hidden max-w-[210mm] mx-auto">
+                        <span className="flex items-center gap-1.5">
+                          <FileText size={14} className="text-emerald-600" />
+                          Folha A4 {pageIdx + 1} de {paginatedPages.length}
+                          <span className="text-gray-400 font-normal ml-1">
+                            ({pageItems.length} de {currentLayoutConfig.itemsPerPage} posições preenchidas)
+                          </span>
+                        </span>
+                        <span className="text-[11px] font-mono text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-md border border-emerald-100">
+                          {currentLayoutConfig.itemsPerPage} por folha • Anti-Corte
+                        </span>
+                      </div>
+
+                      {/* Folha A4 Rígida com dimensões milimétricas exatas */}
                       <div
-                        key={`${item.id}-${idx}`}
-                        className="border border-gray-300 rounded-lg p-2 flex flex-col justify-between bg-white text-gray-900 break-inside-avoid relative overflow-hidden"
-                        style={{ height: '32mm', boxSizing: 'border-box' }}
+                        className="price-tag-sheet bg-white mx-auto shadow-md print:shadow-none print:m-0 border border-gray-200 print:border-none box-border relative overflow-hidden"
+                        style={{
+                          width: '210mm',
+                          height: '297mm',
+                          maxHeight: '297mm',
+                          minHeight: '297mm',
+                          boxSizing: 'border-box',
+                          overflow: 'hidden',
+                          ...pagePadding,
+                        }}
                       >
-                        {/* Tarja Superior se tiver badge */}
-                        {item.badgeText && (
-                          <div className="absolute top-0 right-0 bg-yellow-400 text-gray-950 font-black text-[9px] px-2 py-0.5 rounded-bl-md uppercase tracking-wider">
-                            {item.badgeText}
-                          </div>
-                        )}
+                        <div className={`grid ${currentLayoutConfig.gridClass} w-full h-full`}>
+                          {pageItems.map(({ item, index: itemRepIndex }, itemIdx) => {
+                            const uniqueKey = `${item.id}-${pageIdx}-${itemIdx}-${itemRepIndex}`;
 
-                        <div>
-                          {/* Cabeçalho da Etiqueta: Código e Farmácia */}
-                          <div className="flex items-center justify-between text-[8px] font-bold text-gray-400 mb-0.5">
-                            <span>
-                              {showInternalCode && item.product.internalCode
-                                ? `CÓD: ${item.product.internalCode}`
-                                : ''}
-                            </span>
-                            <span>{showStoreLogo ? tenant.name : ''}</span>
-                          </div>
+                            // 1. MODELO: GÔNDOLA PADRÃO (30 por folha • Grade 3x10 • h: 26mm)
+                            if (activeLayoutKey === 'gondola') {
+                              return (
+                                <div
+                                  key={uniqueKey}
+                                  className={`border border-gray-300 rounded-sm p-1 flex flex-col justify-between bg-white text-gray-900 break-inside-avoid relative overflow-hidden ${currentLayoutConfig.tagHeight}`}
+                                  style={{ boxSizing: 'border-box' }}
+                                >
+                                  {/* Tarja Superior se tiver badge */}
+                                  {item.badgeText && (
+                                    <div className="absolute top-0 right-0 bg-yellow-400 text-gray-950 font-black text-[7px] px-1 py-0.2 rounded-bl uppercase tracking-wider leading-none">
+                                      {item.badgeText}
+                                    </div>
+                                  )}
 
-                          {/* Nome do Produto */}
-                          <h4 className="text-[11px] font-black leading-tight line-clamp-2 text-gray-950">
-                            {item.product.name}
-                          </h4>
+                                  <div>
+                                    {/* Cabeçalho da Etiqueta: Código e Farmácia */}
+                                    <div className="flex items-center justify-between text-[6.5px] font-bold text-gray-400 mb-0.5 leading-none">
+                                      <span>
+                                        {showInternalCode && item.product.internalCode
+                                          ? `CÓD: ${item.product.internalCode}`
+                                          : ''}
+                                      </span>
+                                      <span className="truncate max-w-[85px]">{showStoreLogo ? tenant.name : ''}</span>
+                                    </div>
 
-                          {/* Apresentação / Princípio Ativo */}
-                          <p className="text-[8px] text-gray-500 truncate mt-0.5">
-                            {item.product.activePrinciple || item.product.presentation || item.product.category}
-                          </p>
-                        </div>
+                                    {/* Nome do Produto */}
+                                    <h4 className="text-[8.5px] font-black leading-[1.15] line-clamp-2 text-gray-950">
+                                      {item.product.name}
+                                    </h4>
 
-                        {/* Bloco de Preço */}
-                        <div className="flex items-end justify-between mt-1 pt-1 border-t border-gray-100">
-                          <div>
-                            {item.showOriginalPrice && item.originalPrice > item.promotionalPrice && (
-                              <span className="text-[9px] text-gray-400 line-through block leading-none">
-                                DE R$ {item.originalPrice.toFixed(2).replace('.', ',')}
-                              </span>
-                            )}
-                            <div className="flex items-baseline gap-0.5 leading-none mt-0.5">
-                              <span className="text-[9px] font-bold text-gray-500">R$</span>
-                              <span className="text-lg font-black text-gray-950 tracking-tight">
-                                {item.promotionalPrice.toFixed(2).replace('.', ',')}
-                              </span>
-                            </div>
-                            {item.unitMeasurementText && (
-                              <span className="text-[7px] text-gray-500 block leading-tight">
-                                {item.unitMeasurementText}
-                              </span>
-                            )}
-                          </div>
+                                    {/* Apresentação / Princípio Ativo */}
+                                    <p className="text-[6.5px] text-gray-500 truncate leading-none mt-0.5">
+                                      {item.product.activePrinciple || item.product.presentation || item.product.category}
+                                    </p>
+                                  </div>
 
-                          {/* Código de barras simulado em linhas vetoriais ou EAN textual */}
-                          {showBarcode && (
-                            <div className="text-right">
-                              <div className="inline-block tracking-tighter opacity-80 scale-x-90">
-                                {/* Simulação vetorial de código de barras para impressão rápida sem dependências pesadas */}
-                                <div className="h-4 flex items-end gap-[1px]">
-                                  {[3, 1, 2, 4, 1, 3, 2, 1, 4, 2, 1, 3, 1, 2, 4, 1, 2].map((w, i) => (
-                                    <span
-                                      key={i}
-                                      className="bg-black inline-block"
-                                      style={{ width: `${w}px`, height: '100%' }}
-                                    />
-                                  ))}
+                                  {/* Bloco de Preço */}
+                                  <div className="flex items-end justify-between mt-auto pt-0.5 border-t border-gray-100">
+                                    <div>
+                                      {item.showOriginalPrice && item.originalPrice > item.promotionalPrice && (
+                                        <span className="text-[6.5px] text-gray-400 line-through block leading-none">
+                                          DE R$ {item.originalPrice.toFixed(2).replace('.', ',')}
+                                        </span>
+                                      )}
+                                      <div className="flex items-baseline gap-0.5 leading-none">
+                                        <span className="text-[7px] font-bold text-gray-500">R$</span>
+                                        <span className="text-[13px] font-black text-gray-950 tracking-tight">
+                                          {item.promotionalPrice.toFixed(2).replace('.', ',')}
+                                        </span>
+                                      </div>
+                                      {item.unitMeasurementText && (
+                                        <span className="text-[6px] text-gray-500 block leading-none truncate max-w-[80px]">
+                                          {item.unitMeasurementText}
+                                        </span>
+                                      )}
+                                    </div>
+
+                                    {/* Código de barras simulado */}
+                                    {showBarcode && (
+                                      <div className="text-right">
+                                        <div className="inline-block tracking-tighter opacity-80 scale-x-90">
+                                          <div className="h-2 flex items-end gap-[1px]">
+                                            {[2, 1, 2, 3, 1, 2, 1, 3, 1, 2, 3, 1, 2].map((w, i) => (
+                                              <span
+                                                key={i}
+                                                className="bg-black inline-block"
+                                                style={{ width: `${w}px`, height: '100%' }}
+                                              />
+                                            ))}
+                                          </div>
+                                        </div>
+                                        <span className="block text-[6px] font-mono text-gray-600 leading-none">
+                                          {item.product.barcode || item.product.internalCode || '7890000000000'}
+                                        </span>
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  {/* Data de Impressão e Rodapé */}
+                                  {showPrintDate && (
+                                    <div className="text-[5.5px] text-gray-400 text-right leading-none mt-0.5">
+                                      {todayFormatted}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            }
+
+                            // 2. MODELO: ETIQUETA BAIANA (8 por folha • Grade 2x4 • h: 65mm)
+                            if (activeLayoutKey === 'baiana') {
+                              return (
+                                <div
+                                  key={uniqueKey}
+                                  className={`border-2 border-gray-950 rounded-lg overflow-hidden bg-white text-gray-900 break-inside-avoid flex flex-col justify-between ${currentLayoutConfig.tagHeight}`}
+                                  style={{ boxSizing: 'border-box' }}
+                                >
+                                  {/* Tarja Superior Vermelha/Amarela */}
+                                  <div className="bg-red-600 text-yellow-300 font-black text-center py-1 px-2 text-xs uppercase tracking-wider flex items-center justify-between">
+                                    <span className="text-[9px] font-bold text-white truncate max-w-[110px]">
+                                      {showStoreLogo ? tenant.name : 'DROGARIA'}
+                                    </span>
+                                    <span className="font-black text-[11px]">
+                                      {item.badgeText || 'SUPER OFERTA'}
+                                    </span>
+                                    <span className="text-[9px] font-mono text-white">
+                                      {item.product.internalCode || ''}
+                                    </span>
+                                  </div>
+
+                                  {/* Corpo com Nome e Informações */}
+                                  <div className="p-2 flex-1 flex flex-col justify-between">
+                                    <div>
+                                      <h4 className="text-xs font-black leading-tight text-gray-950 line-clamp-2">
+                                        {item.product.name}
+                                      </h4>
+                                      <p className="text-[8.5px] text-gray-600 mt-0.5 truncate">
+                                        {item.product.activePrinciple || item.product.presentation || item.product.category}
+                                      </p>
+                                      {item.customObservations && (
+                                        <p className="text-[8px] font-bold text-red-700 mt-0.5 truncate">
+                                          {item.customObservations}
+                                        </p>
+                                      )}
+                                    </div>
+
+                                    {/* Bloco de Preço Grande DE / POR */}
+                                    <div className="flex items-end justify-between mt-1 pt-1 border-t-2 border-dashed border-gray-200">
+                                      <div>
+                                        {item.showOriginalPrice && item.originalPrice > item.promotionalPrice && (
+                                          <span className="text-[9.5px] text-gray-500 line-through font-bold block">
+                                            DE: R$ {item.originalPrice.toFixed(2).replace('.', ',')}
+                                          </span>
+                                        )}
+                                        <div className="flex items-baseline gap-1">
+                                          <span className="text-xs font-black text-red-600">POR R$</span>
+                                          <span className="text-2xl font-black text-gray-950 tracking-tight leading-none">
+                                            {item.promotionalPrice.toFixed(2).replace('.', ',')}
+                                          </span>
+                                        </div>
+                                        {item.unitMeasurementText && (
+                                          <span className="text-[8px] text-gray-500 block font-semibold">
+                                            {item.unitMeasurementText}
+                                          </span>
+                                        )}
+                                      </div>
+
+                                      {/* Código de barras */}
+                                      {showBarcode && (
+                                        <div className="text-right">
+                                          <div className="h-3.5 flex items-end gap-[1px] justify-end">
+                                            {[2, 1, 3, 1, 4, 1, 2, 3, 1, 2, 4, 1].map((w, i) => (
+                                              <span key={i} className="bg-black" style={{ width: `${w}px`, height: '100%' }} />
+                                            ))}
+                                          </div>
+                                          <span className="text-[8px] font-mono font-bold text-gray-700 block mt-0.5">
+                                            {item.product.barcode || item.product.internalCode || '7890000000000'}
+                                          </span>
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+
+                                  {/* Rodapé da Etiqueta Baiana */}
+                                  {showPrintDate && (
+                                    <div className="bg-gray-100 px-2 py-0.5 text-[7.5px] text-gray-500 flex justify-between">
+                                      <span>Preço válido enquanto durarem os estoques</span>
+                                      <span>{todayFormatted}</span>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            }
+
+                            // 3. MODELO: CARTAZ A5 (2 por folha • Grade 1x2 • h: 135mm)
+                            if (activeLayoutKey === 'cartaz_a5') {
+                              return (
+                                <div
+                                  key={uniqueKey}
+                                  className={`border-4 border-gray-950 rounded-xl overflow-hidden bg-white text-gray-900 break-inside-avoid flex flex-col justify-between ${currentLayoutConfig.tagHeight}`}
+                                  style={{ boxSizing: 'border-box' }}
+                                >
+                                  {/* Topo de Impacto Promocional */}
+                                  <div className="bg-red-600 text-yellow-300 font-black text-center py-2 px-3 text-base uppercase tracking-wider flex items-center justify-between">
+                                    <span className="text-xs font-bold text-white">
+                                      {showStoreLogo ? tenant.name : 'DROGARIA'}
+                                    </span>
+                                    <span className="text-lg font-black">
+                                      {item.badgeText || 'OFERTA ESPECIAL'}
+                                    </span>
+                                    <span className="text-xs font-mono text-white">
+                                      #{item.product.internalCode || ''}
+                                    </span>
+                                  </div>
+
+                                  {/* Centro: Nome e Detalhes */}
+                                  <div className="p-4 text-center flex-1 flex flex-col justify-center">
+                                    <h2 className="text-2xl font-black text-gray-950 leading-tight">
+                                      {item.product.name}
+                                    </h2>
+                                    <p className="text-xs font-bold text-gray-600 mt-1">
+                                      {item.product.activePrinciple || item.product.presentation || item.product.category}
+                                    </p>
+                                    {item.customObservations && (
+                                      <p className="text-xs font-black text-red-600 mt-0.5">
+                                        {item.customObservations}
+                                      </p>
+                                    )}
+                                  </div>
+
+                                  {/* Bloco de Preço Gigante */}
+                                  <div className="bg-yellow-300 p-3 text-center border-t-4 border-gray-950">
+                                    {item.showOriginalPrice && item.originalPrice > item.promotionalPrice && (
+                                      <div className="text-xs font-black text-gray-700 line-through">
+                                        DE R$ {item.originalPrice.toFixed(2).replace('.', ',')}
+                                      </div>
+                                    )}
+                                    <div className="flex items-center justify-center gap-2">
+                                      <span className="text-base font-black text-red-700">POR APENAS R$</span>
+                                      <span className="text-5xl font-black text-gray-950 tracking-tighter">
+                                        {item.promotionalPrice.toFixed(2).replace('.', ',')}
+                                      </span>
+                                    </div>
+                                    {item.unitMeasurementText && (
+                                      <span className="text-xs font-bold text-gray-800 block mt-0.5">
+                                        {item.unitMeasurementText}
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  {/* Rodapé Informativo */}
+                                  <div className="p-1.5 bg-gray-50 flex items-center justify-between text-[9px] text-gray-500 font-bold border-t border-gray-200">
+                                    <span>{tenant.name} • PDV</span>
+                                    {showBarcode && (
+                                      <span className="font-mono">
+                                        EAN: {item.product.barcode || item.product.internalCode}
+                                      </span>
+                                    )}
+                                    <span>{todayFormatted}</span>
+                                  </div>
+                                </div>
+                              );
+                            }
+
+                            // 4. MODELO: CARTAZ A4 (1 por folha • Grade 1x1 • h: 277mm)
+                            return (
+                              <div
+                                key={uniqueKey}
+                                className={`border-8 border-gray-950 rounded-2xl overflow-hidden bg-white text-gray-900 break-inside-avoid flex flex-col justify-between ${currentLayoutConfig.tagHeight}`}
+                                style={{ boxSizing: 'border-box' }}
+                              >
+                                {/* Topo de Impacto Máximo */}
+                                <div className="bg-red-600 text-yellow-300 font-black text-center py-4 px-6 text-2xl uppercase tracking-widest flex items-center justify-between border-b-8 border-gray-950">
+                                  <span className="text-sm font-bold text-white">
+                                    {showStoreLogo ? tenant.name : 'DROGARIA'}
+                                  </span>
+                                  <span className="text-3xl font-black tracking-tight">
+                                    {item.badgeText || 'SUPER OFERTA'}
+                                  </span>
+                                  <span className="text-sm font-mono text-white">
+                                    #{item.product.internalCode || ''}
+                                  </span>
+                                </div>
+
+                                {/* Centro: Nome do Produto em Destaque */}
+                                <div className="p-8 text-center flex-1 flex flex-col justify-center items-center">
+                                  <h2 className="text-4xl sm:text-5xl font-black text-gray-950 leading-tight max-w-lg">
+                                    {item.product.name}
+                                  </h2>
+                                  <p className="text-base font-bold text-gray-600 mt-3 max-w-md">
+                                    {item.product.activePrinciple || item.product.presentation || item.product.category}
+                                  </p>
+                                  {item.customObservations && (
+                                    <div className="mt-2 px-3 py-1 bg-red-100 text-red-800 rounded-lg text-xs font-black uppercase">
+                                      {item.customObservations}
+                                    </div>
+                                  )}
+                                </div>
+
+                                {/* Bloco de Preço Gigante da Vitrine */}
+                                <div className="bg-yellow-300 p-6 text-center border-t-8 border-b-8 border-gray-950">
+                                  {item.showOriginalPrice && item.originalPrice > item.promotionalPrice && (
+                                    <div className="text-xl font-black text-gray-700 line-through mb-1">
+                                      DE R$ {item.originalPrice.toFixed(2).replace('.', ',')}
+                                    </div>
+                                  )}
+                                  <div className="flex items-center justify-center gap-3">
+                                    <span className="text-2xl font-black text-red-700">POR APENAS R$</span>
+                                    <span className="text-7xl sm:text-8xl font-black text-gray-950 tracking-tighter leading-none">
+                                      {item.promotionalPrice.toFixed(2).replace('.', ',')}
+                                    </span>
+                                  </div>
+                                  {item.unitMeasurementText && (
+                                    <span className="text-sm font-black text-gray-800 block mt-2">
+                                      {item.unitMeasurementText}
+                                    </span>
+                                  )}
+                                </div>
+
+                                {/* Rodapé da Vitrine */}
+                                <div className="p-3 bg-gray-100 flex items-center justify-between text-xs text-gray-600 font-black">
+                                  <span>{tenant.name} • Ofertas válidas enquanto durarem os estoques</span>
+                                  {showBarcode && (
+                                    <span className="font-mono">
+                                      EAN: {item.product.barcode || item.product.internalCode}
+                                    </span>
+                                  )}
+                                  <span>Impressão: {todayFormatted}</span>
                                 </div>
                               </div>
-                              <span className="block text-[7px] font-mono text-gray-600">
-                                {item.product.barcode || item.product.internalCode || '7890000000000'}
-                              </span>
-                            </div>
-                          )}
-                        </div>
-
-                        {/* Data de Impressão e Rodapé */}
-                        {showPrintDate && (
-                          <div className="text-[7px] text-gray-400 text-right mt-0.5 leading-none">
-                            {todayFormatted}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {/* 2. LAYOUT: ETIQUETA BAIANA / TESTEIRA DE DESTAQUE */}
-                {layoutFormat === 'baiana_destaque' && (
-                  <div className="grid grid-cols-2 gap-3 print:grid-cols-2 print:gap-3">
-                    {expandedTagList.map(({ item }, idx) => (
-                      <div
-                        key={`${item.id}-${idx}`}
-                        className="border-2 border-gray-950 rounded-xl overflow-hidden bg-white text-gray-900 break-inside-avoid flex flex-col justify-between"
-                        style={{ height: '54mm', boxSizing: 'border-box' }}
-                      >
-                        {/* Tarja Superior Vermelha/Amarela */}
-                        <div className="bg-red-600 text-yellow-300 font-black text-center py-1 px-2 text-xs uppercase tracking-wider flex items-center justify-between">
-                          <span className="text-[9px] font-bold text-white truncate max-w-[120px]">
-                            {showStoreLogo ? tenant.name : 'DROGARIA'}
-                          </span>
-                          <span className="font-black text-[11px]">
-                            {item.badgeText || 'SUPER OFERTA'}
-                          </span>
-                          <span className="text-[9px] font-mono text-white">
-                            {item.product.internalCode || ''}
-                          </span>
-                        </div>
-
-                        {/* Corpo com Nome e Informações */}
-                        <div className="p-2.5 flex-1 flex flex-col justify-between">
-                          <div>
-                            <h4 className="text-sm font-black leading-tight text-gray-950 line-clamp-2">
-                              {item.product.name}
-                            </h4>
-                            <p className="text-[9px] text-gray-600 mt-0.5 truncate">
-                              {item.product.activePrinciple || item.product.presentation || item.product.category}
-                            </p>
-                            {item.customObservations && (
-                              <p className="text-[8px] font-bold text-red-700 mt-0.5">
-                                {item.customObservations}
-                              </p>
-                            )}
-                          </div>
-
-                          {/* Bloco de Preço Grande DE / POR */}
-                          <div className="flex items-end justify-between mt-2 pt-1 border-t-2 border-dashed border-gray-200">
-                            <div>
-                              {item.showOriginalPrice && item.originalPrice > item.promotionalPrice && (
-                                <span className="text-xs text-gray-500 line-through font-bold block">
-                                  DE: R$ {item.originalPrice.toFixed(2).replace('.', ',')}
-                                </span>
-                              )}
-                              <div className="flex items-baseline gap-1">
-                                <span className="text-xs font-black text-red-600">POR R$</span>
-                                <span className="text-3xl font-black text-gray-950 tracking-tight leading-none">
-                                  {item.promotionalPrice.toFixed(2).replace('.', ',')}
-                                </span>
-                              </div>
-                              {item.unitMeasurementText && (
-                                <span className="text-[8px] text-gray-500 block font-semibold">
-                                  {item.unitMeasurementText}
-                                </span>
-                              )}
-                            </div>
-
-                            {/* Código de barras */}
-                            {showBarcode && (
-                              <div className="text-right">
-                                <div className="h-4 flex items-end gap-[1px] justify-end">
-                                  {[2, 1, 3, 1, 4, 1, 2, 3, 1, 2, 4, 1].map((w, i) => (
-                                    <span key={i} className="bg-black" style={{ width: `${w}px`, height: '100%' }} />
-                                  ))}
-                                </div>
-                                <span className="text-[8px] font-mono font-bold text-gray-700 block mt-0.5">
-                                  {item.product.barcode || item.product.internalCode || '7890000000000'}
-                                </span>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-
-                        {/* Rodapé da Etiqueta Baiana */}
-                        {showPrintDate && (
-                          <div className="bg-gray-100 px-2 py-0.5 text-[8px] text-gray-500 flex justify-between">
-                            <span>Preço válido enquanto durarem os estoques</span>
-                            <span>{todayFormatted}</span>
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {/* 3. LAYOUT: CARTAZ A5 (MEIA FOLHA) */}
-                {layoutFormat === 'cartaz_a5' && (
-                  <div className="space-y-6 print:space-y-0">
-                    {expandedTagList.map(({ item }, idx) => (
-                      <div
-                        key={`${item.id}-${idx}`}
-                        className="border-4 border-gray-950 rounded-2xl overflow-hidden bg-white text-gray-900 break-inside-avoid flex flex-col justify-between print:mb-0"
-                        style={{ height: '138mm', boxSizing: 'border-box', pageBreakAfter: 'always' }}
-                      >
-                        {/* Topo de Impacto Promocional */}
-                        <div className="bg-red-600 text-yellow-300 font-black text-center py-2 px-4 text-xl uppercase tracking-wider flex items-center justify-between">
-                          <span className="text-xs font-bold text-white">
-                            {showStoreLogo ? tenant.name : 'DROGARIA'}
-                          </span>
-                          <span className="text-2xl font-black">
-                            {item.badgeText || 'OFERTA ESPECIAL'}
-                          </span>
-                          <span className="text-xs font-mono text-white">
-                            #{item.product.internalCode || ''}
-                          </span>
-                        </div>
-
-                        {/* Centro: Nome e Detalhes */}
-                        <div className="p-6 text-center flex-1 flex flex-col justify-center">
-                          <h2 className="text-2xl sm:text-3xl font-black text-gray-950 leading-tight">
-                            {item.product.name}
-                          </h2>
-                          <p className="text-sm font-bold text-gray-600 mt-2">
-                            {item.product.activePrinciple || item.product.presentation || item.product.category}
-                          </p>
-                          {item.customObservations && (
-                            <p className="text-xs font-black text-red-600 mt-1">
-                              {item.customObservations}
-                            </p>
-                          )}
-                        </div>
-
-                        {/* Bloco de Preço Gigante */}
-                        <div className="bg-yellow-300 p-4 text-center border-t-4 border-gray-950">
-                          {item.showOriginalPrice && item.originalPrice > item.promotionalPrice && (
-                            <div className="text-sm font-black text-gray-700 line-through">
-                              DE R$ {item.originalPrice.toFixed(2).replace('.', ',')}
-                            </div>
-                          )}
-                          <div className="flex items-center justify-center gap-2">
-                            <span className="text-xl font-black text-red-700">POR APENAS R$</span>
-                            <span className="text-6xl font-black text-gray-950 tracking-tighter">
-                              {item.promotionalPrice.toFixed(2).replace('.', ',')}
-                            </span>
-                          </div>
-                          {item.unitMeasurementText && (
-                            <span className="text-xs font-bold text-gray-800 block mt-1">
-                              {item.unitMeasurementText}
-                            </span>
-                          )}
-                        </div>
-
-                        {/* Rodapé Informativo */}
-                        <div className="p-2 bg-gray-50 flex items-center justify-between text-xs text-gray-500 font-bold border-t border-gray-200">
-                          <span>{tenant.name} • Oferta de Ponto de Venda</span>
-                          {showBarcode && (
-                            <span className="font-mono">
-                              EAN: {item.product.barcode || item.product.internalCode}
-                            </span>
-                          )}
-                          <span>Emitido em: {todayFormatted}</span>
+                            );
+                          })}
                         </div>
                       </div>
-                    ))}
-                  </div>
-                )}
-
-                {/* 4. LAYOUT: CARTAZ A4 (FOLHA INTEIRA) */}
-                {layoutFormat === 'cartaz_a4' && (
-                  <div className="space-y-8 print:space-y-0">
-                    {expandedTagList.map(({ item }, idx) => (
-                      <div
-                        key={`${item.id}-${idx}`}
-                        className="border-8 border-gray-950 rounded-3xl overflow-hidden bg-white text-gray-900 break-inside-avoid flex flex-col justify-between print:m-0"
-                        style={{ height: '277mm', boxSizing: 'border-box', pageBreakAfter: 'always' }}
-                      >
-                        {/* Topo de Impacto Máximo */}
-                        <div className="bg-red-600 text-yellow-300 font-black text-center py-4 px-6 text-3xl uppercase tracking-widest flex items-center justify-between border-b-8 border-gray-950">
-                          <span className="text-sm font-bold text-white">
-                            {showStoreLogo ? tenant.name : 'DROGARIA'}
-                          </span>
-                          <span className="text-4xl font-black tracking-tight">
-                            {item.badgeText || 'SUPER OFERTA'}
-                          </span>
-                          <span className="text-sm font-mono text-white">
-                            #{item.product.internalCode || ''}
-                          </span>
-                        </div>
-
-                        {/* Centro: Nome do Produto em Destaque */}
-                        <div className="p-8 text-center flex-1 flex flex-col justify-center items-center">
-                          <h2 className="text-4xl sm:text-5xl font-black text-gray-950 leading-tight max-w-lg">
-                            {item.product.name}
-                          </h2>
-                          <p className="text-lg font-bold text-gray-600 mt-4 max-w-md">
-                            {item.product.activePrinciple || item.product.presentation || item.product.category}
-                          </p>
-                          {item.customObservations && (
-                            <div className="mt-3 px-4 py-1.5 bg-red-100 text-red-800 rounded-xl text-sm font-black uppercase">
-                              {item.customObservations}
-                            </div>
-                          )}
-                        </div>
-
-                        {/* Bloco de Preço Gigante da Vitrine */}
-                        <div className="bg-yellow-300 p-8 text-center border-t-8 border-b-8 border-gray-950">
-                          {item.showOriginalPrice && item.originalPrice > item.promotionalPrice && (
-                            <div className="text-2xl font-black text-gray-700 line-through mb-1">
-                              DE R$ {item.originalPrice.toFixed(2).replace('.', ',')}
-                            </div>
-                          )}
-                          <div className="flex items-center justify-center gap-3">
-                            <span className="text-3xl font-black text-red-700">POR APENAS R$</span>
-                            <span className="text-8xl font-black text-gray-950 tracking-tighter">
-                              {item.promotionalPrice.toFixed(2).replace('.', ',')}
-                            </span>
-                          </div>
-                          {item.unitMeasurementText && (
-                            <span className="text-base font-black text-gray-800 block mt-2">
-                              {item.unitMeasurementText}
-                            </span>
-                          )}
-                        </div>
-
-                        {/* Rodapé da Vitrine */}
-                        <div className="p-4 bg-gray-100 flex items-center justify-between text-sm text-gray-600 font-black">
-                          <span>{tenant.name} • Ofertas válidas enquanto durarem os estoques</span>
-                          {showBarcode && (
-                            <span className="font-mono">
-                              EAN: {item.product.barcode || item.product.internalCode}
-                            </span>
-                          )}
-                          <span>Impressão: {todayFormatted}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
 

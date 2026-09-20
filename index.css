@@ -71,11 +71,17 @@ body {
   }
 }
 
-/* Regras Estritas de Impressão para Etiquetas de Preço e Cartazeamento */
+/* Regras Estritas de Impressão para Etiquetas de Preço e Cartazeamento (Paginação Rígida Anti-Corte) */
 @media print {
   @page {
     size: A4 portrait;
-    margin: 5mm;
+    margin: 0 !important;
+  }
+
+  html, body {
+    margin: 0 !important;
+    padding: 0 !important;
+    background: white !important;
   }
 
   body * {
@@ -91,14 +97,34 @@ body {
     position: absolute;
     left: 0;
     top: 0;
-    width: 100% !important;
-    max-width: 100% !important;
+    width: 210mm !important;
     margin: 0 !important;
     padding: 0 !important;
     box-shadow: none !important;
     background: white !important;
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
+  }
+
+  .price-tag-sheet {
+    width: 210mm !important;
+    height: 297mm !important;
+    max-height: 297mm !important;
+    min-height: 297mm !important;
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+    page-break-after: always !important;
+    break-after: page !important;
+    overflow: hidden !important;
+    box-sizing: border-box !important;
+    margin: 0 !important;
+    background: white !important;
+  }
+
+  .print-page-wrapper:last-child .price-tag-sheet,
+  .price-tag-sheet:last-of-type {
+    page-break-after: auto !important;
+    break-after: auto !important;
   }
 
   /* Evitar quebras de página no meio de uma etiqueta */
