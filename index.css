@@ -78,29 +78,26 @@ body {
     margin: 0 !important;
   }
 
-  html, body {
+  html, body, #root {
+    height: auto !important;
+    min-height: 100% !important;
+    overflow: visible !important;
+    position: static !important;
     margin: 0 !important;
     padding: 0 !important;
     background: white !important;
-    width: 210mm !important;
   }
 
   /* Oculta tudo que não seja o container oficial de etiquetas */
-  body * {
-    visibility: hidden;
-  }
-
-  #price-tags-print-container,
-  #price-tags-print-container * {
-    visibility: visible;
+  body > *:not(#price-tags-print-container) {
+    display: none !important;
   }
 
   #price-tags-print-container {
     display: block !important;
-    position: absolute;
-    left: 0;
-    top: 0;
-    width: 210mm !important;
+    position: static !important;
+    overflow: visible !important;
+    width: 100% !important;
     margin: 0 !important;
     padding: 0 !important;
     box-shadow: none !important;
@@ -120,13 +117,17 @@ body {
     display: none !important;
   }
 
+  .print-page,
   .price-tag-sheet {
+    display: flex !important;
+    flex-direction: column !important;
+    page-break-after: always !important;
+    break-after: page !important;
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
     width: 210mm !important;
     height: 297mm !important;
     max-height: 297mm !important;
-    min-height: 297mm !important;
-    page-break-inside: avoid !important;
-    break-inside: avoid !important;
     overflow: hidden !important;
     box-sizing: border-box !important;
     margin: 0 !important;
@@ -135,12 +136,8 @@ body {
     print-color-adjust: exact !important;
   }
 
-  /* Trava de quebra de página: apenas se NÃO for a última página */
-  .price-tag-sheet.price-tag-page-break {
-    page-break-after: always !important;
-    break-after: page !important;
-  }
-
+  .print-page:last-child,
+  .print-page:last-of-type,
   .price-tag-sheet:last-child,
   .price-tag-sheet:last-of-type {
     page-break-after: auto !important;

@@ -53,7 +53,7 @@ export const TAG_LAYOUTS = {
   cartaz_a4: {
     itemsPerPage: 1, // 1 cartaz preenchendo a folha inteira
     gridClass: "grid-cols-1 grid-rows-1",
-    tagHeight: "h-[277mm]",
+    tagHeight: "h-[282mm] max-h-[282mm]",
     orientation: "portrait",
   },
 } as const;
@@ -97,12 +97,18 @@ export const getPagePaddingStyle = (key: TagLayoutKey) => {
         paddingRight: '8mm',
       };
     case 'cartaz_a4':
+      return {
+        paddingTop: '5mm',
+        paddingBottom: '5mm',
+        paddingLeft: '5mm',
+        paddingRight: '5mm',
+      };
     default:
       return {
-        paddingTop: '10mm',
-        paddingBottom: '10mm',
-        paddingLeft: '8mm',
-        paddingRight: '8mm',
+        paddingTop: '8mm',
+        paddingBottom: '8mm',
+        paddingLeft: '6mm',
+        paddingRight: '6mm',
       };
   }
 };
@@ -459,30 +465,32 @@ export const renderTagCard = (
     );
   }
 
-  // 4. MODELO: CARTAZ A4 (1 por folha • Grade 1x1 • h: 277mm)
+  // 4. MODELO: CARTAZ A4 (1 por folha • Grade 1x1 • w-full h-[282mm] max-h-[282mm])
   return (
     <div
       key={uniqueKey}
-      className={`border-8 border-gray-950 rounded-2xl overflow-hidden bg-white text-gray-900 break-inside-avoid flex flex-col justify-between ${currentLayoutConfig.tagHeight}`}
+      className="w-full h-[282mm] max-h-[282mm] border-[3px] border-black rounded-lg overflow-hidden bg-white text-gray-900 break-inside-avoid flex flex-col justify-between"
       style={{ boxSizing: 'border-box' }}
     >
-      <div className="bg-red-600 text-yellow-300 font-black text-center py-4 px-6 flex items-center justify-between">
-        <span className="text-xl font-black text-white tracking-wide">
+      {/* Cabeçalho Vermelho: Altura fixa h-[38mm] */}
+      <div className="h-[38mm] min-h-[38mm] max-h-[38mm] bg-red-600 text-yellow-300 font-black px-6 flex items-center justify-between shrink-0 overflow-hidden">
+        <span className="text-xl font-black text-white tracking-wide truncate max-w-[35%]">
           {showStoreLogo ? tenant.name : 'DROGARIA POPULAR'}
         </span>
-        <span className="text-3xl font-black uppercase tracking-wider animate-pulse">
-          {item.badgeText || 'SUPER OFERTA IMPERDÍVEL'}
+        <span className="text-3xl font-black uppercase tracking-wider text-center flex-1 px-2 animate-pulse truncate">
+          {item.badgeText || 'SUPER OFERTA'}
         </span>
-        <span className="text-lg font-mono text-white">
-          CÓD: {item.product.internalCode || ''}
+        <span className="text-lg font-mono text-white text-right shrink-0">
+          {item.product.internalCode ? `CÓD: ${item.product.internalCode}` : ''}
         </span>
       </div>
 
-      <div className="p-8 text-center flex-1 flex flex-col justify-center items-center">
-        <h1 className="text-4xl sm:text-5xl font-black text-gray-950 leading-tight uppercase max-w-lg">
+      {/* Corpo Central: flex-1 com alinhamento vertical e nomes seguros */}
+      <div className="flex-1 flex flex-col items-center justify-center p-4 text-center overflow-hidden">
+        <h1 className="text-4xl sm:text-5xl font-black text-gray-950 leading-tight uppercase line-clamp-3 max-w-xl">
           {item.product.name}
         </h1>
-        <p className="text-base font-bold text-gray-600 mt-3 max-w-md">
+        <p className="text-base font-bold text-gray-600 mt-2 max-w-lg line-clamp-2">
           {item.product.activePrinciple || item.product.presentation || item.product.category}
         </p>
         {formattedValidity && (
@@ -497,33 +505,37 @@ export const renderTagCard = (
         )}
       </div>
 
-      <div className="bg-yellow-300 p-6 text-center border-t-8 border-b-8 border-gray-950">
+      {/* Bloco Amarelo de Preço: Altura fixa h-[50mm] */}
+      <div className="h-[50mm] min-h-[50mm] max-h-[50mm] bg-yellow-300 px-6 py-2 text-center border-t-[3px] border-b-[3px] border-black flex flex-col justify-center items-center shrink-0 overflow-hidden">
         {item.showOriginalPrice && origPrice > promoPrice && (
-          <div className="text-xl font-black text-gray-700 line-through mb-1">
+          <div className="text-lg font-black text-gray-700 line-through leading-none mb-1">
             DE R$ {origPrice.toFixed(2).replace('.', ',')}
           </div>
         )}
-        <div className="flex items-center justify-center gap-3">
+        <div className="flex items-center justify-center gap-3 leading-none">
           <span className="text-2xl font-black text-red-700">POR APENAS R$</span>
           <span className="text-7xl sm:text-8xl font-black text-gray-950 tracking-tighter leading-none">
             {promoPrice.toFixed(2).replace('.', ',')}
           </span>
         </div>
         {item.unitMeasurementText && (
-          <span className="text-sm font-black text-gray-800 block mt-2">
+          <span className="text-xs font-black text-gray-800 block mt-1 uppercase">
             {item.unitMeasurementText}
           </span>
         )}
       </div>
 
-      <div className="p-3 bg-gray-100 flex items-center justify-between text-xs text-gray-600 font-black">
-        <span>{tenant.name} • Ofertas válidas enquanto durarem os estoques</span>
+      {/* Rodapé Legal: Altura fixa h-[9mm] anti-corte */}
+      <div className="h-[9mm] min-h-[9mm] max-h-[9mm] px-3 bg-white border-t border-slate-300 flex items-center justify-between text-[9px] text-gray-600 font-bold shrink-0 overflow-hidden">
+        <span className="truncate max-w-[45%]">
+          {tenant.name} • Ofertas válidas enquanto durarem os estoques
+        </span>
         {showBarcode && (
-          <span className="font-mono">
-            EAN: {item.product.barcode || item.product.internalCode}
+          <span className="font-mono text-center truncate px-2">
+            EAN: {item.product.barcode || item.product.internalCode || 'N/A'}
           </span>
         )}
-        <span>Impressão: {todayFormatted}</span>
+        <span className="shrink-0 text-right">Data: {todayFormatted}</span>
       </div>
     </div>
   );
@@ -1021,7 +1033,7 @@ export const PrintContainer = React.memo<PrintContainerProps>(({
         return (
           <div
             key={`print-page-${pageIdx}`}
-            className={`price-tag-sheet ${!isLastPage ? 'price-tag-page-break' : ''}`}
+            className="print-page price-tag-sheet"
             style={{
               width: '210mm',
               height: '297mm',
