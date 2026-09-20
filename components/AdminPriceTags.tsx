@@ -33,8 +33,8 @@ import { Product, PharmacyConfig, PromotionRule } from '../types';
 export const TAG_LAYOUTS = {
   gondola: {
     itemsPerPage: 30,
-    gridClass: "grid-cols-3 grid-rows-10 gap-x-[2mm] gap-y-[0mm]",
-    tagHeight: "h-[26mm]",
+    gridClass: "grid-cols-3 grid-rows-10 gap-x-[2.5mm] gap-y-[2mm]",
+    tagHeight: "h-[26mm] min-h-[26mm] max-h-[26mm]",
     orientation: "portrait",
   },
   baiana: {
@@ -72,13 +72,14 @@ export const normalizeLayoutKey = (format: TagLayoutFormat): TagLayoutKey => {
 const getPagePaddingStyle = (key: TagLayoutKey) => {
   switch (key) {
     case 'gondola':
-      // 10 linhas x 26mm = 260mm. Folha A4 tem 297mm. (297 - 260) / 2 = 18.5mm
-      // 3 colunas: (210mm - 8mm padding - 4mm gaps) / 3 = 66mm
+      // 10 linhas x 26mm = 260mm + 9 x 2mm gaps = 278mm. Folha A4 tem 297mm.
+      // Margens verticais: 8mm (278mm + 16mm = 294mm < 297mm, trava rigorosa de página única)
+      // Margens horizontais: 6mm (210mm - 12mm margens - 5mm gaps = 193mm / 3 colunas = ~64.3mm por etiqueta)
       return {
-        paddingTop: '18.5mm',
-        paddingBottom: '18.5mm',
-        paddingLeft: '4mm',
-        paddingRight: '4mm',
+        paddingTop: '8mm',
+        paddingBottom: '8mm',
+        paddingLeft: '6mm',
+        paddingRight: '6mm',
       };
     case 'baiana':
       // 4 linhas x 65mm = 260mm + 3 x 3mm gaps = 269mm. (297 - 269) / 2 = 14mm
@@ -115,13 +116,28 @@ const getPagePaddingStyle = (key: TagLayoutKey) => {
   }
 };
 
+export const parsePrice = (val: number | string | undefined | null, fallback = 0): number => {
+  if (typeof val === 'number') return isNaN(val) ? fallback : val;
+  if (val === undefined || val === null) return fallback;
+  const str = String(val).trim();
+  if (!str) return fallback;
+  let normalized = str;
+  if (normalized.includes('.') && normalized.includes(',')) {
+    normalized = normalized.replace(/\./g, '').replace(',', '.');
+  } else if (normalized.includes(',')) {
+    normalized = normalized.replace(',', '.');
+  }
+  const num = parseFloat(normalized);
+  return isNaN(num) ? fallback : num;
+};
+
 export interface PriceTagItem {
   id: string; // product id
   product: Product;
   quantity: number; // quantidade de etiquetas a imprimir
   badgeText: string;
-  originalPrice: number;
-  promotionalPrice: number;
+  originalPrice: number | string;
+  promotionalPrice: number | string;
   showOriginalPrice: boolean;
   unitMeasurementText: string; // ex: "R$ 0,15 por comprimido" ou "Saindo por 12,99"
   customObservations?: string; // ex: "Validade: 11/2026 - Lote: 4920A"
@@ -533,13 +549,15 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
   const renderTagCard = (item: PriceTagItem, layoutKey: TagLayoutKey, uniqueKey: string) => {
     const { formattedValidity, auxText } = getTagDetails(item);
     const storeName = item.customStoreName || (showStoreLogo ? tenant.name : '');
+    const origPrice = parsePrice(item.originalPrice, Number(item.product.price) || 0);
+    const promoPrice = parsePrice(item.promotionalPrice, origPrice);
 
     // 1. MODELO: GÔNDOLA PADRÃO (30 por folha • Grade 3x10 • h: 26mm)
     if (layoutKey === 'gondola') {
       return (
         <div
           key={uniqueKey}
-          className={`border border-slate-300 rounded-sm p-1 flex flex-col justify-between bg-white text-slate-900 break-inside-avoid relative overflow-hidden ${currentLayoutConfig.tagHeight}`}
+          className={`border border-slate-300 rounded-[3px] p-1.5 flex flex-col justify-between bg-white text-slate-900 break-inside-avoid relative overflow-hidden ${currentLayoutConfig.tagHeight}`}
           style={{ boxSizing: 'border-box' }}
         >
           <div>
@@ -558,46 +576,47 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
                 )}
               </div>
               {item.badgeText && (
-                <span className="bg-amber-400 text-slate-900 font-extrabold text-[7px] px-1 py-0.5 rounded-sm uppercase tracking-tight whitespace-nowrap shrink-0">
+                <span className="bg-amber-400 text-slate-900 font-extrabold text-[6.5px] px-1 py-0.5 rounded-sm uppercase tracking-tight whitespace-nowrap shrink-0 leading-none">
                   {item.badgeText}
                 </span>
               )}
             </div>
 
             {/* Nome do Produto */}
-            <h4 className="text-[8.5px] font-black leading-[1.15] line-clamp-2 text-slate-950 mt-0.5">
+            <h4 className="text-[8px] font-black leading-[1.1] line-clamp-2 text-slate-950 mt-0.5">
               {item.product.name}
             </h4>
 
-            <p className="text-[6.5px] text-slate-500 truncate leading-none mt-0.5">
+            {/* Apresentação / Princípio Ativo */}
+            <p className="text-[6px] text-slate-500 truncate leading-none mt-0.5">
               {item.product.activePrinciple || item.product.presentation || item.product.category}
             </p>
           </div>
 
           {/* Bloco Inferior: Duas Colunas Bem Definidas */}
-          <div className="flex items-end justify-between gap-1.5 mt-auto pt-0.5 border-t border-slate-100">
+          <div className="flex items-end justify-between gap-1 mt-auto pt-0.5 border-t border-slate-100">
             {/* Coluna Esquerda: Preço principal em destaque e texto auxiliar / validade */}
             <div className="flex flex-col min-w-0 flex-1">
-              {item.showOriginalPrice && item.originalPrice > item.promotionalPrice && (
-                <span className="text-[6.5px] text-slate-400 line-through leading-none">
-                  DE R$ {item.originalPrice.toFixed(2).replace('.', ',')}
+              {item.showOriginalPrice && origPrice > promoPrice && (
+                <span className="text-[6px] text-slate-400 line-through leading-none">
+                  DE R$ {origPrice.toFixed(2).replace('.', ',')}
                 </span>
               )}
-              <div className="flex items-baseline gap-0.5">
-                <span className="text-[7px] font-bold text-slate-500">R$</span>
-                <span className="text-[13px] sm:text-[14px] font-black text-slate-950 tracking-tight leading-none">
-                  {item.promotionalPrice.toFixed(2).replace('.', ',')}
+              <div className="flex items-baseline gap-0.5 leading-none">
+                <span className="text-[6.5px] font-bold text-slate-500">R$</span>
+                <span className="text-[12.5px] font-black text-slate-950 tracking-tight leading-none">
+                  {promoPrice.toFixed(2).replace('.', ',')}
                 </span>
               </div>
               {/* Linha de observação/fórmula e validade */}
-              <div className="flex flex-col gap-[1px] mt-0.5">
+              <div className="flex flex-col gap-[0.5px] mt-0.5">
                 {auxText && (
-                  <span className="text-[6.5px] font-bold text-slate-700 leading-tight truncate max-w-[105px]" title={auxText}>
+                  <span className="text-[6px] font-bold text-slate-700 leading-tight truncate max-w-[100px]" title={auxText}>
                     {auxText}
                   </span>
                 )}
                 {formattedValidity && (
-                  <span className="text-[6.5px] font-extrabold text-red-700 leading-tight tracking-tight truncate max-w-[105px]">
+                  <span className="text-[6px] font-extrabold text-red-700 leading-tight tracking-tight truncate max-w-[100px]">
                     {formattedValidity}
                   </span>
                 )}
@@ -608,17 +627,17 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
             {showBarcode && (
               <div className="flex flex-col items-end shrink-0 text-right">
                 <div className="inline-block tracking-tighter opacity-90 scale-x-95">
-                  <div className="h-2.5 flex items-end gap-[1px] justify-end">
+                  <div className="h-2 flex items-end gap-[1px] justify-end">
                     {[2, 1, 2, 3, 1, 2, 1, 3, 1, 2, 3, 1, 2].map((w, i) => (
                       <span
                         key={i}
-                        className="bg-black"
+                        className="bg-black inline-block"
                         style={{ width: `${w}px`, height: '100%' }}
                       />
                     ))}
                   </div>
                 </div>
-                <span className="block text-[6.5px] font-mono font-bold text-slate-700 leading-none mt-0.5">
+                <span className="block text-[6px] font-mono font-bold text-slate-700 leading-none mt-0.5">
                   {item.product.barcode || item.product.internalCode || '7890000000000'}
                 </span>
                 {showPrintDate && (
@@ -678,15 +697,15 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
             {/* Bloco de Preço Grande DE / POR */}
             <div className="flex items-end justify-between mt-1 pt-1 border-t-2 border-dashed border-gray-200">
               <div>
-                {item.showOriginalPrice && item.originalPrice > item.promotionalPrice && (
+                {item.showOriginalPrice && origPrice > promoPrice && (
                   <span className="text-[9.5px] text-gray-500 line-through font-bold block">
-                    DE: R$ {item.originalPrice.toFixed(2).replace('.', ',')}
+                    DE: R$ {origPrice.toFixed(2).replace('.', ',')}
                   </span>
                 )}
                 <div className="flex items-baseline gap-1">
                   <span className="text-xs font-black text-red-600">POR R$</span>
                   <span className="text-2xl font-black text-gray-950 tracking-tight leading-none">
-                    {item.promotionalPrice.toFixed(2).replace('.', ',')}
+                    {promoPrice.toFixed(2).replace('.', ',')}
                   </span>
                 </div>
                 {item.unitMeasurementText && (
@@ -766,15 +785,15 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
 
           {/* Bloco de Preço Gigante */}
           <div className="bg-yellow-300 p-3 text-center border-t-4 border-gray-950">
-            {item.showOriginalPrice && item.originalPrice > item.promotionalPrice && (
+            {item.showOriginalPrice && origPrice > promoPrice && (
               <div className="text-xs font-black text-gray-700 line-through">
-                DE R$ {item.originalPrice.toFixed(2).replace('.', ',')}
+                DE R$ {origPrice.toFixed(2).replace('.', ',')}
               </div>
             )}
             <div className="flex items-center justify-center gap-2">
               <span className="text-base font-black text-red-700">POR APENAS R$</span>
               <span className="text-5xl font-black text-gray-950 tracking-tighter">
-                {item.promotionalPrice.toFixed(2).replace('.', ',')}
+                {promoPrice.toFixed(2).replace('.', ',')}
               </span>
             </div>
             {item.unitMeasurementText && (
@@ -840,15 +859,15 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
 
         {/* Bloco de Preço Gigante da Vitrine */}
         <div className="bg-yellow-300 p-6 text-center border-t-8 border-b-8 border-gray-950">
-          {item.showOriginalPrice && item.originalPrice > item.promotionalPrice && (
+          {item.showOriginalPrice && origPrice > promoPrice && (
             <div className="text-xl font-black text-gray-700 line-through mb-1">
-              DE R$ {item.originalPrice.toFixed(2).replace('.', ',')}
+              DE R$ {origPrice.toFixed(2).replace('.', ',')}
             </div>
           )}
           <div className="flex items-center justify-center gap-3">
             <span className="text-2xl font-black text-red-700">POR APENAS R$</span>
             <span className="text-7xl sm:text-8xl font-black text-gray-950 tracking-tighter leading-none">
-              {item.promotionalPrice.toFixed(2).replace('.', ',')}
+              {promoPrice.toFixed(2).replace('.', ',')}
             </span>
           </div>
           {item.unitMeasurementText && (
@@ -1454,12 +1473,28 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
                           </label>
                         </div>
                         <input
-                          type="number"
-                          step="0.01"
-                          value={item.originalPrice}
-                          onChange={(e) =>
-                            handleUpdateItem(item.id, { originalPrice: parseFloat(e.target.value) || 0 })
-                          }
+                          type="text"
+                          inputMode="decimal"
+                          placeholder="0,00"
+                          value={item.originalPrice ?? ''}
+                          onChange={(e) => {
+                            let val = e.target.value;
+                            // Permite apenas dígitos, ponto e vírgula
+                            val = val.replace(/[^\d.,]/g, '');
+                            // Remove zero à esquerda se vier seguido de dígito 1 a 9 (preserva 0. e 0,)
+                            val = val.replace(/^0+(?=[1-9])/, '');
+                            handleUpdateItem(item.id, { originalPrice: val });
+                          }}
+                          onBlur={() => {
+                            const raw = item.originalPrice;
+                            if (raw === '' || raw === null || raw === undefined) {
+                              const fallback = Number(item.product.price) || 0;
+                              handleUpdateItem(item.id, { originalPrice: fallback });
+                            } else {
+                              const parsed = parsePrice(raw, Number(item.product.price) || 0);
+                              handleUpdateItem(item.id, { originalPrice: parsed });
+                            }
+                          }}
                           className="w-full px-2.5 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-bold text-gray-900 focus:border-emerald-500 focus:outline-none"
                         />
                       </div>
@@ -1469,12 +1504,31 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
                           Preço POR (R$)
                         </label>
                         <input
-                          type="number"
-                          step="0.01"
-                          value={item.promotionalPrice}
-                          onChange={(e) =>
-                            handleUpdateItem(item.id, { promotionalPrice: parseFloat(e.target.value) || 0 })
-                          }
+                          type="text"
+                          inputMode="decimal"
+                          placeholder="0,00"
+                          value={item.promotionalPrice ?? ''}
+                          onChange={(e) => {
+                            let val = e.target.value;
+                            // Permite apenas dígitos, ponto e vírgula
+                            val = val.replace(/[^\d.,]/g, '');
+                            // Remove zero à esquerda se vier seguido de dígito 1 a 9 (preserva 0. e 0,)
+                            val = val.replace(/^0+(?=[1-9])/, '');
+                            handleUpdateItem(item.id, { promotionalPrice: val });
+                          }}
+                          onBlur={() => {
+                            const raw = item.promotionalPrice;
+                            if (raw === '' || raw === null || raw === undefined) {
+                              const promoFallback =
+                                Number(item.product.promotionalPrice || item.product.promotional_price) ||
+                                parsePrice(item.originalPrice, Number(item.product.price) || 0);
+                              handleUpdateItem(item.id, { promotionalPrice: promoFallback });
+                            } else {
+                              const fallback = parsePrice(item.originalPrice, Number(item.product.price) || 0);
+                              const parsed = parsePrice(raw, fallback);
+                              handleUpdateItem(item.id, { promotionalPrice: parsed });
+                            }
+                          }}
                           className="w-full px-2.5 py-1.5 bg-white border border-emerald-300 rounded-lg text-xs font-black text-emerald-700 focus:border-emerald-500 focus:outline-none"
                         />
                       </div>
