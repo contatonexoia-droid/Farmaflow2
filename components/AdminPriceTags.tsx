@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { 
   Printer, 
   Search, 
@@ -21,8 +21,13 @@ import {
   BarChart2,
   Calendar,
   Percent,
-  DollarSign
+  DollarSign,
+  ScanLine,
+  Camera,
+  Volume2,
+  AlertTriangle
 } from 'lucide-react';
+import ProductScanner from './ProductScanner';
 import { Product, PharmacyConfig, PromotionRule } from '../types';
 
 export type TagLayoutFormat = 'gondola_pimaco' | 'baiana_destaque' | 'cartaz_a5' | 'cartaz_a4';
@@ -65,6 +70,66 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [onlyPromotions, setOnlyPromotions] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // --- Estados de Escaneamento e Notificações (Feedback Visual e Sonoro) ---
+  const [isScannerOpen, setIsScannerOpen] = useState(false);
+  const [scannerToast, setScannerToast] = useState<{
+    id: number;
+    title: string;
+    description: string;
+    type: 'success' | 'error' | 'info';
+  } | null>(null);
+  const toastTimeoutRef = useRef<any>(null);
+
+  // --- Web Audio API para Som de Bip sem dependências externas ---
+  const playBeep = useCallback((type: 'success' | 'error' = 'success') => {
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+
+      if (type === 'success') {
+        // Bip agudo e positivo característico de leitor óptico comercial
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(1800, ctx.currentTime);
+        gain.gain.setValueAtTime(0.15, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.12);
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + 0.12);
+      } else {
+        // Bip de erro mais grave duplo
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(320, ctx.currentTime);
+        gain.gain.setValueAtTime(0.2, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + 0.25);
+      }
+    } catch {
+      // Navegadores que bloqueiam áudio automático
+    }
+  }, []);
+
+  const showToast = useCallback((title: string, description: string, type: 'success' | 'error' | 'info' = 'success') => {
+    if (toastTimeoutRef.current) {
+      clearTimeout(toastTimeoutRef.current);
+    }
+    setScannerToast({
+      id: Date.now(),
+      title,
+      description,
+      type
+    });
+    toastTimeoutRef.current = setTimeout(() => {
+      setScannerToast(null);
+    }, 3500);
+  }, []);
 
   // --- Lista de Etiquetas na Fila ---
   const [tagItems, setTagItems] = useState<PriceTagItem[]>([]);
@@ -128,35 +193,91 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
     return tagItems.some((item) => item.id === productId);
   };
 
-  // Adicionar produto à fila
-  const handleAddProduct = (product: Product) => {
-    if (isProductInQueue(product.id)) {
-      setTagItems((prev) =>
-        prev.map((item) =>
-          item.id === product.id ? { ...item, quantity: item.quantity + 1 } : item
-        )
+  // Adicionar produto à fila (com suporte a aviso sonoro e toast opcional)
+  const handleAddProduct = useCallback((product: Product, source: 'manual' | 'scanner' = 'manual') => {
+    let updatedQty = 1;
+    let wasAlreadyInQueue = false;
+
+    setTagItems((prev) => {
+      const exists = prev.some((item) => item.id === product.id);
+      if (exists) {
+        wasAlreadyInQueue = true;
+        return prev.map((item) => {
+          if (item.id === product.id) {
+            updatedQty = item.quantity + 1;
+            return { ...item, quantity: item.quantity + 1 };
+          }
+          return item;
+        });
+      }
+
+      const currentPrice = Number(product.price) || 0;
+      const promo = Number(product.promotionalPrice || product.promotional_price || 0);
+      const hasPromo = promo > 0 && promo < currentPrice;
+
+      const newItem: PriceTagItem = {
+        id: product.id,
+        product,
+        quantity: 1,
+        badgeText: globalBadge || (hasPromo ? 'SUPER OFERTA' : ''),
+        originalPrice: hasPromo ? currentPrice : currentPrice,
+        promotionalPrice: hasPromo ? promo : currentPrice,
+        showOriginalPrice: hasPromo,
+        unitMeasurementText: '',
+        customObservations: ''
+      };
+
+      return [newItem, ...prev];
+    });
+
+    if (source === 'scanner') {
+      playBeep('success');
+      showToast(
+        wasAlreadyInQueue ? 'Quantidade incrementada (+1)' : 'Produto adicionado à fila',
+        `${product.name} • ${product.barcode || product.internalCode || ''}`,
+        'success'
       );
-      return;
     }
+  }, [globalBadge, playBeep, showToast]);
 
-    const currentPrice = Number(product.price) || 0;
-    const promo = Number(product.promotionalPrice || product.promotional_price || 0);
-    const hasPromo = promo > 0 && promo < currentPrice;
+  // Função para processar código de barras (Leitor Físico USB/Bluetooth ou Câmera)
+  const handleBarcodeScanned = useCallback((rawBarcode: string) => {
+    const code = rawBarcode.trim();
+    if (!code) return;
 
-    const newItem: PriceTagItem = {
-      id: product.id,
-      product,
-      quantity: 1,
-      badgeText: globalBadge || (hasPromo ? 'SUPER OFERTA' : ''),
-      originalPrice: hasPromo ? currentPrice : currentPrice,
-      promotionalPrice: hasPromo ? promo : currentPrice,
-      showOriginalPrice: hasPromo,
-      unitMeasurementText: '',
-      customObservations: ''
-    };
+    // Normalizar removendo espaços
+    const cleanCode = code.replace(/\s+/g, '');
 
-    setTagItems((prev) => [newItem, ...prev]);
-  };
+    // Busca exata pelo EAN/Barcode, ou Código Interno
+    const matchedProduct = products.find((p) => {
+      const pBarcode = (p.barcode || '').trim().replace(/\s+/g, '');
+      const pInternal = (p.internalCode || '').trim().replace(/\s+/g, '');
+      return pBarcode === cleanCode || pInternal === cleanCode;
+    });
+
+    if (matchedProduct) {
+      handleAddProduct(matchedProduct, 'scanner');
+      setSearchTerm('');
+      setIsScannerOpen(false); // Fecha o modal após ler com sucesso
+      // Manter foco no campo para o próximo bip do leitor físico
+      setTimeout(() => {
+        searchInputRef.current?.focus();
+      }, 50);
+      return true;
+    } else {
+      playBeep('error');
+      showToast(
+        'Produto não cadastrado',
+        `Nenhum produto encontrado com o código: ${code}`,
+        'error'
+      );
+      // Manter foco no input para tentar outro ou corrigir
+      setTimeout(() => {
+        searchInputRef.current?.select();
+      }, 50);
+      return false;
+    }
+  }, [products, handleAddProduct, playBeep, showToast]);
 
   // Adicionar todos os filtrados
   const handleAddAllFiltered = () => {
@@ -213,6 +334,29 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
       );
     }
   };
+
+  // Tecla de atalho global ou no input (Enter no campo de busca aciona busca rápida por EAN)
+  const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      const term = searchTerm.trim();
+      if (term) {
+        // Se for um código de barras / EAN numérico ou código interno exato
+        const found = handleBarcodeScanned(term);
+        if (found) {
+          e.preventDefault();
+        }
+      }
+    }
+  };
+
+  // Limpeza de timeout de notificação ao desmontar
+  useEffect(() => {
+    return () => {
+      if (toastTimeoutRef.current) {
+        clearTimeout(toastTimeoutRef.current);
+      }
+    };
+  }, []);
 
   // Executar Impressão Nativa do Navegador
   const handlePrint = () => {
@@ -287,25 +431,63 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
               </span>
             </div>
 
-            {/* Campo de Busca */}
-            <div className="relative">
-              <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
-              <input
-                type="text"
-                placeholder="Buscar por Nome, EAN, Código ou Laboratório..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-semibold text-gray-900 placeholder-gray-400 focus:bg-white focus:border-emerald-500 focus:outline-none transition-all"
-              />
-              {searchTerm && (
-                <button
-                  type="button"
-                  onClick={() => setSearchTerm('')}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
-                >
-                  <X size={14} />
-                </button>
-              )}
+            {/* Campo de Busca e Leitor de Código de Barras (Pistola USB / Câmera) */}
+            <div className="flex items-center gap-2">
+              <div className="relative flex-1">
+                <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
+                <input
+                  ref={searchInputRef}
+                  type="text"
+                  placeholder="Buscar ou bipar EAN / Código com o leitor..."
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  onKeyDown={handleSearchKeyDown}
+                  className="w-full pl-10 pr-9 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-semibold text-gray-900 placeholder-gray-400 focus:bg-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/10 focus:outline-none transition-all"
+                />
+                {searchTerm ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSearchTerm('');
+                      searchInputRef.current?.focus();
+                    }}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 cursor-pointer"
+                  >
+                    <X size={14} />
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => searchInputRef.current?.focus()}
+                    title="Pronto para leitura contínua com pistola óptica USB/Bluetooth"
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-300 hover:text-emerald-600 transition-colors cursor-pointer"
+                  >
+                    <ScanLine size={15} />
+                  </button>
+                )}
+              </div>
+
+              {/* Botão de Scanner (Abre o Scanner idêntico ao menu de produtos) */}
+              <button
+                type="button"
+                onClick={() => setIsScannerOpen(true)}
+                title="Escanear Código de Barras (Câmera ou Leitor USB)"
+                className="px-3 py-2.5 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 active:scale-95 border border-emerald-200 rounded-xl flex items-center justify-center gap-1.5 text-xs font-black transition-all shrink-0 cursor-pointer shadow-2xs"
+              >
+                <ScanLine size={16} />
+                <span className="hidden sm:inline">Escanear</span>
+              </button>
+            </div>
+
+            {/* Dica do leitor óptico */}
+            <div className="flex items-center justify-between px-1 text-[11px] text-gray-400">
+              <span className="flex items-center gap-1">
+                <ScanLine size={12} className="text-emerald-600" />
+                Pistola USB ou câmera: bipe o produto para incluir na fila
+              </span>
+              <span className="font-mono text-[10px] bg-gray-100 px-1.5 py-0.5 rounded text-gray-500">
+                Auto-adiciona ao bipar
+              </span>
             </div>
 
             {/* Filtros Secundários */}
@@ -1235,6 +1417,73 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
                   <Printer size={16} />
                   <span>Imprimir Folha</span>
                 </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL SCANNER DE PRODUTO (CONFIGURAÇÃO IDÊNTICA AO MENU DE PRODUTOS) */}
+      {isScannerOpen && (
+        <ProductScanner
+          title="Entrada de Produto"
+          description="Escolha como deseja ler o código de barras do produto."
+          onScan={(code) => {
+            handleBarcodeScanned(code);
+          }}
+          onClose={() => setIsScannerOpen(false)}
+        />
+      )}
+
+      {/* TOAST OPERACIONAL FLUTUANTE (FEEDBACK VISUAL DE LEITURA) */}
+      {scannerToast && (
+        <div className="fixed bottom-6 right-6 z-[10000] max-w-sm w-full animate-in slide-in-from-bottom-5 fade-in duration-200">
+          <div
+            className={`p-4 rounded-2xl shadow-xl border flex items-start gap-3 backdrop-blur-md ${
+              scannerToast.type === 'success'
+                ? 'bg-emerald-900/95 text-white border-emerald-700 shadow-emerald-950/20'
+                : scannerToast.type === 'error'
+                ? 'bg-red-900/95 text-white border-red-700 shadow-red-950/20'
+                : 'bg-gray-900/95 text-white border-gray-700 shadow-gray-950/20'
+            }`}
+          >
+            <div
+              className={`p-2 rounded-xl shrink-0 ${
+                scannerToast.type === 'success'
+                  ? 'bg-emerald-800 text-emerald-300'
+                  : scannerToast.type === 'error'
+                  ? 'bg-red-800 text-red-300'
+                  : 'bg-gray-800 text-gray-300'
+              }`}
+            >
+              {scannerToast.type === 'success' ? (
+                <Check size={18} />
+              ) : scannerToast.type === 'error' ? (
+                <AlertCircle size={18} />
+              ) : (
+                <ScanLine size={18} />
+              )}
+            </div>
+
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-black uppercase tracking-wide">{scannerToast.title}</h4>
+                <button
+                  type="button"
+                  onClick={() => setScannerToast(null)}
+                  className="text-white/60 hover:text-white p-0.5"
+                >
+                  <X size={12} />
+                </button>
+              </div>
+              <p className="text-xs text-white/80 font-medium truncate mt-0.5">
+                {scannerToast.description}
+              </p>
+              <div className="mt-1.5 flex items-center justify-between text-[10px] text-white/60 font-mono">
+                <span>Fila: {totalTagsToPrint} etiqueta(s)</span>
+                <span className="flex items-center gap-1">
+                  <Volume2 size={10} /> Bip ativo
+                </span>
               </div>
             </div>
           </div>

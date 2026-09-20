@@ -5,9 +5,16 @@ import { X, Camera, Keyboard, AlertTriangle, ScanLine } from 'lucide-react';
 interface ProductScannerProps {
     onScan: (decodedText: string) => void;
     onClose: () => void;
+    title?: string;
+    description?: string;
 }
 
-const ProductScanner: React.FC<ProductScannerProps> = ({ onScan, onClose }) => {
+const ProductScanner: React.FC<ProductScannerProps> = ({ 
+    onScan, 
+    onClose,
+    title = 'Entrada de Produto',
+    description = 'Escolha como deseja ler o código de barras do produto.'
+}) => {
     const [mode, setMode] = useState<'keyboard' | 'camera'>('keyboard');
     const [barcodeInput, setBarcodeInput] = useState('');
     const [error, setError] = useState<string>('');
@@ -44,12 +51,16 @@ const ProductScanner: React.FC<ProductScannerProps> = ({ onScan, onClose }) => {
                     return;
                 }
             }
-        } catch (e) {
+        } catch {
             // Some browsers don't support camera permission query
-            console.log("Permission query not supported");
         }
 
         try {
+            // Aguardar render do container no DOM
+            await new Promise(resolve => setTimeout(resolve, 80));
+            const container = document.getElementById("reader");
+            if (!container) return;
+
             const scanner = new Html5Qrcode("reader");
             scannerRef.current = scanner;
 
@@ -59,24 +70,24 @@ const ProductScanner: React.FC<ProductScannerProps> = ({ onScan, onClose }) => {
                 { facingMode: "environment" },
                 config,
                 (decodedText) => {
-                    // Just call onScan. The parent component will typically close the modal,
-                    // triggering the useEffect cleanup which handles stopping the camera safely.
+                    if (navigator.vibrate) {
+                        try { navigator.vibrate(120); } catch { /* ignore */ }
+                    }
                     onScan(decodedText);
                 },
-                (errorMessage) => {
+                () => {
                     // Ignore frame errors
                 }
             );
         } catch (err: any) {
             console.error("Camera error:", err);
-            setError("Não foi possível acessar a câmera. Verifique as permissões ou se há outra aba usando a câmera.");
+            setError("Não foi possível acessar a câmera. Verifique as permissões do navegador ou se outra aba está utilizando a câmera.");
         }
     };
 
     const stopCamera = async () => {
         const scanner = scannerRef.current;
         if (scanner) {
-            // Clear ref immediately to prevent subsequent calls
             scannerRef.current = null;
             try {
                 if (scanner.getState && scanner.getState() === 2) { // 2 = SCANNING
@@ -117,7 +128,7 @@ const ProductScanner: React.FC<ProductScannerProps> = ({ onScan, onClose }) => {
         <div className="fixed inset-0 z-[9999] bg-black/90 flex flex-col items-center justify-center p-4 backdrop-blur-sm animate-in fade-in">
             <button 
                 onClick={onClose}
-                className="absolute top-6 right-6 p-4 bg-white/10 hover:bg-white/20 rounded-full text-white transition-all backdrop-blur-md"
+                className="absolute top-6 right-6 p-4 bg-white/10 hover:bg-white/20 rounded-full text-white transition-all backdrop-blur-md cursor-pointer"
             >
                 <X size={24} />
             </button>
@@ -126,8 +137,8 @@ const ProductScanner: React.FC<ProductScannerProps> = ({ onScan, onClose }) => {
                     <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-sm">
                         <ScanLine size={32} />
                     </div>
-                    <h2 className="text-gray-900 text-xl font-black mb-1">Entrada de Produto</h2>
-                    <p className="text-gray-500 text-sm font-medium">Escolha como deseja ler o código de barras do produto.</p>
+                    <h2 className="text-gray-900 text-xl font-black mb-1">{title}</h2>
+                    <p className="text-gray-500 text-sm font-medium">{description}</p>
                 </div>
                 
                 <div className="p-6 space-y-6">
@@ -135,7 +146,7 @@ const ProductScanner: React.FC<ProductScannerProps> = ({ onScan, onClose }) => {
                     <div className="flex bg-gray-100 p-1.5 rounded-2xl">
                         <button
                             onClick={() => setMode('keyboard')}
-                            className={`flex-1 flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl font-bold text-[13px] sm:text-sm transition-all ${
+                            className={`flex-1 flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl font-bold text-[13px] sm:text-sm transition-all cursor-pointer ${
                                 mode === 'keyboard' 
                                     ? 'bg-white text-gray-900 shadow-sm' 
                                     : 'text-gray-500 hover:text-gray-700'
@@ -146,7 +157,7 @@ const ProductScanner: React.FC<ProductScannerProps> = ({ onScan, onClose }) => {
                         </button>
                         <button
                             onClick={() => setMode('camera')}
-                            className={`flex-1 flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl font-bold text-[13px] sm:text-sm transition-all ${
+                            className={`flex-1 flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl font-bold text-[13px] sm:text-sm transition-all cursor-pointer ${
                                 mode === 'camera' 
                                     ? 'bg-emerald-500 text-white shadow-sm shadow-emerald-500/20' 
                                     : 'text-gray-500 hover:text-gray-700'
@@ -187,7 +198,7 @@ const ProductScanner: React.FC<ProductScannerProps> = ({ onScan, onClose }) => {
                                     }
                                 }}
                                 disabled={!barcodeInput.trim()}
-                                className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-300 disabled:text-gray-500 text-white font-bold py-4 rounded-2xl shadow-md transition-all active:scale-[0.98]"
+                                className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-300 disabled:text-gray-500 text-white font-bold py-4 rounded-2xl shadow-md transition-all active:scale-[0.98] cursor-pointer"
                             >
                                 Buscar Produto
                             </button>
@@ -206,8 +217,15 @@ const ProductScanner: React.FC<ProductScannerProps> = ({ onScan, onClose }) => {
                             )}
 
                             {error ? (
-                                <div className="bg-red-50 border border-red-200 text-red-700 p-4 rounded-2xl text-sm font-bold text-center">
-                                    {error}
+                                <div className="bg-red-50 border border-red-200 text-red-700 p-5 rounded-2xl text-sm font-bold text-center space-y-3">
+                                    <p>{error}</p>
+                                    <button
+                                        type="button"
+                                        onClick={() => startCamera()}
+                                        className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shadow-sm"
+                                    >
+                                        Tentar Novamente
+                                    </button>
                                 </div>
                             ) : (
                                 <div className="bg-black rounded-2xl overflow-hidden relative shadow-inner aspect-square flex items-center justify-center">
