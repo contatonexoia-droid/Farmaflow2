@@ -82,18 +82,21 @@ body {
     margin: 0 !important;
     padding: 0 !important;
     background: white !important;
+    width: 210mm !important;
   }
 
+  /* Oculta tudo que não seja o container oficial de etiquetas */
   body * {
     visibility: hidden;
   }
 
-  #printable-price-tags-sheet,
-  #printable-price-tags-sheet * {
+  #price-tags-print-container,
+  #price-tags-print-container * {
     visibility: visible;
   }
 
-  #printable-price-tags-sheet {
+  #price-tags-print-container {
+    display: block !important;
     position: absolute;
     left: 0;
     top: 0;
@@ -106,6 +109,17 @@ body {
     print-color-adjust: exact !important;
   }
 
+  /* Garante que modais, backdrops e barras sumam completamente */
+  .modal-backdrop,
+  header,
+  nav,
+  aside,
+  button,
+  [class*="print:hidden"],
+  .print-hidden {
+    display: none !important;
+  }
+
   .price-tag-sheet {
     width: 210mm !important;
     height: 297mm !important;
@@ -113,15 +127,21 @@ body {
     min-height: 297mm !important;
     page-break-inside: avoid !important;
     break-inside: avoid !important;
-    page-break-after: always !important;
-    break-after: page !important;
     overflow: hidden !important;
     box-sizing: border-box !important;
     margin: 0 !important;
     background: white !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
   }
 
-  .print-page-wrapper:last-child .price-tag-sheet,
+  /* Trava de quebra de página: apenas se NÃO for a última página */
+  .price-tag-sheet.price-tag-page-break {
+    page-break-after: always !important;
+    break-after: page !important;
+  }
+
+  .price-tag-sheet:last-child,
   .price-tag-sheet:last-of-type {
     page-break-after: auto !important;
     break-after: auto !important;
