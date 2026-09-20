@@ -51,6 +51,7 @@ interface AdminProductManagerProps {
   onProductDelete: (productId: string) => Promise<void> | void;
   onBulkDelete: (productIds: string[]) => Promise<void> | void;
   onTenantUpdate: (config: PharmacyConfig) => Promise<void> | void;
+  onNavigateToPriceTags?: () => void;
 }
 
 const InputLabel = ({ label }: { label: string }) => (
@@ -399,7 +400,8 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
   onProductsStateUpdate,
   onProductDelete,
   onBulkDelete,
-  onTenantUpdate
+  onTenantUpdate,
+  onNavigateToPriceTags
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
@@ -3221,6 +3223,11 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                     <button onClick={() => setIsDepartmentManagerOpen(true)} title="Aqui você pode criar, renomear ou excluir seus departamentos e subcategorias." className="flex-1 md:flex-none px-5 py-4 rounded-xl font-bold text-xs uppercase tracking-wide flex items-center justify-center gap-2 bg-blue-50 text-blue-600 border border-blue-100 text-center leading-tight whitespace-nowrap">
                         <Layers size={18} /> Gerenciar Departamentos
                     </button>
+                    {onNavigateToPriceTags && (
+                        <button onClick={onNavigateToPriceTags} title="Gerar e imprimir etiquetas de gôndola, faixas e cartazes de preços" className="flex-1 md:flex-none px-5 py-4 rounded-xl font-bold text-xs uppercase tracking-wide flex items-center justify-center gap-2 bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 whitespace-nowrap">
+                            <Printer size={18} /> Gerar Etiquetas
+                        </button>
+                    )}
                     <button onClick={handleCreateProduct} className="flex-1 md:flex-none px-8 py-4 rounded-xl font-black text-xs uppercase tracking-wide flex items-center justify-center gap-2 bg-brand text-brand-contrast hover:bg-emerald-700 transition-all shadow-lg w-full md:w-auto md:ml-auto whitespace-nowrap">
                         <Plus size={18} /> Novo Item
                     </button>

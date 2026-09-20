@@ -113,6 +113,7 @@ import {
   Calendar,
   Percent,
   Tag,
+  Printer,
   Users, Inbox,
   TrendingUp,
   Settings,
@@ -185,6 +186,11 @@ const AdminCouponManager = lazy(
 );
 const AdminPromotionManager = lazy(
   () => import("./components/AdminPromotionManager"),
+);
+const AdminPriceTags = lazy(() =>
+  import("./components/AdminPriceTags").then((m) => ({
+    default: m.AdminPriceTags,
+  })),
 );
 const SuperAdminManager = lazy(() =>
   import("./components/SuperAdminManager").then((m) => ({
@@ -577,6 +583,7 @@ const App: React.FC = () => {
     | "products"
     | "promotions"
     | "coupons"
+    | "price-tags"
     | "settings"
     | "manual"
     | "history"
@@ -3618,6 +3625,16 @@ const App: React.FC = () => {
                       </button>
                       <button
                         onClick={() => {
+                          setAdminTab("price-tags");
+                          setIsSidebarOpen(false);
+                        }}
+                        className={`w-full flex items-center gap-3 px-6 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "price-tags" ? "bg-brand text-brand-contrast" : "text-gray-500 hover:bg-gray-50"}`}
+                      >
+                        <Printer size={20} />
+                        Etiquetas & Cartazes
+                      </button>
+                      <button
+                        onClick={() => {
                           setAdminTab("history");
                           setIsSidebarOpen(false);
                         }}
@@ -4016,6 +4033,29 @@ const App: React.FC = () => {
                       </button>
 
                       <button
+                        onClick={() => setAdminTab("price-tags")}
+                        title={isSidebarCollapsed ? "Etiquetas & Cartazes" : undefined}
+                        className={`group relative w-full flex items-center rounded-2xl font-bold text-[14px] transition-all ${
+                          isSidebarCollapsed 
+                            ? "justify-center p-3.5" 
+                            : "gap-3 px-4 py-3.5"
+                        } ${adminTab === "price-tags" ? "bg-brand text-brand-contrast shadow-sm" : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"}`}
+                        style={
+                          adminTab === "price-tags"
+                            ? { backgroundColor: currentTenant.primaryColor }
+                            : {}
+                        }
+                      >
+                        <Printer size={19} className="shrink-0" />
+                        {!isSidebarCollapsed && <span className="truncate">Etiquetas & Cartazes</span>}
+                        {isSidebarCollapsed && (
+                          <div className="fixed left-24 z-50 pointer-events-none hidden group-hover:flex items-center px-3 py-1.5 bg-gray-900 text-white text-xs font-bold rounded-xl shadow-lg whitespace-nowrap animate-in fade-in zoom-in-95 duration-150">
+                            Etiquetas & Cartazes
+                          </div>
+                        )}
+                      </button>
+
+                      <button
                         onClick={() => setAdminTab("history")}
                         title={isSidebarCollapsed ? "Histórico 24h" : undefined}
                         className={`group relative w-full flex items-center rounded-2xl font-bold text-[14px] transition-all ${
@@ -4336,6 +4376,7 @@ const App: React.FC = () => {
                     onProductDelete={handleProductDelete}
                     onBulkDelete={handleBulkProductDelete}
                     onTenantUpdate={handleUpdateConfig}
+                    onNavigateToPriceTags={() => setAdminTab("price-tags")}
                   />
                 )}
                 {adminTab === "promotions" && (
@@ -4367,6 +4408,21 @@ const App: React.FC = () => {
                       products={products}
                       coupons={coupons}
                       onCouponsUpdate={setCoupons}
+                    />
+                  </React.Suspense>
+                )}
+                {adminTab === "price-tags" && (
+                  <React.Suspense
+                    fallback={
+                      <div className="p-8 text-center text-gray-400">
+                        Carregando Gerador de Etiquetas & Cartazeamento...
+                      </div>
+                    }
+                  >
+                    <AdminPriceTags
+                      products={products}
+                      tenant={currentTenant!}
+                      promotions={promotions}
                     />
                   </React.Suspense>
                 )}

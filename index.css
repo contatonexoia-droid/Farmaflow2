@@ -70,3 +70,40 @@ body {
     scrollbar-color: #cbd5e1 #f1f5f9;
   }
 }
+
+/* Regras Estritas de Impressão para Etiquetas de Preço e Cartazeamento */
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 5mm;
+  }
+
+  body * {
+    visibility: hidden;
+  }
+
+  #printable-price-tags-sheet,
+  #printable-price-tags-sheet * {
+    visibility: visible;
+  }
+
+  #printable-price-tags-sheet {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+    background: white !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* Evitar quebras de página no meio de uma etiqueta */
+  .break-inside-avoid {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+}
