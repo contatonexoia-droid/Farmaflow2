@@ -123,9 +123,51 @@ export interface PriceTagItem {
   originalPrice: number;
   promotionalPrice: number;
   showOriginalPrice: boolean;
-  unitMeasurementText: string; // ex: "R$ 0,15 por comprimido" ou "R$ 4,50 / 100ml"
+  unitMeasurementText: string; // ex: "R$ 0,15 por comprimido" ou "Saindo por 12,99"
   customObservations?: string; // ex: "Validade: 11/2026 - Lote: 4920A"
+  expiryDate?: string; // ex: "11/2026"
+  customStoreName?: string;
 }
+
+export const getTagDetails = (item: PriceTagItem) => {
+  const exp = (item.expiryDate || '').trim();
+  const obs = (item.customObservations || '').trim();
+  const unit = (item.unitMeasurementText || '').trim();
+
+  let formattedValidity = '';
+  // Se expiryDate estiver preenchido diretamente
+  if (exp) {
+    formattedValidity = /^(val|venc|validade|vencimento)/i.test(exp)
+      ? exp.toUpperCase()
+      : `VAL: ${exp}`;
+  } else if (obs && (/^(val|venc|validade|vencimento)/i.test(obs) || /^\d{1,2}\/\d{2,4}$/.test(obs))) {
+    formattedValidity = /^(val|venc|validade|vencimento)/i.test(obs)
+      ? obs.toUpperCase()
+      : `VAL: ${obs}`;
+  } else if (unit && (/^(val|venc|validade|vencimento)/i.test(unit) || /^\d{1,2}\/\d{2,4}$/.test(unit))) {
+    formattedValidity = /^(val|venc|validade|vencimento)/i.test(unit)
+      ? unit.toUpperCase()
+      : `VAL: ${unit}`;
+  }
+
+  // Identificar texto auxiliar/fórmula/fracionado
+  let auxText = unit;
+  if (!auxText && obs) {
+    const cleanObs = obs.replace(/^(val|venc|validade|vencimento)[:\s]*/i, '').trim();
+    const cleanVal = formattedValidity.replace(/^(val|venc|validade|vencimento)[:\s]*/i, '').trim();
+    if (cleanObs !== cleanVal) {
+      auxText = obs;
+    }
+  } else if (auxText && obs) {
+    const cleanObs = obs.replace(/^(val|venc|validade|vencimento)[:\s]*/i, '').trim();
+    const cleanVal = formattedValidity.replace(/^(val|venc|validade|vencimento)[:\s]*/i, '').trim();
+    if (cleanObs !== cleanVal && !auxText.includes(obs)) {
+      auxText = `${auxText} • ${obs}`;
+    }
+  }
+
+  return { formattedValidity, auxText };
+};
 
 interface AdminPriceTagsProps {
   products: Product[];
@@ -307,7 +349,8 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
         promotionalPrice: hasPromo ? promo : currentPrice,
         showOriginalPrice: hasPromo,
         unitMeasurementText: '',
-        customObservations: ''
+        customObservations: '',
+        expiryDate: ''
       };
 
       return [newItem, ...prev];
@@ -381,7 +424,8 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
         promotionalPrice: hasPromo ? promo : currentPrice,
         showOriginalPrice: hasPromo,
         unitMeasurementText: '',
-        customObservations: ''
+        customObservations: '',
+        expiryDate: ''
       };
     });
 
@@ -1088,27 +1132,41 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
                       </div>
                     </div>
 
-                    {/* Linha 3: Observações Opcionais (ex: Lote/Validade ou Preço por Unidade) */}
+                    {/* Linha 3: Validade/Lote e Observações/Preço Fracionado */}
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      <input
-                        type="text"
-                        placeholder="Info extra (ex: Venc: 10/2026 - Lote: 301A)"
-                        value={item.customObservations || ''}
-                        onChange={(e) =>
-                          handleUpdateItem(item.id, { customObservations: e.target.value })
-                        }
-                        className="w-full px-2.5 py-1 bg-white border border-gray-200 rounded-lg text-[11px] text-gray-600 focus:border-emerald-500 focus:outline-none"
-                      />
+                      <div>
+                        <label className="text-[10px] font-bold uppercase text-gray-500 block mb-0.5">
+                          Validade / Lote
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="Ex: 11/2026 ou Lote: 4902A"
+                          value={item.expiryDate ?? item.customObservations ?? ''}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            handleUpdateItem(item.id, {
+                              expiryDate: val,
+                              customObservations: val
+                            });
+                          }}
+                          className="w-full px-2.5 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-medium text-gray-800 focus:border-emerald-500 focus:outline-none"
+                        />
+                      </div>
 
-                      <input
-                        type="text"
-                        placeholder="Preço fracionado (ex: R$ 0,25/comp)"
-                        value={item.unitMeasurementText || ''}
-                        onChange={(e) =>
-                          handleUpdateItem(item.id, { unitMeasurementText: e.target.value })
-                        }
-                        className="w-full px-2.5 py-1 bg-white border border-gray-200 rounded-lg text-[11px] text-gray-600 focus:border-emerald-500 focus:outline-none"
-                      />
+                      <div>
+                        <label className="text-[10px] font-bold uppercase text-gray-500 block mb-0.5">
+                          Obs / Fórmula / Fracionado
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="Ex: Saindo por 12,99"
+                          value={item.unitMeasurementText || ''}
+                          onChange={(e) =>
+                            handleUpdateItem(item.id, { unitMeasurementText: e.target.value })
+                          }
+                          className="w-full px-2.5 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-medium text-gray-800 focus:border-emerald-500 focus:outline-none"
+                        />
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -1220,67 +1278,83 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
 
                             // 1. MODELO: GÔNDOLA PADRÃO (30 por folha • Grade 3x10 • h: 26mm)
                             if (activeLayoutKey === 'gondola') {
+                              const { formattedValidity, auxText } = getTagDetails(item);
+                              const storeName = item.customStoreName || (showStoreLogo ? tenant.name : '');
+
                               return (
                                 <div
                                   key={uniqueKey}
-                                  className={`border border-gray-300 rounded-sm p-1 flex flex-col justify-between bg-white text-gray-900 break-inside-avoid relative overflow-hidden ${currentLayoutConfig.tagHeight}`}
+                                  className={`border border-slate-300 rounded-sm p-1 flex flex-col justify-between bg-white text-slate-900 break-inside-avoid relative overflow-hidden ${currentLayoutConfig.tagHeight}`}
                                   style={{ boxSizing: 'border-box' }}
                                 >
-                                  {/* Tarja Superior se tiver badge */}
-                                  {item.badgeText && (
-                                    <div className="absolute top-0 right-0 bg-yellow-400 text-gray-950 font-black text-[7px] px-1 py-0.2 rounded-bl uppercase tracking-wider leading-none">
-                                      {item.badgeText}
-                                    </div>
-                                  )}
-
                                   <div>
-                                    {/* Cabeçalho da Etiqueta: Código e Farmácia */}
-                                    <div className="flex items-center justify-between text-[6.5px] font-bold text-gray-400 mb-0.5 leading-none">
-                                      <span>
-                                        {showInternalCode && item.product.internalCode
-                                          ? `CÓD: ${item.product.internalCode}`
-                                          : ''}
-                                      </span>
-                                      <span className="truncate max-w-[85px]">{showStoreLogo ? tenant.name : ''}</span>
+                                    {/* Cabeçalho da Etiqueta: flexbox limpo com badge sem sobreposição */}
+                                    <div className="flex items-start justify-between gap-1 w-full border-b border-slate-100 pb-0.5 leading-none">
+                                      <div className="flex items-center gap-1 min-w-0 flex-1 overflow-hidden">
+                                        {showInternalCode && item.product.internalCode && (
+                                          <span className="text-[6.5px] font-bold text-slate-400 shrink-0">
+                                            CÓD: {item.product.internalCode}
+                                          </span>
+                                        )}
+                                        {storeName && (
+                                          <span className="text-[7px] text-slate-500 font-medium truncate max-w-[55%]">
+                                            {storeName}
+                                          </span>
+                                        )}
+                                      </div>
+                                      {item.badgeText && (
+                                        <span className="bg-amber-400 text-slate-900 font-extrabold text-[7px] px-1 py-0.5 rounded-sm uppercase tracking-tight whitespace-nowrap shrink-0">
+                                          {item.badgeText}
+                                        </span>
+                                      )}
                                     </div>
 
                                     {/* Nome do Produto */}
-                                    <h4 className="text-[8.5px] font-black leading-[1.15] line-clamp-2 text-gray-950">
+                                    <h4 className="text-[8.5px] font-black leading-[1.15] line-clamp-2 text-slate-950 mt-0.5">
                                       {item.product.name}
                                     </h4>
 
                                     {/* Apresentação / Princípio Ativo */}
-                                    <p className="text-[6.5px] text-gray-500 truncate leading-none mt-0.5">
+                                    <p className="text-[6.5px] text-slate-500 truncate leading-none mt-0.5">
                                       {item.product.activePrinciple || item.product.presentation || item.product.category}
                                     </p>
                                   </div>
 
-                                  {/* Bloco de Preço */}
-                                  <div className="flex items-end justify-between mt-auto pt-0.5 border-t border-gray-100">
-                                    <div>
+                                  {/* Bloco Inferior: Duas Colunas Bem Definidas */}
+                                  <div className="flex items-end justify-between gap-1.5 mt-auto pt-0.5 border-t border-slate-100">
+                                    {/* Coluna Esquerda: Preço principal em destaque e texto auxiliar / validade */}
+                                    <div className="flex flex-col min-w-0 flex-1">
                                       {item.showOriginalPrice && item.originalPrice > item.promotionalPrice && (
-                                        <span className="text-[6.5px] text-gray-400 line-through block leading-none">
+                                        <span className="text-[6.5px] text-slate-400 line-through leading-none">
                                           DE R$ {item.originalPrice.toFixed(2).replace('.', ',')}
                                         </span>
                                       )}
                                       <div className="flex items-baseline gap-0.5 leading-none">
-                                        <span className="text-[7px] font-bold text-gray-500">R$</span>
-                                        <span className="text-[13px] font-black text-gray-950 tracking-tight">
+                                        <span className="text-[7px] font-bold text-slate-500">R$</span>
+                                        <span className="text-[13px] sm:text-[14px] font-black text-slate-950 tracking-tight leading-none">
                                           {item.promotionalPrice.toFixed(2).replace('.', ',')}
                                         </span>
                                       </div>
-                                      {item.unitMeasurementText && (
-                                        <span className="text-[6px] text-gray-500 block leading-none truncate max-w-[80px]">
-                                          {item.unitMeasurementText}
-                                        </span>
-                                      )}
+                                      {/* Linha de observação/fórmula e validade */}
+                                      <div className="flex flex-col gap-[1px] mt-0.5">
+                                        {auxText && (
+                                          <span className="text-[6.5px] font-bold text-slate-700 leading-tight truncate max-w-[105px]" title={auxText}>
+                                            {auxText}
+                                          </span>
+                                        )}
+                                        {formattedValidity && (
+                                          <span className="text-[6.5px] font-extrabold text-red-700 leading-tight tracking-tight truncate max-w-[105px]">
+                                            {formattedValidity}
+                                          </span>
+                                        )}
+                                      </div>
                                     </div>
 
-                                    {/* Código de barras simulado */}
+                                    {/* Coluna Direita: Código de barras vetorial nítido e EAN numérico */}
                                     {showBarcode && (
-                                      <div className="text-right">
-                                        <div className="inline-block tracking-tighter opacity-80 scale-x-90">
-                                          <div className="h-2 flex items-end gap-[1px]">
+                                      <div className="flex flex-col items-end shrink-0 text-right">
+                                        <div className="inline-block tracking-tighter opacity-90 scale-x-95">
+                                          <div className="h-2.5 flex items-end gap-[1px] justify-end">
                                             {[2, 1, 2, 3, 1, 2, 1, 3, 1, 2, 3, 1, 2].map((w, i) => (
                                               <span
                                                 key={i}
@@ -1290,25 +1364,25 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
                                             ))}
                                           </div>
                                         </div>
-                                        <span className="block text-[6px] font-mono text-gray-600 leading-none">
+                                        <span className="block text-[6.5px] font-mono font-bold text-slate-700 leading-none mt-0.5">
                                           {item.product.barcode || item.product.internalCode || '7890000000000'}
                                         </span>
+                                        {showPrintDate && (
+                                          <span className="block text-[5.5px] text-slate-400 leading-none mt-0.5">
+                                            {todayFormatted}
+                                          </span>
+                                        )}
                                       </div>
                                     )}
                                   </div>
-
-                                  {/* Data de Impressão e Rodapé */}
-                                  {showPrintDate && (
-                                    <div className="text-[5.5px] text-gray-400 text-right leading-none mt-0.5">
-                                      {todayFormatted}
-                                    </div>
-                                  )}
                                 </div>
                               );
                             }
 
                             // 2. MODELO: ETIQUETA BAIANA (8 por folha • Grade 2x4 • h: 65mm)
                             if (activeLayoutKey === 'baiana') {
+                              const { formattedValidity, auxText } = getTagDetails(item);
+
                               return (
                                 <div
                                   key={uniqueKey}
@@ -1337,9 +1411,14 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
                                       <p className="text-[8.5px] text-gray-600 mt-0.5 truncate">
                                         {item.product.activePrinciple || item.product.presentation || item.product.category}
                                       </p>
-                                      {item.customObservations && (
-                                        <p className="text-[8px] font-bold text-red-700 mt-0.5 truncate">
-                                          {item.customObservations}
+                                      {formattedValidity && (
+                                        <p className="text-[8px] font-black text-red-700 mt-0.5 truncate">
+                                          {formattedValidity}
+                                        </p>
+                                      )}
+                                      {auxText && (
+                                        <p className="text-[7.5px] font-bold text-gray-700 mt-0.5 truncate">
+                                          {auxText}
                                         </p>
                                       )}
                                     </div>
@@ -1394,6 +1473,8 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
 
                             // 3. MODELO: CARTAZ A5 (2 por folha • Grade 1x2 • h: 135mm)
                             if (activeLayoutKey === 'cartaz_a5') {
+                              const { formattedValidity, auxText } = getTagDetails(item);
+
                               return (
                                 <div
                                   key={uniqueKey}
@@ -1421,9 +1502,14 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
                                     <p className="text-xs font-bold text-gray-600 mt-1">
                                       {item.product.activePrinciple || item.product.presentation || item.product.category}
                                     </p>
-                                    {item.customObservations && (
+                                    {formattedValidity && (
                                       <p className="text-xs font-black text-red-600 mt-0.5">
-                                        {item.customObservations}
+                                        {formattedValidity}
+                                      </p>
+                                    )}
+                                    {auxText && (
+                                      <p className="text-[11px] font-bold text-gray-700 mt-0.5">
+                                        {auxText}
                                       </p>
                                     )}
                                   </div>
@@ -1463,6 +1549,8 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
                             }
 
                             // 4. MODELO: CARTAZ A4 (1 por folha • Grade 1x1 • h: 277mm)
+                            const { formattedValidity, auxText } = getTagDetails(item);
+
                             return (
                               <div
                                 key={uniqueKey}
@@ -1490,9 +1578,14 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
                                   <p className="text-base font-bold text-gray-600 mt-3 max-w-md">
                                     {item.product.activePrinciple || item.product.presentation || item.product.category}
                                   </p>
-                                  {item.customObservations && (
+                                  {formattedValidity && (
                                     <div className="mt-2 px-3 py-1 bg-red-100 text-red-800 rounded-lg text-xs font-black uppercase">
-                                      {item.customObservations}
+                                      {formattedValidity}
+                                    </div>
+                                  )}
+                                  {auxText && (
+                                    <div className="mt-1 text-sm font-bold text-gray-700">
+                                      {auxText}
                                     </div>
                                   )}
                                 </div>
