@@ -14,9 +14,21 @@ import {
   AlertCircle,
   Percent, 
   ScanLine, 
-  Volume2
+  Volume2,
+  History,
+  RotateCcw,
+  Clock,
+  Save
 } from 'lucide-react';
 import ProductScanner from './ProductScanner';
+import { PriceTagBatchesHistoryModal } from './PriceTagBatchesHistoryModal';
+import { 
+  PriceTagBatch,
+  savePriceTagBatch,
+  fetchRecentPriceTagBatches,
+  deletePriceTagBatch,
+  deserializeSnapshotToTagItems
+} from '../services/priceTagBatchService';
 import { Product, PharmacyConfig, PromotionRule } from '../types';
 
 export const TAG_LAYOUTS = {
@@ -1355,17 +1367,91 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
     };
   }, []);
 
+  // Estado e controle do Histórico de Lotes (48h)
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [recentBatches, setRecentBatches] = useState<PriceTagBatch[]>([]);
+  const [isLoadingBatches, setIsLoadingBatches] = useState(false);
+  const [isSavingBatch, setIsSavingBatch] = useState(false);
+
+  const loadBatches = useCallback(async () => {
+    setIsLoadingBatches(true);
+    try {
+      const list = await fetchRecentPriceTagBatches(tenant.id);
+      setRecentBatches(list);
+    } catch (err) {
+      console.warn('[AdminPriceTags] Erro ao carregar histórico de lotes:', err);
+    } finally {
+      setIsLoadingBatches(false);
+    }
+  }, [tenant.id]);
+
+  useEffect(() => {
+    loadBatches();
+  }, [loadBatches]);
+
+  const activeLayoutKey = normalizeLayoutKey(layoutFormat);
+
+  // Salvamento assíncrono do lote atual
+  const handleSaveCurrentBatch = useCallback(async (showNotification: boolean = true) => {
+    if (tagItems.length === 0) return;
+    setIsSavingBatch(true);
+    try {
+      const saved = await savePriceTagBatch(tenant.id, activeLayoutKey, tagItems);
+      if (saved) {
+        setRecentBatches((prev) => [saved, ...prev.filter((b) => b.id !== saved.id)]);
+        if (showNotification) {
+          showToast('Lote de etiquetas salvo no histórico (válido por 48h)', 'success');
+        }
+      }
+    } catch (err) {
+      console.warn('[AdminPriceTags] Erro ao salvar lote:', err);
+    } finally {
+      setIsSavingBatch(false);
+    }
+  }, [tenant.id, activeLayoutKey, tagItems, showToast]);
+
+  // Impressão nativa imediata com persistência em background
   const handlePrint = useCallback(() => {
+    if (tagItems.length > 0) {
+      // Disparo em background sem travar o diálogo window.print()
+      savePriceTagBatch(tenant.id, activeLayoutKey, tagItems)
+        .then((saved) => {
+          if (saved) {
+            setRecentBatches((prev) => [saved, ...prev.filter((b) => b.id !== saved.id)]);
+          }
+        })
+        .catch((err) => {
+          console.warn('[AdminPriceTags] Erro em background ao registrar lote impresso:', err);
+        });
+    }
     window.print();
-  }, []);
+  }, [tagItems, tenant.id, activeLayoutKey]);
+
+  // Reimpressão com 1 clique a partir de um lote do histórico
+  const handleReprintBatch = useCallback((batch: PriceTagBatch) => {
+    const restoredItems = deserializeSnapshotToTagItems(batch.items, products);
+    setTagItems(restoredItems);
+    setLayoutFormat(batch.model);
+    setIsHistoryOpen(false);
+    setIsPreviewOpen(true);
+    playBeep();
+    showToast(`Lote restaurado! ${batch.total_tags} etiquetas carregadas para reimpressão.`, 'success');
+  }, [products, showToast, playBeep]);
+
+  // Exclusão manual de um lote
+  const handleDeleteBatch = useCallback(async (batchId: string) => {
+    const success = await deletePriceTagBatch(batchId, tenant.id);
+    if (success) {
+      setRecentBatches((prev) => prev.filter((b) => b.id !== batchId));
+      showToast('Lote removido do histórico com sucesso.', 'info');
+    }
+  }, [tenant.id, showToast]);
 
   const todayFormatted = useMemo(() => new Date().toLocaleDateString('pt-BR'), []);
 
   const totalTagsToPrint = useMemo(() => {
     return tagItems.reduce((acc, curr) => acc + (Number(curr.quantity) || 1), 0);
   }, [tagItems]);
-
-  const activeLayoutKey = normalizeLayoutKey(layoutFormat);
 
   return (
     <div className="space-y-8 pb-16">
@@ -1385,6 +1471,25 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
+          {/* Botão de Histórico e Reimpressão de Lotes (48h) */}
+          <button
+            type="button"
+            onClick={() => {
+              loadBatches();
+              setIsHistoryOpen(true);
+            }}
+            className="flex items-center gap-2 px-4 py-3 rounded-2xl text-sm font-bold text-gray-700 bg-white hover:bg-gray-50 border border-gray-200 shadow-xs transition-all active:scale-95 cursor-pointer relative"
+            title="Ver lotes gerados nas últimas 48 horas para reimpressão imediata"
+          >
+            <History size={18} className="text-emerald-600" />
+            <span>Histórico / Reimpressão (48h)</span>
+            {recentBatches.length > 0 && (
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-emerald-100 text-emerald-800 border border-emerald-200">
+                {recentBatches.length}
+              </span>
+            )}
+          </button>
+
           <button
             type="button"
             onClick={() => setIsPreviewOpen(true)}
@@ -1777,14 +1882,26 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
               </div>
 
               {tagItems.length > 0 && (
-                <button
-                  type="button"
-                  onClick={handleClearAll}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-red-600 hover:bg-red-50 rounded-xl transition-colors cursor-pointer"
-                >
-                  <Trash2 size={14} />
-                  <span>Limpar Fila</span>
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleSaveCurrentBatch(true)}
+                    disabled={isSavingBatch}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-xl transition-colors cursor-pointer border border-emerald-200 disabled:opacity-50"
+                    title="Salvar lote atual para reimpressão posterior (48h)"
+                  >
+                    <Save size={14} />
+                    <span>{isSavingBatch ? 'Salvando...' : 'Salvar Lote'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleClearAll}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-red-600 hover:bg-red-50 rounded-xl transition-colors cursor-pointer"
+                  >
+                    <Trash2 size={14} />
+                    <span>Limpar Fila</span>
+                  </button>
+                </div>
               )}
             </div>
 
@@ -1825,6 +1942,17 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
         tenant={tenant}
         todayFormatted={todayFormatted}
         onPrint={handlePrint}
+      />
+
+      {/* MODAL DE HISTÓRICO & REIMPRESSÃO DE LOTES (48 HORAS) */}
+      <PriceTagBatchesHistoryModal
+        isOpen={isHistoryOpen}
+        onClose={() => setIsHistoryOpen(false)}
+        batches={recentBatches}
+        isLoading={isLoadingBatches}
+        onRefresh={loadBatches}
+        onReprintBatch={handleReprintBatch}
+        onDeleteBatch={handleDeleteBatch}
       />
 
       {/* MODAL SCANNER DE PRODUTO */}
