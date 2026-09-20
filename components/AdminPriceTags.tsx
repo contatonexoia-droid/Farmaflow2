@@ -1,31 +1,20 @@
-import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useRef, useEffect, useCallback, useDeferredValue } from 'react';
 import { 
   Printer, 
   Search, 
   Tag, 
   Sliders, 
-  CheckSquare, 
-  Square, 
   Trash2, 
   Plus, 
   Minus, 
   Eye, 
-  Sparkles, 
-  Layers, 
   FileText, 
-  RefreshCw, 
   X, 
   Check, 
   AlertCircle,
-  HelpCircle,
-  BarChart2,
-  Calendar,
-  Percent,
-  DollarSign,
-  ScanLine,
-  Camera,
-  Volume2,
-  AlertTriangle
+  Percent, 
+  ScanLine, 
+  Volume2
 } from 'lucide-react';
 import ProductScanner from './ProductScanner';
 import { Product, PharmacyConfig, PromotionRule } from '../types';
@@ -69,12 +58,12 @@ export const normalizeLayoutKey = (format: TagLayoutFormat): TagLayoutKey => {
   return 'gondola';
 };
 
-const getPagePaddingStyle = (key: TagLayoutKey) => {
+export const getPagePaddingStyle = (key: TagLayoutKey) => {
   switch (key) {
     case 'gondola':
       // 10 linhas x 26mm = 260mm + 9 x 2mm gaps = 278mm. Folha A4 tem 297mm.
-      // Margens verticais: 8mm (278mm + 16mm = 294mm < 297mm, trava rigorosa de página única)
-      // Margens horizontais: 6mm (210mm - 12mm margens - 5mm gaps = 193mm / 3 colunas = ~64.3mm por etiqueta)
+      // Margens verticais: 8mm (278mm + 16mm = 294mm < 297mm, trava de página única)
+      // Margens horizontais: 6mm (210mm - 12mm margens - 5mm gaps = 193mm / 3 colunas = ~64.3mm)
       return {
         paddingTop: '8mm',
         paddingBottom: '8mm',
@@ -82,8 +71,6 @@ const getPagePaddingStyle = (key: TagLayoutKey) => {
         paddingRight: '6mm',
       };
     case 'baiana':
-      // 4 linhas x 65mm = 260mm + 3 x 3mm gaps = 269mm. (297 - 269) / 2 = 14mm
-      // 2 colunas: (210mm - 10mm padding - 4mm gap) / 2 = 98mm
       return {
         paddingTop: '14mm',
         paddingBottom: '14mm',
@@ -91,7 +78,6 @@ const getPagePaddingStyle = (key: TagLayoutKey) => {
         paddingRight: '5mm',
       };
     case 'cartaz_a5':
-      // 2 linhas x 135mm = 270mm + 6mm gap = 276mm. (297 - 276) / 2 = 10.5mm
       return {
         paddingTop: '10.5mm',
         paddingBottom: '10.5mm',
@@ -99,13 +85,6 @@ const getPagePaddingStyle = (key: TagLayoutKey) => {
         paddingRight: '8mm',
       };
     case 'cartaz_a4':
-      // 1 cartaz de 277mm em folha de 297mm. (297 - 277) / 2 = 10mm
-      return {
-        paddingTop: '10mm',
-        paddingBottom: '10mm',
-        paddingLeft: '8mm',
-        paddingRight: '8mm',
-      };
     default:
       return {
         paddingTop: '10mm',
@@ -132,16 +111,16 @@ export const parsePrice = (val: number | string | undefined | null, fallback = 0
 };
 
 export interface PriceTagItem {
-  id: string; // product id
+  id: string;
   product: Product;
-  quantity: number; // quantidade de etiquetas a imprimir
+  quantity: number;
   badgeText: string;
   originalPrice: number | string;
   promotionalPrice: number | string;
   showOriginalPrice: boolean;
-  unitMeasurementText: string; // ex: "R$ 0,15 por comprimido" ou "Saindo por 12,99"
-  customObservations?: string; // ex: "Validade: 11/2026 - Lote: 4920A"
-  expiryDate?: string; // ex: "11/2026"
+  unitMeasurementText: string;
+  customObservations?: string;
+  expiryDate?: string;
   customStoreName?: string;
 }
 
@@ -151,7 +130,6 @@ export const getTagDetails = (item: PriceTagItem) => {
   const unit = (item.unitMeasurementText || '').trim();
 
   let formattedValidity = '';
-  // Se expiryDate estiver preenchido diretamente
   if (exp) {
     formattedValidity = /^(val|venc|validade|vencimento)/i.test(exp)
       ? exp.toUpperCase()
@@ -166,7 +144,6 @@ export const getTagDetails = (item: PriceTagItem) => {
       : `VAL: ${unit}`;
   }
 
-  // Identificar texto auxiliar/fórmula/fracionado
   let auxText = unit;
   if (!auxText && obs) {
     const cleanObs = obs.replace(/^(val|venc|validade|vencimento)[:\s]*/i, '').trim();
@@ -194,11 +171,873 @@ export const chunkArray = <T,>(array: T[], size: number): T[][] => {
   return result;
 };
 
-interface AdminPriceTagsProps {
-  products: Product[];
+export interface TagRenderOptions {
+  showBarcode: boolean;
+  showInternalCode: boolean;
+  showPrintDate: boolean;
+  showStoreLogo: boolean;
   tenant: PharmacyConfig;
-  promotions?: PromotionRule[];
+  todayFormatted: string;
 }
+
+// Renderizador sob demanda das etiquetas de impressão
+export const renderTagCard = (
+  item: PriceTagItem,
+  layoutKey: TagLayoutKey,
+  uniqueKey: string,
+  options: TagRenderOptions
+) => {
+  const { showBarcode, showInternalCode, showPrintDate, showStoreLogo, tenant, todayFormatted } = options;
+  const currentLayoutConfig = TAG_LAYOUTS[layoutKey];
+  const { formattedValidity, auxText } = getTagDetails(item);
+  const storeName = item.customStoreName || (showStoreLogo ? tenant.name : '');
+  const origPrice = parsePrice(item.originalPrice, Number(item.product.price) || 0);
+  const promoPrice = parsePrice(item.promotionalPrice, origPrice);
+
+  // 1. MODELO: GÔNDOLA PADRÃO (30 por folha • Grade 3x10 • h: 26mm)
+  if (layoutKey === 'gondola') {
+    return (
+      <div
+        key={uniqueKey}
+        className={`border border-slate-300 rounded-[3px] p-1.5 flex flex-col justify-between bg-white text-slate-900 break-inside-avoid relative overflow-hidden ${currentLayoutConfig.tagHeight}`}
+        style={{ boxSizing: 'border-box' }}
+      >
+        <div>
+          {/* Cabeçalho */}
+          <div className="flex items-start justify-between gap-1 w-full border-b border-slate-100 pb-0.5 leading-none">
+            <div className="flex items-center gap-1 min-w-0 flex-1 overflow-hidden">
+              {showInternalCode && item.product.internalCode && (
+                <span className="text-[6.5px] font-bold text-slate-400 shrink-0">
+                  CÓD: {item.product.internalCode}
+                </span>
+              )}
+              {storeName && (
+                <span className="text-[7px] text-slate-500 font-medium truncate max-w-[55%]">
+                  {storeName}
+                </span>
+              )}
+            </div>
+            {item.badgeText && (
+              <span className="bg-amber-400 text-slate-900 font-extrabold text-[6.5px] px-1 py-0.5 rounded-sm uppercase tracking-tight whitespace-nowrap shrink-0 leading-none">
+                {item.badgeText}
+              </span>
+            )}
+          </div>
+
+          {/* Nome do Produto */}
+          <h4 className="text-[8px] font-black leading-[1.1] line-clamp-2 text-slate-950 mt-0.5">
+            {item.product.name}
+          </h4>
+
+          {/* Apresentação / Princípio Ativo */}
+          <p className="text-[6px] text-slate-500 truncate leading-none mt-0.5">
+            {item.product.activePrinciple || item.product.presentation || item.product.category}
+          </p>
+        </div>
+
+        {/* Bloco Inferior: Preço e Barras */}
+        <div className="flex items-end justify-between gap-1 mt-auto pt-0.5 border-t border-slate-100">
+          <div className="flex flex-col min-w-0 flex-1">
+            {item.showOriginalPrice && origPrice > promoPrice && (
+              <span className="text-[6px] text-slate-400 line-through leading-none">
+                DE R$ {origPrice.toFixed(2).replace('.', ',')}
+              </span>
+            )}
+            <div className="flex items-baseline gap-0.5 leading-none">
+              <span className="text-[6.5px] font-bold text-slate-500">R$</span>
+              <span className="text-[12.5px] font-black text-slate-950 tracking-tight leading-none">
+                {promoPrice.toFixed(2).replace('.', ',')}
+              </span>
+            </div>
+            <div className="flex flex-col gap-[0.5px] mt-0.5">
+              {auxText && (
+                <span className="text-[6px] font-bold text-slate-700 leading-tight truncate max-w-[100px]" title={auxText}>
+                  {auxText}
+                </span>
+              )}
+              {formattedValidity && (
+                <span className="text-[6px] font-extrabold text-red-700 leading-tight tracking-tight truncate max-w-[100px]">
+                  {formattedValidity}
+                </span>
+              )}
+            </div>
+          </div>
+
+          {showBarcode && (
+            <div className="flex flex-col items-end shrink-0 text-right">
+              <div className="inline-block tracking-tighter opacity-90 scale-x-95">
+                <div className="h-2 flex items-end gap-[1px] justify-end">
+                  {[2, 1, 2, 3, 1, 2, 1, 3, 1, 2, 3, 1, 2].map((w, i) => (
+                    <span
+                      key={i}
+                      className="bg-black inline-block"
+                      style={{ width: `${w}px`, height: '100%' }}
+                    />
+                  ))}
+                </div>
+              </div>
+              <span className="block text-[6px] font-mono font-bold text-slate-700 leading-none mt-0.5">
+                {item.product.barcode || item.product.internalCode || '7890000000000'}
+              </span>
+              {showPrintDate && (
+                <span className="block text-[5.5px] text-slate-400 leading-none mt-0.5">
+                  {todayFormatted}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // 2. MODELO: ETIQUETA BAIANA (8 por folha • Grade 2x4 • h: 65mm)
+  if (layoutKey === 'baiana') {
+    return (
+      <div
+        key={uniqueKey}
+        className={`border-2 border-gray-950 rounded-lg overflow-hidden bg-white text-gray-900 break-inside-avoid flex flex-col justify-between ${currentLayoutConfig.tagHeight}`}
+        style={{ boxSizing: 'border-box' }}
+      >
+        <div className="bg-red-600 text-yellow-300 font-black text-center py-1 px-2 text-xs uppercase tracking-wider flex items-center justify-between">
+          <span className="text-[9px] font-bold text-white truncate max-w-[110px]">
+            {showStoreLogo ? tenant.name : 'DROGARIA'}
+          </span>
+          <span className="font-black text-[11px]">
+            {item.badgeText || 'SUPER OFERTA'}
+          </span>
+          <span className="text-[9px] font-mono text-white">
+            {item.product.internalCode || ''}
+          </span>
+        </div>
+
+        <div className="p-2 flex-1 flex flex-col justify-between">
+          <div>
+            <h4 className="text-xs font-black leading-tight text-gray-950 line-clamp-2">
+              {item.product.name}
+            </h4>
+            <p className="text-[8.5px] text-gray-600 mt-0.5 truncate">
+              {item.product.activePrinciple || item.product.presentation || item.product.category}
+            </p>
+            {formattedValidity && (
+              <p className="text-[8px] font-black text-red-700 mt-0.5 truncate">
+                {formattedValidity}
+              </p>
+            )}
+            {auxText && (
+              <p className="text-[7.5px] font-bold text-gray-700 mt-0.5 truncate">
+                {auxText}
+              </p>
+            )}
+          </div>
+
+          <div className="flex items-end justify-between mt-1 pt-1 border-t-2 border-dashed border-gray-200">
+            <div>
+              {item.showOriginalPrice && origPrice > promoPrice && (
+                <span className="text-[9.5px] text-gray-500 line-through font-bold block">
+                  DE: R$ {origPrice.toFixed(2).replace('.', ',')}
+                </span>
+              )}
+              <div className="flex items-baseline gap-1">
+                <span className="text-xs font-black text-red-600">POR R$</span>
+                <span className="text-2xl font-black text-gray-950 tracking-tight leading-none">
+                  {promoPrice.toFixed(2).replace('.', ',')}
+                </span>
+              </div>
+              {item.unitMeasurementText && (
+                <span className="text-[8px] text-gray-500 block font-semibold">
+                  {item.unitMeasurementText}
+                </span>
+              )}
+            </div>
+
+            {showBarcode && (
+              <div className="text-right">
+                <div className="h-3.5 flex items-end gap-[1px] justify-end">
+                  {[2, 1, 3, 1, 4, 1, 2, 3, 1, 2, 4, 1].map((w, i) => (
+                    <span key={i} className="bg-black" style={{ width: `${w}px`, height: '100%' }} />
+                  ))}
+                </div>
+                <span className="text-[8px] font-mono font-bold text-gray-700 block mt-0.5">
+                  {item.product.barcode || item.product.internalCode || '7890000000000'}
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {showPrintDate && (
+          <div className="bg-gray-100 px-2 py-0.5 text-[7.5px] text-gray-500 flex justify-between">
+            <span>Preço válido enquanto durarem os estoques</span>
+            <span>{todayFormatted}</span>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // 3. MODELO: CARTAZ A5 (2 por folha • Grade 1x2 • h: 135mm)
+  if (layoutKey === 'cartaz_a5') {
+    return (
+      <div
+        key={uniqueKey}
+        className={`border-4 border-gray-950 rounded-xl overflow-hidden bg-white text-gray-900 break-inside-avoid flex flex-col justify-between ${currentLayoutConfig.tagHeight}`}
+        style={{ boxSizing: 'border-box' }}
+      >
+        <div className="bg-red-600 text-yellow-300 font-black text-center py-2 px-3 text-base uppercase tracking-wider flex items-center justify-between">
+          <span className="text-xs font-bold text-white">
+            {showStoreLogo ? tenant.name : 'DROGARIA'}
+          </span>
+          <span className="text-lg font-black">
+            {item.badgeText || 'OFERTA ESPECIAL'}
+          </span>
+          <span className="text-xs font-mono text-white">
+            #{item.product.internalCode || ''}
+          </span>
+        </div>
+
+        <div className="p-4 text-center flex-1 flex flex-col justify-center">
+          <h2 className="text-2xl font-black text-gray-950 leading-tight">
+            {item.product.name}
+          </h2>
+          <p className="text-xs font-bold text-gray-600 mt-1">
+            {item.product.activePrinciple || item.product.presentation || item.product.category}
+          </p>
+          {formattedValidity && (
+            <p className="text-xs font-black text-red-600 mt-0.5">
+              {formattedValidity}
+            </p>
+          )}
+          {auxText && (
+            <p className="text-[11px] font-bold text-gray-700 mt-0.5">
+              {auxText}
+            </p>
+          )}
+        </div>
+
+        <div className="bg-yellow-300 p-3 text-center border-t-4 border-gray-950">
+          {item.showOriginalPrice && origPrice > promoPrice && (
+            <div className="text-xs font-black text-gray-700 line-through">
+              DE R$ {origPrice.toFixed(2).replace('.', ',')}
+            </div>
+          )}
+          <div className="flex items-center justify-center gap-2">
+            <span className="text-base font-black text-red-700">POR APENAS R$</span>
+            <span className="text-5xl font-black text-gray-950 tracking-tighter">
+              {promoPrice.toFixed(2).replace('.', ',')}
+            </span>
+          </div>
+          {item.unitMeasurementText && (
+            <span className="text-xs font-bold text-gray-800 block mt-0.5">
+              {item.unitMeasurementText}
+            </span>
+          )}
+        </div>
+
+        <div className="p-1.5 bg-gray-50 flex items-center justify-between text-[9px] text-gray-500 font-bold border-t border-gray-200">
+          <span>{tenant.name} • PDV</span>
+          {showBarcode && (
+            <span className="font-mono">
+              EAN: {item.product.barcode || item.product.internalCode}
+            </span>
+          )}
+          <span>{todayFormatted}</span>
+        </div>
+      </div>
+    );
+  }
+
+  // 4. MODELO: CARTAZ A4 (1 por folha • Grade 1x1 • h: 277mm)
+  return (
+    <div
+      key={uniqueKey}
+      className={`border-8 border-gray-950 rounded-2xl overflow-hidden bg-white text-gray-900 break-inside-avoid flex flex-col justify-between ${currentLayoutConfig.tagHeight}`}
+      style={{ boxSizing: 'border-box' }}
+    >
+      <div className="bg-red-600 text-yellow-300 font-black text-center py-4 px-6 flex items-center justify-between">
+        <span className="text-xl font-black text-white tracking-wide">
+          {showStoreLogo ? tenant.name : 'DROGARIA POPULAR'}
+        </span>
+        <span className="text-3xl font-black uppercase tracking-wider animate-pulse">
+          {item.badgeText || 'SUPER OFERTA IMPERDÍVEL'}
+        </span>
+        <span className="text-lg font-mono text-white">
+          CÓD: {item.product.internalCode || ''}
+        </span>
+      </div>
+
+      <div className="p-8 text-center flex-1 flex flex-col justify-center items-center">
+        <h1 className="text-4xl sm:text-5xl font-black text-gray-950 leading-tight uppercase max-w-lg">
+          {item.product.name}
+        </h1>
+        <p className="text-base font-bold text-gray-600 mt-3 max-w-md">
+          {item.product.activePrinciple || item.product.presentation || item.product.category}
+        </p>
+        {formattedValidity && (
+          <div className="mt-2 px-3 py-1 bg-red-100 text-red-800 rounded-lg text-xs font-black uppercase">
+            {formattedValidity}
+          </div>
+        )}
+        {auxText && (
+          <div className="mt-1 text-sm font-bold text-gray-700">
+            {auxText}
+          </div>
+        )}
+      </div>
+
+      <div className="bg-yellow-300 p-6 text-center border-t-8 border-b-8 border-gray-950">
+        {item.showOriginalPrice && origPrice > promoPrice && (
+          <div className="text-xl font-black text-gray-700 line-through mb-1">
+            DE R$ {origPrice.toFixed(2).replace('.', ',')}
+          </div>
+        )}
+        <div className="flex items-center justify-center gap-3">
+          <span className="text-2xl font-black text-red-700">POR APENAS R$</span>
+          <span className="text-7xl sm:text-8xl font-black text-gray-950 tracking-tighter leading-none">
+            {promoPrice.toFixed(2).replace('.', ',')}
+          </span>
+        </div>
+        {item.unitMeasurementText && (
+          <span className="text-sm font-black text-gray-800 block mt-2">
+            {item.unitMeasurementText}
+          </span>
+        )}
+      </div>
+
+      <div className="p-3 bg-gray-100 flex items-center justify-between text-xs text-gray-600 font-black">
+        <span>{tenant.name} • Ofertas válidas enquanto durarem os estoques</span>
+        {showBarcode && (
+          <span className="font-mono">
+            EAN: {item.product.barcode || item.product.internalCode}
+          </span>
+        )}
+        <span>Impressão: {todayFormatted}</span>
+      </div>
+    </div>
+  );
+};
+
+// ==========================================
+// SUBCOMPONENTES MEMOIZADOS (HIGH PERFORMANCE)
+// ==========================================
+
+// Item do Catálogo de Produtos
+interface CatalogProductItemProps {
+  product: Product;
+  inQueue: boolean;
+  onAdd: (product: Product) => void;
+}
+
+const CatalogProductItem = React.memo<CatalogProductItemProps>(({ product, inQueue, onAdd }) => {
+  const promoPrice = Number(product.promotionalPrice || product.promotional_price || 0);
+  const isPromo = promoPrice > 0 && promoPrice < product.price;
+
+  return (
+    <div
+      className={`p-3 rounded-2xl border transition-all flex items-center justify-between gap-3 ${
+        inQueue
+          ? 'bg-emerald-50/40 border-emerald-200/80 shadow-2xs'
+          : 'bg-white border-gray-100 hover:border-gray-200 hover:shadow-2xs'
+      }`}
+    >
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="text-[11px] font-mono font-bold text-gray-400">
+            {product.internalCode || 'SEM CÓD'}
+          </span>
+          {product.barcode && (
+            <span className="text-[10px] font-mono text-gray-400 bg-gray-50 px-1.5 py-0.5 rounded border border-gray-100">
+              {product.barcode}
+            </span>
+          )}
+          {isPromo && (
+            <span className="text-[10px] font-black uppercase px-1.5 py-0.5 bg-amber-100 text-amber-800 rounded">
+              Oferta
+            </span>
+          )}
+        </div>
+        <h4 className="text-xs font-bold text-gray-900 truncate mt-0.5" title={product.name}>
+          {product.name}
+        </h4>
+        <div className="flex items-baseline gap-2 mt-1">
+          <span className="text-xs font-black text-emerald-700">
+            R$ {(isPromo ? promoPrice : product.price).toFixed(2).replace('.', ',')}
+          </span>
+          {isPromo && (
+            <span className="text-[10px] text-gray-400 line-through">
+              R$ {product.price.toFixed(2).replace('.', ',')}
+            </span>
+          )}
+          {product.manufacturer && (
+            <span className="text-[10px] text-gray-400 truncate">
+              • {product.manufacturer}
+            </span>
+          )}
+        </div>
+      </div>
+
+      <button
+        type="button"
+        onClick={() => onAdd(product)}
+        className={`p-2 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
+          inQueue
+            ? 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm'
+            : 'bg-gray-50 text-gray-700 hover:bg-emerald-50 hover:text-emerald-700 border border-gray-200'
+        }`}
+        title={inQueue ? 'Adicionar mais uma cópia à fila' : 'Adicionar à fila de etiquetas'}
+      >
+        <Plus size={16} />
+      </button>
+    </div>
+  );
+});
+
+// Card de Edição de Item da Fila de Impressão
+interface SelectedTagItemProps {
+  item: PriceTagItem;
+  onUpdate: (id: string, updates: Partial<PriceTagItem>) => void;
+  onRemove: (id: string) => void;
+}
+
+export const SelectedTagItem = React.memo<SelectedTagItemProps>(({ item, onUpdate, onRemove }) => {
+  return (
+    <div className="p-4 rounded-2xl border border-gray-100 bg-gray-50/60 hover:bg-white hover:border-gray-200 transition-all space-y-3 shadow-2xs">
+      {/* Linha 1: Dados do Produto e Controles de Qtd */}
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[11px] font-mono font-black text-emerald-700">
+              #{item.product.internalCode || 'S/C'}
+            </span>
+            {item.product.barcode && (
+              <span className="text-[10px] font-mono text-gray-400 bg-white px-1.5 py-0.5 rounded border border-gray-200">
+                {item.product.barcode}
+              </span>
+            )}
+            <span className="text-[10px] font-bold text-gray-400">
+              {item.product.category}
+            </span>
+          </div>
+          <h4 className="text-sm font-black text-gray-900 truncate mt-0.5">
+            {item.product.name}
+          </h4>
+        </div>
+
+        {/* Controle de Cópias */}
+        <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center bg-white rounded-xl border border-gray-200 p-1 shadow-2xs">
+            <button
+              type="button"
+              onClick={() => onUpdate(item.id, { quantity: Math.max(1, Number(item.quantity) - 1) })}
+              className="p-1 hover:bg-gray-100 rounded-lg text-gray-600 transition-colors cursor-pointer"
+              title="Diminuir quantidade"
+            >
+              <Minus size={13} />
+            </button>
+            <span className="px-2 text-xs font-black text-gray-900 min-w-[24px] text-center">
+              {item.quantity}
+            </span>
+            <button
+              type="button"
+              onClick={() => onUpdate(item.id, { quantity: Number(item.quantity) + 1 })}
+              className="p-1 hover:bg-gray-100 rounded-lg text-gray-600 transition-colors cursor-pointer"
+              title="Aumentar quantidade"
+            >
+              <Plus size={13} />
+            </button>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => onRemove(item.id)}
+            className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors cursor-pointer"
+            title="Remover produto da fila"
+          >
+            <Trash2 size={16} />
+          </button>
+        </div>
+      </div>
+
+      {/* Linha 2: Personalização Rápida (Preço DE/POR e Badge) */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-2 border-t border-gray-200/60">
+        <div>
+          <label className="text-[10px] font-black uppercase text-gray-400 block mb-1">
+            Chamada / Badge
+          </label>
+          <input
+            type="text"
+            placeholder="Ex: OFERTA, VALIDADE..."
+            value={item.badgeText}
+            onChange={(e) => onUpdate(item.id, { badgeText: e.target.value.toUpperCase() })}
+            className="w-full px-2.5 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-bold text-gray-900 focus:border-emerald-500 focus:outline-none"
+          />
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between mb-1">
+            <label className="text-[10px] font-black uppercase text-gray-400">
+              Preço DE (R$)
+            </label>
+            <label className="flex items-center gap-1 text-[10px] text-gray-500 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={item.showOriginalPrice}
+                onChange={(e) => onUpdate(item.id, { showOriginalPrice: e.target.checked })}
+                className="rounded text-emerald-600 w-3 h-3"
+              />
+              <span>Exibir</span>
+            </label>
+          </div>
+          <input
+            type="text"
+            inputMode="decimal"
+            placeholder="0,00"
+            value={item.originalPrice ?? ''}
+            onChange={(e) => {
+              let val = e.target.value;
+              val = val.replace(/[^\d.,]/g, '');
+              val = val.replace(/^0+(?=[1-9])/, '');
+              onUpdate(item.id, { originalPrice: val });
+            }}
+            onBlur={() => {
+              const raw = item.originalPrice;
+              if (raw === '' || raw === null || raw === undefined) {
+                const fallback = Number(item.product.price) || 0;
+                onUpdate(item.id, { originalPrice: fallback });
+              } else {
+                const parsed = parsePrice(raw, Number(item.product.price) || 0);
+                onUpdate(item.id, { originalPrice: parsed });
+              }
+            }}
+            className="w-full px-2.5 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-bold text-gray-900 focus:border-emerald-500 focus:outline-none"
+          />
+        </div>
+
+        <div>
+          <label className="text-[10px] font-black uppercase text-emerald-700 block mb-1">
+            Preço POR (R$)
+          </label>
+          <input
+            type="text"
+            inputMode="decimal"
+            placeholder="0,00"
+            value={item.promotionalPrice ?? ''}
+            onChange={(e) => {
+              let val = e.target.value;
+              val = val.replace(/[^\d.,]/g, '');
+              val = val.replace(/^0+(?=[1-9])/, '');
+              onUpdate(item.id, { promotionalPrice: val });
+            }}
+            onBlur={() => {
+              const raw = item.promotionalPrice;
+              if (raw === '' || raw === null || raw === undefined) {
+                const promoFallback =
+                  Number(item.product.promotionalPrice || item.product.promotional_price) ||
+                  parsePrice(item.originalPrice, Number(item.product.price) || 0);
+                onUpdate(item.id, { promotionalPrice: promoFallback });
+              } else {
+                const fallback = parsePrice(item.originalPrice, Number(item.product.price) || 0);
+                const parsed = parsePrice(raw, fallback);
+                onUpdate(item.id, { promotionalPrice: parsed });
+              }
+            }}
+            className="w-full px-2.5 py-1.5 bg-white border border-emerald-300 rounded-lg text-xs font-black text-emerald-700 focus:border-emerald-500 focus:outline-none"
+          />
+        </div>
+      </div>
+
+      {/* Linha 3: Validade/Lote e Observações/Preço Fracionado */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        <div>
+          <label className="text-[10px] font-bold uppercase text-gray-500 block mb-0.5">
+            Validade / Lote
+          </label>
+          <input
+            type="text"
+            placeholder="Ex: 11/2026 ou Lote: 4902A"
+            value={item.expiryDate ?? item.customObservations ?? ''}
+            onChange={(e) => {
+              const val = e.target.value;
+              onUpdate(item.id, {
+                expiryDate: val,
+                customObservations: val
+              });
+            }}
+            className="w-full px-2.5 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-medium text-gray-800 focus:border-emerald-500 focus:outline-none"
+          />
+        </div>
+
+        <div>
+          <label className="text-[10px] font-bold uppercase text-gray-500 block mb-0.5">
+            Obs / Fórmula / Fracionado
+          </label>
+          <input
+            type="text"
+            placeholder="Ex: Saindo por 12,99"
+            value={item.unitMeasurementText || ''}
+            onChange={(e) => onUpdate(item.id, { unitMeasurementText: e.target.value })}
+            className="w-full px-2.5 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-medium text-gray-800 focus:border-emerald-500 focus:outline-none"
+          />
+        </div>
+      </div>
+    </div>
+  );
+});
+
+// Modal de Pré-Visualização das Folhas A4 (Recalcula páginas e layouts apenas sob demanda)
+interface PrintPreviewModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  tagItems: PriceTagItem[];
+  activeLayoutKey: TagLayoutKey;
+  showBarcode: boolean;
+  showInternalCode: boolean;
+  showPrintDate: boolean;
+  showStoreLogo: boolean;
+  tenant: PharmacyConfig;
+  todayFormatted: string;
+  onPrint: () => void;
+}
+
+export const PrintPreviewModal = React.memo<PrintPreviewModalProps>(({
+  isOpen,
+  onClose,
+  tagItems,
+  activeLayoutKey,
+  showBarcode,
+  showInternalCode,
+  showPrintDate,
+  showStoreLogo,
+  tenant,
+  todayFormatted,
+  onPrint,
+}) => {
+  if (!isOpen) return null;
+
+  const currentLayoutConfig = TAG_LAYOUTS[activeLayoutKey];
+
+  // Expansão e paginação isoladas (não bloqueiam busca nem seleção)
+  const paginatedPages = useMemo(() => {
+    const list: { item: PriceTagItem; index: number }[] = [];
+    tagItems.forEach((item) => {
+      const q = Math.max(1, Number(item.quantity) || 1);
+      for (let i = 0; i < q; i++) {
+        list.push({ item, index: i });
+      }
+    });
+    return chunkArray(list, currentLayoutConfig.itemsPerPage);
+  }, [tagItems, currentLayoutConfig.itemsPerPage]);
+
+  const totalSheets = paginatedPages.length;
+  const pagePadding = getPagePaddingStyle(activeLayoutKey);
+  const tagOptions: TagRenderOptions = {
+    showBarcode,
+    showInternalCode,
+    showPrintDate,
+    showStoreLogo,
+    tenant,
+    todayFormatted,
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-6 bg-gray-950/70 backdrop-blur-xs animate-in fade-in duration-150 print:hidden">
+      <div className="bg-white w-full max-w-5xl max-h-[95vh] rounded-3xl shadow-2xl flex flex-col overflow-hidden border border-gray-100 print:hidden">
+        {/* Topbar do Modal */}
+        <div className="p-4 sm:p-5 border-b border-gray-100 flex items-center justify-between bg-white shrink-0 print:hidden">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center">
+              <Printer size={20} />
+            </div>
+            <div>
+              <h3 className="text-base font-black text-gray-900">
+                Pré-Visualização de Impressão
+              </h3>
+              <p className="text-xs text-gray-400 font-medium">
+                Modelo selecionado:{' '}
+                <strong className="text-gray-700">
+                  {activeLayoutKey === 'gondola' && 'Gôndola Padrão (Grade 3x10 • 30 por folha)'}
+                  {activeLayoutKey === 'baiana' && 'Etiqueta Baiana / Testeira (Grade 2x4 • 8 por folha)'}
+                  {activeLayoutKey === 'cartaz_a5' && 'Cartaz Promocional A5 (Grade 1x2 • 2 por folha)'}
+                  {activeLayoutKey === 'cartaz_a4' && 'Cartaz Vitrine A4 (1 por folha)'}
+                </strong>{' '}
+                • Total de folhas A4: <span className="text-emerald-700 font-bold">{totalSheets} folha(s)</span>
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onPrint}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-black text-white bg-emerald-600 hover:bg-emerald-700 shadow-sm transition-all active:scale-95 cursor-pointer"
+            >
+              <Printer size={15} />
+              <span>Imprimir Agora</span>
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-xl transition-colors cursor-pointer"
+            >
+              <X size={20} />
+            </button>
+          </div>
+        </div>
+
+        {/* Área com as Folhas A4 */}
+        <div className="flex-1 overflow-y-auto p-4 sm:p-8 bg-gray-100/80 custom-scrollbar">
+          <div className="max-w-[210mm] mx-auto space-y-8">
+            {paginatedPages.map((pageItems, pageIdx) => {
+              return (
+                <div key={`preview-page-${pageIdx}`} className="space-y-2">
+                  <div className="flex items-center justify-between text-xs font-bold text-gray-500 px-1">
+                    <span>
+                      Folha {pageIdx + 1} de {totalSheets}
+                      <span className="text-gray-400 font-normal ml-1">
+                        ({pageItems.length} de {currentLayoutConfig.itemsPerPage} posições preenchidas)
+                      </span>
+                    </span>
+                    <span className="text-[11px] font-mono text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-md border border-emerald-100">
+                      {currentLayoutConfig.itemsPerPage} por folha • Anti-Corte
+                    </span>
+                  </div>
+
+                  <div
+                    className="bg-white mx-auto shadow-md border border-gray-200 box-border relative overflow-hidden"
+                    style={{
+                      width: '210mm',
+                      height: '297mm',
+                      maxHeight: '297mm',
+                      minHeight: '297mm',
+                      boxSizing: 'border-box',
+                      overflow: 'hidden',
+                      ...pagePadding,
+                    }}
+                  >
+                    <div className={`grid ${currentLayoutConfig.gridClass} w-full h-full`}>
+                      {pageItems.map(({ item, index: itemRepIndex }, itemIdx) => {
+                        const uniqueKey = `modal-preview-${item.id}-${pageIdx}-${itemIdx}-${itemRepIndex}`;
+                        return renderTagCard(item, activeLayoutKey, uniqueKey, tagOptions);
+                      })}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Rodapé do Modal */}
+        <div className="p-4 bg-gray-50 border-t border-gray-100 flex items-center justify-between shrink-0 print:hidden">
+          <span className="text-xs text-gray-500 font-medium">
+            Pressione <strong>Ctrl + P</strong> ou clique no botão de impressão.
+          </span>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 rounded-xl text-xs font-bold text-gray-600 hover:bg-gray-200 transition-colors cursor-pointer"
+            >
+              Fechar
+            </button>
+            <button
+              type="button"
+              onClick={onPrint}
+              className="flex items-center gap-2 px-6 py-2.5 rounded-xl text-xs font-black text-white bg-emerald-600 hover:bg-emerald-700 shadow-md transition-all active:scale-95 cursor-pointer"
+            >
+              <Printer size={16} />
+              <span>Imprimir Folha</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+});
+
+// Container Oficial de Impressão (Isolado no DOM para disparo nativo @media print)
+interface PrintContainerProps {
+  tagItems: PriceTagItem[];
+  activeLayoutKey: TagLayoutKey;
+  showBarcode: boolean;
+  showInternalCode: boolean;
+  showPrintDate: boolean;
+  showStoreLogo: boolean;
+  tenant: PharmacyConfig;
+  todayFormatted: string;
+}
+
+export const PrintContainer = React.memo<PrintContainerProps>(({
+  tagItems,
+  activeLayoutKey,
+  showBarcode,
+  showInternalCode,
+  showPrintDate,
+  showStoreLogo,
+  tenant,
+  todayFormatted,
+}) => {
+  if (tagItems.length === 0) return null;
+
+  const currentLayoutConfig = TAG_LAYOUTS[activeLayoutKey];
+
+  const paginatedPages = useMemo(() => {
+    const list: { item: PriceTagItem; index: number }[] = [];
+    tagItems.forEach((item) => {
+      const q = Math.max(1, Number(item.quantity) || 1);
+      for (let i = 0; i < q; i++) {
+        list.push({ item, index: i });
+      }
+    });
+    return chunkArray(list, currentLayoutConfig.itemsPerPage);
+  }, [tagItems, currentLayoutConfig.itemsPerPage]);
+
+  const pagePadding = getPagePaddingStyle(activeLayoutKey);
+  const tagOptions: TagRenderOptions = {
+    showBarcode,
+    showInternalCode,
+    showPrintDate,
+    showStoreLogo,
+    tenant,
+    todayFormatted,
+  };
+
+  return (
+    <div id="price-tags-print-container" className="hidden print:block">
+      {paginatedPages.map((pageItems, pageIdx) => {
+        const isLastPage = pageIdx === paginatedPages.length - 1;
+        return (
+          <div
+            key={`print-page-${pageIdx}`}
+            className={`price-tag-sheet ${!isLastPage ? 'price-tag-page-break' : ''}`}
+            style={{
+              width: '210mm',
+              height: '297mm',
+              maxHeight: '297mm',
+              minHeight: '297mm',
+              boxSizing: 'border-box',
+              overflow: 'hidden',
+              ...pagePadding,
+            }}
+          >
+            <div className={`grid ${currentLayoutConfig.gridClass} w-full h-full`}>
+              {pageItems.map(({ item, index: itemRepIndex }, itemIdx) => {
+                const uniqueKey = `print-${activeLayoutKey}-${item.id}-${pageIdx}-${itemIdx}-${itemRepIndex}`;
+                return renderTagCard(item, activeLayoutKey, uniqueKey, tagOptions);
+              })}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+});
+
+// ==========================================
+// COMPONENTE PRINCIPAL
+// ==========================================
+
+const MAX_SEARCH_RESULTS = 30;
 
 const QUICK_BADGES = [
   'SUPER OFERTA',
@@ -211,18 +1050,34 @@ const QUICK_BADGES = [
   'GENÉRICO EM CONTA',
 ];
 
+interface AdminPriceTagsProps {
+  products: Product[];
+  tenant: PharmacyConfig;
+  promotions?: PromotionRule[];
+}
+
 export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
   products,
   tenant,
-  promotions = []
 }) => {
-  // --- Estados de Seleção e Busca de Produtos ---
-  const [searchTerm, setSearchTerm] = useState('');
+  // --- Estados de Busca e Filtros com Debounce e DeferredValue ---
+  const [searchInput, setSearchInput] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const deferredSearch = useDeferredValue(debouncedSearch);
+
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [onlyPromotions, setOnlyPromotions] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  // --- Estados de Escaneamento e Notificações (Feedback Visual e Sonoro) ---
+  // Debounce de 250ms para desacoplar a digitação do filtro pesado de catálogo
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedSearch(searchInput);
+    }, 250);
+    return () => clearTimeout(handler);
+  }, [searchInput]);
+
+  // --- Estados de Escaneamento e Notificações ---
   const [isScannerOpen, setIsScannerOpen] = useState(false);
   const [scannerToast, setScannerToast] = useState<{
     id: number;
@@ -232,7 +1087,7 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
   } | null>(null);
   const toastTimeoutRef = useRef<any>(null);
 
-  // --- Web Audio API para Som de Bip sem dependências externas ---
+  // Web Audio API para Som de Bip
   const playBeep = useCallback((type: 'success' | 'error' = 'success') => {
     try {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
@@ -245,7 +1100,6 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
       gain.connect(ctx.destination);
 
       if (type === 'success') {
-        // Bip agudo e positivo característico de leitor óptico comercial
         osc.type = 'sine';
         osc.frequency.setValueAtTime(1800, ctx.currentTime);
         gain.gain.setValueAtTime(0.15, ctx.currentTime);
@@ -253,7 +1107,6 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
         osc.start(ctx.currentTime);
         osc.stop(ctx.currentTime + 0.12);
       } else {
-        // Bip de erro mais grave duplo
         osc.type = 'sawtooth';
         osc.frequency.setValueAtTime(320, ctx.currentTime);
         gain.gain.setValueAtTime(0.2, ctx.currentTime);
@@ -281,7 +1134,7 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
     }, 3500);
   }, []);
 
-  // --- Lista de Etiquetas na Fila ---
+  // --- Fila de Etiquetas ---
   const [tagItems, setTagItems] = useState<PriceTagItem[]>([]);
 
   // --- Configurações Globais da Etiqueta ---
@@ -290,7 +1143,6 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
   const [showInternalCode, setShowInternalCode] = useState(true);
   const [showPrintDate, setShowPrintDate] = useState(true);
   const [showStoreLogo, setShowStoreLogo] = useState(true);
-  const [showUnitMeasurement, setShowUnitMeasurement] = useState(false);
   const [globalBadge, setGlobalBadge] = useState('');
 
   // --- Modal de Pré-Visualização / Impressão ---
@@ -305,10 +1157,11 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
     return Array.from(set).sort();
   }, [products]);
 
-  // Filtro de produtos do catálogo
+  // Filtro de produtos do catálogo acionado pelo deferredSearch desacoplado
   const filteredCatalog = useMemo(() => {
+    const query = deferredSearch.toLowerCase().trim();
+
     return products.filter((p) => {
-      // Filtro de promoção
       if (onlyPromotions) {
         const hasPromo = 
           (p.promotionalPrice && p.promotionalPrice < p.price) ||
@@ -318,14 +1171,11 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
         if (!hasPromo) return false;
       }
 
-      // Filtro de categoria
       if (selectedCategory !== 'all' && p.category !== selectedCategory) {
         return false;
       }
 
-      // Filtro de busca (Nome, EAN, Código Interno, Princípio Ativo)
-      if (searchTerm.trim()) {
-        const query = searchTerm.toLowerCase().trim();
+      if (query) {
         const matchName = (p.name || '').toLowerCase().includes(query);
         const matchEan = (p.barcode || '').toLowerCase().includes(query);
         const matchCode = (p.internalCode || '').toLowerCase().includes(query);
@@ -336,16 +1186,20 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
 
       return true;
     });
-  }, [products, onlyPromotions, selectedCategory, searchTerm]);
+  }, [products, onlyPromotions, selectedCategory, deferredSearch]);
 
-  // Helper para calcular se item já está na fila
-  const isProductInQueue = (productId: string) => {
-    return tagItems.some((item) => item.id === productId);
-  };
+  // Limite rígido de resultados para máxima fluidez do DOM
+  const visibleProducts = useMemo(() => {
+    return filteredCatalog.slice(0, MAX_SEARCH_RESULTS);
+  }, [filteredCatalog]);
 
-  // Adicionar produto à fila (com suporte a aviso sonoro e toast opcional)
+  // Set O(1) de produtos na fila
+  const tagItemIdsSet = useMemo(() => {
+    return new Set(tagItems.map((item) => item.id));
+  }, [tagItems]);
+
+  // Adicionar produto à fila (memoizado)
   const handleAddProduct = useCallback((product: Product, source: 'manual' | 'scanner' = 'manual') => {
-    let updatedQty = 1;
     let wasAlreadyInQueue = false;
 
     setTagItems((prev) => {
@@ -354,7 +1208,6 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
         wasAlreadyInQueue = true;
         return prev.map((item) => {
           if (item.id === product.id) {
-            updatedQty = item.quantity + 1;
             return { ...item, quantity: item.quantity + 1 };
           }
           return item;
@@ -394,12 +1247,10 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
   // Função para processar código de barras (Leitor Físico USB/Bluetooth ou Câmera)
   const handleBarcodeScanned = useCallback((rawBarcode: string) => {
     const code = rawBarcode.trim();
-    if (!code) return;
+    if (!code) return false;
 
-    // Normalizar removendo espaços
     const cleanCode = code.replace(/\s+/g, '');
 
-    // Busca exata pelo EAN/Barcode, ou Código Interno
     const matchedProduct = products.find((p) => {
       const pBarcode = (p.barcode || '').trim().replace(/\s+/g, '');
       const pInternal = (p.internalCode || '').trim().replace(/\s+/g, '');
@@ -408,9 +1259,9 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
 
     if (matchedProduct) {
       handleAddProduct(matchedProduct, 'scanner');
-      setSearchTerm('');
-      setIsScannerOpen(false); // Fecha o modal após ler com sucesso
-      // Manter foco no campo para o próximo bip do leitor físico
+      setSearchInput('');
+      setDebouncedSearch('');
+      setIsScannerOpen(false);
       setTimeout(() => {
         searchInputRef.current?.focus();
       }, 50);
@@ -422,7 +1273,6 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
         `Nenhum produto encontrado com o código: ${code}`,
         'error'
       );
-      // Manter foco no input para tentar outro ou corrigir
       setTimeout(() => {
         searchInputRef.current?.select();
       }, 50);
@@ -430,9 +1280,9 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
     }
   }, [products, handleAddProduct, playBeep, showToast]);
 
-  // Adicionar todos os filtrados
-  const handleAddAllFiltered = () => {
-    const toAdd = filteredCatalog.filter((p) => !isProductInQueue(p.id));
+  // Adicionar todos os filtrados em lote (memoizado)
+  const handleAddAllFiltered = useCallback(() => {
+    const toAdd = filteredCatalog.filter((p) => !tagItemIdsSet.has(p.id));
     if (toAdd.length === 0) return;
 
     const newItems: PriceTagItem[] = toAdd.map((product) => {
@@ -455,44 +1305,40 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
     });
 
     setTagItems((prev) => [...newItems, ...prev]);
-  };
+  }, [filteredCatalog, tagItemIdsSet, globalBadge]);
 
-  // Remover produto da fila
-  const handleRemoveItem = (id: string) => {
+  // Remover produto da fila (memoizado)
+  const handleRemoveItem = useCallback((id: string) => {
     setTagItems((prev) => prev.filter((item) => item.id !== id));
-  };
+  }, []);
 
-  // Limpar toda a fila
-  const handleClearAll = () => {
-    if (tagItems.length === 0) return;
-    if (confirm('Deseja remover todas as etiquetas selecionadas da fila?')) {
-      setTagItems([]);
-    }
-  };
+  // Limpeza de estado atômica e instantânea da fila
+  const handleClearAll = useCallback(() => {
+    setTagItems([]);
+  }, []);
 
-  // Atualizar campo de um item
-  const handleUpdateItem = (id: string, updates: Partial<PriceTagItem>) => {
+  // Atualizar campo de um item (memoizado)
+  const handleUpdateItem = useCallback((id: string, updates: Partial<PriceTagItem>) => {
     setTagItems((prev) =>
       prev.map((item) => (item.id === id ? { ...item, ...updates } : item))
     );
-  };
+  }, []);
 
   // Aplicar badge em massa
-  const handleApplyGlobalBadge = (badge: string) => {
+  const handleApplyGlobalBadge = useCallback((badge: string) => {
     setGlobalBadge(badge);
     if (tagItems.length > 0) {
       setTagItems((prev) =>
         prev.map((item) => ({ ...item, badgeText: badge }))
       );
     }
-  };
+  }, [tagItems.length]);
 
-  // Tecla de atalho global ou no input (Enter no campo de busca aciona busca rápida por EAN)
+  // Tecla de atalho Enter no campo de busca (EAN ou Código Interno)
   const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
-      const term = searchTerm.trim();
+      const term = searchInput.trim();
       if (term) {
-        // Se for um código de barras / EAN numérico ou código interno exato
         const found = handleBarcodeScanned(term);
         if (found) {
           e.preventDefault();
@@ -501,7 +1347,6 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
     }
   };
 
-  // Limpeza de timeout de notificação ao desmontar
   useEffect(() => {
     return () => {
       if (toastTimeoutRef.current) {
@@ -510,386 +1355,17 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
     };
   }, []);
 
-  // Executar Impressão Nativa do Navegador
-  const handlePrint = () => {
+  const handlePrint = useCallback(() => {
     window.print();
-  };
+  }, []);
 
-  // Data atual formatada para impressão
-  const todayFormatted = new Date().toLocaleDateString('pt-BR');
+  const todayFormatted = useMemo(() => new Date().toLocaleDateString('pt-BR'), []);
 
-  // Quantidade total de etiquetas calculando as repetições
   const totalTagsToPrint = useMemo(() => {
     return tagItems.reduce((acc, curr) => acc + (Number(curr.quantity) || 1), 0);
   }, [tagItems]);
 
-  // Lista expandida com repetição de quantidades para renderização fiel da folha
-  const expandedTagList = useMemo(() => {
-    const list: { item: PriceTagItem; index: number }[] = [];
-    tagItems.forEach((item) => {
-      const q = Math.max(1, item.quantity || 1);
-      for (let i = 0; i < q; i++) {
-        list.push({ item, index: i });
-      }
-    });
-    return list;
-  }, [tagItems]);
-
-  // Modelo ativo normalizado e sua respectiva configuração rígida
   const activeLayoutKey = normalizeLayoutKey(layoutFormat);
-  const currentLayoutConfig = TAG_LAYOUTS[activeLayoutKey];
-
-  // Paginação Rígida Anti-Corte: divide rigorosamente a lista em páginas conforme a capacidade do modelo
-  const paginatedPages = useMemo(() => {
-    const itemsPerPage = currentLayoutConfig.itemsPerPage || 30;
-    return chunkArray(expandedTagList, itemsPerPage);
-  }, [expandedTagList, currentLayoutConfig.itemsPerPage]);
-
-  // Função isolada de renderização da etiqueta: renderiza APENAS o modelo selecionado
-  const renderTagCard = (item: PriceTagItem, layoutKey: TagLayoutKey, uniqueKey: string) => {
-    const { formattedValidity, auxText } = getTagDetails(item);
-    const storeName = item.customStoreName || (showStoreLogo ? tenant.name : '');
-    const origPrice = parsePrice(item.originalPrice, Number(item.product.price) || 0);
-    const promoPrice = parsePrice(item.promotionalPrice, origPrice);
-
-    // 1. MODELO: GÔNDOLA PADRÃO (30 por folha • Grade 3x10 • h: 26mm)
-    if (layoutKey === 'gondola') {
-      return (
-        <div
-          key={uniqueKey}
-          className={`border border-slate-300 rounded-[3px] p-1.5 flex flex-col justify-between bg-white text-slate-900 break-inside-avoid relative overflow-hidden ${currentLayoutConfig.tagHeight}`}
-          style={{ boxSizing: 'border-box' }}
-        >
-          <div>
-            {/* Cabeçalho da Etiqueta: flexbox limpo com badge sem sobreposição */}
-            <div className="flex items-start justify-between gap-1 w-full border-b border-slate-100 pb-0.5 leading-none">
-              <div className="flex items-center gap-1 min-w-0 flex-1 overflow-hidden">
-                {showInternalCode && item.product.internalCode && (
-                  <span className="text-[6.5px] font-bold text-slate-400 shrink-0">
-                    CÓD: {item.product.internalCode}
-                  </span>
-                )}
-                {storeName && (
-                  <span className="text-[7px] text-slate-500 font-medium truncate max-w-[55%]">
-                    {storeName}
-                  </span>
-                )}
-              </div>
-              {item.badgeText && (
-                <span className="bg-amber-400 text-slate-900 font-extrabold text-[6.5px] px-1 py-0.5 rounded-sm uppercase tracking-tight whitespace-nowrap shrink-0 leading-none">
-                  {item.badgeText}
-                </span>
-              )}
-            </div>
-
-            {/* Nome do Produto */}
-            <h4 className="text-[8px] font-black leading-[1.1] line-clamp-2 text-slate-950 mt-0.5">
-              {item.product.name}
-            </h4>
-
-            {/* Apresentação / Princípio Ativo */}
-            <p className="text-[6px] text-slate-500 truncate leading-none mt-0.5">
-              {item.product.activePrinciple || item.product.presentation || item.product.category}
-            </p>
-          </div>
-
-          {/* Bloco Inferior: Duas Colunas Bem Definidas */}
-          <div className="flex items-end justify-between gap-1 mt-auto pt-0.5 border-t border-slate-100">
-            {/* Coluna Esquerda: Preço principal em destaque e texto auxiliar / validade */}
-            <div className="flex flex-col min-w-0 flex-1">
-              {item.showOriginalPrice && origPrice > promoPrice && (
-                <span className="text-[6px] text-slate-400 line-through leading-none">
-                  DE R$ {origPrice.toFixed(2).replace('.', ',')}
-                </span>
-              )}
-              <div className="flex items-baseline gap-0.5 leading-none">
-                <span className="text-[6.5px] font-bold text-slate-500">R$</span>
-                <span className="text-[12.5px] font-black text-slate-950 tracking-tight leading-none">
-                  {promoPrice.toFixed(2).replace('.', ',')}
-                </span>
-              </div>
-              {/* Linha de observação/fórmula e validade */}
-              <div className="flex flex-col gap-[0.5px] mt-0.5">
-                {auxText && (
-                  <span className="text-[6px] font-bold text-slate-700 leading-tight truncate max-w-[100px]" title={auxText}>
-                    {auxText}
-                  </span>
-                )}
-                {formattedValidity && (
-                  <span className="text-[6px] font-extrabold text-red-700 leading-tight tracking-tight truncate max-w-[100px]">
-                    {formattedValidity}
-                  </span>
-                )}
-              </div>
-            </div>
-
-            {/* Coluna Direita: Código de barras vetorial nítido e EAN numérico */}
-            {showBarcode && (
-              <div className="flex flex-col items-end shrink-0 text-right">
-                <div className="inline-block tracking-tighter opacity-90 scale-x-95">
-                  <div className="h-2 flex items-end gap-[1px] justify-end">
-                    {[2, 1, 2, 3, 1, 2, 1, 3, 1, 2, 3, 1, 2].map((w, i) => (
-                      <span
-                        key={i}
-                        className="bg-black inline-block"
-                        style={{ width: `${w}px`, height: '100%' }}
-                      />
-                    ))}
-                  </div>
-                </div>
-                <span className="block text-[6px] font-mono font-bold text-slate-700 leading-none mt-0.5">
-                  {item.product.barcode || item.product.internalCode || '7890000000000'}
-                </span>
-                {showPrintDate && (
-                  <span className="block text-[5.5px] text-slate-400 leading-none mt-0.5">
-                    {todayFormatted}
-                  </span>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-      );
-    }
-
-    // 2. MODELO: ETIQUETA BAIANA (8 por folha • Grade 2x4 • h: 65mm)
-    if (layoutKey === 'baiana') {
-      return (
-        <div
-          key={uniqueKey}
-          className={`border-2 border-gray-950 rounded-lg overflow-hidden bg-white text-gray-900 break-inside-avoid flex flex-col justify-between ${currentLayoutConfig.tagHeight}`}
-          style={{ boxSizing: 'border-box' }}
-        >
-          {/* Tarja Superior Vermelha/Amarela */}
-          <div className="bg-red-600 text-yellow-300 font-black text-center py-1 px-2 text-xs uppercase tracking-wider flex items-center justify-between">
-            <span className="text-[9px] font-bold text-white truncate max-w-[110px]">
-              {showStoreLogo ? tenant.name : 'DROGARIA'}
-            </span>
-            <span className="font-black text-[11px]">
-              {item.badgeText || 'SUPER OFERTA'}
-            </span>
-            <span className="text-[9px] font-mono text-white">
-              {item.product.internalCode || ''}
-            </span>
-          </div>
-
-          {/* Corpo com Nome e Informações */}
-          <div className="p-2 flex-1 flex flex-col justify-between">
-            <div>
-              <h4 className="text-xs font-black leading-tight text-gray-950 line-clamp-2">
-                {item.product.name}
-              </h4>
-              <p className="text-[8.5px] text-gray-600 mt-0.5 truncate">
-                {item.product.activePrinciple || item.product.presentation || item.product.category}
-              </p>
-              {formattedValidity && (
-                <p className="text-[8px] font-black text-red-700 mt-0.5 truncate">
-                  {formattedValidity}
-                </p>
-              )}
-              {auxText && (
-                <p className="text-[7.5px] font-bold text-gray-700 mt-0.5 truncate">
-                  {auxText}
-                </p>
-              )}
-            </div>
-
-            {/* Bloco de Preço Grande DE / POR */}
-            <div className="flex items-end justify-between mt-1 pt-1 border-t-2 border-dashed border-gray-200">
-              <div>
-                {item.showOriginalPrice && origPrice > promoPrice && (
-                  <span className="text-[9.5px] text-gray-500 line-through font-bold block">
-                    DE: R$ {origPrice.toFixed(2).replace('.', ',')}
-                  </span>
-                )}
-                <div className="flex items-baseline gap-1">
-                  <span className="text-xs font-black text-red-600">POR R$</span>
-                  <span className="text-2xl font-black text-gray-950 tracking-tight leading-none">
-                    {promoPrice.toFixed(2).replace('.', ',')}
-                  </span>
-                </div>
-                {item.unitMeasurementText && (
-                  <span className="text-[8px] text-gray-500 block font-semibold">
-                    {item.unitMeasurementText}
-                  </span>
-                )}
-              </div>
-
-              {/* Código de barras */}
-              {showBarcode && (
-                <div className="text-right">
-                  <div className="h-3.5 flex items-end gap-[1px] justify-end">
-                    {[2, 1, 3, 1, 4, 1, 2, 3, 1, 2, 4, 1].map((w, i) => (
-                      <span key={i} className="bg-black" style={{ width: `${w}px`, height: '100%' }} />
-                    ))}
-                  </div>
-                  <span className="text-[8px] font-mono font-bold text-gray-700 block mt-0.5">
-                    {item.product.barcode || item.product.internalCode || '7890000000000'}
-                  </span>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Rodapé da Etiqueta Baiana */}
-          {showPrintDate && (
-            <div className="bg-gray-100 px-2 py-0.5 text-[7.5px] text-gray-500 flex justify-between">
-              <span>Preço válido enquanto durarem os estoques</span>
-              <span>{todayFormatted}</span>
-            </div>
-          )}
-        </div>
-      );
-    }
-
-    // 3. MODELO: CARTAZ A5 (2 por folha • Grade 1x2 • h: 135mm)
-    if (layoutKey === 'cartaz_a5') {
-      return (
-        <div
-          key={uniqueKey}
-          className={`border-4 border-gray-950 rounded-xl overflow-hidden bg-white text-gray-900 break-inside-avoid flex flex-col justify-between ${currentLayoutConfig.tagHeight}`}
-          style={{ boxSizing: 'border-box' }}
-        >
-          {/* Topo de Impacto Promocional */}
-          <div className="bg-red-600 text-yellow-300 font-black text-center py-2 px-3 text-base uppercase tracking-wider flex items-center justify-between">
-            <span className="text-xs font-bold text-white">
-              {showStoreLogo ? tenant.name : 'DROGARIA'}
-            </span>
-            <span className="text-lg font-black">
-              {item.badgeText || 'OFERTA ESPECIAL'}
-            </span>
-            <span className="text-xs font-mono text-white">
-              #{item.product.internalCode || ''}
-            </span>
-          </div>
-
-          {/* Centro: Nome e Detalhes */}
-          <div className="p-4 text-center flex-1 flex flex-col justify-center">
-            <h2 className="text-2xl font-black text-gray-950 leading-tight">
-              {item.product.name}
-            </h2>
-            <p className="text-xs font-bold text-gray-600 mt-1">
-              {item.product.activePrinciple || item.product.presentation || item.product.category}
-            </p>
-            {formattedValidity && (
-              <p className="text-xs font-black text-red-600 mt-0.5">
-                {formattedValidity}
-              </p>
-            )}
-            {auxText && (
-              <p className="text-[11px] font-bold text-gray-700 mt-0.5">
-                {auxText}
-              </p>
-            )}
-          </div>
-
-          {/* Bloco de Preço Gigante */}
-          <div className="bg-yellow-300 p-3 text-center border-t-4 border-gray-950">
-            {item.showOriginalPrice && origPrice > promoPrice && (
-              <div className="text-xs font-black text-gray-700 line-through">
-                DE R$ {origPrice.toFixed(2).replace('.', ',')}
-              </div>
-            )}
-            <div className="flex items-center justify-center gap-2">
-              <span className="text-base font-black text-red-700">POR APENAS R$</span>
-              <span className="text-5xl font-black text-gray-950 tracking-tighter">
-                {promoPrice.toFixed(2).replace('.', ',')}
-              </span>
-            </div>
-            {item.unitMeasurementText && (
-              <span className="text-xs font-bold text-gray-800 block mt-0.5">
-                {item.unitMeasurementText}
-              </span>
-            )}
-          </div>
-
-          {/* Rodapé Informativo */}
-          <div className="p-1.5 bg-gray-50 flex items-center justify-between text-[9px] text-gray-500 font-bold border-t border-gray-200">
-            <span>{tenant.name} • PDV</span>
-            {showBarcode && (
-              <span className="font-mono">
-                EAN: {item.product.barcode || item.product.internalCode}
-              </span>
-            )}
-            <span>{todayFormatted}</span>
-          </div>
-        </div>
-      );
-    }
-
-    // 4. MODELO: CARTAZ A4 (1 por folha • Grade 1x1 • h: 277mm)
-    return (
-      <div
-        key={uniqueKey}
-        className={`border-8 border-gray-950 rounded-2xl overflow-hidden bg-white text-gray-900 break-inside-avoid flex flex-col justify-between ${currentLayoutConfig.tagHeight}`}
-        style={{ boxSizing: 'border-box' }}
-      >
-        {/* Faixa Superior com Logo e Chamada */}
-        <div className="bg-red-600 text-yellow-300 font-black text-center py-4 px-6 flex items-center justify-between">
-          <span className="text-xl font-black text-white tracking-wide">
-            {showStoreLogo ? tenant.name : 'DROGARIA POPULAR'}
-          </span>
-          <span className="text-3xl font-black uppercase tracking-wider animate-pulse">
-            {item.badgeText || 'SUPER OFERTA IMPERDÍVEL'}
-          </span>
-          <span className="text-lg font-mono text-white">
-            CÓD: {item.product.internalCode || ''}
-          </span>
-        </div>
-
-        {/* Nome do Produto com Tipografia Ultra Destacada */}
-        <div className="p-8 text-center flex-1 flex flex-col justify-center items-center">
-          <h1 className="text-4xl sm:text-5xl font-black text-gray-950 leading-tight uppercase max-w-lg">
-            {item.product.name}
-          </h1>
-          <p className="text-base font-bold text-gray-600 mt-3 max-w-md">
-            {item.product.activePrinciple || item.product.presentation || item.product.category}
-          </p>
-          {formattedValidity && (
-            <div className="mt-2 px-3 py-1 bg-red-100 text-red-800 rounded-lg text-xs font-black uppercase">
-              {formattedValidity}
-            </div>
-          )}
-          {auxText && (
-            <div className="mt-1 text-sm font-bold text-gray-700">
-              {auxText}
-            </div>
-          )}
-        </div>
-
-        {/* Bloco de Preço Gigante da Vitrine */}
-        <div className="bg-yellow-300 p-6 text-center border-t-8 border-b-8 border-gray-950">
-          {item.showOriginalPrice && origPrice > promoPrice && (
-            <div className="text-xl font-black text-gray-700 line-through mb-1">
-              DE R$ {origPrice.toFixed(2).replace('.', ',')}
-            </div>
-          )}
-          <div className="flex items-center justify-center gap-3">
-            <span className="text-2xl font-black text-red-700">POR APENAS R$</span>
-            <span className="text-7xl sm:text-8xl font-black text-gray-950 tracking-tighter leading-none">
-              {promoPrice.toFixed(2).replace('.', ',')}
-            </span>
-          </div>
-          {item.unitMeasurementText && (
-            <span className="text-sm font-black text-gray-800 block mt-2">
-              {item.unitMeasurementText}
-            </span>
-          )}
-        </div>
-
-        {/* Rodapé da Vitrine */}
-        <div className="p-3 bg-gray-100 flex items-center justify-between text-xs text-gray-600 font-black">
-          <span>{tenant.name} • Ofertas válidas enquanto durarem os estoques</span>
-          {showBarcode && (
-            <span className="font-mono">
-              EAN: {item.product.barcode || item.product.internalCode}
-            </span>
-          )}
-          <span>Impressão: {todayFormatted}</span>
-        </div>
-      </div>
-    );
-  };
 
   return (
     <div className="space-y-8 pb-16">
@@ -898,14 +1374,13 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
         <div className="space-y-2">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-emerald-50 text-emerald-700 border border-emerald-100">
             <Tag size={14} />
-            Comunicação Visual de Ponto de Venda (PDV)
+            <span>Gerador e Impressão de Etiquetas</span>
           </div>
           <h1 className="text-2xl sm:text-3xl font-black text-gray-900 tracking-tight">
-            Gerador de Etiquetas & Cartazeamento
+            Etiquetas de Preço & Gôndola
           </h1>
-          <p className="text-sm font-medium text-gray-500 max-w-2xl">
-            Crie e imprima etiquetas de gôndola, faixas promocionais e cartazes de ofertas para a sua farmácia.
-            Personalize chamadas ("Validade Próxima", "Super Oferta") e imprima em folha A4 com precisão.
+          <p className="text-sm text-gray-500 max-w-2xl font-medium">
+            Selecione produtos para imprimir folhas A4 padrão varejo farmacêutico com corte milimétrico, chamadas promocionais e códigos de barras nítidos.
           </p>
         </div>
 
@@ -923,7 +1398,7 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
         </div>
       </div>
 
-      {/* GRID PRINCIPAL: 2 COLUNAS (Catálogo à esquerda / Fila e Personalização à direita) */}
+      {/* GRID PRINCIPAL: 2 COLUNAS */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         
         {/* COLUNA 1: CATÁLOGO & SELEÇÃO DE PRODUTOS (5 cols) */}
@@ -939,7 +1414,7 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
               </span>
             </div>
 
-            {/* Campo de Busca e Leitor de Código de Barras (Pistola USB / Câmera) */}
+            {/* Campo de Busca Desacoplado */}
             <div className="flex items-center gap-2">
               <div className="relative flex-1">
                 <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" size={16} />
@@ -947,16 +1422,17 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
                   ref={searchInputRef}
                   type="text"
                   placeholder="Buscar ou bipar EAN / Código com o leitor..."
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
+                  value={searchInput}
+                  onChange={(e) => setSearchInput(e.target.value)}
                   onKeyDown={handleSearchKeyDown}
                   className="w-full pl-10 pr-9 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-semibold text-gray-900 placeholder-gray-400 focus:bg-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/10 focus:outline-none transition-all"
                 />
-                {searchTerm ? (
+                {searchInput ? (
                   <button
                     type="button"
                     onClick={() => {
-                      setSearchTerm('');
+                      setSearchInput('');
+                      setDebouncedSearch('');
                       searchInputRef.current?.focus();
                     }}
                     className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 cursor-pointer"
@@ -975,7 +1451,7 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
                 )}
               </div>
 
-              {/* Botão de Scanner (Abre o Scanner idêntico ao menu de produtos) */}
+              {/* Botão de Scanner de Câmera */}
               <button
                 type="button"
                 onClick={() => setIsScannerOpen(true)}
@@ -991,7 +1467,7 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
             <div className="flex items-center justify-between px-1 text-[11px] text-gray-400">
               <span className="flex items-center gap-1">
                 <ScanLine size={12} className="text-emerald-600" />
-                Pistola USB ou câmera: bipe o produto para incluir na fila
+                Pistola USB ou câmera: bipe para incluir na fila
               </span>
               <span className="font-mono text-[10px] bg-gray-100 px-1.5 py-0.5 rounded text-gray-500">
                 Auto-adiciona ao bipar
@@ -1039,7 +1515,17 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
               </button>
             </div>
 
-            {/* Lista com Rolagem dos Produtos */}
+            {/* Aviso de Limite de Resultados */}
+            {filteredCatalog.length > MAX_SEARCH_RESULTS && (
+              <div className="px-3 py-2 bg-amber-50/80 border border-amber-200/70 rounded-xl text-[11px] font-medium text-amber-800 flex items-center justify-between">
+                <span>Exibindo os primeiros {MAX_SEARCH_RESULTS} resultados (refine a busca se necessário)</span>
+                <span className="font-bold text-amber-900 bg-amber-100 px-1.5 py-0.5 rounded text-[10px]">
+                  {filteredCatalog.length} no total
+                </span>
+              </div>
+            )}
+
+            {/* Lista com Rolagem dos Produtos (Limitada aos primeiros 30 para 60 FPS) */}
             <div className="max-h-[500px] overflow-y-auto space-y-2 pr-1 custom-scrollbar">
               {filteredCatalog.length === 0 ? (
                 <div className="p-8 text-center border-2 border-dashed border-gray-100 rounded-2xl">
@@ -1048,71 +1534,14 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
                   <p className="text-[11px] text-gray-400 mt-0.5">Tente alterar os termos de busca ou filtros.</p>
                 </div>
               ) : (
-                filteredCatalog.map((product) => {
-                  const inQueue = isProductInQueue(product.id);
-                  const promoPrice = Number(product.promotionalPrice || product.promotional_price || 0);
-                  const isPromo = promoPrice > 0 && promoPrice < product.price;
-
-                  return (
-                    <div
-                      key={product.id}
-                      className={`p-3 rounded-2xl border transition-all flex items-center justify-between gap-3 ${
-                        inQueue
-                          ? 'bg-emerald-50/40 border-emerald-200/80 shadow-2xs'
-                          : 'bg-white border-gray-100 hover:border-gray-200 hover:shadow-2xs'
-                      }`}
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="text-[11px] font-mono font-bold text-gray-400">
-                            {product.internalCode || 'SEM CÓD'}
-                          </span>
-                          {product.barcode && (
-                            <span className="text-[10px] font-mono text-gray-400 bg-gray-50 px-1.5 py-0.5 rounded border border-gray-100">
-                              {product.barcode}
-                            </span>
-                          )}
-                          {isPromo && (
-                            <span className="text-[10px] font-black uppercase px-1.5 py-0.5 bg-amber-100 text-amber-800 rounded">
-                              Oferta
-                            </span>
-                          )}
-                        </div>
-                        <h4 className="text-xs font-bold text-gray-900 truncate mt-0.5" title={product.name}>
-                          {product.name}
-                        </h4>
-                        <div className="flex items-baseline gap-2 mt-1">
-                          <span className="text-xs font-black text-emerald-700">
-                            R$ {(isPromo ? promoPrice : product.price).toFixed(2).replace('.', ',')}
-                          </span>
-                          {isPromo && (
-                            <span className="text-[10px] text-gray-400 line-through">
-                              R$ {product.price.toFixed(2).replace('.', ',')}
-                            </span>
-                          )}
-                          {product.manufacturer && (
-                            <span className="text-[10px] text-gray-400 truncate">
-                              • {product.manufacturer}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={() => handleAddProduct(product)}
-                        className={`p-2 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
-                          inQueue
-                            ? 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm'
-                            : 'bg-gray-50 text-gray-700 hover:bg-emerald-50 hover:text-emerald-700 border border-gray-200'
-                        }`}
-                        title={inQueue ? 'Adicionar mais uma cópia à fila' : 'Adicionar à fila de etiquetas'}
-                      >
-                        {inQueue ? <Plus size={16} /> : <Plus size={16} />}
-                      </button>
-                    </div>
-                  );
-                })
+                visibleProducts.map((product) => (
+                  <CatalogProductItem
+                    key={product.id}
+                    product={product}
+                    inQueue={tagItemIdsSet.has(product.id)}
+                    onAdd={handleAddProduct}
+                  />
+                ))
               )}
             </div>
           </div>
@@ -1155,11 +1584,11 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
                   </div>
                   <h4 className="text-xs font-black text-gray-900">Gôndola Padrão</h4>
                   <p className="text-[10px] font-medium text-gray-500 mt-0.5 leading-tight">
-                    30 etiquetas por folha A4 (h: 26mm)
+                    30 por folha A4 com área de corte (h: 26mm)
                   </p>
                 </div>
                 <span className="text-[9px] font-black uppercase text-emerald-700 mt-3 block">
-                  Prateleiras e Gôndolas
+                  Mais Usado na Farmácia
                 </span>
               </button>
 
@@ -1184,15 +1613,15 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
                   </div>
                   <h4 className="text-xs font-black text-gray-900">Etiqueta Baiana</h4>
                   <p className="text-[10px] font-medium text-gray-500 mt-0.5 leading-tight">
-                    8 etiquetas por folha A4 (h: 65mm)
+                    8 por folha A4 (h: 65mm). Destaque em ponta de gôndola.
                   </p>
                 </div>
                 <span className="text-[9px] font-black uppercase text-amber-700 mt-3 block">
-                  Pontas e Destaques
+                  Médio Impacto
                 </span>
               </button>
 
-              {/* Modelo 3: Cartaz A5 */}
+              {/* Modelo 3: Cartaz Promocional A5 */}
               <button
                 type="button"
                 onClick={() => setLayoutFormat('cartaz_a5')}
@@ -1204,10 +1633,10 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
               >
                 <div>
                   <div className="flex items-center justify-between mb-2">
-                    <div className="w-8 h-8 rounded-xl bg-blue-100 text-blue-800 flex items-center justify-center font-black text-xs">
+                    <div className="w-8 h-8 rounded-xl bg-purple-100 text-purple-800 flex items-center justify-center font-black text-xs">
                       2
                     </div>
-                    <span className="text-[10px] font-black uppercase text-blue-700 bg-blue-100/60 px-2 py-0.5 rounded-full">
+                    <span className="text-[10px] font-black uppercase text-purple-700 bg-purple-100/60 px-2 py-0.5 rounded-full">
                       1x2
                     </span>
                   </div>
@@ -1216,12 +1645,12 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
                     2 cartazes por folha A4 (h: 135mm)
                   </p>
                 </div>
-                <span className="text-[9px] font-black uppercase text-blue-700 mt-3 block">
-                  Ilhas e Cestões
+                <span className="text-[9px] font-black uppercase text-purple-700 mt-3 block">
+                  Ilhas & Cestões
                 </span>
               </button>
 
-              {/* Modelo 4: Cartaz A4 */}
+              {/* Modelo 4: Cartaz A4 Inteiro */}
               <button
                 type="button"
                 onClick={() => setLayoutFormat('cartaz_a4')}
@@ -1309,7 +1738,7 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
                   <button
                     type="button"
                     onClick={() => handleApplyGlobalBadge('')}
-                    className="text-[11px] font-bold text-red-600 hover:underline"
+                    className="text-[11px] font-bold text-red-600 hover:underline cursor-pointer"
                   >
                     Limpar Chamadas
                   </button>
@@ -1343,7 +1772,7 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
                   Itens Selecionados para Impressão ({tagItems.length})
                 </h3>
                 <p className="text-xs text-gray-400 font-medium">
-                  Total de {totalTagsToPrint} etiqueta(s) a ser(em) gerada(s).
+                  {totalTagsToPrint} etiqueta(s) serão impressas no total calculando as repetições
                 </p>
               </div>
 
@@ -1370,207 +1799,12 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
             ) : (
               <div className="space-y-3 max-h-[550px] overflow-y-auto pr-1 custom-scrollbar">
                 {tagItems.map((item) => (
-                  <div
+                  <SelectedTagItem
                     key={item.id}
-                    className="p-4 rounded-2xl border border-gray-100 bg-gray-50/60 hover:bg-white hover:border-gray-200 transition-all space-y-3 shadow-2xs"
-                  >
-                    {/* Linha 1: Dados do Produto e Controles de Qtd */}
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-[11px] font-mono font-black text-emerald-700">
-                            #{item.product.internalCode || 'S/C'}
-                          </span>
-                          {item.product.barcode && (
-                            <span className="text-[10px] font-mono text-gray-400 bg-white px-1.5 py-0.5 rounded border border-gray-200">
-                              {item.product.barcode}
-                            </span>
-                          )}
-                          <span className="text-[10px] font-bold text-gray-400">
-                            {item.product.category}
-                          </span>
-                        </div>
-                        <h4 className="text-sm font-black text-gray-900 truncate mt-0.5">
-                          {item.product.name}
-                        </h4>
-                      </div>
-
-                      {/* Controle de Cópias */}
-                      <div className="flex items-center gap-2 shrink-0">
-                        <div className="flex items-center bg-white rounded-xl border border-gray-200 p-1 shadow-2xs">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleUpdateItem(item.id, {
-                                quantity: Math.max(1, item.quantity - 1)
-                              })
-                            }
-                            className="p-1 hover:bg-gray-100 rounded-lg text-gray-600 transition-colors"
-                            title="Diminuir quantidade"
-                          >
-                            <Minus size={13} />
-                          </button>
-                          <span className="px-2 text-xs font-black text-gray-900 min-w-[24px] text-center">
-                            {item.quantity}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleUpdateItem(item.id, {
-                                quantity: item.quantity + 1
-                              })
-                            }
-                            className="p-1 hover:bg-gray-100 rounded-lg text-gray-600 transition-colors"
-                            title="Aumentar quantidade"
-                          >
-                            <Plus size={13} />
-                          </button>
-                        </div>
-
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveItem(item.id)}
-                          className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors cursor-pointer"
-                          title="Remover produto da fila"
-                        >
-                          <Trash2 size={16} />
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Linha 2: Personalização Rápida (Preço DE/POR e Badge) */}
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-2 border-t border-gray-200/60">
-                      <div>
-                        <label className="text-[10px] font-black uppercase text-gray-400 block mb-1">
-                          Chamada / Badge
-                        </label>
-                        <input
-                          type="text"
-                          placeholder="Ex: OFERTA, VALIDADE..."
-                          value={item.badgeText}
-                          onChange={(e) =>
-                            handleUpdateItem(item.id, { badgeText: e.target.value.toUpperCase() })
-                          }
-                          className="w-full px-2.5 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-bold text-gray-900 focus:border-emerald-500 focus:outline-none"
-                        />
-                      </div>
-
-                      <div>
-                        <div className="flex items-center justify-between mb-1">
-                          <label className="text-[10px] font-black uppercase text-gray-400">
-                            Preço DE (R$)
-                          </label>
-                          <label className="flex items-center gap-1 text-[10px] text-gray-500 cursor-pointer">
-                            <input
-                              type="checkbox"
-                              checked={item.showOriginalPrice}
-                              onChange={(e) =>
-                                handleUpdateItem(item.id, { showOriginalPrice: e.target.checked })
-                              }
-                              className="rounded text-emerald-600 w-3 h-3"
-                            />
-                            <span>Exibir</span>
-                          </label>
-                        </div>
-                        <input
-                          type="text"
-                          inputMode="decimal"
-                          placeholder="0,00"
-                          value={item.originalPrice ?? ''}
-                          onChange={(e) => {
-                            let val = e.target.value;
-                            // Permite apenas dígitos, ponto e vírgula
-                            val = val.replace(/[^\d.,]/g, '');
-                            // Remove zero à esquerda se vier seguido de dígito 1 a 9 (preserva 0. e 0,)
-                            val = val.replace(/^0+(?=[1-9])/, '');
-                            handleUpdateItem(item.id, { originalPrice: val });
-                          }}
-                          onBlur={() => {
-                            const raw = item.originalPrice;
-                            if (raw === '' || raw === null || raw === undefined) {
-                              const fallback = Number(item.product.price) || 0;
-                              handleUpdateItem(item.id, { originalPrice: fallback });
-                            } else {
-                              const parsed = parsePrice(raw, Number(item.product.price) || 0);
-                              handleUpdateItem(item.id, { originalPrice: parsed });
-                            }
-                          }}
-                          className="w-full px-2.5 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-bold text-gray-900 focus:border-emerald-500 focus:outline-none"
-                        />
-                      </div>
-
-                      <div>
-                        <label className="text-[10px] font-black uppercase text-emerald-700 block mb-1">
-                          Preço POR (R$)
-                        </label>
-                        <input
-                          type="text"
-                          inputMode="decimal"
-                          placeholder="0,00"
-                          value={item.promotionalPrice ?? ''}
-                          onChange={(e) => {
-                            let val = e.target.value;
-                            // Permite apenas dígitos, ponto e vírgula
-                            val = val.replace(/[^\d.,]/g, '');
-                            // Remove zero à esquerda se vier seguido de dígito 1 a 9 (preserva 0. e 0,)
-                            val = val.replace(/^0+(?=[1-9])/, '');
-                            handleUpdateItem(item.id, { promotionalPrice: val });
-                          }}
-                          onBlur={() => {
-                            const raw = item.promotionalPrice;
-                            if (raw === '' || raw === null || raw === undefined) {
-                              const promoFallback =
-                                Number(item.product.promotionalPrice || item.product.promotional_price) ||
-                                parsePrice(item.originalPrice, Number(item.product.price) || 0);
-                              handleUpdateItem(item.id, { promotionalPrice: promoFallback });
-                            } else {
-                              const fallback = parsePrice(item.originalPrice, Number(item.product.price) || 0);
-                              const parsed = parsePrice(raw, fallback);
-                              handleUpdateItem(item.id, { promotionalPrice: parsed });
-                            }
-                          }}
-                          className="w-full px-2.5 py-1.5 bg-white border border-emerald-300 rounded-lg text-xs font-black text-emerald-700 focus:border-emerald-500 focus:outline-none"
-                        />
-                      </div>
-                    </div>
-
-                    {/* Linha 3: Validade/Lote e Observações/Preço Fracionado */}
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      <div>
-                        <label className="text-[10px] font-bold uppercase text-gray-500 block mb-0.5">
-                          Validade / Lote
-                        </label>
-                        <input
-                          type="text"
-                          placeholder="Ex: 11/2026 ou Lote: 4902A"
-                          value={item.expiryDate ?? item.customObservations ?? ''}
-                          onChange={(e) => {
-                            const val = e.target.value;
-                            handleUpdateItem(item.id, {
-                              expiryDate: val,
-                              customObservations: val
-                            });
-                          }}
-                          className="w-full px-2.5 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-medium text-gray-800 focus:border-emerald-500 focus:outline-none"
-                        />
-                      </div>
-
-                      <div>
-                        <label className="text-[10px] font-bold uppercase text-gray-500 block mb-0.5">
-                          Obs / Fórmula / Fracionado
-                        </label>
-                        <input
-                          type="text"
-                          placeholder="Ex: Saindo por 12,99"
-                          value={item.unitMeasurementText || ''}
-                          onChange={(e) =>
-                            handleUpdateItem(item.id, { unitMeasurementText: e.target.value })
-                          }
-                          className="w-full px-2.5 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-medium text-gray-800 focus:border-emerald-500 focus:outline-none"
-                        />
-                      </div>
-                    </div>
-                  </div>
+                    item={item}
+                    onUpdate={handleUpdateItem}
+                    onRemove={handleRemoveItem}
+                  />
                 ))}
               </div>
             )}
@@ -1578,138 +1812,22 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
         </div>
       </div>
 
-      {/* MODAL DE PRÉ-VISUALIZAÇÃO & IMPRESSÃO */}
-      {isPreviewOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-6 bg-gray-950/70 backdrop-blur-xs animate-in fade-in duration-150 print:hidden">
-          <div className="bg-white w-full max-w-5xl max-h-[95vh] rounded-3xl shadow-2xl flex flex-col overflow-hidden border border-gray-100 print:hidden">
-            {/* Topbar do Modal (Oculto ao Imprimir via CSS) */}
-            <div className="p-4 sm:p-5 border-b border-gray-100 flex items-center justify-between bg-white shrink-0 print:hidden">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center">
-                  <Printer size={20} />
-                </div>
-                <div>
-                  <h3 className="text-base font-black text-gray-900">
-                    Pré-Visualização de Impressão
-                  </h3>
-                  <p className="text-xs text-gray-400 font-medium">
-                    Modelo selecionado:{' '}
-                    <strong className="text-gray-700">
-                      {activeLayoutKey === 'gondola' && 'Gôndola Padrão (Grade 3x10 • 30 por folha)'}
-                      {activeLayoutKey === 'baiana' && 'Etiqueta Baiana / Testeira (Grade 2x4 • 8 por folha)'}
-                      {activeLayoutKey === 'cartaz_a5' && 'Cartaz Promocional A5 (Grade 1x2 • 2 por folha)'}
-                      {activeLayoutKey === 'cartaz_a4' && 'Cartaz Promocional A4 (1 por folha inteira)'}
-                    </strong>{' '}
-                    • {totalTagsToPrint} etiqueta(s) em{' '}
-                    <strong className="text-emerald-700">{paginatedPages.length} folha(s) A4</strong>
-                  </p>
-                </div>
-              </div>
+      {/* MODAL DE PRÉ-VISUALIZAÇÃO & IMPRESSÃO (CARREGADO APENAS QUANDO ABERTO) */}
+      <PrintPreviewModal
+        isOpen={isPreviewOpen}
+        onClose={() => setIsPreviewOpen(false)}
+        tagItems={tagItems}
+        activeLayoutKey={activeLayoutKey}
+        showBarcode={showBarcode}
+        showInternalCode={showInternalCode}
+        showPrintDate={showPrintDate}
+        showStoreLogo={showStoreLogo}
+        tenant={tenant}
+        todayFormatted={todayFormatted}
+        onPrint={handlePrint}
+      />
 
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handlePrint}
-                  className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-black text-white bg-emerald-600 hover:bg-emerald-700 shadow-md transition-all active:scale-95 cursor-pointer"
-                >
-                  <Printer size={16} />
-                  <span>Imprimir Agora</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setIsPreviewOpen(false)}
-                  className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-xl transition-colors cursor-pointer"
-                >
-                  <X size={20} />
-                </button>
-              </div>
-            </div>
-
-            {/* Dica Rápida de Configuração do Navegador */}
-            <div className="px-5 py-2.5 bg-amber-50 border-b border-amber-100 text-xs text-amber-800 flex items-center gap-2 shrink-0 print:hidden">
-              <AlertCircle size={14} className="shrink-0 text-amber-600" />
-              <span>
-                <strong>Dica de Impressão:</strong> Na caixa de diálogo do navegador, defina as margens como{' '}
-                <strong>"Nenhuma"</strong> ou <strong>"Padrão"</strong> e ative a opção{' '}
-                <strong>"Gráficos de segundo plano"</strong> para que as cores de destaque e tarjas saiam nítidas.
-              </span>
-            </div>
-
-            {/* Área de Renderização da Folha / Preview com rolagem (Apenas em tela) */}
-            <div className="flex-1 overflow-y-auto p-4 sm:p-8 bg-gray-100/80 custom-scrollbar print:hidden">
-              <div className="space-y-8 print:hidden">
-                {paginatedPages.map((pageItems, pageIdx) => {
-                  const pagePadding = getPagePaddingStyle(activeLayoutKey);
-                  return (
-                    <div key={`page-${pageIdx}`} className="print-page-wrapper">
-                      {/* Indicador visual de folha na tela (oculto na impressão) */}
-                      <div className="flex items-center justify-between text-xs font-bold text-gray-500 mb-2 px-1 print:hidden max-w-[210mm] mx-auto">
-                        <span className="flex items-center gap-1.5">
-                          <FileText size={14} className="text-emerald-600" />
-                          Folha A4 {pageIdx + 1} de {paginatedPages.length}
-                          <span className="text-gray-400 font-normal ml-1">
-                            ({pageItems.length} de {currentLayoutConfig.itemsPerPage} posições preenchidas)
-                          </span>
-                        </span>
-                        <span className="text-[11px] font-mono text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-md border border-emerald-100">
-                          {currentLayoutConfig.itemsPerPage} por folha • Anti-Corte
-                        </span>
-                      </div>
-
-                      {/* Folha A4 no Preview de Tela */}
-                      <div
-                        className="bg-white mx-auto shadow-md border border-gray-200 box-border relative overflow-hidden"
-                        style={{
-                          width: '210mm',
-                          height: '297mm',
-                          maxHeight: '297mm',
-                          minHeight: '297mm',
-                          boxSizing: 'border-box',
-                          overflow: 'hidden',
-                          ...pagePadding,
-                        }}
-                      >
-                        <div className={`grid ${currentLayoutConfig.gridClass} w-full h-full`}>
-                          {pageItems.map(({ item, index: itemRepIndex }, itemIdx) => {
-                            const uniqueKey = `modal-preview-${item.id}-${pageIdx}-${itemIdx}-${itemRepIndex}`;
-                            return renderTagCard(item, activeLayoutKey, uniqueKey);
-                          })}
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Rodapé do Modal com Botões */}
-            <div className="p-4 bg-gray-50 border-t border-gray-100 flex items-center justify-between shrink-0 print:hidden">
-              <span className="text-xs text-gray-500 font-medium">
-                Pressione <strong>Ctrl + P</strong> ou clique no botão de impressão.
-              </span>
-              <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={() => setIsPreviewOpen(false)}
-                  className="px-4 py-2 rounded-xl text-xs font-bold text-gray-600 hover:bg-gray-200 transition-colors cursor-pointer"
-                >
-                  Fechar
-                </button>
-                <button
-                  type="button"
-                  onClick={handlePrint}
-                  className="flex items-center gap-2 px-6 py-2.5 rounded-xl text-xs font-black text-white bg-emerald-600 hover:bg-emerald-700 shadow-md transition-all active:scale-95 cursor-pointer"
-                >
-                  <Printer size={16} />
-                  <span>Imprimir Folha</span>
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL SCANNER DE PRODUTO (CONFIGURAÇÃO IDÊNTICA AO MENU DE PRODUTOS) */}
+      {/* MODAL SCANNER DE PRODUTO */}
       {isScannerOpen && (
         <ProductScanner
           title="Entrada de Produto"
@@ -1721,7 +1839,7 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
         />
       )}
 
-      {/* TOAST OPERACIONAL FLUTUANTE (FEEDBACK VISUAL DE LEITURA) */}
+      {/* TOAST OPERACIONAL FLUTUANTE */}
       {scannerToast && (
         <div className="fixed bottom-6 right-6 z-[10000] max-w-sm w-full animate-in slide-in-from-bottom-5 fade-in duration-200">
           <div
@@ -1757,7 +1875,7 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
                 <button
                   type="button"
                   onClick={() => setScannerToast(null)}
-                  className="text-white/60 hover:text-white p-0.5"
+                  className="text-white/60 hover:text-white p-0.5 cursor-pointer"
                 >
                   <X size={12} />
                 </button>
@@ -1775,37 +1893,18 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
           </div>
         </div>
       )}
-      {/* CONTAINER EXCLUSIVO E OFICIAL DE IMPRESSÃO (ISOLAMENTO TOTAL) */}
-      {totalTagsToPrint > 0 && (
-        <div id="price-tags-print-container" className="hidden print:block">
-          {paginatedPages.map((pageItems, pageIdx) => {
-            const isLastPage = pageIdx === paginatedPages.length - 1;
-            const pagePadding = getPagePaddingStyle(activeLayoutKey);
-            return (
-              <div
-                key={`print-page-${pageIdx}`}
-                className={`price-tag-sheet ${!isLastPage ? 'price-tag-page-break' : ''}`}
-                style={{
-                  width: '210mm',
-                  height: '297mm',
-                  maxHeight: '297mm',
-                  minHeight: '297mm',
-                  boxSizing: 'border-box',
-                  overflow: 'hidden',
-                  ...pagePadding,
-                }}
-              >
-                <div className={`grid ${currentLayoutConfig.gridClass} w-full h-full`}>
-                  {pageItems.map(({ item, index: itemRepIndex }, itemIdx) => {
-                    const uniqueKey = `print-${activeLayoutKey}-${item.id}-${pageIdx}-${itemIdx}-${itemRepIndex}`;
-                    return renderTagCard(item, activeLayoutKey, uniqueKey);
-                  })}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
+
+      {/* CONTAINER EXCLUSIVO E OFICIAL DE IMPRESSÃO */}
+      <PrintContainer
+        tagItems={tagItems}
+        activeLayoutKey={activeLayoutKey}
+        showBarcode={showBarcode}
+        showInternalCode={showInternalCode}
+        showPrintDate={showPrintDate}
+        showStoreLogo={showStoreLogo}
+        tenant={tenant}
+        todayFormatted={todayFormatted}
+      />
     </div>
   );
 };
