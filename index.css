@@ -81,40 +81,41 @@ body {
   html, body, #root {
     height: auto !important;
     min-height: 100% !important;
-    overflow: visible !important;
-    position: static !important;
     margin: 0 !important;
     padding: 0 !important;
-    background: white !important;
-  }
-
-  /* Oculta tudo que não seja o container oficial de etiquetas */
-  body > *:not(#price-tags-print-container) {
-    display: none !important;
-  }
-
-  #price-tags-print-container {
-    display: block !important;
-    position: static !important;
     overflow: visible !important;
-    width: 100% !important;
-    margin: 0 !important;
-    padding: 0 !important;
-    box-shadow: none !important;
-    background: white !important;
-    -webkit-print-color-adjust: exact !important;
-    print-color-adjust: exact !important;
+    background: #ffffff !important;
   }
 
-  /* Garante que modais, backdrops e barras sumam completamente */
-  .modal-backdrop,
+  /* Oculta tudo na tela durante o print, exceto a área de impressão */
+  .no-print,
   header,
   nav,
   aside,
   button,
+  .modal-backdrop,
+  [role="dialog"] > div:not(#price-tags-print-container),
   [class*="print:hidden"],
   .print-hidden {
     display: none !important;
+  }
+
+  /* Força a exibição nítida do container de etiquetas */
+  #price-tags-print-container {
+    display: block !important;
+    visibility: visible !important;
+    position: static !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    box-shadow: none !important;
+    background: white !important;
+  }
+
+  #price-tags-print-container * {
+    visibility: visible !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
   }
 
   .print-page,

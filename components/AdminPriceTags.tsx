@@ -1027,7 +1027,7 @@ export const PrintContainer = React.memo<PrintContainerProps>(({
   };
 
   return (
-    <div id="price-tags-print-container" className="hidden print:block">
+    <div id="price-tags-print-container" className="hidden print:block w-full">
       {paginatedPages.map((pageItems, pageIdx) => {
         const isLastPage = pageIdx === paginatedPages.length - 1;
         return (
