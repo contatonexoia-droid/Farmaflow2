@@ -53,7 +53,7 @@ export const TAG_LAYOUTS = {
   cartaz_a4: {
     itemsPerPage: 1, // 1 cartaz preenchendo a folha inteira
     gridClass: "grid-cols-1 grid-rows-1",
-    tagHeight: "h-[282mm] max-h-[282mm]",
+    tagHeight: "h-full",
     orientation: "portrait",
   },
 } as const;
@@ -98,10 +98,10 @@ export const getPagePaddingStyle = (key: TagLayoutKey) => {
       };
     case 'cartaz_a4':
       return {
-        paddingTop: '5mm',
-        paddingBottom: '5mm',
-        paddingLeft: '5mm',
-        paddingRight: '5mm',
+        paddingTop: '4mm',
+        paddingBottom: '4mm',
+        paddingLeft: '4mm',
+        paddingRight: '4mm',
       };
     default:
       return {
@@ -465,11 +465,11 @@ export const renderTagCard = (
     );
   }
 
-  // 4. MODELO: CARTAZ A4 (1 por folha • Grade 1x1 • w-full h-[282mm] max-h-[282mm])
+  // 4. MODELO: CARTAZ A4 (1 por folha • Grade 1x1 • w-full h-full com margem de segurança)
   return (
     <div
       key={uniqueKey}
-      className="w-full h-[282mm] max-h-[282mm] border-[3px] border-black rounded-lg overflow-hidden bg-white text-gray-900 break-inside-avoid flex flex-col justify-between"
+      className="w-full h-full border-[3px] border-black rounded-lg overflow-hidden bg-white text-gray-900 break-inside-avoid flex flex-col justify-between"
       style={{ boxSizing: 'border-box' }}
     >
       {/* Cabeçalho Vermelho: Altura fixa h-[38mm] */}
@@ -1033,14 +1033,14 @@ export const PrintContainer = React.memo<PrintContainerProps>(({
         return (
           <div
             key={`print-page-${pageIdx}`}
-            className={`print-page price-tag-sheet w-[210mm] h-[296mm] max-h-[296mm] mx-auto bg-white overflow-hidden ${
+            className={`print-page price-tag-sheet mx-auto bg-white box-border flex flex-col justify-between overflow-hidden ${
               !isLastPage ? 'page-break-after-always break-after-page' : ''
             }`}
             style={{
-              width: '210mm',
-              height: '296mm',
-              maxHeight: '296mm',
-              minHeight: '296mm',
+              width: '200mm',
+              height: '285mm',
+              maxHeight: '285mm',
+              minHeight: '285mm',
               boxSizing: 'border-box',
               overflow: 'hidden',
               ...pagePadding,
