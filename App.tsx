@@ -29,6 +29,7 @@ import {
   checkProductMatchesRule,
   getVariableCombosForProduct,
   VariableComboRequirement,
+  getProductVolumePromotionInfo,
 } from "./types";
 
 import { Navbar } from "./components/Navbar";
@@ -1527,6 +1528,11 @@ const App: React.FC = () => {
       return checkProductMatchesRule(p, selectedProduct, matrizProducts, currentTenant?.id);
     });
   }, [selectedProduct, promotions, activePromoIds, matrizProducts, currentTenant?.id]);
+
+  const volumePromoForSelected = useMemo(() => {
+    if (!selectedProduct) return null;
+    return getProductVolumePromotionInfo(selectedProduct, promotions);
+  }, [selectedProduct, promotions]);
 
   // moved isMedicine logic to root level of component or file
   const normalize = (s: string) =>
@@ -3104,27 +3110,37 @@ const App: React.FC = () => {
     product: Product,
     isMainProduct: boolean = false,
     showGlobalToast: boolean = true,
+    quantityToAdd: number = 1,
   ) => {
     if (product.stock <= 0) return alert("Produto esgotado!");
+    const qty = Math.max(1, quantityToAdd);
     setCart((prev) => {
       const existing = prev.find((i) => i.id === product.id);
       if (existing) {
-        if (existing.quantity >= product.stock) {
+        const targetQty = existing.quantity + qty;
+        if (targetQty > product.stock) {
           alert("Quantidade máxima em estoque atingida.");
-          return prev;
+          return prev.map((i) =>
+            i.id === product.id ? { ...i, quantity: product.stock } : i,
+          );
         }
         return prev.map((i) =>
-          i.id === product.id ? { ...i, quantity: i.quantity + 1 } : i,
+          i.id === product.id ? { ...i, quantity: targetQty } : i,
         );
       }
-      return [...prev, { ...product, quantity: 1 }];
+      const initialQty = Math.min(qty, product.stock);
+      return [...prev, { ...product, quantity: initialQty }];
     });
 
     if (isMainProduct) {
       setShowAddedFeedback(true);
       setTimeout(() => setShowAddedFeedback(false), 2000);
     } else if (showGlobalToast) {
-      setGlobalToast("Produto adicionado ao carrinho!");
+      setGlobalToast(
+        qty > 1
+          ? `${qty} unidades adicionadas ao carrinho!`
+          : "Produto adicionado ao carrinho!"
+      );
       setTimeout(() => setGlobalToast(null), 2000);
     }
   };
@@ -4651,78 +4667,6 @@ const App: React.FC = () => {
                     )}
                   </div>
 
-                  {selectedProduct.promotionType !== "NONE" && (
-                    <div className="mb-6 animate-in slide-in-from-left duration-500">
-                      {selectedProduct.promotionType === "BUY_X_PAY_Y" ? (
-                        <div className="bg-red-600 p-5 rounded-3xl md:rounded-[2rem] text-white shadow-xl shadow-red-200 flex items-center gap-5 border border-red-500 animate-pulse">
-                          <div className="w-14 h-14 bg-white/20 rounded-2xl flex items-center justify-center shrink-0 border border-white/20">
-                            <Layers size={30} className="text-white" />
-                          </div>
-                          <div className="flex-1">
-                            <h4 className="text-lg font-black leading-none mb-1 uppercase tracking-tight">
-                              PROMOÇÃO: Leve {selectedProduct.buyX}, Pague{" "}
-                              {selectedProduct.payY}
-                            </h4>
-                            <p className="text-[11px] font-bold text-red-100 uppercase tracking-wider">
-                              Adicione pelo menos {selectedProduct.buyX}{" "}
-                              unidades ao seu carrinho para ativar o desconto
-                              automático de kit!
-                            </p>
-                          </div>
-                        </div>
-                      ) : selectedProduct.promotionType ===
-                        "DISCOUNT_ON_QTY" ? (
-                        <div className="bg-red-600 p-5 rounded-3xl md:rounded-[2rem] text-white shadow-xl shadow-red-200 flex items-center gap-5 border border-red-500 animate-pulse">
-                          <div className="w-14 h-14 bg-white/20 rounded-2xl flex items-center justify-center shrink-0 border border-white/20">
-                            <Percent size={30} className="text-white" />
-                          </div>
-                          <div className="flex-1">
-                            <h4 className="text-lg font-black leading-none mb-1 uppercase tracking-tight">
-                              DESCONTO PROGRESSIVO
-                            </h4>
-                            <p className="text-[11px] font-bold text-red-100 uppercase tracking-wider">
-                              Compre {selectedProduct.discountQtyThreshold} ou
-                              mais e ganhe{" "}
-                              {selectedProduct.discountQtyPercentage}% de
-                              desconto em cada unidade!
-                            </p>
-                          </div>
-                        </div>
-                      ) : (selectedProduct.originalPrice &&
-                        selectedProduct.originalPrice >
-                          (selectedProduct.promotionalPrice && selectedProduct.promotionalPrice > 0 ? selectedProduct.promotionalPrice : selectedProduct.price)) ? (
-                        <div className="bg-red-600 p-5 rounded-3xl md:rounded-[2rem] text-white shadow-xl shadow-red-200 flex items-center gap-5 border border-red-500">
-                          <div className="w-14 h-14 bg-white/20 rounded-2xl flex items-center justify-center shrink-0 border border-white/20">
-                            <TrendingDown
-                              size={30}
-                              className="text-white animate-pulse"
-                            />
-                          </div>
-                          <div className="flex-1">
-                            <h4 className="text-lg font-black leading-none mb-1 uppercase tracking-tight">
-                              Oferta Especial de Desconto
-                            </h4>
-                            <p className="text-[11px] font-bold text-red-100 uppercase tracking-wider">
-                              Economize R${" "}
-                              {(
-                                selectedProduct.originalPrice -
-                                (selectedProduct.promotionalPrice && selectedProduct.promotionalPrice > 0 ? selectedProduct.promotionalPrice : selectedProduct.price)
-                              ).toFixed(2)}{" "}
-                              comprando agora! (
-                              {Math.round(
-                                ((selectedProduct.originalPrice -
-                                  (selectedProduct.promotionalPrice && selectedProduct.promotionalPrice > 0 ? selectedProduct.promotionalPrice : selectedProduct.price)) /
-                                  selectedProduct.originalPrice) *
-                                  100,
-                              )}
-                              % de desconto aplicado)
-                            </p>
-                          </div>
-                        </div>
-                      ) : null}
-                    </div>
-                  )}
-
                   {variableCombosForSelected.map((comboReq) => (
                     <div
                       key={comboReq.promo.id}
@@ -4832,41 +4776,60 @@ const App: React.FC = () => {
                     </div>
                   ))}
 
-                  {activePromotionForSelected && (
+                  {volumePromoForSelected ? (
+                    <div className="mb-6 animate-in slide-in-from-left duration-500">
+                      <div className="bg-gradient-to-r from-red-600 via-rose-600 to-amber-600 p-5 rounded-3xl md:rounded-[2rem] text-white shadow-xl shadow-red-200 border border-red-500">
+                        <div className="flex items-center gap-4">
+                          <div className="w-14 h-14 bg-white/20 rounded-2xl flex items-center justify-center shrink-0 border border-white/20">
+                            <Layers size={30} className="text-white" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <span className="text-[10px] font-black uppercase tracking-widest bg-white/20 px-2 py-0.5 rounded-full inline-block mb-1">
+                              PROMOÇÃO CONDICIONAL DE VOLUME
+                            </span>
+                            <h4 className="text-lg font-black leading-none mb-1 uppercase tracking-tight">
+                              {volumePromoForSelected.badgeText}
+                            </h4>
+                            <p className="text-xs font-medium text-red-50 leading-snug">
+                              {volumePromoForSelected.modalDetailText}
+                            </p>
+                          </div>
+                        </div>
+
+                        {selectedProduct.stock >= volumePromoForSelected.minQty && (
+                          <button
+                            onClick={() => {
+                              addToCart(selectedProduct, true, false, volumePromoForSelected.minQty);
+                            }}
+                            className="mt-4 w-full bg-white text-red-700 hover:bg-red-50 active:scale-[0.98] transition-all font-black text-xs md:text-sm py-3 px-4 rounded-2xl flex items-center justify-center gap-2 shadow-lg cursor-pointer"
+                          >
+                            <ShoppingBag size={18} />
+                            {volumePromoForSelected.quickAddLabel}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ) : activePromotionForSelected ? (
                     <div className="mb-6 animate-in slide-in-from-left duration-500">
                       <div className="bg-red-600 p-5 rounded-3xl md:rounded-[2rem] text-white shadow-xl shadow-red-200 flex items-center gap-5 border border-red-500 animate-pulse">
                         <div className="w-14 h-14 bg-white/20 rounded-2xl flex items-center justify-center shrink-0 border border-white/20">
-                          {activePromotionForSelected.type === "BUY_X_PAY_Y" ? (
-                            <Layers size={30} className="text-white" />
-                          ) : (
-                            <Percent size={30} className="text-white" />
-                          )}
+                          <Percent size={30} className="text-white" />
                         </div>
                         <div className="flex-1">
                           <h4 className="text-lg font-black leading-none mb-1 uppercase tracking-tight">
                             {activePromotionForSelected.name}
                           </h4>
                           <p className="text-[11px] font-bold text-red-100 uppercase tracking-wider">
-                            {activePromotionForSelected.type === "BUY_X_PAY_Y"
-                              ? `Leve ${activePromotionForSelected.buyX}, Pague ${activePromotionForSelected.payY}! Adicione ${activePromotionForSelected.buyX} unidades para ativar o desconto.`
-                              : activePromotionForSelected.type ===
-                                    "FIXED_COMBO" ||
-                                  (activePromotionForSelected.type ===
-                                    "LIGHTNING_OFFER" &&
-                                    activePromotionForSelected.buyX &&
-                                    activePromotionForSelected.payY)
-                                ? `${activePromotionForSelected.type === "LIGHTNING_OFFER" ? "OFERTA RELÂMPAGO" : "COMBO ESPECIAL"}: ${activePromotionForSelected.buyX || 1} unidades por R$ ${(activePromotionForSelected.payY || 0).toFixed(2)}! Economize R$ ${(selectedProduct.price * (activePromotionForSelected.buyX || 1) - (activePromotionForSelected.payY || 0)).toFixed(2)} no combo.`
-                                : activePromotionForSelected.type ===
-                                    "LIGHTNING_OFFER"
-                                  ? activePromotionForSelected.lightningDiscountPercentage
-                                    ? `Aproveite ${activePromotionForSelected.lightningDiscountPercentage}% de desconto por tempo limitado!`
-                                    : `Aproveite a oferta relâmpago por tempo limitado!`
-                                  : `Desconto Progressivo: Ganhe até ${Math.max(0, ...(activePromotionForSelected.discountThresholds?.map((t) => t.discountPercentage) || []))}% de desconto!`}
+                            {activePromotionForSelected.type === "LIGHTNING_OFFER"
+                              ? activePromotionForSelected.lightningDiscountPercentage
+                                ? `Aproveite ${activePromotionForSelected.lightningDiscountPercentage}% de desconto por tempo limitado!`
+                                : `Aproveite a oferta relâmpago por tempo limitado!`
+                              : `Desconto promocional ativo por tempo limitado!`}
                           </p>
                         </div>
                       </div>
                     </div>
-                  )}
+                  ) : null}
 
                   {isControlledProduct(selectedProduct) && (
                     <div className="mb-6 bg-amber-50 border-l-4 border-amber-500 p-4 rounded-r-2xl flex items-start gap-3">
@@ -4891,7 +4854,7 @@ const App: React.FC = () => {
                     <div className="flex justify-between md:block">
                       <div className="flex items-center gap-2 mb-1">
                         <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest">
-                          Preço Unitário
+                          Preço unitário avulso
                         </p>
                         {isControlledProduct(selectedProduct) && (
                           <span className="bg-amber-100 text-amber-700 px-2 py-0.5 rounded-md text-[9px] font-black uppercase tracking-widest flex items-center gap-1">
@@ -4899,91 +4862,66 @@ const App: React.FC = () => {
                           </span>
                         )}
                       </div>
-                      {activePromotionForSelected ? (
-                        <div className="flex flex-col">
-                          <span className="text-xs font-bold text-gray-400 line-through">
-                            R${" "}
-                            {(
-                              selectedProduct.originalPrice ||
-                              selectedProduct.price
-                            ).toFixed(2)}
-                          </span>
-                          <span className="text-3xl font-black text-red-600">
-                            R${" "}
-                            {activePromotionForSelected.type === "BUY_X_PAY_Y"
-                              ? (
-                                  (selectedProduct.price *
-                                    (activePromotionForSelected.payY || 0)) /
-                                  (activePromotionForSelected.buyX || 1)
-                                ).toFixed(2)
-                              : (activePromotionForSelected.type ===
-                                    "FIXED_COMBO" ||
-                                    activePromotionForSelected.type ===
-                                      "LIGHTNING_OFFER") &&
-                                  activePromotionForSelected.payY
-                                ? (
-                                    (activePromotionForSelected.payY || 0) /
-                                    (activePromotionForSelected.buyX || 1)
-                                  ).toFixed(2)
-                                : activePromotionForSelected.type ===
-                                      "LIGHTNING_OFFER" &&
-                                    activePromotionForSelected.lightningDiscountPercentage
-                                  ? (
-                                      selectedProduct.price *
-                                      (1 -
-                                        activePromotionForSelected.lightningDiscountPercentage /
-                                          100)
-                                    ).toFixed(2)
-                                  : activePromotionForSelected.type ===
-                                      "LIGHTNING_OFFER"
-                                    ? selectedProduct.price.toFixed(2)
-                                    : (
-                                        selectedProduct.price *
-                                        (1 -
-                                          (activePromotionForSelected
-                                            .discountThresholds?.[0]
-                                            ?.discountPercentage || 0) /
-                                            100)
-                                      ).toFixed(2)}
-                          </span>
-                          <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-tight mt-1">
-                            {activePromotionForSelected.type === "BUY_X_PAY_Y"
-                              ? `Nesta promoção, cada unidade sai por apenas R$ ${((selectedProduct.price * (activePromotionForSelected.payY || 0)) / (activePromotionForSelected.buyX || 1)).toFixed(2)}`
-                              : (activePromotionForSelected.type ===
-                                    "FIXED_COMBO" ||
-                                    activePromotionForSelected.type ===
-                                      "LIGHTNING_OFFER") &&
-                                  activePromotionForSelected.payY
-                                ? `R$ ${((activePromotionForSelected.payY || 0) / (activePromotionForSelected.buyX || 1)).toFixed(2)} cada no combo de ${activePromotionForSelected.buyX || 1} unidades`
-                                : activePromotionForSelected.type ===
-                                    "LIGHTNING_OFFER"
-                                  ? `Oferta Relâmpago`
-                                  : `A partir de ${activePromotionForSelected.discountThresholds?.[0]?.qty || "?"} unidades`}
-                          </p>
-                        </div>
-                      ) : (selectedProduct.originalPrice && selectedProduct.originalPrice > selectedProduct.price) ||
-                        (selectedProduct.promotionalPrice && selectedProduct.promotionalPrice > 0 && selectedProduct.promotionalPrice < (selectedProduct.originalPrice || selectedProduct.price)) ? (
-                        <div className="flex flex-col">
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs font-bold text-gray-400 line-through">
-                              De: R$ {(selectedProduct.originalPrice || selectedProduct.price).toFixed(2)}
+
+                      {(() => {
+                        let unitPrice = selectedProduct.price;
+                        let hasDirectDiscount = false;
+                        let directOriginalPrice = selectedProduct.originalPrice ?? selectedProduct.price;
+
+                        if (selectedProduct.promotionalPrice && selectedProduct.promotionalPrice > 0 && selectedProduct.promotionalPrice < selectedProduct.price) {
+                          unitPrice = selectedProduct.promotionalPrice;
+                          directOriginalPrice = selectedProduct.price;
+                          hasDirectDiscount = true;
+                        } else if (selectedProduct.originalPrice && selectedProduct.originalPrice > selectedProduct.price) {
+                          unitPrice = selectedProduct.price;
+                          directOriginalPrice = selectedProduct.originalPrice;
+                          hasDirectDiscount = true;
+                        }
+
+                        if (
+                          !volumePromoForSelected &&
+                          activePromotionForSelected &&
+                          activePromotionForSelected.type === "LIGHTNING_OFFER" &&
+                          activePromotionForSelected.lightningDiscountPercentage &&
+                          activePromotionForSelected.lightningDiscountPercentage > 0
+                        ) {
+                          const discounted = Number(
+                            (selectedProduct.price * (1 - activePromotionForSelected.lightningDiscountPercentage / 100)).toFixed(2)
+                          );
+                          if (discounted < unitPrice) {
+                            directOriginalPrice = selectedProduct.price;
+                            unitPrice = discounted;
+                            hasDirectDiscount = true;
+                          }
+                        }
+
+                        return (
+                          <div className="flex flex-col">
+                            {hasDirectDiscount && directOriginalPrice > unitPrice && (
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-bold text-gray-400 line-through">
+                                  De: R$ {directOriginalPrice.toFixed(2)}
+                                </span>
+                                <span className="bg-red-50 text-red-600 text-[10px] font-black px-2 py-0.5 rounded-full font-mono">
+                                  Economize R$ {(directOriginalPrice - unitPrice).toFixed(2)}
+                                </span>
+                              </div>
+                            )}
+
+                            <span className={`text-3xl font-black ${hasDirectDiscount ? "text-red-600" : "text-gray-900"}`}>
+                              {hasDirectDiscount ? "Por: " : ""}R$ {unitPrice.toFixed(2)}
                             </span>
-                            {selectedProduct.originalPrice && selectedProduct.originalPrice > (selectedProduct.promotionalPrice && selectedProduct.promotionalPrice > 0 ? selectedProduct.promotionalPrice : selectedProduct.price) && (
-                              <span className="bg-red-50 text-red-600 text-[10px] font-black px-2 py-0.5 rounded-full font-mono">
-                                Economize R$ {(selectedProduct.originalPrice - (selectedProduct.promotionalPrice && selectedProduct.promotionalPrice > 0 ? selectedProduct.promotionalPrice : selectedProduct.price)).toFixed(2)}
-                              </span>
+
+                            {volumePromoForSelected && (
+                              <div className="mt-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-1.5 w-fit">
+                                <p className="text-xs text-amber-900 font-extrabold leading-tight">
+                                  💡 {volumePromoForSelected.auxText}
+                                </p>
+                              </div>
                             )}
                           </div>
-                          <span className="text-3xl font-black text-red-600">
-                            Por: R$ {(selectedProduct.promotionalPrice && selectedProduct.promotionalPrice > 0 ? selectedProduct.promotionalPrice : selectedProduct.price).toFixed(2)}
-                          </span>
-                        </div>
-                      ) : (
-                        <p className="text-3xl font-black text-emerald-600">
-                          R${" "}
-                          {selectedProduct.price.toFixed(2)}
-                        </p>
-                      )}
+                        );
+                      })()}
                     </div>
 
                     {selectedProduct.stock > 0 ? (

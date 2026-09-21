@@ -19,6 +19,7 @@ import {
   isPromotionActive,
   checkProductMatchesRule,
   CartItem,
+  getProductVolumePromotionInfo,
 } from "../types";
 import {
   Search,
@@ -619,66 +620,58 @@ const ProductCardComponent = ({
     }) || null;
   }, [promotions, product, isProductInRule]);
 
-    let currentPrice = product.price;
-    let fallbackOriginalPrice = product.originalPrice ?? product.price;
+    const volumePromo = useMemo(() => {
+      return getProductVolumePromotionInfo(product, promotions);
+    }, [product, promotions]);
+
+    // Preço unitário avulso (vigente para compra de 1 unidade avulsa)
+    let unitPrice = product.price;
+    let hasDirectDiscount = false;
+    let directOriginalPrice = product.originalPrice ?? product.price;
     let promoDescription = "";
 
+    // 1. Desconto direto no item avulso (remarcação simples DE / POR do produto)
+    if (
+      product.promotionalPrice &&
+      product.promotionalPrice > 0 &&
+      product.promotionalPrice < product.price
+    ) {
+      unitPrice = product.promotionalPrice;
+      directOriginalPrice = product.price;
+      hasDirectDiscount = true;
+    } else if (product.originalPrice && product.originalPrice > product.price) {
+      unitPrice = product.price;
+      directOriginalPrice = product.originalPrice;
+      hasDirectDiscount = true;
+    }
+
+    // 2. Desconto direto via oferta externa (ex: % de desconto avulso imediato)
     if (activePromo) {
-      if (activePromo.type === "LIGHTNING_OFFER") {
-        if (
-          activePromo.lightningDiscountPercentage &&
-          activePromo.lightningDiscountPercentage > 0
-        ) {
-          currentPrice =
-            product.price * (1 - activePromo.lightningDiscountPercentage / 100);
+      if (
+        activePromo.type === "LIGHTNING_OFFER" &&
+        activePromo.lightningDiscountPercentage &&
+        activePromo.lightningDiscountPercentage > 0
+      ) {
+        const discounted = Number(
+          (product.price * (1 - activePromo.lightningDiscountPercentage / 100)).toFixed(2)
+        );
+        if (discounted < unitPrice) {
+          directOriginalPrice = product.price;
+          unitPrice = discounted;
+          hasDirectDiscount = true;
           promoDescription = "OFERTA RELÂMPAGO";
-        } else if (activePromo.buyX && activePromo.payY) {
-          currentPrice = activePromo.payY / activePromo.buyX;
-          promoDescription = `OFERTA RELÂMPAGO: R$ ${currentPrice.toFixed(2)} cada no combo`;
         }
-      } else if (
-        activePromo.type === "BUY_X_PAY_Y" &&
-        activePromo.buyX &&
-        activePromo.payY
-      ) {
-        currentPrice = (product.price * activePromo.payY) / activePromo.buyX;
-        promoDescription = `Nesta promoção, cada unidade sai por R$ ${currentPrice.toFixed(2)}`;
-      } else if (
-        activePromo.type === "FIXED_COMBO" &&
-        activePromo.buyX &&
-        activePromo.payY
-      ) {
-        currentPrice = activePromo.payY / activePromo.buyX;
-        promoDescription = `Combo: R$ ${currentPrice.toFixed(2)} cada no combo`;
       } else if (activePromo.type === "VARIABLE_COMBO") {
         const comboPrice = activePromo.comboPrice ?? activePromo.payY ?? 0;
         promoDescription = `Combo Especial: ${activePromo.name} por R$ ${Number(comboPrice).toFixed(2).replace(".", ",")}`;
-      } else if (
-        activePromo.type === "PROGRESSIVE_DISCOUNT" &&
-        activePromo.discountThresholds?.[0]
-      ) {
-        currentPrice =
-          product.price *
-          (1 - activePromo.discountThresholds[0].discountPercentage / 100);
-        promoDescription = `A partir de ${activePromo.discountThresholds[0].qty} unidades`;
       }
-    } else if (isKit) {
-      currentPrice =
-        (product.price * (product.payY || 0)) / (product.buyX || 1);
-      promoDescription = `Nesta promoção, cada unidade sai por apenas R$ ${currentPrice.toFixed(2)}`;
-    } else if (isDiscountOnQty) {
-      currentPrice =
-        product.price * (1 - (product.discountQtyPercentage || 0) / 100);
-      promoDescription = `Leve ${product.discountQtyThreshold} ou mais por R$ ${currentPrice.toFixed(2)} cada`;
     }
 
-    // Force original price to show crossed if there is an active discount
-    const showOriginalPrice = Boolean(hasDiscount || currentPrice < product.price);
-    const finalOriginalPrice = showOriginalPrice
-      ? hasDiscount
-        ? Math.max(product.originalPrice || 0, product.price)
-        : product.price
-      : product.price;
+    // 3. Se for promoção condicional de volume / kit:
+    // O preço unitário avulso NUNCA é substituído pelo preço rateado!
+    if (volumePromo) {
+      promoDescription = volumePromo.auxText;
+    }
 
     const [imgError, setImgError] = useState(false);
     const [isAdding, setIsAdding] = useState(false);
@@ -783,9 +776,8 @@ const ProductCardComponent = ({
 
           {!isOutOfStock &&
             Boolean(
-              hasDiscount ||
-              isKit ||
-              isDiscountOnQty ||
+              volumePromo ||
+              hasDirectDiscount ||
               activePromo ||
               product.isFeatured ||
               (product as any)._justUpdated
@@ -802,41 +794,25 @@ const ProductCardComponent = ({
                     Destaque
                   </span>
                 )}
-                {Boolean(activePromo) && (
+                {Boolean(volumePromo) ? (
+                  <span className="bg-red-600 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1 animate-pulse">
+                    <Layers size={10} strokeWidth={4} /> {volumePromo.badgeText}
+                  </span>
+                ) : Boolean(activePromo) ? (
                   <span className="bg-red-600 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1 animate-pulse">
                     <Tag size={10} strokeWidth={4} />
-                    {activePromo.type === "BUY_X_PAY_Y"
-                      ? `Leve ${activePromo.buyX} Pague ${activePromo.payY}`
-                      : activePromo.type === "VARIABLE_COMBO"
-                        ? `COMBO POR R$ ${Number(activePromo.comboPrice ?? activePromo.payY ?? 0).toFixed(2).replace(".", ",")}`
-                        : activePromo.type === "LIGHTNING_OFFER" &&
-                            activePromo.lightningDiscountPercentage
-                          ? `GANHE ${activePromo.lightningDiscountPercentage}% OFF`
-                          : activePromo.type === "LIGHTNING_OFFER" &&
-                              activePromo.buyX &&
-                              activePromo.payY
-                            ? `Leve ${activePromo.buyX} por R$ ${activePromo.payY.toFixed(2).replace(".", ",")}`
-                            : activePromo.name}
+                    {activePromo.type === "VARIABLE_COMBO"
+                      ? `COMBO POR R$ ${Number(activePromo.comboPrice ?? activePromo.payY ?? 0).toFixed(2).replace(".", ",")}`
+                      : activePromo.type === "LIGHTNING_OFFER" &&
+                          activePromo.lightningDiscountPercentage
+                        ? `GANHE ${activePromo.lightningDiscountPercentage}% OFF`
+                        : activePromo.name}
                   </span>
-                )}
-                {Boolean(hasDiscount && !activePromo) && (
+                ) : Boolean(hasDirectDiscount) ? (
                   <span className="bg-red-500 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1 animate-pulse">
                     <Percent size={10} strokeWidth={4} /> Oferta
                   </span>
-                )}
-                {Boolean(isKit) && (
-                  <span className="bg-red-600 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1 animate-pulse">
-                    <Layers size={10} strokeWidth={4} /> PROMOÇÃO: Leve{" "}
-                    {product.buyX} Pague {product.payY}
-                  </span>
-                )}
-                {Boolean(isDiscountOnQty) && (
-                  <span className="bg-red-600 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1 animate-pulse">
-                    <Percent size={10} strokeWidth={4} /> PROMOÇÃO: A partir de{" "}
-                    {product.discountQtyThreshold} unidades, ganhe{" "}
-                    {product.discountQtyPercentage}% OFF
-                  </span>
-                )}
+                ) : null}
               </div>
             )}
 
@@ -885,26 +861,35 @@ const ProductCardComponent = ({
           )}
           <div className="flex flex-col gap-2 mt-auto">
             <div>
-              {showOriginalPrice && finalOriginalPrice > currentPrice && (
+              {hasDirectDiscount && directOriginalPrice > unitPrice && (
                 <div className="flex items-center gap-1.5 leading-none mb-0.5">
                   <p className="text-[9px] md:text-[11px] text-gray-400 font-bold line-through">
-                    De: R$ {finalOriginalPrice.toFixed(2)}
+                    De: R$ {directOriginalPrice.toFixed(2)}
                   </p>
                   <span className="bg-red-50 text-red-600 text-[8px] md:text-[9px] font-black px-1.5 py-0.2 rounded font-mono">
-                    -{Math.round(((finalOriginalPrice - currentPrice) / finalOriginalPrice) * 100)}%
+                    -{Math.round(((directOriginalPrice - unitPrice) / directOriginalPrice) * 100)}%
                   </span>
                 </div>
               )}
-              <p
-                className={`font-black ${showOriginalPrice && finalOriginalPrice > currentPrice ? "text-red-600" : "text-gray-900"} ${isCompact ? "text-xs md:text-sm" : "text-sm md:text-lg"}`}
-              >
-                {showOriginalPrice && finalOriginalPrice > currentPrice ? "Por: " : ""}R$ {currentPrice.toFixed(2)}
-              </p>
-              {promoDescription && !isCompact && (
+              <div className="flex items-baseline gap-1">
+                <p
+                  className={`font-black ${hasDirectDiscount ? "text-red-600" : "text-gray-900"} ${isCompact ? "text-xs md:text-sm" : "text-sm md:text-lg"}`}
+                >
+                  {hasDirectDiscount ? "Por: " : ""}R$ {unitPrice.toFixed(2)}
+                </p>
+                <span className="text-[9px] text-gray-400 font-semibold">un</span>
+              </div>
+              {volumePromo ? (
+                <div className="mt-1 bg-amber-50 border border-amber-200/80 rounded-lg px-2 py-0.5 w-fit shadow-2xs">
+                  <p className="text-[8px] md:text-[9.5px] text-amber-900 font-extrabold leading-tight">
+                    {volumePromo.auxText}
+                  </p>
+                </div>
+              ) : promoDescription && !isCompact ? (
                 <p className="text-[8px] md:text-[9px] text-emerald-600 font-bold mt-1 leading-tight">
                   {promoDescription}
                 </p>
-              )}
+              ) : null}
             </div>
 
             {isOutOfStock ? (
@@ -3440,92 +3425,60 @@ export const Storefront: React.FC<StorefrontProps> = ({
 
                               <div className="text-right flex flex-col items-end shrink-0">
                                 {(() => {
-                                  let currentPrice = (p.promotionalPrice && p.promotionalPrice > 0 && p.promotionalPrice < p.price)
-                                    ? p.promotionalPrice
-                                    : p.price;
-                                  let hasDiscount = Boolean(
-                                    (p.originalPrice && p.originalPrice > p.price) ||
-                                    (p.promotionalPrice && p.promotionalPrice > 0 && p.promotionalPrice < (p.originalPrice || p.price))
-                                  );
+                                  const volumePromo = getProductVolumePromotionInfo(p, promotions);
+                                  let unitPrice = p.price;
+                                  let hasDirectDiscount = false;
+                                  let directOriginalPrice = p.originalPrice ?? p.price;
 
-                                  if (activePromo) {
-                                    if (
-                                      activePromo.type === "LIGHTNING_OFFER"
-                                    ) {
-                                      if (
-                                        activePromo.lightningDiscountPercentage &&
-                                        activePromo.lightningDiscountPercentage >
-                                          0
-                                      ) {
-                                        currentPrice =
-                                          p.price *
-                                          (1 -
-                                            activePromo.lightningDiscountPercentage /
-                                              100);
-                                      } else if (
-                                        activePromo.buyX &&
-                                        activePromo.payY
-                                      ) {
-                                        // fixed combo calculation: effective price per unit
-                                        currentPrice =
-                                          activePromo.payY / activePromo.buyX;
-                                      }
-                                    } else if (
-                                      activePromo.type === "BUY_X_PAY_Y" &&
-                                      activePromo.buyX &&
-                                      activePromo.payY
-                                    ) {
-                                      currentPrice =
-                                        (p.price * activePromo.payY) /
-                                        activePromo.buyX;
-                                    } else if (
-                                      activePromo.type === "FIXED_COMBO" &&
-                                      activePromo.buyX &&
-                                      activePromo.payY
-                                    ) {
-                                      currentPrice =
-                                        activePromo.payY / activePromo.buyX;
-                                    } else if (
-                                      activePromo.type ===
-                                        "PROGRESSIVE_DISCOUNT" &&
-                                      activePromo.discountThresholds?.[0]
-                                    ) {
-                                      currentPrice =
-                                        p.price *
-                                        (1 -
-                                          activePromo.discountThresholds[0]
-                                            .discountPercentage /
-                                            100);
+                                  if (p.promotionalPrice && p.promotionalPrice > 0 && p.promotionalPrice < p.price) {
+                                    unitPrice = p.promotionalPrice;
+                                    directOriginalPrice = p.price;
+                                    hasDirectDiscount = true;
+                                  } else if (p.originalPrice && p.originalPrice > p.price) {
+                                    unitPrice = p.price;
+                                    directOriginalPrice = p.originalPrice;
+                                    hasDirectDiscount = true;
+                                  }
+
+                                  if (
+                                    activePromo &&
+                                    activePromo.type === "LIGHTNING_OFFER" &&
+                                    activePromo.lightningDiscountPercentage &&
+                                    activePromo.lightningDiscountPercentage > 0
+                                  ) {
+                                    const discounted = Number(
+                                      (p.price * (1 - activePromo.lightningDiscountPercentage / 100)).toFixed(2)
+                                    );
+                                    if (discounted < unitPrice) {
+                                      directOriginalPrice = p.price;
+                                      unitPrice = discounted;
+                                      hasDirectDiscount = true;
                                     }
                                   }
 
-                                  const showOriginalPrice = Boolean(
-                                    hasDiscount ||
-                                    currentPrice < (p.originalPrice || p.price)
-                                  );
-                                  const origPrice = showOriginalPrice
-                                    ? Math.max(p.originalPrice || 0, p.price)
-                                    : p.price;
-
                                   return (
-                                    <>
-                                      {showOriginalPrice &&
-                                        origPrice > currentPrice && (
-                                          <span className="text-[10px] text-gray-400 line-through font-bold">
-                                            De: R$ {origPrice.toFixed(2)}
-                                          </span>
-                                        )}
+                                    <div className="flex flex-col items-end">
+                                      {hasDirectDiscount && directOriginalPrice > unitPrice && (
+                                        <span className="text-[10px] text-gray-400 line-through font-bold">
+                                          De: R$ {directOriginalPrice.toFixed(2)}
+                                        </span>
+                                      )}
                                       <div className="flex items-center gap-2 md:gap-4">
                                         <p
-                                          className={`font-black text-sm md:text-base whitespace-nowrap ${showOriginalPrice && origPrice > currentPrice ? "text-red-600" : "text-emerald-600"}`}
+                                          className={`font-black text-sm md:text-base whitespace-nowrap ${hasDirectDiscount ? "text-red-600" : "text-emerald-600"}`}
                                         >
-                                          {showOriginalPrice && origPrice > currentPrice ? "Por: " : ""}R$ {currentPrice.toFixed(2)}
+                                          {hasDirectDiscount ? "Por: " : ""}R$ {unitPrice.toFixed(2)}
                                         </p>
                                         <div className="hidden md:flex w-8 h-8 rounded-full bg-gray-100 items-center justify-center text-gray-400 group-hover:bg-emerald-600 group-hover:text-white transition-all">
                                           <ChevronRight size={18} />
                                         </div>
                                       </div>
-                                    </>
+                                      {volumePromo && (
+                                        <span className="text-[9px] text-amber-800 font-extrabold whitespace-nowrap">
+                                          {volumePromo.auxText}
+                                        </span>
+                                      )}
+                                    </div>
                                   );
                                 })()}
                               </div>

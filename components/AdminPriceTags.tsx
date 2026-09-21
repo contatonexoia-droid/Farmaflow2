@@ -48,7 +48,7 @@ export const TAG_LAYOUTS = {
   baiana: {
     itemsPerPage: 8, // 2 colunas x 4 linhas
     gridClass: "grid-cols-2 grid-rows-4 gap-x-[4mm] gap-y-[3mm]",
-    tagHeight: "h-[65mm]",
+    tagHeight: "h-[65mm] min-h-[65mm] max-h-[65mm]",
     orientation: "portrait",
   },
   cartaz_a5: {
@@ -383,73 +383,70 @@ export const renderTagCard = (
         className={`border border-slate-300 rounded-[3px] p-1.5 flex flex-col justify-between bg-white text-slate-900 break-inside-avoid relative overflow-hidden ${currentLayoutConfig.tagHeight}`}
         style={{ boxSizing: 'border-box' }}
       >
-        <div>
+        <div className="overflow-hidden">
           {/* Cabeçalho */}
-          <div className="flex items-start justify-between gap-1 w-full border-b border-slate-100 pb-0.5 leading-none">
+          <div className="flex items-center justify-between gap-1 w-full border-b border-slate-100 pb-0.5 leading-none shrink-0">
             <div className="flex items-center gap-1 min-w-0 flex-1 overflow-hidden">
-              {showInternalCode && item.product.internalCode && (
-                <span className="text-[6.5px] font-bold text-slate-400 shrink-0">
-                  CÓD: {item.product.internalCode}
+              {storeName && (
+                <span className="text-[7.5px] text-slate-600 font-bold truncate max-w-[55%]">
+                  {storeName}
                 </span>
               )}
-              {storeName && (
-                <span className="text-[7px] text-slate-500 font-medium truncate max-w-[55%]">
-                  {storeName}
+              {showInternalCode && item.product.internalCode && (
+                <span className="text-[6.5px] font-mono font-bold text-slate-400 shrink-0">
+                  #{item.product.internalCode}
                 </span>
               )}
             </div>
             {item.badgeText && (
-              <span className="bg-amber-400 text-slate-900 font-extrabold text-[6.5px] px-1 py-0.5 rounded-sm uppercase tracking-tight whitespace-nowrap shrink-0 leading-none">
+              <span className="bg-amber-400 text-slate-950 font-black text-[7px] px-1 py-0.5 rounded-[2px] uppercase tracking-tight whitespace-nowrap shrink-0 leading-none">
                 {item.badgeText}
               </span>
             )}
           </div>
 
           {/* Nome do Produto */}
-          <h4 className="text-[8px] font-black leading-[1.1] line-clamp-2 text-slate-950 mt-0.5">
+          <h4 className="text-[10.5px] font-black leading-[1.15] text-slate-900 uppercase line-clamp-2 mt-0.5 tracking-tight">
             {item.product.name}
           </h4>
-
-          {/* Apresentação / Princípio Ativo */}
-          <p className="text-[6px] text-slate-500 truncate leading-none mt-0.5">
-            {item.product.activePrinciple || item.product.presentation || item.product.category}
-          </p>
         </div>
 
-        {/* Bloco Inferior: Preço e Barras */}
-        <div className="flex items-end justify-between gap-1 mt-auto pt-0.5 border-t border-slate-100">
-          <div className="flex flex-col min-w-0 flex-1">
+        {/* Linha Inferior: Preço de Venda à esquerda e Código de Barras compacto à direita */}
+        <div className="flex justify-between items-end gap-1 mt-auto pt-0.5 border-t border-slate-100 overflow-hidden shrink-0">
+          <div className="flex flex-col min-w-0 flex-1 justify-end leading-none">
             {item.showOriginalPrice && origPrice > promoPrice && (
-              <span className="text-[6.5px] font-bold text-gray-500 line-through leading-none">
+              <span className="text-[8px] font-bold text-slate-500 line-through block leading-none mb-0.5">
                 DE: R$ {origPrice.toFixed(2).replace('.', ',')}
               </span>
             )}
-            <div className="flex items-baseline gap-0.5 leading-none mt-0.5">
-              <span className="text-[7px] font-black text-red-600">
-                {item.showOriginalPrice && origPrice > promoPrice ? 'POR:' : 'R$'}
+            <div className="flex items-baseline gap-0.5 leading-none">
+              <span className="text-[10px] font-bold text-red-600 leading-none">
+                {item.showOriginalPrice && origPrice > promoPrice ? 'POR R$' : 'R$'}
               </span>
-              <span className="text-[12.5px] font-black text-slate-950 tracking-tight leading-none">
-                {item.showOriginalPrice && origPrice > promoPrice ? ` R$ ${promoPrice.toFixed(2).replace('.', ',')}` : promoPrice.toFixed(2).replace('.', ',')}
+              <span className="text-[21px] font-black text-slate-950 tracking-tight leading-none">
+                {promoPrice.toFixed(2).replace('.', ',')}
               </span>
             </div>
-            <div className="flex flex-col gap-[0.5px] mt-0.5">
-              {auxText && (
-                <span className="text-[6px] font-bold text-slate-700 leading-tight truncate max-w-[100px]" title={auxText}>
-                  {auxText}
-                </span>
-              )}
-              {formattedValidity && (
-                <span className="text-[6px] font-extrabold text-red-700 leading-tight tracking-tight truncate max-w-[100px]">
-                  {formattedValidity}
-                </span>
-              )}
-            </div>
+            {(auxText || formattedValidity) && (
+              <div className="flex flex-col gap-[0.5px] mt-0.5 leading-none">
+                {auxText && (
+                  <span className="text-[6.5px] font-bold text-slate-700 leading-tight truncate max-w-[105px]" title={auxText}>
+                    {auxText}
+                  </span>
+                )}
+                {formattedValidity && (
+                  <span className="text-[6.5px] font-black text-red-700 leading-tight tracking-tight truncate max-w-[105px]">
+                    {formattedValidity}
+                  </span>
+                )}
+              </div>
+            )}
           </div>
 
           {showBarcode && (
             <div className="flex flex-col items-end shrink-0 text-right">
               <div className="inline-block tracking-tighter opacity-90 scale-x-95">
-                <div className="h-2 flex items-end gap-[1px] justify-end">
+                <div className="h-2.5 flex items-end gap-[1px] justify-end">
                   {[2, 1, 2, 3, 1, 2, 1, 3, 1, 2, 3, 1, 2].map((w, i) => (
                     <span
                       key={i}
@@ -459,7 +456,7 @@ export const renderTagCard = (
                   ))}
                 </div>
               </div>
-              <span className="block text-[6px] font-mono font-bold text-slate-700 leading-none mt-0.5">
+              <span className="block text-[6.5px] font-mono font-bold text-slate-700 leading-none mt-0.5">
                 {item.product.barcode || item.product.internalCode || '7890000000000'}
               </span>
               {showPrintDate && (
@@ -476,87 +473,100 @@ export const renderTagCard = (
 
   // 2. MODELO: ETIQUETA BAIANA (8 por folha • Grade 2x4 • h: 65mm)
   if (layoutKey === 'baiana') {
+    const subtitle = item.product.activePrinciple || item.product.presentation || item.product.category;
     return (
       <div
         key={uniqueKey}
         className={`border-2 border-gray-950 rounded-lg overflow-hidden bg-white text-gray-900 break-inside-avoid flex flex-col justify-between ${currentLayoutConfig.tagHeight}`}
         style={{ boxSizing: 'border-box' }}
       >
-        <div className="bg-red-600 text-yellow-300 font-black text-center py-1 px-2 text-xs uppercase tracking-wider flex items-center justify-between">
-          <span className="text-[9px] font-bold text-white truncate max-w-[110px]">
-            {showStoreLogo ? tenant.name : 'DROGARIA'}
+        {/* Cabeçalho (Topo): Barra superior compacta preta/vermelha */}
+        <div className="bg-red-600 text-yellow-300 font-black px-3 py-1 text-xs uppercase tracking-wider flex items-center justify-between shrink-0 leading-none h-[7mm]">
+          <span className="text-[10px] font-black text-white truncate max-w-[32%] text-left">
+            {storeName || (showStoreLogo ? tenant.name : 'DROGARIA')}
           </span>
-          <span className="font-black text-[11px]">
+          <span className="font-black text-[12px] text-yellow-300 px-2 py-0.5 rounded bg-black/25 uppercase tracking-wide truncate max-w-[44%] text-center">
             {item.badgeText || 'SUPER OFERTA'}
           </span>
-          <span className="text-[9px] font-mono text-white">
-            {item.product.internalCode || ''}
+          <span className="text-[10px] font-mono font-bold text-white text-right truncate max-w-[24%]">
+            {item.product.internalCode ? `CÓD: ${item.product.internalCode}` : ''}
           </span>
         </div>
 
-        <div className="p-2 flex-1 flex flex-col justify-between">
-          <div>
-            <h4 className="text-xs font-black leading-tight text-gray-950 line-clamp-2">
+        {/* Corpo: flex-1 com distribuição equilibrada sem buracos vazios */}
+        <div className="p-3 pb-2 flex-1 flex flex-col justify-between overflow-hidden">
+          {/* Área do Produto (Centro-Superior) */}
+          <div className="shrink-0">
+            <h3 className="text-base sm:text-lg font-black leading-tight text-slate-900 uppercase line-clamp-2">
               {item.product.name}
-            </h4>
-            <p className="text-[8.5px] text-gray-600 mt-0.5 truncate">
-              {item.product.activePrinciple || item.product.presentation || item.product.category}
-            </p>
-            {formattedValidity && (
-              <p className="text-[8px] font-black text-red-700 mt-0.5 truncate">
-                {formattedValidity}
-              </p>
-            )}
-            {auxText && (
-              <p className="text-[7.5px] font-bold text-gray-700 mt-0.5 truncate">
-                {auxText}
+            </h3>
+            {subtitle && (
+              <p className="text-xs font-semibold text-slate-600 line-clamp-1 mt-0.5">
+                {subtitle}
               </p>
             )}
           </div>
 
-          <div className="flex items-end justify-between mt-1 pt-1 border-t-2 border-dashed border-gray-200">
-            <div>
-              {item.showOriginalPrice && origPrice > promoPrice && (
-                <span className="text-[10px] text-gray-500 line-through font-bold block leading-tight">
-                  DE: R$ {origPrice.toFixed(2).replace('.', ',')}
+          {/* Área de Preço (Centro-Inferior - Ocupando o centro com grande impacto) */}
+          <div className="my-auto py-1">
+            {item.showOriginalPrice && origPrice > promoPrice && (
+              <div className="text-xs font-bold text-slate-500 line-through leading-none mb-1">
+                DE: R$ {origPrice.toFixed(2).replace('.', ',')}
+              </div>
+            )}
+            <div className="flex items-baseline gap-1.5 leading-none">
+              <span className="text-sm font-extrabold text-slate-800 tracking-tight shrink-0">
+                {item.showOriginalPrice && origPrice > promoPrice ? 'POR APENAS R$' : 'POR R$'}
+              </span>
+              <span className="text-4xl sm:text-5xl font-black text-slate-950 tracking-tight leading-none">
+                {promoPrice.toFixed(2).replace('.', ',')}
+              </span>
+            </div>
+          </div>
+
+          {/* Rodapé (Inferior): Fracionado/Validade à esquerda e Código de Barras vetorial h-[14mm] à direita */}
+          <div className="flex items-end justify-between gap-2 pt-1 border-t-2 border-dashed border-gray-200 mt-auto shrink-0">
+            <div className="flex flex-col min-w-0 flex-1 justify-end leading-tight">
+              {formattedValidity && (
+                <span className="text-[10px] font-black text-red-700 block truncate leading-tight">
+                  {formattedValidity}
                 </span>
               )}
-              <div className="flex items-baseline gap-1">
-                <span className="text-xs font-black text-red-600">
-                  {item.showOriginalPrice && origPrice > promoPrice ? 'POR APENAS R$' : 'R$'}
+              {auxText && (
+                <span className="text-[10px] font-bold text-slate-700 block truncate leading-tight mt-0.5" title={auxText}>
+                  {auxText}
                 </span>
-                <span className="text-2xl font-black text-gray-950 tracking-tight leading-none">
-                  {promoPrice.toFixed(2).replace('.', ',')}
-                </span>
-              </div>
-              {item.unitMeasurementText && (
-                <span className="text-[8px] text-gray-500 block font-semibold">
+              )}
+              {item.unitMeasurementText && item.unitMeasurementText !== auxText && (
+                <span className="text-[9px] font-bold text-slate-600 block truncate leading-tight mt-0.5">
                   {item.unitMeasurementText}
+                </span>
+              )}
+              {showPrintDate && (
+                <span className="text-[8px] text-slate-400 block leading-tight mt-0.5">
+                  Val. estoques • {todayFormatted}
                 </span>
               )}
             </div>
 
             {showBarcode && (
-              <div className="text-right">
-                <div className="h-3.5 flex items-end gap-[1px] justify-end">
-                  {[2, 1, 3, 1, 4, 1, 2, 3, 1, 2, 4, 1].map((w, i) => (
-                    <span key={i} className="bg-black" style={{ width: `${w}px`, height: '100%' }} />
+              <div className="flex flex-col items-end shrink-0 text-right">
+                <div className="h-[10.5mm] flex items-end gap-[1.5px] justify-end">
+                  {[2, 1, 3, 1, 4, 1, 2, 3, 1, 2, 4, 1, 2, 1, 3, 1, 2].map((w, i) => (
+                    <span
+                      key={i}
+                      className="bg-black inline-block"
+                      style={{ width: `${w}px`, height: '100%' }}
+                    />
                   ))}
                 </div>
-                <span className="text-[8px] font-mono font-bold text-gray-700 block mt-0.5">
+                <span className="text-[9px] font-mono font-bold text-slate-800 block mt-0.5 leading-none">
                   {item.product.barcode || item.product.internalCode || '7890000000000'}
                 </span>
               </div>
             )}
           </div>
         </div>
-
-        {showPrintDate && (
-          <div className="bg-gray-100 px-2 py-0.5 text-[7.5px] text-gray-500 flex justify-between">
-            <span>Preço válido enquanto durarem os estoques</span>
-            <span>{todayFormatted}</span>
-          </div>
-        )}
       </div>
     );
   }

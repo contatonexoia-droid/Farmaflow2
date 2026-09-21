@@ -937,6 +937,153 @@ export const calculateItemTotal = (
   return item.price * item.quantity - details.discount;
 };
 
+export interface VolumePromotionInfo {
+  isVolumePromo: boolean;
+  minQty: number;
+  totalComboPrice: number;
+  unitRatePrice: number;
+  badgeText: string;
+  promoTitle: string;
+  auxText: string;
+  modalDetailText: string;
+  quickAddLabel: string;
+}
+
+export const getProductVolumePromotionInfo = (
+  product: Product,
+  promotions: PromotionRule[] = [],
+  matrizProducts: Product[] = [],
+  tenantId?: string
+): VolumePromotionInfo | null => {
+  const regularPrice = Number(product.price) || 0;
+  if (regularPrice <= 0) return null;
+
+  const now = new Date();
+  const applicableRule = promotions.find((p) => {
+    if (!isPromotionActive(p, now)) return false;
+    return checkProductMatchesRule(p, product, matrizProducts, tenantId);
+  });
+
+  if (applicableRule) {
+    if (applicableRule.type === "BUY_X_PAY_Y" && applicableRule.buyX && applicableRule.payY && applicableRule.buyX > 1) {
+      const buyX = applicableRule.buyX;
+      const payY = applicableRule.payY;
+      const totalComboPrice = Number((regularPrice * payY).toFixed(2));
+      const unitRatePrice = Number((totalComboPrice / buyX).toFixed(2));
+      const badgeText = `LEVE ${buyX}, PAGUE ${payY}`;
+      return {
+        isVolumePromo: true,
+        minQty: buyX,
+        totalComboPrice,
+        unitRatePrice,
+        badgeText,
+        promoTitle: applicableRule.name || badgeText,
+        auxText: `Na compra de ${buyX} un: R$ ${unitRatePrice.toFixed(2).replace('.', ',')} cada`,
+        modalDetailText: `Adicione ${buyX} unidades ao carrinho e pague apenas R$ ${totalComboPrice.toFixed(2).replace('.', ',')} (cada uma sai a R$ ${unitRatePrice.toFixed(2).replace('.', ',')})`,
+        quickAddLabel: `Adicionar Kit com ${buyX} unidades ao carrinho (R$ ${totalComboPrice.toFixed(2).replace('.', ',')})`
+      };
+    }
+
+    if (applicableRule.type === "FIXED_COMBO" && applicableRule.buyX && applicableRule.payY && applicableRule.buyX > 1) {
+      const buyX = applicableRule.buyX;
+      const totalComboPrice = Number(applicableRule.payY);
+      const unitRatePrice = Number((totalComboPrice / buyX).toFixed(2));
+      const badgeText = `LEVE ${buyX} POR R$ ${totalComboPrice.toFixed(2).replace('.', ',')}`;
+      return {
+        isVolumePromo: true,
+        minQty: buyX,
+        totalComboPrice,
+        unitRatePrice,
+        badgeText,
+        promoTitle: applicableRule.name || badgeText,
+        auxText: `Na compra de ${buyX} un: R$ ${unitRatePrice.toFixed(2).replace('.', ',')} cada`,
+        modalDetailText: `Adicione ${buyX} unidades ao carrinho e pague apenas R$ ${totalComboPrice.toFixed(2).replace('.', ',')} (cada uma sai a R$ ${unitRatePrice.toFixed(2).replace('.', ',')})`,
+        quickAddLabel: `Adicionar Kit com ${buyX} unidades ao carrinho (R$ ${totalComboPrice.toFixed(2).replace('.', ',')})`
+      };
+    }
+
+    if (applicableRule.type === "LIGHTNING_OFFER" && applicableRule.buyX && applicableRule.payY && applicableRule.buyX > 1) {
+      const buyX = applicableRule.buyX;
+      const totalComboPrice = Number(applicableRule.payY);
+      const unitRatePrice = Number((totalComboPrice / buyX).toFixed(2));
+      const badgeText = `LEVE ${buyX} POR R$ ${totalComboPrice.toFixed(2).replace('.', ',')}`;
+      return {
+        isVolumePromo: true,
+        minQty: buyX,
+        totalComboPrice,
+        unitRatePrice,
+        badgeText,
+        promoTitle: applicableRule.name || 'OFERTA RELÂMPAGO',
+        auxText: `Na compra de ${buyX} un: R$ ${unitRatePrice.toFixed(2).replace('.', ',')} cada`,
+        modalDetailText: `Adicione ${buyX} unidades ao carrinho e pague apenas R$ ${totalComboPrice.toFixed(2).replace('.', ',')} (cada uma sai a R$ ${unitRatePrice.toFixed(2).replace('.', ',')})`,
+        quickAddLabel: `Adicionar Kit com ${buyX} unidades ao carrinho (R$ ${totalComboPrice.toFixed(2).replace('.', ',')})`
+      };
+    }
+
+    if (applicableRule.type === "PROGRESSIVE_DISCOUNT" && applicableRule.discountThresholds && applicableRule.discountThresholds.length > 0) {
+      const sorted = [...applicableRule.discountThresholds].sort((a, b) => a.qty - b.qty);
+      const first = sorted[0];
+      if (first && first.qty > 1) {
+        const unitRatePrice = Number((regularPrice * (1 - first.discountPercentage / 100)).toFixed(2));
+        const totalComboPrice = Number((unitRatePrice * first.qty).toFixed(2));
+        const badgeText = `A PARTIR DE ${first.qty} UN: -${first.discountPercentage}%`;
+        return {
+          isVolumePromo: true,
+          minQty: first.qty,
+          totalComboPrice,
+          unitRatePrice,
+          badgeText,
+          promoTitle: applicableRule.name || badgeText,
+          auxText: `A partir de ${first.qty} un: R$ ${unitRatePrice.toFixed(2).replace('.', ',')} cada`,
+          modalDetailText: `Compre ${first.qty} ou mais e pague apenas R$ ${unitRatePrice.toFixed(2).replace('.', ',')} em cada (${first.discountPercentage}% OFF)`,
+          quickAddLabel: `Adicionar ${first.qty} unidades ao carrinho (${first.discountPercentage}% OFF)`
+        };
+      }
+    }
+  }
+
+  // Fallback para campos direct no product (legados)
+  if (product.promotionType === "BUY_X_PAY_Y" && product.buyX && product.payY && product.buyX > 1) {
+    const buyX = product.buyX;
+    const payY = product.payY;
+    const totalComboPrice = Number((regularPrice * payY).toFixed(2));
+    const unitRatePrice = Number((totalComboPrice / buyX).toFixed(2));
+    const badgeText = `LEVE ${buyX}, PAGUE ${payY}`;
+    return {
+      isVolumePromo: true,
+      minQty: buyX,
+      totalComboPrice,
+      unitRatePrice,
+      badgeText,
+      promoTitle: badgeText,
+      auxText: `Na compra de ${buyX} un: R$ ${unitRatePrice.toFixed(2).replace('.', ',')} cada`,
+      modalDetailText: `Adicione ${buyX} unidades ao carrinho e pague apenas R$ ${totalComboPrice.toFixed(2).replace('.', ',')} (cada uma sai a R$ ${unitRatePrice.toFixed(2).replace('.', ',')})`,
+      quickAddLabel: `Adicionar Kit com ${buyX} unidades ao carrinho (R$ ${totalComboPrice.toFixed(2).replace('.', ',')})`
+    };
+  }
+
+  if (product.promotionType === "DISCOUNT_ON_QTY" && product.discountQtyThreshold && product.discountQtyPercentage && product.discountQtyThreshold > 1) {
+    const qty = product.discountQtyThreshold;
+    const pct = product.discountQtyPercentage;
+    const unitRatePrice = Number((regularPrice * (1 - pct / 100)).toFixed(2));
+    const totalComboPrice = Number((unitRatePrice * qty).toFixed(2));
+    const badgeText = `LEVE ${qty} OU MAIS (-${pct}%)`;
+    return {
+      isVolumePromo: true,
+      minQty: qty,
+      totalComboPrice,
+      unitRatePrice,
+      badgeText,
+      promoTitle: `Desconto por Quantidade`,
+      auxText: `A partir de ${qty} un: R$ ${unitRatePrice.toFixed(2).replace('.', ',')} cada`,
+      modalDetailText: `Compre ${qty} ou mais e ganhe ${pct}% de desconto (sai a R$ ${unitRatePrice.toFixed(2).replace('.', ',')} cada)`,
+      quickAddLabel: `Adicionar ${qty} unidades com desconto`
+    };
+  }
+
+  return null;
+};
+
 export interface ChatMessageReaction {
   emoji: string;
   sender?: "CUSTOMER" | "USER" | "SYSTEM" | string;

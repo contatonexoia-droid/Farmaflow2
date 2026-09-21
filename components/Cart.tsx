@@ -11,6 +11,8 @@ import {
   CouponRule,
   isPromotionActive,
   checkProductMatchesRule,
+  getProductVolumePromotionInfo,
+  VolumePromotionInfo,
 } from "../types";
 import {
   Trash2,
@@ -585,10 +587,17 @@ export const Cart: React.FC<CartProps> = ({
     return customer[field] as string;
   };
 
+  const grossSubtotal = items.reduce(
+    (acc, curr) => acc + (Number(curr.price) || 0) * curr.quantity,
+    0,
+  );
+
   const subtotal = items.reduce(
     (acc, curr) => acc + calculateItemTotal(curr, promotions, matrizProducts, tenant?.id, items),
     0,
   );
+
+  const totalItemPromoDiscounts = Math.max(0, grossSubtotal - subtotal);
 
   useEffect(() => {
     if (
@@ -1241,6 +1250,17 @@ export const Cart: React.FC<CartProps> = ({
               tenant?.id,
               items,
             );
+            const volumeInfo = getProductVolumePromotionInfo(
+              item,
+              promotions,
+              matrizProducts,
+              tenant?.id,
+            );
+            const originalGross = (Number(item.price) || 0) * item.quantity;
+            const itemDiscount = Math.max(0, promoDetails.discount || 0);
+            const isVolumePending = volumeInfo && item.quantity < volumeInfo.minQty;
+            const isVolumeMet = volumeInfo && item.quantity >= volumeInfo.minQty;
+
             let activePromo =
               promotions.find((p) => p.id === promoDetails.promotionId) ||
               promotions.find((p) => {
@@ -1288,7 +1308,7 @@ export const Cart: React.FC<CartProps> = ({
             return (
               <div
                 key={item.id}
-                className="bg-white p-5 rounded-[2rem] border border-gray-50 flex gap-5 shadow-sm hover:shadow-md transition-all"
+                className="bg-white p-5 rounded-[2rem] border border-gray-100 flex gap-4 sm:gap-5 shadow-sm hover:shadow-md transition-all"
               >
                 <div className="h-24 w-24 rounded-3xl bg-gray-50 flex-shrink-0 overflow-hidden flex items-center justify-center">
                   {displayImage ? (
@@ -1310,76 +1330,146 @@ export const Cart: React.FC<CartProps> = ({
                     <Package className="text-gray-200" size={32} />
                   )}
                 </div>
-                <div className="flex-1 min-w-0 flex flex-col justify-center">
-                  <div className="flex items-center gap-2 mb-1">
-                    <h4 className="font-black text-gray-900 truncate text-lg">
-                      {item.name}
-                    </h4>
-                    {isControlledProduct(item) && (
-                      <span className="bg-amber-100 text-amber-700 text-[10px] font-black uppercase px-2 py-0.5 rounded-full whitespace-nowrap">
-                        Receita
-                      </span>
+                <div className="flex-1 min-w-0 flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center gap-2 mb-1">
+                      <h4 className="font-black text-gray-900 truncate text-base sm:text-lg">
+                        {item.name}
+                      </h4>
+                      {isControlledProduct(item) && (
+                        <span className="bg-amber-100 text-amber-700 text-[10px] font-black uppercase px-2 py-0.5 rounded-full whitespace-nowrap">
+                          Receita
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs font-bold text-gray-400 mb-1 uppercase tracking-wider">
+                      Ref: {item.internalCode}
+                    </p>
+
+                    {/* Bloco de Promoção de Volume / Incentivo CDC */}
+                    {volumeInfo ? (
+                      <div className="my-2">
+                        {isVolumePending ? (
+                          <div className="bg-amber-50/90 border border-amber-200/80 rounded-2xl p-2.5 sm:p-3">
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                              <div className="min-w-0 flex-1">
+                                <span className="bg-amber-500 text-white text-[9px] font-black uppercase px-2 py-0.5 rounded-md inline-block mb-1">
+                                  {volumeInfo.badgeText}
+                                </span>
+                                <p className="text-xs font-bold text-amber-950 leading-tight">
+                                  Falta <span className="font-black text-amber-800">{volumeInfo.minQty - item.quantity}</span> {volumeInfo.minQty - item.quantity === 1 ? "unidade" : "unidades"} para ativar o preço especial de <span className="font-black text-amber-800">R$ {volumeInfo.unitRatePrice.toFixed(2).replace('.', ',')} cada</span>
+                                </p>
+                                <p className="text-[10px] text-amber-700 font-semibold mt-0.5">
+                                  Comprando {volumeInfo.minQty} un, pague apenas R$ {volumeInfo.totalComboPrice.toFixed(2).replace('.', ',')}
+                                </p>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => updateQuantity(item.id, volumeInfo.minQty - item.quantity)}
+                                disabled={item.stock < volumeInfo.minQty}
+                                className="self-start sm:self-center bg-amber-600 hover:bg-amber-700 active:scale-95 text-white text-[11px] font-black px-3 py-1.5 rounded-xl shrink-0 transition-all shadow-sm cursor-pointer whitespace-nowrap"
+                                title={`Completar para ${volumeInfo.minQty} unidades`}
+                              >
+                                + Ativar Kit ({volumeInfo.minQty} un)
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="bg-emerald-50/90 border border-emerald-200/80 rounded-2xl p-2.5 sm:p-3">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="min-w-0 flex-1">
+                                <span className="bg-emerald-600 text-white text-[9px] font-black uppercase px-2 py-0.5 rounded-md inline-block mb-0.5">
+                                  {volumeInfo.badgeText} ATIVADO!
+                                </span>
+                                <p className="text-xs font-bold text-emerald-900 leading-tight">
+                                  Desconto de volume: <span className="font-black text-emerald-700">- R$ {itemDiscount.toFixed(2).replace('.', ',')}</span>
+                                </p>
+                                <p className="text-[10px] text-emerald-700 font-semibold mt-0.5">
+                                  Valor unitário rateado: R$ {(itemTotal / item.quantity).toFixed(2).replace('.', ',')} cada
+                                </p>
+                              </div>
+                              <span className="bg-white border border-emerald-200 text-emerald-800 text-[10px] font-black px-2.5 py-1 rounded-lg shrink-0">
+                                {item.quantity} un no combo
+                              </span>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      activePromo && (
+                        <div className="flex flex-col gap-1 mb-2">
+                          <span className="bg-red-50 text-red-600 text-[9px] font-black uppercase px-2 py-0.5 rounded-lg w-fit flex items-center gap-1 border border-red-100">
+                            <Tag size={10} strokeWidth={4} /> {activePromo.name}
+                          </span>
+                          {activePromo.type === "BUY_X_PAY_Y" &&
+                            item.quantity < (activePromo.buyX || 1) && (
+                              <p className="text-[9px] font-bold text-red-400 uppercase tracking-tight">
+                                Adicione mais{" "}
+                                {(activePromo.buyX || 1) - item.quantity} para
+                                ativar!
+                              </p>
+                            )}
+                          {activePromo.type === "BUY_X_PAY_Y" &&
+                            item.quantity >= (activePromo.buyX || 1) && (
+                              <p className="text-[9px] font-bold text-emerald-600 uppercase tracking-tight">
+                                Desconto Aplicado!
+                              </p>
+                            )}
+                          {activePromo.type === "FIXED_COMBO" &&
+                            item.quantity < (activePromo.buyX || 1) && (
+                              <p className="text-[9px] font-bold text-red-400 uppercase tracking-tight">
+                                Adicione mais{" "}
+                                {(activePromo.buyX || 1) - item.quantity} para o
+                                combo de R$ {(activePromo.payY || 0).toFixed(2)}!
+                              </p>
+                            )}
+                          {activePromo.type === "FIXED_COMBO" &&
+                            item.quantity >= (activePromo.buyX || 1) && (
+                              <p className="text-[9px] font-bold text-emerald-600 uppercase tracking-tight">
+                                Combo aplicado! Você economizou R${" "}
+                                {promoDetails.discount?.toFixed(2) || "0.00"}
+                              </p>
+                            )}
+                        </div>
+                      )
                     )}
                   </div>
-                  <p className="text-xs font-bold text-gray-400 mb-1 uppercase tracking-wider">
-                    Ref: {item.internalCode}
-                  </p>
 
-                  {activePromo && (
-                    <div className="flex flex-col gap-1 mb-2">
-                      <span className="bg-red-50 text-red-600 text-[9px] font-black uppercase px-2 py-0.5 rounded-lg w-fit flex items-center gap-1 border border-red-100">
-                        <Tag size={10} strokeWidth={4} /> {activePromo.name}
-                      </span>
-                      {activePromo.type === "BUY_X_PAY_Y" &&
-                        item.quantity < (activePromo.buyX || 1) && (
-                          <p className="text-[9px] font-bold text-red-400 uppercase tracking-tight">
-                            Adicione mais{" "}
-                            {(activePromo.buyX || 1) - item.quantity} para
-                            ativar!
-                          </p>
-                        )}
-                      {activePromo.type === "BUY_X_PAY_Y" &&
-                        item.quantity >= (activePromo.buyX || 1) && (
-                          <p className="text-[9px] font-bold text-emerald-600 uppercase tracking-tight">
-                            Desconto Aplicado!
-                          </p>
-                        )}
-                      {activePromo.type === "FIXED_COMBO" &&
-                        item.quantity < (activePromo.buyX || 1) && (
-                          <p className="text-[9px] font-bold text-red-400 uppercase tracking-tight">
-                            Adicione mais{" "}
-                            {(activePromo.buyX || 1) - item.quantity} para o
-                            combo de R$ {(activePromo.payY || 0).toFixed(2)}!
-                          </p>
-                        )}
-                      {activePromo.type === "FIXED_COMBO" &&
-                        item.quantity >= (activePromo.buyX || 1) && (
-                          <p className="text-[9px] font-bold text-emerald-600 uppercase tracking-tight">
-                            Combo aplicado! Você economizou R${" "}
-                            {promoDetails.discount?.toFixed(2) || "0.00"}
-                          </p>
-                        )}
-                      {activePromo.type === "DISCOUNT_ON_QTY" &&
-                        item.quantity < (activePromo.buyX || 1) && (
-                          <p className="text-[9px] font-bold text-red-400 uppercase tracking-tight">
-                            Adicione mais{" "}
-                            {(activePromo.buyX || 1) - item.quantity} para
-                            ativar!
-                          </p>
-                        )}
-                      {activePromo.type === "DISCOUNT_ON_QTY" &&
-                        item.quantity >= (activePromo.buyX || 1) && (
-                          <p className="text-[9px] font-bold text-emerald-600 uppercase tracking-tight">
-                            Desconto Aplicado!
-                          </p>
-                        )}
+                  <div className="flex items-end justify-between mt-2 pt-2 border-t border-gray-50">
+                    <div className="flex flex-col">
+                      {itemDiscount > 0 ? (
+                        <>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold text-gray-400 line-through">
+                              R$ {originalGross.toFixed(2).replace('.', ',')}
+                            </span>
+                            <span className="text-[10px] font-black text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded">
+                              - R$ {itemDiscount.toFixed(2).replace('.', ',')}
+                            </span>
+                          </div>
+                          <div className="flex items-baseline gap-1.5">
+                            <span className="font-black text-emerald-600 text-xl">
+                              R$ {itemTotal.toFixed(2).replace('.', ',')}
+                            </span>
+                            <span className="text-[11px] font-bold text-gray-500">
+                              (R$ {(itemTotal / item.quantity).toFixed(2).replace('.', ',')} cada)
+                            </span>
+                          </div>
+                        </>
+                      ) : (
+                        <div className="flex flex-col">
+                          <span className="font-black text-gray-900 text-xl">
+                            R$ {itemTotal.toFixed(2).replace('.', ',')}
+                          </span>
+                          <span className="text-[10px] font-bold text-gray-400">
+                            {item.quantity > 1
+                              ? `${item.quantity} un x R$ ${(Number(item.price) || 0).toFixed(2).replace('.', ',')}`
+                              : `1 unidade avulsa: R$ ${(Number(item.price) || 0).toFixed(2).replace('.', ',')}`}
+                          </span>
+                        </div>
+                      )}
                     </div>
-                  )}
 
-                  <div className="flex items-center justify-between mt-2">
-                    <p className="font-black text-emerald-600 text-xl">
-                      R$ {itemTotal.toFixed(2)}
-                    </p>
                     <div className="flex items-center gap-3">
                       <button
                         onClick={() => updateQuantity(item.id, -1)}
@@ -1991,10 +2081,27 @@ export const Cart: React.FC<CartProps> = ({
           </div>
 
           <div className="pt-10 border-t border-gray-50 space-y-6">
-            <div className="flex justify-between items-center text-gray-400 font-bold px-1">
-              <span>Subtotal</span>
-              <span className="text-black">R$ {subtotal.toFixed(2)}</span>
-            </div>
+            {totalItemPromoDiscounts > 0 ? (
+              <div className="space-y-2 px-1">
+                <div className="flex justify-between items-center text-gray-400 font-bold">
+                  <span>Subtotal Bruto (preço avulso)</span>
+                  <span className="text-gray-500 line-through">R$ {grossSubtotal.toFixed(2).replace('.', ',')}</span>
+                </div>
+                <div className="flex justify-between items-center text-emerald-600 font-bold">
+                  <span>Descontos de Volume / Kits</span>
+                  <span>- R$ {totalItemPromoDiscounts.toFixed(2).replace('.', ',')}</span>
+                </div>
+                <div className="flex justify-between items-center text-gray-600 font-bold pt-1 border-t border-gray-100">
+                  <span>Subtotal dos Produtos</span>
+                  <span className="text-black font-black">R$ {subtotal.toFixed(2).replace('.', ',')}</span>
+                </div>
+              </div>
+            ) : (
+              <div className="flex justify-between items-center text-gray-400 font-bold px-1">
+                <span>Subtotal</span>
+                <span className="text-black">R$ {subtotal.toFixed(2).replace('.', ',')}</span>
+              </div>
+            )}
             {tenant?.deliverySettings?.enabled && (
               <div className="flex flex-col gap-1 px-1">
                 <div className="flex justify-between items-center text-gray-400 font-bold">
