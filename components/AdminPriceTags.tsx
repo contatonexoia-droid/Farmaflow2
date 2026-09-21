@@ -34,7 +34,9 @@ import {
   PharmacyConfig, 
   PromotionRule, 
   isPromotionActive, 
-  checkProductMatchesRule 
+  checkProductMatchesRule,
+  getProductVolumePromotionInfo,
+  VolumePromotionInfo
 } from '../types';
 import { getPromotionsByTenant } from '../services/storage';
 
@@ -135,6 +137,11 @@ export const parsePrice = (val: number | string | undefined | null, fallback = 0
   return isNaN(num) ? fallback : num;
 };
 
+export const formatPrice = (val: number | string | undefined | null, fallback = 0): string => {
+  const num = parsePrice(val, fallback);
+  return num.toFixed(2).replace('.', ',');
+};
+
 export interface PriceTagItem {
   id: string;
   product: Product;
@@ -147,6 +154,16 @@ export interface PriceTagItem {
   customObservations?: string;
   expiryDate?: string;
   customStoreName?: string;
+  // Propriedades estruturais de Promoção de Volume (Leve Mais por Menos / Kits)
+  isVolumePromo?: boolean;
+  volumeMinQty?: number;
+  volumeTotalPrice?: number | string;
+  volumeUnitEquivalent?: number | string;
+  // Aliases compatíveis para templates de etiquetas
+  price?: number | string;
+  pricePor?: number | string;
+  priceDe?: number | string;
+  showPriceDe?: boolean;
 }
 
 export interface ProductPriceCalculation {
@@ -157,6 +174,11 @@ export interface ProductPriceCalculation {
   suggestedObs: string;
   discountPercentage: number;
   promoTitle?: string;
+  // Propriedades estruturais de Promoção de Volume (Leve Mais por Menos / Kits)
+  isVolumePromo?: boolean;
+  volumeMinQty?: number;
+  volumeTotalPrice?: number;
+  volumeUnitEquivalent?: number;
 }
 
 export const calculateProductPriceTagInfo = (
@@ -171,7 +193,55 @@ export const calculateProductPriceTagInfo = (
   let suggestedObs = '';
   let promoTitle = '';
 
-  // 1. Verificar regras de promoção ativas na loja online (compatibilidade Storefront)
+  // 1. CHECAGEM PRIORITÁRIA DE PROMOÇÃO DE VOLUME / KITS (CDC & Decreto nº 5.903/2006)
+  // O preço unitário avulso NUNCA pode ser substituído pelo valor rateado do combo.
+  const volumeInfo = getProductVolumePromotionInfo(product, promotions);
+  if (volumeInfo && volumeInfo.isVolumePromo) {
+    return {
+      originalPrice: regularPrice,
+      promotionalPrice: regularPrice, // CRÍTICO: NÃO atribui 4,93 como se fosse preço de 1 un avulsa!
+      hasDiscount: false, // Mantém sem falso DE/POR unitário
+      suggestedBadge: volumeInfo.badgeText,
+      suggestedObs: `Nesta condição, cada unidade sai a R$ ${volumeInfo.unitRatePrice.toFixed(2).replace('.', ',')}`,
+      discountPercentage: 0,
+      promoTitle: volumeInfo.promoTitle,
+      isVolumePromo: true,
+      volumeMinQty: volumeInfo.minQty,
+      volumeTotalPrice: volumeInfo.totalComboPrice,
+      volumeUnitEquivalent: volumeInfo.unitRatePrice,
+    };
+  }
+
+  // Fallback para variações de nomenclatura de promoção de volume direta no produto
+  const pAny = product as any;
+  const promoTypeUpper = String(product.promotionType || pAny.promotion_type || '').toUpperCase();
+  if (
+    promoTypeUpper.includes('BUY_X_PAY_Y') ||
+    promoTypeUpper.includes('LEVE_X_PAG') ||
+    promoTypeUpper.includes('VOLUME')
+  ) {
+    const buyX = Number(product.buyX || pAny.buy_x || pAny.min_qty || 3);
+    const payY = Number(product.payY || pAny.pay_y || 2);
+    if (buyX > 1) {
+      const totalCombo = Number((regularPrice * payY).toFixed(2));
+      const unitEq = Number((totalCombo / buyX).toFixed(2));
+      return {
+        originalPrice: regularPrice,
+        promotionalPrice: regularPrice,
+        hasDiscount: false,
+        suggestedBadge: `LEVE ${buyX} PAGUE ${payY}`,
+        suggestedObs: `Nesta condição, cada unidade sai a R$ ${unitEq.toFixed(2).replace('.', ',')}`,
+        discountPercentage: 0,
+        promoTitle: `Leve ${buyX} Pague ${payY}`,
+        isVolumePromo: true,
+        volumeMinQty: buyX,
+        volumeTotalPrice: totalCombo,
+        volumeUnitEquivalent: unitEq,
+      };
+    }
+  }
+
+  // 2. Verificar regras de promoção com desconto direto (Oferta Relâmpago em %, combos com preço definido)
   let activeRule: PromotionRule | null = null;
   if (promotions && promotions.length > 0) {
     activeRule = promotions.find((p) => {
@@ -180,43 +250,15 @@ export const calculateProductPriceTagInfo = (
     }) || null;
   }
 
-  // Se houver regra ativa:
   if (activeRule) {
     promoTitle = activeRule.name || '';
-    if (activeRule.type === 'BUY_X_PAY_Y') {
-      const buyX = activeRule.buyX || (product as any).buyX || 1;
-      const payY = activeRule.payY || (product as any).payY || 1;
-      const unitPrice = (regularPrice * payY) / (buyX || 1);
+    if (activeRule.type === 'LIGHTNING_OFFER' && activeRule.lightningDiscountPercentage && activeRule.lightningDiscountPercentage > 0) {
+      const pct = activeRule.lightningDiscountPercentage;
+      promotionalPrice = Number((regularPrice * (1 - pct / 100)).toFixed(2));
       originalPrice = regularPrice;
-      promotionalPrice = Number(unitPrice.toFixed(2));
       hasDiscount = true;
-      suggestedBadge = `LEVE ${buyX} PAGUE ${payY}`;
-      suggestedObs = `Nesta promoção, cada unidade sai por R$ ${unitPrice.toFixed(2).replace('.', ',')}`;
-    } else if (activeRule.type === 'LIGHTNING_OFFER') {
-      if (activeRule.lightningDiscountPercentage && activeRule.lightningDiscountPercentage > 0) {
-        const pct = activeRule.lightningDiscountPercentage;
-        promotionalPrice = Number((regularPrice * (1 - pct / 100)).toFixed(2));
-        originalPrice = regularPrice;
-        hasDiscount = true;
-        suggestedBadge = `-${pct}% OFF`;
-        suggestedObs = 'Oferta Relâmpago';
-      } else if (activeRule.buyX && activeRule.payY) {
-        const unitPrice = activeRule.payY / activeRule.buyX;
-        originalPrice = regularPrice;
-        promotionalPrice = Number(unitPrice.toFixed(2));
-        hasDiscount = true;
-        suggestedBadge = `LEVE ${activeRule.buyX} POR R$ ${Number(activeRule.payY).toFixed(2).replace('.', ',')}`;
-        suggestedObs = `Nesta promoção, cada unidade sai por R$ ${unitPrice.toFixed(2).replace('.', ',')}`;
-      }
-    } else if (activeRule.type === 'FIXED_COMBO') {
-      if (activeRule.buyX && activeRule.payY) {
-        const unitPrice = activeRule.payY / activeRule.buyX;
-        originalPrice = regularPrice;
-        promotionalPrice = Number(unitPrice.toFixed(2));
-        hasDiscount = true;
-        suggestedBadge = 'COMBO ESPECIAL';
-        suggestedObs = `Combo: R$ ${unitPrice.toFixed(2).replace('.', ',')} cada`;
-      }
+      suggestedBadge = `-${pct}% OFF`;
+      suggestedObs = 'Oferta Relâmpago';
     } else if (activeRule.type === 'VARIABLE_COMBO') {
       const comboPrice = activeRule.comboPrice ?? activeRule.payY ?? 0;
       suggestedBadge = 'SUPER OFERTA';
@@ -226,62 +268,35 @@ export const calculateProductPriceTagInfo = (
         hasDiscount = true;
       }
       suggestedObs = `Combo Especial: ${activeRule.name} por R$ ${Number(comboPrice).toFixed(2).replace('.', ',')}`;
-    } else if (activeRule.type === 'PROGRESSIVE_DISCOUNT' && activeRule.discountThresholds?.[0]) {
-      const first = activeRule.discountThresholds[0];
-      promotionalPrice = Number((regularPrice * (1 - first.discountPercentage / 100)).toFixed(2));
-      originalPrice = regularPrice;
-      hasDiscount = true;
-      suggestedBadge = `-${first.discountPercentage}% OFF`;
-      suggestedObs = `A partir de ${first.qty} un. ganhe ${first.discountPercentage}% OFF`;
     }
   }
 
-  // 2. Se não caiu em regra externa (ou não alterou preço), checar dados diretos do produto (Kits, Desconto por Qtd, promotional_price)
+  // 3. Se não caiu em regra externa, checar preços promocionais diretos de tabela/cadastro
   if (!hasDiscount) {
-    if (product.promotionType === 'BUY_X_PAY_Y' && product.buyX && product.payY) {
-      const buyX = product.buyX;
-      const payY = product.payY;
-      const unitPrice = (regularPrice * payY) / buyX;
-      originalPrice = regularPrice;
-      promotionalPrice = Number(unitPrice.toFixed(2));
-      hasDiscount = true;
-      suggestedBadge = `LEVE ${buyX} PAGUE ${payY}`;
-      suggestedObs = `Nesta promoção, cada unidade sai por R$ ${unitPrice.toFixed(2).replace('.', ',')}`;
-    } else if (product.promotionType === 'DISCOUNT_ON_QTY' && product.discountQtyPercentage) {
-      const pct = product.discountQtyPercentage;
-      const threshold = product.discountQtyThreshold || 2;
-      promotionalPrice = Number((regularPrice * (1 - pct / 100)).toFixed(2));
-      originalPrice = regularPrice;
-      hasDiscount = true;
-      suggestedBadge = `-${pct}% OFF`;
-      suggestedObs = `A partir de ${threshold} un. sai por R$ ${promotionalPrice.toFixed(2).replace('.', ',')} cada`;
-    } else {
-      // Checar preços promocionais diretos
-      const promoDirect = Number(
-        product.promotionalPrice ||
-        product.promotional_price ||
-        (product as any).preco_promocional ||
-        0
-      );
-      const originalDirect = Number(
-        product.originalPrice ||
-        (product as any).preco_original ||
-        0
-      );
+    const promoDirect = Number(
+      product.promotionalPrice ||
+      product.promotional_price ||
+      (product as any).preco_promocional ||
+      0
+    );
+    const originalDirect = Number(
+      product.originalPrice ||
+      (product as any).preco_original ||
+      0
+    );
 
-      if (promoDirect > 0 && promoDirect < regularPrice) {
-        originalPrice = regularPrice;
-        promotionalPrice = promoDirect;
-        hasDiscount = true;
-      } else if (originalDirect > 0 && originalDirect > regularPrice) {
-        originalPrice = originalDirect;
-        promotionalPrice = regularPrice;
-        hasDiscount = true;
-      }
+    if (promoDirect > 0 && promoDirect < regularPrice) {
+      originalPrice = regularPrice;
+      promotionalPrice = promoDirect;
+      hasDiscount = true;
+    } else if (originalDirect > 0 && originalDirect > regularPrice) {
+      originalPrice = originalDirect;
+      promotionalPrice = regularPrice;
+      hasDiscount = true;
     }
   }
 
-  // Cálculo da porcentagem de desconto
+  // Cálculo da porcentagem de desconto para remarcação DE/POR simples
   let discountPercentage = 0;
   if (hasDiscount && originalPrice > promotionalPrice && originalPrice > 0) {
     discountPercentage = Math.round(((originalPrice - promotionalPrice) / originalPrice) * 100);
@@ -301,7 +316,8 @@ export const calculateProductPriceTagInfo = (
     suggestedBadge: suggestedBadge || (hasDiscount ? 'SUPER OFERTA' : ''),
     suggestedObs,
     discountPercentage,
-    promoTitle
+    promoTitle,
+    isVolumePromo: false,
   };
 };
 
@@ -372,8 +388,30 @@ export const renderTagCard = (
   const currentLayoutConfig = TAG_LAYOUTS[layoutKey];
   const { formattedValidity, auxText } = getTagDetails(item);
   const storeName = item.customStoreName || (showStoreLogo ? tenant.name : '');
-  const origPrice = parsePrice(item.originalPrice, Number(item.product.price) || 0);
-  const promoPrice = parsePrice(item.promotionalPrice, origPrice);
+  const regularPrice = Number(item.product.price) || 0;
+  const unitPrice = parsePrice(item.price ?? item.originalPrice, regularPrice);
+  const origPrice = parsePrice(item.priceDe ?? item.originalPrice, unitPrice);
+  const promoPrice = parsePrice(item.pricePor ?? item.promotionalPrice, origPrice);
+
+  const tag = {
+    ...item,
+    price: unitPrice,
+    pricePor: promoPrice,
+    priceDe: origPrice,
+    showPriceDe: item.showPriceDe ?? item.showOriginalPrice,
+    isVolumePromo: !!item.isVolumePromo,
+    volumeMinQty: item.volumeMinQty || 2,
+    volumeTotalPrice: parsePrice(
+      item.volumeTotalPrice,
+      unitPrice * (item.volumeMinQty || 2)
+    ),
+    volumeUnitEquivalent: parsePrice(
+      item.volumeUnitEquivalent,
+      parsePrice(item.volumeTotalPrice, 0) > 0 && (item.volumeMinQty || 2) > 0
+        ? parsePrice(item.volumeTotalPrice, 0) / (item.volumeMinQty || 2)
+        : unitPrice
+    ),
+  };
 
   // 1. MODELO: GÔNDOLA PADRÃO (30 por folha • Grade 3x10 • h: 26mm)
   if (layoutKey === 'gondola') {
@@ -398,9 +436,9 @@ export const renderTagCard = (
                 </span>
               )}
             </div>
-            {item.badgeText && (
+            {tag.badgeText && (
               <span className="bg-amber-400 text-slate-950 font-black text-[7px] px-1 py-0.5 rounded-[2px] uppercase tracking-tight whitespace-nowrap shrink-0 leading-none">
-                {item.badgeText}
+                {tag.badgeText}
               </span>
             )}
           </div>
@@ -414,20 +452,51 @@ export const renderTagCard = (
         {/* Linha Inferior: Preço de Venda à esquerda e Código de Barras compacto à direita */}
         <div className="flex justify-between items-end gap-1 mt-auto pt-0.5 border-t border-slate-100 overflow-hidden shrink-0">
           <div className="flex flex-col min-w-0 flex-1 justify-end leading-none">
-            {item.showOriginalPrice && origPrice > promoPrice && (
-              <span className="text-[8px] font-bold text-slate-500 line-through block leading-none mb-0.5">
-                DE: R$ {origPrice.toFixed(2).replace('.', ',')}
-              </span>
+            {tag.isVolumePromo ? (
+              /* LAYOUT EXCLUSIVO PARA LEVE MAIS POR MENOS / KITS (GÔNDOLA) */
+              <div className="flex flex-col justify-between py-0.5 leading-none overflow-hidden">
+                {/* Preço Unitário Avulso Obrigatório por Lei */}
+                <div className="text-[7.5px] font-bold text-slate-700 leading-none truncate mb-0.5">
+                  Preço unitário avulso: <span className="font-black text-slate-900">R$ {formatPrice(tag.price)}</span>
+                </div>
+
+                {/* Destaque Principal: O TOTAL DO COMBO */}
+                <div className="my-auto flex flex-col items-start leading-none py-0.5">
+                  <span className="text-[7px] font-black text-slate-800 uppercase tracking-tight leading-none">
+                    LEVE {tag.volumeMinQty} POR APENAS
+                  </span>
+                  <div className="flex items-baseline gap-0.5 leading-none">
+                    <span className="text-[9px] font-black text-slate-900 leading-none">R$</span>
+                    <span className="text-[18px] font-black text-slate-950 tracking-tight leading-none">
+                      {formatPrice(tag.volumeTotalPrice)}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Linha Informativa Legal de Rodapé */}
+                <div className="text-[6.5px] font-bold text-slate-600 border-t border-slate-200 pt-0.5 leading-none truncate">
+                  Nesta condição, cada unidade sai a R$ {formatPrice(tag.volumeUnitEquivalent)}
+                </div>
+              </div>
+            ) : (
+              /* LAYOUT PADRÃO: PREÇO AVULSO REGULAR OU REMARCAÇÃO SIMPLES (DE / POR) */
+              <div>
+                {tag.showPriceDe && tag.priceDe > (tag.pricePor || tag.price) && (
+                  <span className="text-[8px] font-bold text-slate-500 line-through block leading-none mb-0.5">
+                    DE: R$ {formatPrice(tag.priceDe)}
+                  </span>
+                )}
+                <div className="flex items-baseline gap-0.5 leading-none">
+                  <span className="text-[10px] font-bold text-slate-700 leading-none">
+                    {tag.showPriceDe && tag.priceDe > (tag.pricePor || tag.price) ? 'POR R$' : 'R$'}
+                  </span>
+                  <span className="text-[21px] font-black text-slate-950 tracking-tight leading-none">
+                    {formatPrice(tag.pricePor || tag.price)}
+                  </span>
+                </div>
+              </div>
             )}
-            <div className="flex items-baseline gap-0.5 leading-none">
-              <span className="text-[10px] font-bold text-red-600 leading-none">
-                {item.showOriginalPrice && origPrice > promoPrice ? 'POR R$' : 'R$'}
-              </span>
-              <span className="text-[21px] font-black text-slate-950 tracking-tight leading-none">
-                {promoPrice.toFixed(2).replace('.', ',')}
-              </span>
-            </div>
-            {(auxText || formattedValidity) && (
+            {(auxText || formattedValidity) && !tag.isVolumePromo && (
               <div className="flex flex-col gap-[0.5px] mt-0.5 leading-none">
                 {auxText && (
                   <span className="text-[6.5px] font-bold text-slate-700 leading-tight truncate max-w-[105px]" title={auxText}>
@@ -486,7 +555,7 @@ export const renderTagCard = (
             {storeName || (showStoreLogo ? tenant.name : 'DROGARIA')}
           </span>
           <span className="font-black text-[12px] text-yellow-300 px-2 py-0.5 rounded bg-black/25 uppercase tracking-wide truncate max-w-[44%] text-center">
-            {item.badgeText || 'SUPER OFERTA'}
+            {tag.badgeText || (tag.isVolumePromo ? `LEVE ${tag.volumeMinQty} PAGUE MENOS` : 'SUPER OFERTA')}
           </span>
           <span className="text-[10px] font-mono font-bold text-white text-right truncate max-w-[24%]">
             {item.product.internalCode ? `CÓD: ${item.product.internalCode}` : ''}
@@ -509,19 +578,48 @@ export const renderTagCard = (
 
           {/* Área de Preço (Centro-Inferior - Ocupando o centro com grande impacto) */}
           <div className="my-auto py-1">
-            {item.showOriginalPrice && origPrice > promoPrice && (
-              <div className="text-xs font-bold text-slate-500 line-through leading-none mb-1">
-                DE: R$ {origPrice.toFixed(2).replace('.', ',')}
+            {tag.isVolumePromo ? (
+              /* LAYOUT EXCLUSIVO PARA LEVE MAIS POR MENOS / KITS */
+              <div className="flex flex-col justify-between h-full py-1">
+                {/* Preço Unitário Avulso Obrigatório por Lei */}
+                <div className="text-xs font-bold text-slate-700">
+                  Preço unitário avulso: <span className="font-extrabold text-slate-900">R$ {formatPrice(tag.price)}</span>
+                </div>
+
+                {/* Destaque Principal: O TOTAL DO COMBO */}
+                <div className="my-auto flex flex-col items-start py-0.5">
+                  <span className="text-[11px] font-black text-slate-800 uppercase tracking-tight">
+                    LEVE {tag.volumeMinQty} POR APENAS
+                  </span>
+                  <div className="flex items-baseline gap-1">
+                    <span className="text-sm font-black text-slate-900">R$</span>
+                    <span className="text-4xl sm:text-5xl font-black text-slate-950 tracking-tight leading-none">
+                      {formatPrice(tag.volumeTotalPrice)}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Linha Informativa Legal de Rodapé */}
+                <div className="text-[10px] font-bold text-slate-600 border-t border-slate-200 pt-0.5">
+                  Nesta condição, cada unidade sai a R$ {formatPrice(tag.volumeUnitEquivalent)}
+                </div>
+              </div>
+            ) : (
+              /* LAYOUT PADRÃO: PREÇO AVULSO REGULAR OU REMARCAÇÃO SIMPLES (DE / POR) */
+              <div>
+                {tag.showPriceDe && tag.priceDe > (tag.pricePor || tag.price) && (
+                  <div className="text-xs font-bold text-slate-500 line-through leading-none mb-1">
+                    DE: R$ {formatPrice(tag.priceDe)}
+                  </div>
+                )}
+                <div className="flex items-baseline gap-1.5 leading-none">
+                  <span className="text-xs font-bold text-slate-700">POR APENAS R$</span>
+                  <span className="text-4xl sm:text-5xl font-black text-slate-950 tracking-tight leading-none">
+                    {formatPrice(tag.pricePor || tag.price)}
+                  </span>
+                </div>
               </div>
             )}
-            <div className="flex items-baseline gap-1.5 leading-none">
-              <span className="text-sm font-extrabold text-slate-800 tracking-tight shrink-0">
-                {item.showOriginalPrice && origPrice > promoPrice ? 'POR APENAS R$' : 'POR R$'}
-              </span>
-              <span className="text-4xl sm:text-5xl font-black text-slate-950 tracking-tight leading-none">
-                {promoPrice.toFixed(2).replace('.', ',')}
-              </span>
-            </div>
           </div>
 
           {/* Rodapé (Inferior): Fracionado/Validade à esquerda e Código de Barras vetorial h-[14mm] à direita */}
@@ -584,7 +682,7 @@ export const renderTagCard = (
             {showStoreLogo ? tenant.name : 'DROGARIA'}
           </span>
           <span className="text-lg font-black">
-            {item.badgeText || 'OFERTA ESPECIAL'}
+            {tag.badgeText || (tag.isVolumePromo ? `LEVE ${tag.volumeMinQty} PAGUE MENOS` : 'OFERTA ESPECIAL')}
           </span>
           <span className="text-xs font-mono text-white">
             #{item.product.internalCode || ''}
@@ -611,21 +709,46 @@ export const renderTagCard = (
         </div>
 
         <div className="bg-yellow-300 p-3 text-center border-t-4 border-gray-950">
-          {item.showOriginalPrice && origPrice > promoPrice && (
-            <div className="text-sm font-black text-gray-700 line-through mb-1">
-              DE: R$ {origPrice.toFixed(2).replace('.', ',')}
+          {tag.isVolumePromo ? (
+            /* LAYOUT EXCLUSIVO PARA LEVE MAIS POR MENOS / KITS */
+            <div className="flex flex-col justify-between py-1">
+              <div className="text-xs font-bold text-slate-800 mb-0.5">
+                Preço unitário avulso: <span className="font-extrabold text-slate-950">R$ {formatPrice(tag.price)}</span>
+              </div>
+              <div className="my-auto py-1 flex flex-col items-center">
+                <span className="text-xs font-black text-slate-900 uppercase tracking-tight">
+                  LEVE {tag.volumeMinQty} POR APENAS
+                </span>
+                <div className="flex items-baseline justify-center gap-1 my-0.5">
+                  <span className="text-base font-black text-slate-900">R$</span>
+                  <span className="text-5xl font-black text-slate-950 tracking-tighter leading-none">
+                    {formatPrice(tag.volumeTotalPrice)}
+                  </span>
+                </div>
+              </div>
+              <div className="text-[11px] font-bold text-slate-800 border-t border-black/20 pt-1">
+                Nesta condição, cada unidade sai a R$ {formatPrice(tag.volumeUnitEquivalent)}
+              </div>
             </div>
-          )}
-          <div className="flex items-center justify-center gap-2">
-            <span className="text-base font-black text-red-700">POR APENAS R$</span>
-            <span className="text-5xl font-black text-gray-950 tracking-tighter">
-              {promoPrice.toFixed(2).replace('.', ',')}
-            </span>
-          </div>
-          {item.unitMeasurementText && (
-            <span className="text-xs font-bold text-gray-800 block mt-0.5">
-              {item.unitMeasurementText}
-            </span>
+          ) : (
+            <div>
+              {tag.showPriceDe && tag.priceDe > (tag.pricePor || tag.price) && (
+                <div className="text-sm font-black text-gray-700 line-through mb-1">
+                  DE: R$ {formatPrice(tag.priceDe)}
+                </div>
+              )}
+              <div className="flex items-center justify-center gap-2">
+                <span className="text-xs font-bold text-slate-700">POR APENAS R$</span>
+                <span className="text-5xl font-black text-slate-950 tracking-tighter">
+                  {formatPrice(tag.pricePor || tag.price)}
+                </span>
+              </div>
+              {item.unitMeasurementText && (
+                <span className="text-xs font-bold text-gray-800 block mt-0.5">
+                  {item.unitMeasurementText}
+                </span>
+              )}
+            </div>
           )}
         </div>
 
@@ -655,7 +778,7 @@ export const renderTagCard = (
           {showStoreLogo ? tenant.name : 'DROGARIA POPULAR'}
         </span>
         <span className="text-3xl font-black uppercase tracking-wider text-center flex-1 px-2 animate-pulse truncate">
-          {item.badgeText || 'SUPER OFERTA'}
+          {tag.badgeText || (tag.isVolumePromo ? `LEVE ${tag.volumeMinQty} PAGUE MENOS` : 'SUPER OFERTA')}
         </span>
         <span className="text-lg font-mono text-white text-right shrink-0">
           {item.product.internalCode ? `CÓD: ${item.product.internalCode}` : ''}
@@ -684,21 +807,46 @@ export const renderTagCard = (
 
       {/* Bloco Amarelo de Preço: Altura fixa h-[50mm] */}
       <div className="h-[50mm] min-h-[50mm] max-h-[50mm] bg-yellow-300 px-6 py-2 text-center border-t-[3px] border-b-[3px] border-black flex flex-col justify-center items-center shrink-0 overflow-hidden">
-        {item.showOriginalPrice && origPrice > promoPrice && (
-          <div className="text-xl font-black text-gray-700 line-through leading-none mb-1.5">
-            DE: R$ {origPrice.toFixed(2).replace('.', ',')}
+        {tag.isVolumePromo ? (
+          /* LAYOUT EXCLUSIVO PARA LEVE MAIS POR MENOS / KITS */
+          <div className="w-full flex flex-col justify-between items-center py-1 leading-none">
+            <div className="text-sm font-bold text-slate-800 mb-0.5 leading-none">
+              Preço unitário avulso: <span className="font-extrabold text-slate-950">R$ {formatPrice(tag.price)}</span>
+            </div>
+            <div className="my-auto flex flex-col items-center leading-none py-1">
+              <span className="text-base font-black text-slate-900 uppercase tracking-tight leading-none">
+                LEVE {tag.volumeMinQty} POR APENAS
+              </span>
+              <div className="flex items-baseline justify-center gap-2 leading-none my-1">
+                <span className="text-2xl font-black text-slate-900 leading-none">R$</span>
+                <span className="text-7xl sm:text-8xl font-black text-slate-950 tracking-tighter leading-none">
+                  {formatPrice(tag.volumeTotalPrice)}
+                </span>
+              </div>
+            </div>
+            <div className="text-xs font-bold text-slate-800 border-t border-black/20 pt-1 leading-none">
+              Nesta condição, cada unidade sai a R$ {formatPrice(tag.volumeUnitEquivalent)}
+            </div>
           </div>
-        )}
-        <div className="flex items-center justify-center gap-3 leading-none">
-          <span className="text-2xl font-black text-red-700">POR APENAS R$</span>
-          <span className="text-7xl sm:text-8xl font-black text-gray-950 tracking-tighter leading-none">
-            {promoPrice.toFixed(2).replace('.', ',')}
-          </span>
-        </div>
-        {item.unitMeasurementText && (
-          <span className="text-xs font-black text-gray-800 block mt-1 uppercase">
-            {item.unitMeasurementText}
-          </span>
+        ) : (
+          <div>
+            {tag.showPriceDe && tag.priceDe > (tag.pricePor || tag.price) && (
+              <div className="text-xl font-black text-gray-700 line-through leading-none mb-1.5">
+                DE: R$ {formatPrice(tag.priceDe)}
+              </div>
+            )}
+            <div className="flex items-center justify-center gap-3 leading-none">
+              <span className="text-2xl font-black text-red-700">POR APENAS R$</span>
+              <span className="text-7xl sm:text-8xl font-black text-gray-950 tracking-tighter leading-none">
+                {formatPrice(tag.pricePor || tag.price)}
+              </span>
+            </div>
+            {item.unitMeasurementText && (
+              <span className="text-xs font-black text-gray-800 block mt-1 uppercase">
+                {item.unitMeasurementText}
+              </span>
+            )}
+          </div>
         )}
       </div>
 
@@ -765,16 +913,34 @@ const CatalogProductItem = React.memo<CatalogProductItemProps>(({ product, inQue
           {product.name}
         </h4>
         <div className="flex items-baseline gap-2 mt-1">
-          <span className="text-xs font-black text-emerald-700">
-            R$ {displayPrice.toFixed(2).replace('.', ',')}
-          </span>
-          {isPromo && origPrice > displayPrice && (
-            <span className="text-[10px] text-gray-400 line-through">
-              DE: R$ {origPrice.toFixed(2).replace('.', ',')}
-            </span>
+          {calc.isVolumePromo ? (
+            <div className="flex flex-col gap-0.5">
+              <div className="flex items-baseline gap-1.5">
+                <span className="text-xs font-black text-slate-900">
+                  R$ {formatPrice(regularPrice)} <span className="text-[10px] font-normal text-slate-500">avulso</span>
+                </span>
+                <span className="text-[10px] font-black text-amber-800 bg-amber-100/90 px-1.5 py-0.5 rounded">
+                  LEVE {calc.volumeMinQty} POR R$ {formatPrice(calc.volumeTotalPrice)}
+                </span>
+              </div>
+              <span className="text-[9.5px] font-semibold text-slate-500">
+                (R$ {formatPrice(calc.volumeUnitEquivalent)} cada na condição)
+              </span>
+            </div>
+          ) : (
+            <>
+              <span className="text-xs font-black text-emerald-700">
+                R$ {formatPrice(displayPrice)}
+              </span>
+              {isPromo && origPrice > displayPrice && (
+                <span className="text-[10px] text-gray-400 line-through">
+                  DE: R$ {formatPrice(origPrice)}
+                </span>
+              )}
+            </>
           )}
           {product.manufacturer && (
-            <span className="text-[10px] text-gray-400 truncate">
+            <span className="text-[10px] text-gray-400 truncate ml-auto">
               • {product.manufacturer}
             </span>
           )}
@@ -868,6 +1034,23 @@ export const SelectedTagItem = React.memo<SelectedTagItemProps>(({ item, onUpdat
         </div>
       </div>
 
+      {/* Indicador Legal de Promoção de Volume */}
+      {item.isVolumePromo && (
+        <div className="p-2.5 rounded-xl bg-amber-50/80 border border-amber-200/90 text-amber-900 flex items-start gap-2 text-xs">
+          <div className="p-1 bg-amber-200/80 rounded-md shrink-0 mt-0.5 text-amber-950 font-black text-[10px]">
+            LEVE {item.volumeMinQty || 2}
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="font-bold text-[11px] leading-tight text-amber-950">
+              Promoção Condicional de Volume / Combo
+            </p>
+            <p className="text-[10px] text-amber-800 leading-tight mt-0.5">
+              Conforme o CDC (Dec. 5.903/06), a etiqueta destacará o <span className="font-bold">Total do Combo (R$ {formatPrice(item.volumeTotalPrice)})</span> e manterá o <span className="font-bold">Unitário Avulso (R$ {formatPrice(item.originalPrice)})</span> visível.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Linha 2: Personalização Rápida (Preço DE/POR e Badge) */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-2 border-t border-gray-200/60">
         <div>
@@ -883,77 +1066,139 @@ export const SelectedTagItem = React.memo<SelectedTagItemProps>(({ item, onUpdat
           />
         </div>
 
-        <div>
-          <div className="flex items-center justify-between mb-1">
-            <label className="text-[10px] font-black uppercase text-gray-400">
-              Preço DE (R$)
-            </label>
-            <label className="flex items-center gap-1 text-[10px] text-gray-500 cursor-pointer">
+        {item.isVolumePromo ? (
+          <>
+            <div>
+              <label className="text-[10px] font-black uppercase text-slate-600 block mb-1">
+                Preço Unitário Avulso (R$)
+              </label>
               <input
-                type="checkbox"
-                checked={item.showOriginalPrice}
-                onChange={(e) => onUpdate(item.id, { showOriginalPrice: e.target.checked })}
-                className="rounded text-emerald-600 w-3 h-3"
+                type="text"
+                inputMode="decimal"
+                placeholder="0,00"
+                value={item.originalPrice ?? ''}
+                onChange={(e) => {
+                  let val = e.target.value;
+                  val = val.replace(/[^\d.,]/g, '');
+                  val = val.replace(/^0+(?=[1-9])/, '');
+                  onUpdate(item.id, { originalPrice: val, price: val, priceDe: val });
+                }}
+                onBlur={() => {
+                  const raw = item.originalPrice;
+                  const fallback = Number(item.product.price) || 0;
+                  const parsed = raw === '' || raw === null || raw === undefined ? fallback : parsePrice(raw, fallback);
+                  onUpdate(item.id, { originalPrice: parsed, price: parsed, priceDe: parsed });
+                }}
+                className="w-full px-2.5 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-bold text-gray-900 focus:border-emerald-500 focus:outline-none"
               />
-              <span>Exibir</span>
-            </label>
-          </div>
-          <input
-            type="text"
-            inputMode="decimal"
-            placeholder="0,00"
-            value={item.originalPrice ?? ''}
-            onChange={(e) => {
-              let val = e.target.value;
-              val = val.replace(/[^\d.,]/g, '');
-              val = val.replace(/^0+(?=[1-9])/, '');
-              onUpdate(item.id, { originalPrice: val });
-            }}
-            onBlur={() => {
-              const raw = item.originalPrice;
-              if (raw === '' || raw === null || raw === undefined) {
-                const fallback = Number(item.product.price) || 0;
-                onUpdate(item.id, { originalPrice: fallback });
-              } else {
-                const parsed = parsePrice(raw, Number(item.product.price) || 0);
-                onUpdate(item.id, { originalPrice: parsed });
-              }
-            }}
-            className="w-full px-2.5 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-bold text-gray-900 focus:border-emerald-500 focus:outline-none"
-          />
-        </div>
+            </div>
 
-        <div>
-          <label className="text-[10px] font-black uppercase text-emerald-700 block mb-1">
-            Preço POR (R$)
-          </label>
-          <input
-            type="text"
-            inputMode="decimal"
-            placeholder="0,00"
-            value={item.promotionalPrice ?? ''}
-            onChange={(e) => {
-              let val = e.target.value;
-              val = val.replace(/[^\d.,]/g, '');
-              val = val.replace(/^0+(?=[1-9])/, '');
-              onUpdate(item.id, { promotionalPrice: val });
-            }}
-            onBlur={() => {
-              const raw = item.promotionalPrice;
-              if (raw === '' || raw === null || raw === undefined) {
-                const promoFallback =
-                  Number(item.product.promotionalPrice || item.product.promotional_price) ||
-                  parsePrice(item.originalPrice, Number(item.product.price) || 0);
-                onUpdate(item.id, { promotionalPrice: promoFallback });
-              } else {
-                const fallback = parsePrice(item.originalPrice, Number(item.product.price) || 0);
-                const parsed = parsePrice(raw, fallback);
-                onUpdate(item.id, { promotionalPrice: parsed });
-              }
-            }}
-            className="w-full px-2.5 py-1.5 bg-white border border-emerald-300 rounded-lg text-xs font-black text-emerald-700 focus:border-emerald-500 focus:outline-none"
-          />
-        </div>
+            <div>
+              <label className="text-[10px] font-black uppercase text-amber-800 block mb-1">
+                Total do Combo ({item.volumeMinQty || 2} un.) (R$)
+              </label>
+              <input
+                type="text"
+                inputMode="decimal"
+                placeholder="0,00"
+                value={item.volumeTotalPrice ?? ''}
+                onChange={(e) => {
+                  let val = e.target.value;
+                  val = val.replace(/[^\d.,]/g, '');
+                  val = val.replace(/^0+(?=[1-9])/, '');
+                  onUpdate(item.id, { volumeTotalPrice: val });
+                }}
+                onBlur={() => {
+                  const raw = item.volumeTotalPrice;
+                  const unit = parsePrice(item.originalPrice, Number(item.product.price) || 0);
+                  const minQty = item.volumeMinQty || 2;
+                  const fallback = unit * minQty;
+                  const parsedTotal = raw === '' || raw === null || raw === undefined ? fallback : parsePrice(raw, fallback);
+                  const parsedUnitEq = minQty > 0 ? Number((parsedTotal / minQty).toFixed(2)) : parsedTotal;
+                  onUpdate(item.id, {
+                    volumeTotalPrice: parsedTotal,
+                    volumeUnitEquivalent: parsedUnitEq
+                  });
+                }}
+                className="w-full px-2.5 py-1.5 bg-white border border-amber-300 rounded-lg text-xs font-black text-amber-900 focus:border-amber-500 focus:outline-none"
+              />
+            </div>
+          </>
+        ) : (
+          <>
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-[10px] font-black uppercase text-gray-400">
+                  Preço DE (R$)
+                </label>
+                <label className="flex items-center gap-1 text-[10px] text-gray-500 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={item.showOriginalPrice}
+                    onChange={(e) => onUpdate(item.id, { showOriginalPrice: e.target.checked, showPriceDe: e.target.checked })}
+                    className="rounded text-emerald-600 w-3 h-3"
+                  />
+                  <span>Exibir</span>
+                </label>
+              </div>
+              <input
+                type="text"
+                inputMode="decimal"
+                placeholder="0,00"
+                value={item.originalPrice ?? ''}
+                onChange={(e) => {
+                  let val = e.target.value;
+                  val = val.replace(/[^\d.,]/g, '');
+                  val = val.replace(/^0+(?=[1-9])/, '');
+                  onUpdate(item.id, { originalPrice: val, priceDe: val });
+                }}
+                onBlur={() => {
+                  const raw = item.originalPrice;
+                  if (raw === '' || raw === null || raw === undefined) {
+                    const fallback = Number(item.product.price) || 0;
+                    onUpdate(item.id, { originalPrice: fallback, priceDe: fallback });
+                  } else {
+                    const parsed = parsePrice(raw, Number(item.product.price) || 0);
+                    onUpdate(item.id, { originalPrice: parsed, priceDe: parsed });
+                  }
+                }}
+                className="w-full px-2.5 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-bold text-gray-900 focus:border-emerald-500 focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="text-[10px] font-black uppercase text-emerald-700 block mb-1">
+                Preço POR (R$)
+              </label>
+              <input
+                type="text"
+                inputMode="decimal"
+                placeholder="0,00"
+                value={item.promotionalPrice ?? ''}
+                onChange={(e) => {
+                  let val = e.target.value;
+                  val = val.replace(/[^\d.,]/g, '');
+                  val = val.replace(/^0+(?=[1-9])/, '');
+                  onUpdate(item.id, { promotionalPrice: val, pricePor: val });
+                }}
+                onBlur={() => {
+                  const raw = item.promotionalPrice;
+                  if (raw === '' || raw === null || raw === undefined) {
+                    const promoFallback =
+                      Number(item.product.promotionalPrice || item.product.promotional_price) ||
+                      parsePrice(item.originalPrice, Number(item.product.price) || 0);
+                    onUpdate(item.id, { promotionalPrice: promoFallback, pricePor: promoFallback });
+                  } else {
+                    const fallback = parsePrice(item.originalPrice, Number(item.product.price) || 0);
+                    const parsed = parsePrice(raw, fallback);
+                    onUpdate(item.id, { promotionalPrice: parsed, pricePor: parsed });
+                  }
+                }}
+                className="w-full px-2.5 py-1.5 bg-white border border-emerald-300 rounded-lg text-xs font-black text-emerald-700 focus:border-emerald-500 focus:outline-none"
+              />
+            </div>
+          </>
+        )}
       </div>
 
       {/* Linha 3: Validade/Lote e Observações/Preço Fracionado */}
@@ -1449,10 +1694,18 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
         badgeText: globalBadge || calc.suggestedBadge || (calc.hasDiscount ? 'SUPER OFERTA' : ''),
         originalPrice: calc.originalPrice,
         promotionalPrice: calc.promotionalPrice,
+        price: calc.originalPrice,
+        priceDe: calc.originalPrice,
+        pricePor: calc.promotionalPrice,
         showOriginalPrice: calc.hasDiscount,
+        showPriceDe: calc.hasDiscount,
         unitMeasurementText: calc.suggestedObs || '',
         customObservations: calc.suggestedObs || '',
-        expiryDate: ''
+        expiryDate: '',
+        isVolumePromo: calc.isVolumePromo,
+        volumeMinQty: calc.volumeMinQty,
+        volumeTotalPrice: calc.volumeTotalPrice,
+        volumeUnitEquivalent: calc.volumeUnitEquivalent,
       };
 
       return [newItem, ...prev];
@@ -1519,10 +1772,18 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
         badgeText: globalBadge || calc.suggestedBadge || (calc.hasDiscount ? 'SUPER OFERTA' : ''),
         originalPrice: calc.originalPrice,
         promotionalPrice: calc.promotionalPrice,
+        price: calc.originalPrice,
+        priceDe: calc.originalPrice,
+        pricePor: calc.promotionalPrice,
         showOriginalPrice: calc.hasDiscount,
+        showPriceDe: calc.hasDiscount,
         unitMeasurementText: calc.suggestedObs || '',
         customObservations: calc.suggestedObs || '',
-        expiryDate: ''
+        expiryDate: '',
+        isVolumePromo: calc.isVolumePromo,
+        volumeMinQty: calc.volumeMinQty,
+        volumeTotalPrice: calc.volumeTotalPrice,
+        volumeUnitEquivalent: calc.volumeUnitEquivalent,
       };
     });
 

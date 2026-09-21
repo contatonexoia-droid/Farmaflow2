@@ -19,6 +19,10 @@ export interface PriceTagBatchItemSnapshot {
   expiryDate?: string;
   customStoreName?: string;
   quantity: number;
+  isVolumePromo?: boolean;
+  volumeMinQty?: number;
+  volumeTotalPrice?: number | string;
+  volumeUnitEquivalent?: number | string;
 }
 
 export interface PriceTagBatch {
@@ -93,6 +97,10 @@ export const serializeTagItemsToSnapshot = (items: PriceTagItem[]): PriceTagBatc
     expiryDate: item.expiryDate || '',
     customStoreName: item.customStoreName || '',
     quantity: Math.max(1, Number(item.quantity) || 1),
+    isVolumePromo: item.isVolumePromo,
+    volumeMinQty: item.volumeMinQty,
+    volumeTotalPrice: item.volumeTotalPrice,
+    volumeUnitEquivalent: item.volumeUnitEquivalent,
   }));
 };
 
@@ -136,6 +144,14 @@ export const deserializeSnapshotToTagItems = (
       customObservations: s.customObservations || '',
       expiryDate: s.expiryDate || '',
       customStoreName: s.customStoreName || '',
+      isVolumePromo: s.isVolumePromo,
+      volumeMinQty: s.volumeMinQty,
+      volumeTotalPrice: s.volumeTotalPrice,
+      volumeUnitEquivalent: s.volumeUnitEquivalent,
+      price: typeof s.originalPrice === 'number' ? s.originalPrice : parseFloat(String(s.originalPrice)) || 0,
+      pricePor: typeof s.promotionalPrice === 'number' ? s.promotionalPrice : parseFloat(String(s.promotionalPrice)) || 0,
+      priceDe: typeof s.originalPrice === 'number' ? s.originalPrice : parseFloat(String(s.originalPrice)) || 0,
+      showPriceDe: s.showOriginalPrice ?? true,
     };
   });
 };
