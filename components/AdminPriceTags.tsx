@@ -29,7 +29,14 @@ import {
   deletePriceTagBatch,
   deserializeSnapshotToTagItems
 } from '../services/priceTagBatchService';
-import { Product, PharmacyConfig, PromotionRule } from '../types';
+import { 
+  Product, 
+  PharmacyConfig, 
+  PromotionRule, 
+  isPromotionActive, 
+  checkProductMatchesRule 
+} from '../types';
+import { getPromotionsByTenant } from '../services/storage';
 
 export const TAG_LAYOUTS = {
   gondola: {
@@ -141,6 +148,162 @@ export interface PriceTagItem {
   expiryDate?: string;
   customStoreName?: string;
 }
+
+export interface ProductPriceCalculation {
+  originalPrice: number;
+  promotionalPrice: number;
+  hasDiscount: boolean;
+  suggestedBadge: string;
+  suggestedObs: string;
+  discountPercentage: number;
+  promoTitle?: string;
+}
+
+export const calculateProductPriceTagInfo = (
+  product: Product,
+  promotions: PromotionRule[] = []
+): ProductPriceCalculation => {
+  const regularPrice = Number(product.price) || 0;
+  let originalPrice = regularPrice;
+  let promotionalPrice = regularPrice;
+  let hasDiscount = false;
+  let suggestedBadge = '';
+  let suggestedObs = '';
+  let promoTitle = '';
+
+  // 1. Verificar regras de promoção ativas na loja online (compatibilidade Storefront)
+  let activeRule: PromotionRule | null = null;
+  if (promotions && promotions.length > 0) {
+    activeRule = promotions.find((p) => {
+      if (!isPromotionActive(p)) return false;
+      return checkProductMatchesRule(p, product);
+    }) || null;
+  }
+
+  // Se houver regra ativa:
+  if (activeRule) {
+    promoTitle = activeRule.name || '';
+    if (activeRule.type === 'BUY_X_PAY_Y') {
+      const buyX = activeRule.buyX || (product as any).buyX || 1;
+      const payY = activeRule.payY || (product as any).payY || 1;
+      const unitPrice = (regularPrice * payY) / (buyX || 1);
+      originalPrice = regularPrice;
+      promotionalPrice = Number(unitPrice.toFixed(2));
+      hasDiscount = true;
+      suggestedBadge = `LEVE ${buyX} PAGUE ${payY}`;
+      suggestedObs = `Nesta promoção, cada unidade sai por R$ ${unitPrice.toFixed(2).replace('.', ',')}`;
+    } else if (activeRule.type === 'LIGHTNING_OFFER') {
+      if (activeRule.lightningDiscountPercentage && activeRule.lightningDiscountPercentage > 0) {
+        const pct = activeRule.lightningDiscountPercentage;
+        promotionalPrice = Number((regularPrice * (1 - pct / 100)).toFixed(2));
+        originalPrice = regularPrice;
+        hasDiscount = true;
+        suggestedBadge = `-${pct}% OFF`;
+        suggestedObs = 'Oferta Relâmpago';
+      } else if (activeRule.buyX && activeRule.payY) {
+        const unitPrice = activeRule.payY / activeRule.buyX;
+        originalPrice = regularPrice;
+        promotionalPrice = Number(unitPrice.toFixed(2));
+        hasDiscount = true;
+        suggestedBadge = `LEVE ${activeRule.buyX} POR R$ ${Number(activeRule.payY).toFixed(2).replace('.', ',')}`;
+        suggestedObs = `Nesta promoção, cada unidade sai por R$ ${unitPrice.toFixed(2).replace('.', ',')}`;
+      }
+    } else if (activeRule.type === 'FIXED_COMBO') {
+      if (activeRule.buyX && activeRule.payY) {
+        const unitPrice = activeRule.payY / activeRule.buyX;
+        originalPrice = regularPrice;
+        promotionalPrice = Number(unitPrice.toFixed(2));
+        hasDiscount = true;
+        suggestedBadge = 'COMBO ESPECIAL';
+        suggestedObs = `Combo: R$ ${unitPrice.toFixed(2).replace('.', ',')} cada`;
+      }
+    } else if (activeRule.type === 'VARIABLE_COMBO') {
+      const comboPrice = activeRule.comboPrice ?? activeRule.payY ?? 0;
+      suggestedBadge = 'SUPER OFERTA';
+      if (comboPrice > 0) {
+        promotionalPrice = Number(comboPrice);
+        originalPrice = regularPrice;
+        hasDiscount = true;
+      }
+      suggestedObs = `Combo Especial: ${activeRule.name} por R$ ${Number(comboPrice).toFixed(2).replace('.', ',')}`;
+    } else if (activeRule.type === 'PROGRESSIVE_DISCOUNT' && activeRule.discountThresholds?.[0]) {
+      const first = activeRule.discountThresholds[0];
+      promotionalPrice = Number((regularPrice * (1 - first.discountPercentage / 100)).toFixed(2));
+      originalPrice = regularPrice;
+      hasDiscount = true;
+      suggestedBadge = `-${first.discountPercentage}% OFF`;
+      suggestedObs = `A partir de ${first.qty} un. ganhe ${first.discountPercentage}% OFF`;
+    }
+  }
+
+  // 2. Se não caiu em regra externa (ou não alterou preço), checar dados diretos do produto (Kits, Desconto por Qtd, promotional_price)
+  if (!hasDiscount) {
+    if (product.promotionType === 'BUY_X_PAY_Y' && product.buyX && product.payY) {
+      const buyX = product.buyX;
+      const payY = product.payY;
+      const unitPrice = (regularPrice * payY) / buyX;
+      originalPrice = regularPrice;
+      promotionalPrice = Number(unitPrice.toFixed(2));
+      hasDiscount = true;
+      suggestedBadge = `LEVE ${buyX} PAGUE ${payY}`;
+      suggestedObs = `Nesta promoção, cada unidade sai por R$ ${unitPrice.toFixed(2).replace('.', ',')}`;
+    } else if (product.promotionType === 'DISCOUNT_ON_QTY' && product.discountQtyPercentage) {
+      const pct = product.discountQtyPercentage;
+      const threshold = product.discountQtyThreshold || 2;
+      promotionalPrice = Number((regularPrice * (1 - pct / 100)).toFixed(2));
+      originalPrice = regularPrice;
+      hasDiscount = true;
+      suggestedBadge = `-${pct}% OFF`;
+      suggestedObs = `A partir de ${threshold} un. sai por R$ ${promotionalPrice.toFixed(2).replace('.', ',')} cada`;
+    } else {
+      // Checar preços promocionais diretos
+      const promoDirect = Number(
+        product.promotionalPrice ||
+        product.promotional_price ||
+        (product as any).preco_promocional ||
+        0
+      );
+      const originalDirect = Number(
+        product.originalPrice ||
+        (product as any).preco_original ||
+        0
+      );
+
+      if (promoDirect > 0 && promoDirect < regularPrice) {
+        originalPrice = regularPrice;
+        promotionalPrice = promoDirect;
+        hasDiscount = true;
+      } else if (originalDirect > 0 && originalDirect > regularPrice) {
+        originalPrice = originalDirect;
+        promotionalPrice = regularPrice;
+        hasDiscount = true;
+      }
+    }
+  }
+
+  // Cálculo da porcentagem de desconto
+  let discountPercentage = 0;
+  if (hasDiscount && originalPrice > promotionalPrice && originalPrice > 0) {
+    discountPercentage = Math.round(((originalPrice - promotionalPrice) / originalPrice) * 100);
+    if (!suggestedBadge) {
+      suggestedBadge = discountPercentage >= 5 ? `-${discountPercentage}% OFF` : 'SUPER OFERTA';
+    }
+  } else if (!hasDiscount) {
+    originalPrice = regularPrice;
+    promotionalPrice = regularPrice;
+    hasDiscount = false;
+  }
+
+  return {
+    originalPrice,
+    promotionalPrice,
+    hasDiscount,
+    suggestedBadge: suggestedBadge || (hasDiscount ? 'SUPER OFERTA' : ''),
+    suggestedObs,
+    discountPercentage,
+    promoTitle
+  };
+};
 
 export const getTagDetails = (item: PriceTagItem) => {
   const exp = (item.expiryDate || '').trim();
@@ -257,14 +420,16 @@ export const renderTagCard = (
         <div className="flex items-end justify-between gap-1 mt-auto pt-0.5 border-t border-slate-100">
           <div className="flex flex-col min-w-0 flex-1">
             {item.showOriginalPrice && origPrice > promoPrice && (
-              <span className="text-[6px] text-slate-400 line-through leading-none">
-                DE R$ {origPrice.toFixed(2).replace('.', ',')}
+              <span className="text-[6.5px] font-bold text-gray-500 line-through leading-none">
+                DE: R$ {origPrice.toFixed(2).replace('.', ',')}
               </span>
             )}
-            <div className="flex items-baseline gap-0.5 leading-none">
-              <span className="text-[6.5px] font-bold text-slate-500">R$</span>
+            <div className="flex items-baseline gap-0.5 leading-none mt-0.5">
+              <span className="text-[7px] font-black text-red-600">
+                {item.showOriginalPrice && origPrice > promoPrice ? 'POR:' : 'R$'}
+              </span>
               <span className="text-[12.5px] font-black text-slate-950 tracking-tight leading-none">
-                {promoPrice.toFixed(2).replace('.', ',')}
+                {item.showOriginalPrice && origPrice > promoPrice ? ` R$ ${promoPrice.toFixed(2).replace('.', ',')}` : promoPrice.toFixed(2).replace('.', ',')}
               </span>
             </div>
             <div className="flex flex-col gap-[0.5px] mt-0.5">
@@ -352,12 +517,14 @@ export const renderTagCard = (
           <div className="flex items-end justify-between mt-1 pt-1 border-t-2 border-dashed border-gray-200">
             <div>
               {item.showOriginalPrice && origPrice > promoPrice && (
-                <span className="text-[9.5px] text-gray-500 line-through font-bold block">
+                <span className="text-[10px] text-gray-500 line-through font-bold block leading-tight">
                   DE: R$ {origPrice.toFixed(2).replace('.', ',')}
                 </span>
               )}
               <div className="flex items-baseline gap-1">
-                <span className="text-xs font-black text-red-600">POR R$</span>
+                <span className="text-xs font-black text-red-600">
+                  {item.showOriginalPrice && origPrice > promoPrice ? 'POR APENAS R$' : 'R$'}
+                </span>
                 <span className="text-2xl font-black text-gray-950 tracking-tight leading-none">
                   {promoPrice.toFixed(2).replace('.', ',')}
                 </span>
@@ -435,8 +602,8 @@ export const renderTagCard = (
 
         <div className="bg-yellow-300 p-3 text-center border-t-4 border-gray-950">
           {item.showOriginalPrice && origPrice > promoPrice && (
-            <div className="text-xs font-black text-gray-700 line-through">
-              DE R$ {origPrice.toFixed(2).replace('.', ',')}
+            <div className="text-sm font-black text-gray-700 line-through mb-1">
+              DE: R$ {origPrice.toFixed(2).replace('.', ',')}
             </div>
           )}
           <div className="flex items-center justify-center gap-2">
@@ -508,8 +675,8 @@ export const renderTagCard = (
       {/* Bloco Amarelo de Preço: Altura fixa h-[50mm] */}
       <div className="h-[50mm] min-h-[50mm] max-h-[50mm] bg-yellow-300 px-6 py-2 text-center border-t-[3px] border-b-[3px] border-black flex flex-col justify-center items-center shrink-0 overflow-hidden">
         {item.showOriginalPrice && origPrice > promoPrice && (
-          <div className="text-lg font-black text-gray-700 line-through leading-none mb-1">
-            DE R$ {origPrice.toFixed(2).replace('.', ',')}
+          <div className="text-xl font-black text-gray-700 line-through leading-none mb-1.5">
+            DE: R$ {origPrice.toFixed(2).replace('.', ',')}
           </div>
         )}
         <div className="flex items-center justify-center gap-3 leading-none">
@@ -550,11 +717,15 @@ interface CatalogProductItemProps {
   product: Product;
   inQueue: boolean;
   onAdd: (product: Product) => void;
+  promotions?: PromotionRule[];
 }
 
-const CatalogProductItem = React.memo<CatalogProductItemProps>(({ product, inQueue, onAdd }) => {
-  const promoPrice = Number(product.promotionalPrice || product.promotional_price || 0);
-  const isPromo = promoPrice > 0 && promoPrice < product.price;
+const CatalogProductItem = React.memo<CatalogProductItemProps>(({ product, inQueue, onAdd, promotions = [] }) => {
+  const calc = calculateProductPriceTagInfo(product, promotions);
+  const isPromo = calc.hasDiscount;
+  const regularPrice = Number(product.price) || 0;
+  const displayPrice = isPromo ? calc.promotionalPrice : regularPrice;
+  const origPrice = calc.originalPrice;
 
   return (
     <div
@@ -576,7 +747,7 @@ const CatalogProductItem = React.memo<CatalogProductItemProps>(({ product, inQue
           )}
           {isPromo && (
             <span className="text-[10px] font-black uppercase px-1.5 py-0.5 bg-amber-100 text-amber-800 rounded">
-              Oferta
+              {calc.suggestedBadge || 'Oferta'}
             </span>
           )}
         </div>
@@ -585,11 +756,11 @@ const CatalogProductItem = React.memo<CatalogProductItemProps>(({ product, inQue
         </h4>
         <div className="flex items-baseline gap-2 mt-1">
           <span className="text-xs font-black text-emerald-700">
-            R$ {(isPromo ? promoPrice : product.price).toFixed(2).replace('.', ',')}
+            R$ {displayPrice.toFixed(2).replace('.', ',')}
           </span>
-          {isPromo && (
+          {isPromo && origPrice > displayPrice && (
             <span className="text-[10px] text-gray-400 line-through">
-              R$ {product.price.toFixed(2).replace('.', ',')}
+              DE: R$ {origPrice.toFixed(2).replace('.', ',')}
             </span>
           )}
           {product.manufacturer && (
@@ -598,6 +769,11 @@ const CatalogProductItem = React.memo<CatalogProductItemProps>(({ product, inQue
             </span>
           )}
         </div>
+        {calc.suggestedObs && (
+          <p className="text-[10px] font-bold text-amber-700 truncate mt-0.5">
+            {calc.suggestedObs}
+          </p>
+        )}
       </div>
 
       <button
@@ -1085,7 +1261,25 @@ interface AdminPriceTagsProps {
 export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
   products,
   tenant,
+  promotions: initialPromotions,
 }) => {
+  // --- Promoções Ativas (recebidas via prop e sincronizadas com a nuvem) ---
+  const [activePromos, setActivePromos] = useState<PromotionRule[]>(initialPromotions || []);
+
+  useEffect(() => {
+    if (initialPromotions && initialPromotions.length > 0) {
+      setActivePromos(initialPromotions);
+    } else if (tenant?.id) {
+      getPromotionsByTenant(tenant.id, tenant.networkId)
+        .then((fetched) => {
+          if (fetched && fetched.length > 0) {
+            setActivePromos(fetched);
+          }
+        })
+        .catch((e) => console.warn('[AdminPriceTags] Falha ao carregar promoções ativas:', e));
+    }
+  }, [initialPromotions, tenant?.id, tenant?.networkId]);
+
   // --- Estados de Busca e Filtros com Debounce e DeferredValue ---
   const [searchInput, setSearchInput] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -1189,12 +1383,8 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
 
     return products.filter((p) => {
       if (onlyPromotions) {
-        const hasPromo = 
-          (p.promotionalPrice && p.promotionalPrice < p.price) ||
-          (p.promotional_price && p.promotional_price < p.price) ||
-          (p.promotionType && p.promotionType !== 'NONE') ||
-          p.isFeatured;
-        if (!hasPromo) return false;
+        const calc = calculateProductPriceTagInfo(p, activePromos);
+        if (!calc.hasDiscount && !p.isFeatured) return false;
       }
 
       if (selectedCategory !== 'all' && p.category !== selectedCategory) {
@@ -1212,7 +1402,7 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
 
       return true;
     });
-  }, [products, onlyPromotions, selectedCategory, deferredSearch]);
+  }, [products, onlyPromotions, selectedCategory, deferredSearch, activePromos]);
 
   // Limite rígido de resultados para máxima fluidez do DOM
   const visibleProducts = useMemo(() => {
@@ -1240,20 +1430,18 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
         });
       }
 
-      const currentPrice = Number(product.price) || 0;
-      const promo = Number(product.promotionalPrice || product.promotional_price || 0);
-      const hasPromo = promo > 0 && promo < currentPrice;
+      const calc = calculateProductPriceTagInfo(product, activePromos);
 
       const newItem: PriceTagItem = {
         id: product.id,
         product,
         quantity: 1,
-        badgeText: globalBadge || (hasPromo ? 'SUPER OFERTA' : ''),
-        originalPrice: hasPromo ? currentPrice : currentPrice,
-        promotionalPrice: hasPromo ? promo : currentPrice,
-        showOriginalPrice: hasPromo,
-        unitMeasurementText: '',
-        customObservations: '',
+        badgeText: globalBadge || calc.suggestedBadge || (calc.hasDiscount ? 'SUPER OFERTA' : ''),
+        originalPrice: calc.originalPrice,
+        promotionalPrice: calc.promotionalPrice,
+        showOriginalPrice: calc.hasDiscount,
+        unitMeasurementText: calc.suggestedObs || '',
+        customObservations: calc.suggestedObs || '',
         expiryDate: ''
       };
 
@@ -1268,7 +1456,7 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
         'success'
       );
     }
-  }, [globalBadge, playBeep, showToast]);
+  }, [globalBadge, playBeep, showToast, activePromos]);
 
   // Função para processar código de barras (Leitor Físico USB/Bluetooth ou Câmera)
   const handleBarcodeScanned = useCallback((rawBarcode: string) => {
@@ -1312,26 +1500,24 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
     if (toAdd.length === 0) return;
 
     const newItems: PriceTagItem[] = toAdd.map((product) => {
-      const currentPrice = Number(product.price) || 0;
-      const promo = Number(product.promotionalPrice || product.promotional_price || 0);
-      const hasPromo = promo > 0 && promo < currentPrice;
+      const calc = calculateProductPriceTagInfo(product, activePromos);
 
       return {
         id: product.id,
         product,
         quantity: 1,
-        badgeText: globalBadge || (hasPromo ? 'SUPER OFERTA' : ''),
-        originalPrice: hasPromo ? currentPrice : currentPrice,
-        promotionalPrice: hasPromo ? promo : currentPrice,
-        showOriginalPrice: hasPromo,
-        unitMeasurementText: '',
-        customObservations: '',
+        badgeText: globalBadge || calc.suggestedBadge || (calc.hasDiscount ? 'SUPER OFERTA' : ''),
+        originalPrice: calc.originalPrice,
+        promotionalPrice: calc.promotionalPrice,
+        showOriginalPrice: calc.hasDiscount,
+        unitMeasurementText: calc.suggestedObs || '',
+        customObservations: calc.suggestedObs || '',
         expiryDate: ''
       };
     });
 
     setTagItems((prev) => [...newItems, ...prev]);
-  }, [filteredCatalog, tagItemIdsSet, globalBadge]);
+  }, [filteredCatalog, tagItemIdsSet, globalBadge, activePromos]);
 
   // Remover produto da fila (memoizado)
   const handleRemoveItem = useCallback((id: string) => {
@@ -1661,6 +1847,7 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
                     product={product}
                     inQueue={tagItemIdsSet.has(product.id)}
                     onAdd={handleAddProduct}
+                    promotions={activePromos}
                   />
                 ))
               )}
