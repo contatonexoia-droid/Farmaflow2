@@ -1027,18 +1027,20 @@ export const PrintContainer = React.memo<PrintContainerProps>(({
   };
 
   return (
-    <div id="price-tags-print-container" className="hidden print:block w-full">
+    <div id="price-tags-print-container" className="hidden print:block w-full bg-white">
       {paginatedPages.map((pageItems, pageIdx) => {
         const isLastPage = pageIdx === paginatedPages.length - 1;
         return (
           <div
             key={`print-page-${pageIdx}`}
-            className="print-page price-tag-sheet"
+            className={`print-page price-tag-sheet w-[210mm] h-[296mm] max-h-[296mm] mx-auto bg-white overflow-hidden ${
+              !isLastPage ? 'page-break-after-always break-after-page' : ''
+            }`}
             style={{
               width: '210mm',
-              height: '297mm',
-              maxHeight: '297mm',
-              minHeight: '297mm',
+              height: '296mm',
+              maxHeight: '296mm',
+              minHeight: '296mm',
               boxSizing: 'border-box',
               overflow: 'hidden',
               ...pagePadding,
@@ -1466,9 +1468,11 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
   }, [tagItems]);
 
   return (
-    <div className="space-y-8 pb-16">
-      {/* CABEÇALHO DO MÓDULO */}
-      <div className="bg-white rounded-3xl p-6 sm:p-8 border border-gray-100 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-6">
+    <>
+      {/* 1. TODA A INTERFACE DO USUÁRIO (Oculta sumariamente na impressão) */}
+      <div className="space-y-8 pb-16 print:hidden">
+        {/* CABEÇALHO DO MÓDULO */}
+        <div className="bg-white rounded-3xl p-6 sm:p-8 border border-gray-100 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-6">
         <div className="space-y-2">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-emerald-50 text-emerald-700 border border-emerald-100">
             <Tag size={14} />
@@ -2033,8 +2037,9 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
           </div>
         </div>
       )}
+      </div>
 
-      {/* CONTAINER EXCLUSIVO E OFICIAL DE IMPRESSÃO */}
+      {/* 2. CONTAINER EXCLUSIVO DE IMPRESSÃO (Só aparece ao imprimir/salvar PDF) */}
       <PrintContainer
         tagItems={tagItems}
         activeLayoutKey={activeLayoutKey}
@@ -2045,6 +2050,6 @@ export const AdminPriceTags: React.FC<AdminPriceTagsProps> = ({
         tenant={tenant}
         todayFormatted={todayFormatted}
       />
-    </div>
+    </>
   );
 };
