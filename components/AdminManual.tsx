@@ -7,11 +7,12 @@ import {
   Settings, Sparkles, Star, Zap, BrainCircuit, Search, Bell,
   ChevronDown, ChevronUp, LayoutDashboard, Tag, Activity,
   Play, Video, Package, CheckCircle2, Clock, ShieldCheck, Info,
-  Percent, DollarSign, Ticket, Target, Truck, Bot, MessageSquare, MapPin
+  Percent, DollarSign, Ticket, Target, Truck, Bot, MessageSquare, MapPin,
+  ScanLine, ExternalLink, Sliders, Check
 } from 'lucide-react';
 
 // ==========================================
-// CONSTANTES DE VÍDEO E CAPÍTULOS DE PROMOÇÕES, CUPONS E CONFIGURAÇÕES
+// CONSTANTES DE VÍDEO E CAPÍTULOS DE PROMOÇÕES, CUPONS, CONFIGURAÇÕES E ETIQUETAS
 // Configure os segundos exatos de cada capítulo do tutorial abaixo:
 // ==========================================
 export const YOUTUBE_PROMOTIONS_VIDEO_ID = 'iUf3dLSzCZg';
@@ -28,6 +29,13 @@ export const YOUTUBE_CONFIG_VIDEO_ID = 'DdmNTb_BOsM';
 export const TIME_CONFIG_FRETE = 0;           // 00:00 - Configurações de Entrega & Frete por KM
 export const TIME_CONFIG_ETIQUETAS = 75;      // 01:15 - Atendimento (Etiquetas e Atalhos de Resposta)
 export const TIME_CONFIG_AGENTE_IA = 155;     // 02:35 - Agente de IA (Atendente Automático)
+
+export const YOUTUBE_PRICETAGS_VIDEO_ID = '7Qk8MyJ89PQ';
+export const YOUTUBE_PRICETAGS_URL = 'https://youtu.be/7Qk8MyJ89PQ?is=P4Jd_4Ru920Ts847';
+export const YOUTUBE_PRICETAGS_EMBED = 'https://www.youtube-nocookie.com/embed/7Qk8MyJ89PQ?rel=0';
+export const TIME_PRICETAGS_BIPAGEM = 0;      // 00:00 - Bipagem & Scanner
+export const TIME_PRICETAGS_MODELOS = 50;     // 00:50 - Modelos Gôndola, Baiana e Cartazes
+export const TIME_PRICETAGS_IMPRESSAO = 110;  // 01:50 - Configuração A4 Sem Cortes
 
 const formatTimestamp = (seconds: number): string => {
   const mins = Math.floor(seconds / 60);
@@ -155,7 +163,63 @@ const CONFIG_CHAPTERS: ConfigChapter[] = [
   }
 ];
 
-const AccordionItem = ({ title, icon, children, isOpen, onToggle }: { title: string, icon: React.ReactNode, children: React.ReactNode, isOpen: boolean, onToggle: () => void }) => {
+interface PriceTagChapter {
+  id: 'BIPAGEM' | 'MODELOS' | 'IMPRESSAO';
+  title: string;
+  shortLabel: string;
+  iconText: string;
+  seconds: number;
+  badge: string;
+  themeColor: 'blue' | 'purple' | 'emerald';
+}
+
+const PRICETAG_CHAPTERS: PriceTagChapter[] = [
+  {
+    id: 'BIPAGEM',
+    title: 'Bipagem por Leitor ou Câmera',
+    shortLabel: 'Bipagem & Scanner',
+    iconText: '📷',
+    seconds: TIME_PRICETAGS_BIPAGEM,
+    badge: 'USB, Bluetooth ou Câmera',
+    themeColor: 'blue'
+  },
+  {
+    id: 'MODELOS',
+    title: 'Modelos Gôndola, Baiana e Cartazes',
+    shortLabel: 'Modelos de Etiquetas',
+    iconText: '🏷️',
+    seconds: TIME_PRICETAGS_MODELOS,
+    badge: '30x, 8x, A5 e A4',
+    themeColor: 'purple'
+  },
+  {
+    id: 'IMPRESSAO',
+    title: 'Impressão A4 Sem Cortes & Margens',
+    shortLabel: 'Impressão Sem Cortes',
+    iconText: '🖨️',
+    seconds: TIME_PRICETAGS_IMPRESSAO,
+    badge: 'Escala 100% & Margem Zero',
+    themeColor: 'emerald'
+  }
+];
+
+const AccordionItem = ({ 
+  title, 
+  icon, 
+  children, 
+  isOpen, 
+  onToggle,
+  badge,
+  description
+}: { 
+  title: string; 
+  icon: React.ReactNode; 
+  children: React.ReactNode; 
+  isOpen: boolean; 
+  onToggle: () => void;
+  badge?: React.ReactNode;
+  description?: string;
+}) => {
   return (
     <div className={`bg-white rounded-[2rem] border transition-all duration-300 ${isOpen ? 'border-emerald-200 shadow-xl' : 'border-gray-100 shadow-sm hover:border-emerald-100'}`}>
       <button 
@@ -163,19 +227,29 @@ const AccordionItem = ({ title, icon, children, isOpen, onToggle }: { title: str
         className="w-full flex items-center justify-between p-6 md:p-8 text-left focus:outline-none"
       >
         <div className="flex items-center gap-4">
-          <div className={`p-3 rounded-2xl transition-colors ${isOpen ? 'bg-emerald-100 text-emerald-600' : 'bg-gray-50 text-gray-500'}`}>
+          <div className={`p-3 rounded-2xl transition-colors shrink-0 ${isOpen ? 'bg-emerald-100 text-emerald-600' : 'bg-gray-50 text-gray-500'}`}>
             {icon}
           </div>
-          <h3 className={`text-xl md:text-2xl font-black ${isOpen ? 'text-gray-900' : 'text-gray-700'}`}>
-            {title}
-          </h3>
+          <div>
+            <div className="flex items-center gap-3 flex-wrap">
+              <h3 className={`text-xl md:text-2xl font-black ${isOpen ? 'text-gray-900' : 'text-gray-700'}`}>
+                {title}
+              </h3>
+              {badge}
+            </div>
+            {description && (
+              <p className="text-xs md:text-sm text-gray-500 font-medium mt-1 leading-snug">
+                {description}
+              </p>
+            )}
+          </div>
         </div>
-        <div className={`p-2 rounded-full transition-colors ${isOpen ? 'bg-emerald-50 text-emerald-600' : 'bg-gray-50 text-gray-400'}`}>
+        <div className={`p-2 rounded-full transition-colors shrink-0 ml-2 ${isOpen ? 'bg-emerald-50 text-emerald-600' : 'bg-gray-50 text-gray-400'}`}>
           {isOpen ? <ChevronUp size={24} /> : <ChevronDown size={24} />}
         </div>
       </button>
       <div 
-        className={`overflow-hidden transition-all duration-500 ease-in-out ${isOpen ? 'max-h-[5000px] opacity-100' : 'max-h-0 opacity-0'}`}
+        className={`overflow-hidden transition-all duration-500 ease-in-out ${isOpen ? 'max-h-[10000px] opacity-100' : 'max-h-0 opacity-0'}`}
       >
         <div className="p-6 md:p-8 pt-0 border-t border-gray-50">
           {children}
@@ -186,8 +260,8 @@ const AccordionItem = ({ title, icon, children, isOpen, onToggle }: { title: str
 };
 
 export const AdminManual: React.FC = () => {
-  const [openSection, setOpenSection] = useState<number>(0);
-  const [tutorialTab, setTutorialTab] = useState<'PROMOTIONS' | 'COUPONS' | 'CONFIG'>('PROMOTIONS');
+  const [openSection, setOpenSection] = useState<number>(6);
+  const [tutorialTab, setTutorialTab] = useState<'PROMOTIONS' | 'COUPONS' | 'CONFIG' | 'PRICETAGS'>('PRICETAGS');
 
   // Estados do vídeo de Promoções
   const [activePromoChapter, setActivePromoChapter] = useState<'LEVE_X_PAGUE_Y' | 'COMBO_FIXO' | 'OFERTA_RELAMPAGO'>('LEVE_X_PAGUE_Y');
@@ -209,6 +283,13 @@ export const AdminManual: React.FC = () => {
     `https://www.youtube.com/embed/${YOUTUBE_CONFIG_VIDEO_ID}?enablejsapi=1`
   );
   const configIframeRef = useRef<HTMLIFrameElement>(null);
+
+  // Estados do vídeo de Etiquetas e Cartazes
+  const [activePriceTagChapter, setActivePriceTagChapter] = useState<'BIPAGEM' | 'MODELOS' | 'IMPRESSAO'>('BIPAGEM');
+  const [priceTagVideoSrc, setPriceTagVideoSrc] = useState<string>(
+    `https://www.youtube-nocookie.com/embed/${YOUTUBE_PRICETAGS_VIDEO_ID}?rel=0&enablejsapi=1`
+  );
+  const priceTagIframeRef = useRef<HTMLIFrameElement>(null);
 
   const handleJumpToPromoChapter = (chapter: PromotionChapter) => {
     setActivePromoChapter(chapter.id);
@@ -297,6 +378,35 @@ export const AdminManual: React.FC = () => {
     }
   };
 
+  const handleJumpToPriceTagChapter = (chapter: PriceTagChapter) => {
+    setActivePriceTagChapter(chapter.id);
+    const newSrc = `https://www.youtube-nocookie.com/embed/${YOUTUBE_PRICETAGS_VIDEO_ID}?rel=0&enablejsapi=1&start=${chapter.seconds}&autoplay=1`;
+    setPriceTagVideoSrc(newSrc);
+
+    if (priceTagIframeRef.current?.contentWindow) {
+      try {
+        priceTagIframeRef.current.contentWindow.postMessage(
+          JSON.stringify({
+            event: 'command',
+            func: 'seekTo',
+            args: [chapter.seconds, true]
+          }),
+          '*'
+        );
+        priceTagIframeRef.current.contentWindow.postMessage(
+          JSON.stringify({
+            event: 'command',
+            func: 'playVideo',
+            args: []
+          }),
+          '*'
+        );
+      } catch {
+        // Fallback garantido pela atualização do iframe src
+      }
+    }
+  };
+
   return (
     <div className="space-y-8 animate-in fade-in duration-700 pb-20 w-full">
       <div className="bg-white p-8 md:p-12 rounded-[3rem] border border-gray-100 shadow-sm">
@@ -370,6 +480,26 @@ export const AdminManual: React.FC = () => {
               >
                 <Settings size={16} />
                 <span>Configurações & Atendimento IA</span>
+              </button>
+
+              <button
+                id="tab-btn-pricetags"
+                onClick={() => setTutorialTab('PRICETAGS')}
+                className={`flex items-center gap-2 px-3.5 py-2 md:px-4 md:py-2.5 rounded-xl font-bold text-xs md:text-sm transition-all duration-200 ${
+                  tutorialTab === 'PRICETAGS'
+                    ? 'bg-emerald-600 text-white shadow-md shadow-emerald-200'
+                    : 'text-gray-600 hover:text-gray-900 hover:bg-slate-50'
+                }`}
+              >
+                <Printer size={16} />
+                <span>Etiquetas & Cartazes</span>
+                <span className={`px-1.5 py-0.5 text-[9px] font-black rounded-full uppercase tracking-wide ${
+                  tutorialTab === 'PRICETAGS'
+                    ? 'bg-white/20 text-white'
+                    : 'bg-emerald-100 text-emerald-800'
+                }`}>
+                  Novo
+                </span>
               </button>
             </div>
           </div>
@@ -1186,6 +1316,146 @@ export const AdminManual: React.FC = () => {
               </div>
             </div>
           )}
+
+          {/* ======================================================== */}
+          {/* ABA 4: GERADOR DE ETIQUETAS E CARTAZES */}
+          {/* ======================================================== */}
+          {tutorialTab === 'PRICETAGS' && (
+            <div className="animate-in fade-in duration-300">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 bg-emerald-600 text-white rounded-2xl flex items-center justify-center shadow-md shadow-emerald-200 shrink-0">
+                    <Printer size={24} />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-emerald-100 text-emerald-800">
+                        Vídeo Aula 04
+                      </span>
+                      <span className="text-xs text-gray-500 font-bold flex items-center gap-1">
+                        <Clock size={12} /> Etiquetas & Cartazeamento
+                      </span>
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-blue-100 text-blue-800">
+                        Novo Recurso
+                      </span>
+                    </div>
+                    <h4 className="text-lg md:text-xl font-black text-gray-900 mt-0.5">
+                      Gerador de Etiquetas de Preço e Cartazes de Ofertas
+                    </h4>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 text-xs font-bold text-gray-500 bg-white px-3.5 py-2 rounded-xl border border-slate-200 self-start md:self-auto shadow-sm">
+                  <Video size={14} className="text-emerald-600" />
+                  <span>Vídeo Oficial (YouTube)</span>
+                </div>
+              </div>
+
+              {/* CONTAINER DO VÍDEO YOUTUBE RESPONSIVO 16:9 */}
+              <div className="relative w-full aspect-video rounded-3xl overflow-hidden shadow-2xl border-4 border-white bg-slate-900 mb-4">
+                <iframe
+                  ref={priceTagIframeRef}
+                  src={priceTagVideoSrc}
+                  title="Tutorial FarmaFlow - Gerador de Etiquetas e Cartazes"
+                  className="absolute inset-0 w-full h-full"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                  allowFullScreen
+                />
+              </div>
+
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-2 mb-6 px-2 text-xs text-slate-500">
+                <span className="flex items-center gap-1.5">
+                  💡 <span>Dica: Assista em tela cheia para ver os detalhes da tela e das impressões.</span>
+                </span>
+                <a
+                  href={YOUTUBE_PRICETAGS_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-red-600 hover:text-red-700 font-semibold underline flex items-center gap-1 transition-colors"
+                >
+                  Abrir diretamente no YouTube ↗
+                </a>
+              </div>
+
+              {/* SELETOR DE CAPÍTULOS RÁPIDOS */}
+              <div className="bg-white rounded-2xl p-4 md:p-5 border border-slate-200 shadow-sm mb-6">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3 pb-3 border-b border-slate-100">
+                  <div className="flex items-center gap-2">
+                    <span className="flex h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+                    <span className="text-xs font-black uppercase tracking-wider text-gray-700">
+                      Capítulos Rápidos da Aula:
+                    </span>
+                  </div>
+                  <span className="text-[11px] text-gray-400 font-medium">
+                    Clique em um capítulo para avançar diretamente o player:
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  {PRICETAG_CHAPTERS.map((chapter) => {
+                    const isActive = activePriceTagChapter === chapter.id;
+                    return (
+                      <button
+                        key={chapter.id}
+                        id={`btn-pricetag-chapter-${chapter.id.toLowerCase()}`}
+                        onClick={() => handleJumpToPriceTagChapter(chapter)}
+                        className={`flex items-center justify-between px-3.5 py-3 rounded-xl text-left transition-all duration-200 border ${
+                          isActive
+                            ? 'bg-emerald-600 text-white border-emerald-600 shadow-md shadow-emerald-200'
+                            : 'bg-slate-50 hover:bg-slate-100 text-gray-700 border-slate-200/80 hover:border-slate-300'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <span className="text-base shrink-0">{chapter.iconText}</span>
+                          <div className="min-w-0">
+                            <p className={`text-xs font-black truncate ${isActive ? 'text-white' : 'text-gray-900'}`}>
+                              {chapter.shortLabel}
+                            </p>
+                            <p className={`text-[10px] font-medium truncate ${isActive ? 'text-emerald-100' : 'text-gray-500'}`}>
+                              {chapter.badge}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 ml-2 shrink-0">
+                          <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ${
+                            isActive ? 'bg-emerald-700 text-white' : 'bg-white text-gray-600 border border-slate-200'
+                          }`}>
+                            {formatTimestamp(chapter.seconds)}
+                          </span>
+                          <Play size={12} className={isActive ? 'fill-white' : 'fill-gray-400 text-gray-400'} />
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* CARD DE ATALHO PARA O TÓPICO DO MANUAL */}
+              <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-200 flex flex-col sm:flex-row items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0 shadow-sm">
+                    <BookOpen size={18} />
+                  </div>
+                  <div>
+                    <h5 className="text-sm font-bold text-gray-900">Guia Prático Operacional no Tópico 7</h5>
+                    <p className="text-xs text-gray-600">Acesse abaixo o manual passo a passo de bipagem, modelos A4 e checklist de margem sem cortes.</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    setOpenSection(6);
+                    const el = document.getElementById('manual-topic-price-tags');
+                    if (el) el.scrollIntoView({ behavior: 'smooth' });
+                  }}
+                  className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition-all shadow-sm shrink-0 flex items-center gap-1.5 hover:scale-[1.02]"
+                >
+                  <span>Abrir Tópico 7 Abaixo</span>
+                  <ArrowRight size={14} />
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="space-y-6 lg:mx-8">
@@ -1738,6 +2008,355 @@ export const AdminManual: React.FC = () => {
               </div>
             </div>
           </AccordionItem>
+
+          {/* ======================================================== */}
+          {/* SEÇÃO 7: GERADOR DE ETIQUETAS E CARTAZES DE OFERTAS */}
+          {/* ======================================================== */}
+          <div id="manual-topic-price-tags">
+            <AccordionItem 
+              title="7. Gerador de Etiquetas e Cartazes de Ofertas" 
+              icon={<Printer size={24} />} 
+              isOpen={openSection === 6} 
+              onToggle={() => setOpenSection(openSection === 6 ? -1 : 6)}
+              badge={
+                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-black uppercase tracking-wider bg-emerald-100 text-emerald-800 border border-emerald-200 shadow-sm">
+                  <Sparkles size={12} className="text-emerald-600" />
+                  Novo Recurso
+                </span>
+              }
+              description="Aprenda a bipar produtos com leitor ou câmera, escolher modelos de gôndola/cartazes e imprimir folhas A4 sem cortes."
+            >
+              <div className="space-y-8">
+                {/* INTRODUÇÃO EXPLICATIVA */}
+                <div className="bg-gradient-to-br from-slate-900 to-slate-800 text-white p-6 md:p-8 rounded-3xl shadow-lg border border-slate-700">
+                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                    <div>
+                      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-black uppercase tracking-wider bg-emerald-500/20 text-emerald-300 border border-emerald-400/30 mb-2">
+                        Automação de Merchandising & Ponto de Venda
+                      </span>
+                      <h4 className="text-xl md:text-2xl font-black text-white">
+                        Precificação Ágil, Padronizada e Sem Desperdício
+                      </h4>
+                      <p className="text-slate-300 text-sm md:text-base mt-2 leading-relaxed max-w-3xl">
+                        O módulo de <strong>Gerador de Etiquetas e Cartazes</strong> foi desenvolvido para solucionar um dos maiores gargalos operacionais da farmácia: a remarcação de gôndolas e a criação de cartazes promocionais. Bipe os itens diretamente no balcão com leitor USB ou câmera de celular, monte a fila de impressão e gere folhas A4 milimetricamente diagramadas sem cortes indesejados.
+                      </p>
+                    </div>
+
+                    <div className="bg-white/10 backdrop-blur-md p-4 rounded-2xl border border-white/10 shrink-0 text-center sm:text-left">
+                      <p className="text-xs text-slate-300 font-medium">Compatibilidade Total</p>
+                      <p className="text-base font-black text-emerald-400">Papel A4 Comum & Adesivo</p>
+                      <p className="text-[11px] text-slate-400 mt-1">Pimaco 6180, Sulfite 75g/90g ou Couché</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* ======================================================== */}
+                {/* PLAYER DE VÍDEO OFICIAL RESPONSIVO DO TUTORIAL */}
+                {/* ======================================================== */}
+                <div className="w-full max-w-4xl mx-auto my-6">
+                  <div className="relative w-full aspect-video rounded-2xl overflow-hidden shadow-xl border border-slate-200 bg-black">
+                    <iframe
+                      className="w-full h-full"
+                      src="https://www.youtube-nocookie.com/embed/7Qk8MyJ89PQ?rel=0"
+                      title="Tutorial: Gerador de Etiquetas e Cartazes - FarmaFlow"
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                      allowFullScreen
+                    />
+                  </div>
+
+                  <div className="flex flex-col sm:flex-row items-center justify-between gap-2 mt-3 px-1 text-xs text-slate-500">
+                    <span className="flex items-center gap-1.5">
+                      💡 <span>Dica: Assista em tela cheia para ver os detalhes da tela e das impressões.</span>
+                    </span>
+                    <a
+                      href="https://youtu.be/7Qk8MyJ89PQ?is=P4Jd_4Ru920Ts847"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-red-600 hover:text-red-700 font-semibold underline flex items-center gap-1 transition-colors"
+                    >
+                      Abrir diretamente no YouTube ↗
+                    </a>
+                  </div>
+                </div>
+
+                {/* ======================================================== */}
+                {/* GUIA PRÁTICO OPERACIONAL EM 5 ETAPAS */}
+                {/* ======================================================== */}
+                <div>
+                  <div className="flex items-center gap-3 mb-6 pb-3 border-b border-gray-100">
+                    <div className="w-10 h-10 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center font-black">
+                      <FileText size={20} />
+                    </div>
+                    <div>
+                      <h4 className="text-xl font-black text-gray-900">Guia Prático Operacional para a Equipe</h4>
+                      <p className="text-xs text-gray-500 font-medium">Siga este roteiro diário para etiquetar gôndolas e produzir cartazes com velocidade e padrão.</p>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+                    {/* ETAPA 1: BIPAGEM */}
+                    <div className="bg-slate-50 p-6 md:p-7 rounded-3xl border border-slate-200/80 hover:border-emerald-200 transition-colors">
+                      <div className="flex items-center gap-3 mb-4">
+                        <span className="w-8 h-8 rounded-xl bg-blue-600 text-white font-black text-xs flex items-center justify-center shadow-md shadow-blue-200">
+                          1
+                        </span>
+                        <div>
+                          <h5 className="font-black text-gray-900 text-base">Bipagem & Adição de Produtos</h5>
+                          <span className="text-[11px] text-blue-600 font-bold uppercase tracking-wider">Leitor Físico, Câmera ou Busca</span>
+                        </div>
+                      </div>
+
+                      <ul className="space-y-3 text-sm text-gray-600">
+                        <li className="flex items-start gap-2.5">
+                          <Check className="text-emerald-500 shrink-0 mt-0.5" size={16} />
+                          <span>
+                            <strong>Leitor USB / Bluetooth:</strong> O campo de busca conta com foco automático inteligente. Basta posicionar o cursor ou disparar o laser do leitor sobre o código de barras (EAN-13) da caixa do remédio para adicioná-lo instantaneamente.
+                          </span>
+                        </li>
+                        <li className="flex items-start gap-2.5">
+                          <Check className="text-emerald-500 shrink-0 mt-0.5" size={16} />
+                          <span>
+                            <strong>Scanner por Câmera:</strong> Clique no botão de câmera para usar o celular ou webcam. Ao apontar para o código de barras, o sistema emite um bipe sonoro de confirmação e inclui o item na lista.
+                          </span>
+                        </li>
+                        <li className="flex items-start gap-2.5">
+                          <Check className="text-emerald-500 shrink-0 mt-0.5" size={16} />
+                          <span>
+                            <strong>Incremento Rápido:</strong> Se você bipar o mesmo produto duas ou mais vezes, a quantidade de etiquetas é somada automaticamente sem duplicar linhas.
+                          </span>
+                        </li>
+                        <li className="flex items-start gap-2.5">
+                          <Check className="text-emerald-500 shrink-0 mt-0.5" size={16} />
+                          <span>
+                            <strong>Controle Manual de Cópias:</strong> Ajuste pelo seletor numérico (+ / -) exatamente quantas etiquetas serão impressas para cada produto da sua fila.
+                          </span>
+                        </li>
+                      </ul>
+                    </div>
+
+                    {/* ETAPA 2: MODELOS */}
+                    <div className="bg-slate-50 p-6 md:p-7 rounded-3xl border border-slate-200/80 hover:border-purple-200 transition-colors">
+                      <div className="flex items-center gap-3 mb-4">
+                        <span className="w-8 h-8 rounded-xl bg-purple-600 text-white font-black text-xs flex items-center justify-center shadow-md shadow-purple-200">
+                          2
+                        </span>
+                        <div>
+                          <h5 className="font-black text-gray-900 text-base">Modelos de Etiquetas e Cartazes</h5>
+                          <span className="text-[11px] text-purple-600 font-bold uppercase tracking-wider">4 Formatos Padrão A4</span>
+                        </div>
+                      </div>
+
+                      <ul className="space-y-3 text-sm text-gray-600">
+                        <li className="flex items-start gap-2.5">
+                          <Tag className="text-purple-500 shrink-0 mt-0.5" size={16} />
+                          <span>
+                            <strong>Gôndola Padrão (30 por folha):</strong> Grade 3x10 (formato Pimaco 6180 / 26mm x 64mm). Ideal para canaletas plásticas de prateleiras. Contém nome completo, código EAN, código de barras escaneável, laboratório e preço à vista/parcelado.
+                          </span>
+                        </li>
+                        <li className="flex items-start gap-2.5">
+                          <Layers className="text-purple-500 shrink-0 mt-0.5" size={16} />
+                          <span>
+                            <strong>Baiana / Destaque de Ponta (8 por folha):</strong> Grade 2x4 com 65mm de altura. Perfeita para ilhas promocionais, pontas de gôndola e cestos com letras e números ampliados para leitura a média distância.
+                          </span>
+                        </li>
+                        <li className="flex items-start gap-2.5">
+                          <FileImage className="text-purple-500 shrink-0 mt-0.5" size={16} />
+                          <span>
+                            <strong>Cartaz Promocional A5 (2 por folha):</strong> Meia folha A4 (135mm x 210mm). Recomendado para testeiras de gôndola e pilhas de produtos em oferta (fraldas, protetores solares, dermocosméticos).
+                          </span>
+                        </li>
+                        <li className="flex items-start gap-2.5">
+                          <Printer className="text-purple-500 shrink-0 mt-0.5" size={16} />
+                          <span>
+                            <strong>Cartaz de Oferta A4 (1 por folha):</strong> Cartaz gigante de página inteira para vitrines, balcão de atendimento e promoções relâmpago de alto impacto visual.
+                          </span>
+                        </li>
+                      </ul>
+                    </div>
+
+                    {/* ETAPA 3: INTELIGÊNCIA PROMOCIONAL */}
+                    <div className="bg-slate-50 p-6 md:p-7 rounded-3xl border border-slate-200/80 hover:border-amber-200 transition-colors">
+                      <div className="flex items-center gap-3 mb-4">
+                        <span className="w-8 h-8 rounded-xl bg-amber-600 text-white font-black text-xs flex items-center justify-center shadow-md shadow-amber-200">
+                          3
+                        </span>
+                        <div>
+                          <h5 className="font-black text-gray-900 text-base">Inteligência de Preços & Ofertas</h5>
+                          <span className="text-[11px] text-amber-600 font-bold uppercase tracking-wider">De / Por, Combos e Parcelamento</span>
+                        </div>
+                      </div>
+
+                      <ul className="space-y-3 text-sm text-gray-600">
+                        <li className="flex items-start gap-2.5">
+                          <Percent className="text-amber-500 shrink-0 mt-0.5" size={16} />
+                          <span>
+                            <strong>Preço "De / Por" Automático:</strong> Se o produto estiver em oferta no sistema, a etiqueta imprime o preço original riscado e o valor promocional com tipografia pesada e selo de economia.
+                          </span>
+                        </li>
+                        <li className="flex items-start gap-2.5">
+                          <Sparkles className="text-amber-500 shrink-0 mt-0.5" size={16} />
+                          <span>
+                            <strong>Leve X Pague Y Integrado:</strong> Quando configurada uma campanha de volume, o cartaz exibe a chamada promocional destacando o valor unitário equivalente no pacote (ex: <em>"Nesta embalagem a unidade sai por R$ 9,90"</em>).
+                          </span>
+                        </li>
+                        <li className="flex items-start gap-2.5">
+                          <DollarSign className="text-amber-500 shrink-0 mt-0.5" size={16} />
+                          <span>
+                            <strong>Condições de Parcelamento:</strong> O sistema calcula e exibe opções de parcelamento sem juros em produtos de maior valor agregado para estimular o ticket médio.
+                          </span>
+                        </li>
+                        <li className="flex items-start gap-2.5">
+                          <ShieldCheck className="text-amber-500 shrink-0 mt-0.5" size={16} />
+                          <span>
+                            <strong>Conformidade Legal & Procon:</strong> Inclusão automática de data de geração, laboratório fabricante e código EAN escaneável para auditorias sanitárias e fiscais.
+                          </span>
+                        </li>
+                      </ul>
+                    </div>
+
+                    {/* ETAPA 4: GESTÃO DE LOTES */}
+                    <div className="bg-slate-50 p-6 md:p-7 rounded-3xl border border-slate-200/80 hover:border-teal-200 transition-colors">
+                      <div className="flex items-center gap-3 mb-4">
+                        <span className="w-8 h-8 rounded-xl bg-teal-600 text-white font-black text-xs flex items-center justify-center shadow-md shadow-teal-200">
+                          4
+                        </span>
+                        <div>
+                          <h5 className="font-black text-gray-900 text-base">Lotes & Histórico de Impressão</h5>
+                          <span className="text-[11px] text-teal-600 font-bold uppercase tracking-wider">Reimpressão Rápida em 1 Clique</span>
+                        </div>
+                      </div>
+
+                      <ul className="space-y-3 text-sm text-gray-600">
+                        <li className="flex items-start gap-2.5">
+                          <Check className="text-teal-500 shrink-0 mt-0.5" size={16} />
+                          <span>
+                            <strong>Salvar Lote de Trabalho:</strong> Ao terminar de bipar uma remessa de gôndola, salve o lote com um nome claro (ex: <em>"Remarcação Perfumaria - 22/09"</em>).
+                          </span>
+                        </li>
+                        <li className="flex items-start gap-2.5">
+                          <Check className="text-teal-500 shrink-0 mt-0.5" size={16} />
+                          <span>
+                            <strong>Recuperação Imediata:</strong> Caso a impressora atole o papel ou seja necessário repor etiquetas danificadas, abra o histórico e clique em <em>"Restaurar Lote"</em> para recuperar todos os itens instantaneamente.
+                          </span>
+                        </li>
+                        <li className="flex items-start gap-2.5">
+                          <Check className="text-teal-500 shrink-0 mt-0.5" size={16} />
+                          <span>
+                            <strong>Limpeza Segura da Fila:</strong> Após a conclusão bem-sucedida, você pode limpar a fila atual mantendo o histórico de lotes preservado.
+                          </span>
+                        </li>
+                      </ul>
+                    </div>
+                  </div>
+
+                  {/* ======================================================== */}
+                  {/* CAIXA DE CONFIGURAÇÃO CRÍTICA DE IMPRESSÃO SEM CORTES */}
+                  {/* ======================================================== */}
+                  <div className="p-6 md:p-8 rounded-3xl bg-amber-50 border-2 border-amber-300 shadow-md">
+                    <div className="flex items-start gap-4">
+                      <div className="w-12 h-12 rounded-2xl bg-amber-500 text-white flex items-center justify-center shrink-0 shadow-md shadow-amber-200">
+                        <Sliders size={24} />
+                      </div>
+                      <div className="w-full">
+                        <div className="flex flex-wrap items-center gap-2 mb-1">
+                          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-amber-200 text-amber-900">
+                            Checklist Obrigatório
+                          </span>
+                          <span className="text-xs font-bold text-amber-800">
+                            Como Configurar a Janela de Impressão Sem Cortar Margens
+                          </span>
+                        </div>
+                        <h5 className="text-lg md:text-xl font-black text-gray-900">
+                          Configurações Críticas do Navegador (Chrome / Edge / Firefox)
+                        </h5>
+                        <p className="text-sm text-gray-700 mt-1 leading-relaxed">
+                          Para garantir que as 30 etiquetas da folha Pimaco 6180 ou os cartazes saiam perfeitamente alinhados e sem quebra de página indevida, configure sua janela de impressão conforme abaixo:
+                        </p>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3.5 mt-5">
+                          <div className="bg-white p-4 rounded-2xl border border-amber-200 shadow-sm">
+                            <span className="text-[10px] font-black uppercase tracking-wider text-amber-700 block mb-1">Passo 1: Tamanho</span>
+                            <h6 className="font-bold text-gray-900 text-sm">Papel A4</h6>
+                            <p className="text-xs text-gray-600 mt-1">Selecione sempre "A4 (210 x 297 mm)" nas opções de papel.</p>
+                          </div>
+
+                          <div className="bg-white p-4 rounded-2xl border border-amber-200 shadow-sm">
+                            <span className="text-[10px] font-black uppercase tracking-wider text-red-600 block mb-1">Passo 2: Margens</span>
+                            <h6 className="font-bold text-gray-900 text-sm">Margem: Nenhuma (ou Padrão)</h6>
+                            <p className="text-xs text-gray-600 mt-1">Defina como <strong>Nenhuma</strong> para que o cabeçalho e rodapé do navegador não empurrem as etiquetas.</p>
+                          </div>
+
+                          <div className="bg-white p-4 rounded-2xl border border-amber-200 shadow-sm">
+                            <span className="text-[10px] font-black uppercase tracking-wider text-emerald-700 block mb-1">Passo 3: Escala</span>
+                            <h6 className="font-bold text-gray-900 text-sm">Escala: 100% (Padrão)</h6>
+                            <p className="text-xs text-gray-600 mt-1"><strong>Nunca</strong> selecione "Ajustar à página" ou porcentagens diferentes de 100%.</p>
+                          </div>
+
+                          <div className="bg-white p-4 rounded-2xl border border-amber-200 shadow-sm sm:col-span-2 md:col-span-2">
+                            <span className="text-[10px] font-black uppercase tracking-wider text-purple-700 block mb-1">Passo 4: Gráficos de Fundo (Indispensável)</span>
+                            <h6 className="font-bold text-gray-900 text-sm">Marcar "Gráficos de segundo plano"</h6>
+                            <p className="text-xs text-gray-600 mt-1">
+                              No menu <em>Mais definições</em>, ative a opção <strong>Gráficos de segundo plano</strong> (Background graphics). Sem isso, as faixas pretas e fundos promocionais não serão impressos.
+                            </p>
+                          </div>
+
+                          <div className="bg-white p-4 rounded-2xl border border-amber-200 shadow-sm">
+                            <span className="text-[10px] font-black uppercase tracking-wider text-blue-700 block mb-1">Passo 5: Cabeçalho</span>
+                            <h6 className="font-bold text-gray-900 text-sm">Desmarcar Cabeçalhos/Rodapés</h6>
+                            <p className="text-xs text-gray-600 mt-1">Desative cabeçalhos para evitar carimbos com URLs e data nas bordas.</p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* ======================================================== */}
+                  {/* RESUMO DE MODELOS RECOMENDADOS POR ÁREA DA FARMÁCIA */}
+                  {/* ======================================================== */}
+                  <div className="mt-8 bg-gray-50 p-6 md:p-8 rounded-3xl border border-gray-100">
+                    <h5 className="font-black text-gray-900 text-base mb-4 flex items-center gap-2">
+                      <Store size={18} className="text-emerald-600" />
+                      Onde Usar Cada Modelo no Ponto de Venda (PDV)
+                    </h5>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                      <div className="bg-white p-4 rounded-2xl border border-gray-200 shadow-sm">
+                        <span className="px-2 py-0.5 rounded text-[10px] font-black uppercase bg-blue-100 text-blue-800">
+                          30x por Folha
+                        </span>
+                        <h6 className="font-bold text-gray-900 text-sm mt-2">Canaletas de Gôndola</h6>
+                        <p className="text-xs text-gray-500 mt-1">Medicamentos RX e OTC, dermocosméticos finos e higiene bucal em prateleiras fechadas.</p>
+                      </div>
+
+                      <div className="bg-white p-4 rounded-2xl border border-gray-200 shadow-sm">
+                        <span className="px-2 py-0.5 rounded text-[10px] font-black uppercase bg-purple-100 text-purple-800">
+                          8x por Folha
+                        </span>
+                        <h6 className="font-bold text-gray-900 text-sm mt-2">Pontas de Gôndola & Ilhas</h6>
+                        <p className="text-xs text-gray-500 mt-1">Cestos centrais, pontas de corredor e produtos em promoção da semana.</p>
+                      </div>
+
+                      <div className="bg-white p-4 rounded-2xl border border-gray-200 shadow-sm">
+                        <span className="px-2 py-0.5 rounded text-[10px] font-black uppercase bg-amber-100 text-amber-800">
+                          A5 (Meia Folha)
+                        </span>
+                        <h6 className="font-bold text-gray-900 text-sm mt-2">Testeiras & Fraldário</h6>
+                        <p className="text-xs text-gray-500 mt-1">Topo de gôndolas e pilhas de fraldas descartáveis, lenços e leites infantis.</p>
+                      </div>
+
+                      <div className="bg-white p-4 rounded-2xl border border-gray-200 shadow-sm">
+                        <span className="px-2 py-0.5 rounded text-[10px] font-black uppercase bg-rose-100 text-rose-800">
+                          A4 (Folha Inteira)
+                        </span>
+                        <h6 className="font-bold text-gray-900 text-sm mt-2">Vitrines & Balcão</h6>
+                        <p className="text-xs text-gray-500 mt-1">Cartazes gigantes com chamadas fortes na entrada da loja e no caixa.</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </AccordionItem>
+          </div>
         </div>
 
         <div className="mt-16 p-8 bg-emerald-600 rounded-[2.5rem] text-white flex flex-col lg:flex-row items-center justify-between gap-8 shadow-2xl shadow-emerald-200">
