@@ -37,6 +37,25 @@
       "destination": "/api/index"
     },
     {
+      "source": "/loja/(.*)",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/loja",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/(.*)",
+      "has": [
+        {
+          "type": "header",
+          "key": "user-agent",
+          "value": "(?i).*(whatsapp|facebookexternalhit|facebot|twitterbot|telegrambot|linkedinbot|slackbot|discordbot|skypeuripreview).*"
+        }
+      ],
+      "destination": "/api/index"
+    },
+    {
       "source": "/((?!assets/|.*\\..*).*)",
       "destination": "/index.html"
     }

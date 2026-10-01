@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { PharmacyConfig, AuthSession } from '../types';
 import { UpsellCard } from './UpsellCard';
-import { Tags, Zap, Upload, Palette, Phone, Building, Save, CheckCircle, Loader2, Type, MessageSquare, AlertTriangle, FileText, MapPin, Mail, DollarSign, BellRing, PlayCircle, Volume2, Store, CreditCard, Truck, Bot, Sparkles, Building2 } from 'lucide-react';
+import { Tags, Zap, Upload, Palette, Phone, Building, Save, CheckCircle, Loader2, Type, MessageSquare, AlertTriangle, FileText, MapPin, Mail, DollarSign, BellRing, PlayCircle, Volume2, Store, CreditCard, Truck, Bot, Sparkles, Building2, ShieldCheck, UserCheck, Scale, Clock } from 'lucide-react';
 import { ImageMigrationTool } from './ImageMigrationTool';
 import { ControlledProductsMigrationTool } from './ControlledProductsMigrationTool';
 import { SmartNumberInput } from './SmartNumberInput';
@@ -11,6 +11,16 @@ import { DeliverySettings } from './DeliverySettings';
 import { AiAgentSettings } from './AiAgentSettings';
 import { TenantSelector } from './TenantSelector';
 import { WelcomeSettings } from './WelcomeSettings';
+import { StoreShareCard } from './StoreShareCard';
+
+export const formatCnpj = (value: string): string => {
+  const digits = (value || '').replace(/\D/g, '').slice(0, 14);
+  return digits
+    .replace(/^(\d{2})(\d)/, '$1.$2')
+    .replace(/^(\d{2})\.(\d{3})(\d)/, '$1.$2.$3')
+    .replace(/\.(\d{3})(\d)/, '.$1/$2')
+    .replace(/(\d{4})(\d)/, '$1-$2');
+};
 
 const parseFullAddress = (fullAddress?: string) => {
   let cep = "", street = "", number = "", complement = "", neighborhood = "", city = "", state = "";
@@ -25,10 +35,10 @@ const parseFullAddress = (fullAddress?: string) => {
     if (cep.length === 8) {
       cep = cep.slice(0, 5) + "-" + cep.slice(5);
     }
-    fullAddress = fullAddress.replace(cepMatch[0], '').replace(/,\s*CEP:\s*/i, '').replace(/,\s*$/, '').trim();
+    fullAddress = fullAddress.replace(cepMatch[0], '').replace(/,\s*CEP:\s*/i, '').replace(/\|\s*CEP:\s*/i, '').replace(/-\s*CEP:\s*/i, '').replace(/,\s*$/, '').trim();
   }
 
-  fullAddress = fullAddress.replace(/,\s*$/, '').replace(/-\s*$/, '').trim();
+  fullAddress = fullAddress.replace(/,\s*$/, '').replace(/-\s*$/, '').replace(/\|\s*$/, '').trim();
 
   // 2. Parse by splitting
   const mainParts = fullAddress.split(/\s+-\s+/);
@@ -115,6 +125,11 @@ const parseFullAddress = (fullAddress?: string) => {
       street = fullAddress;
     }
   }
+
+  // Limpeza de segurança: impedir que dígitos ou prefixo do CEP contaminem bairro, cidade ou UF
+  if (/^\d{4,8}/.test(neighborhood.trim()) || neighborhood.toLowerCase().includes("cep")) neighborhood = "";
+  if (/^\d{4,8}/.test(city.trim()) || city.toLowerCase().includes("cep")) city = "";
+  if (/^\d{4,8}/.test(state.trim()) || state.toLowerCase().includes("cep")) state = "";
 
   return { cep, street, number, complement, neighborhood, city, state };
 };
@@ -203,12 +218,17 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
         if (data.erro) {
           setCepError("CEP não encontrado.");
         } else {
+          // Assegura que bairro receba data.bairro, cidade receba data.localidade e uf receba data.uf, impedindo que inputs recebam o valor do CEP
+          const newNeighborhood = typeof data.bairro === 'string' && data.bairro.trim() && !/^\d+$/.test(data.bairro.trim()) ? data.bairro.trim() : "";
+          const newCity = typeof data.localidade === 'string' && data.localidade.trim() && !/^\d+$/.test(data.localidade.trim()) ? data.localidade.trim() : "";
+          const newState = typeof data.uf === 'string' && data.uf.trim() && !/^\d+$/.test(data.uf.trim()) ? data.uf.trim().toUpperCase() : "";
+
           setAddressData(prev => ({
             ...prev,
-            street: data.logradouro || "",
-            neighborhood: data.bairro || "",
-            city: data.localidade || "",
-            state: data.uf || ""
+            street: typeof data.logradouro === 'string' ? data.logradouro : prev.street,
+            neighborhood: newNeighborhood || prev.neighborhood,
+            city: newCity || prev.city,
+            state: newState || prev.state
           }));
           setCepError("");
         }
@@ -225,7 +245,17 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
   useEffect(() => {
     setFormData({ ...config });
 
-    if (config.fullAddress) {
+    if (config.street || config.neighborhood || config.city || config.cep) {
+      setAddressData({
+        cep: config.cep || "",
+        street: config.street || "",
+        number: config.address_number || "",
+        complement: config.complement || "",
+        neighborhood: /^\d{4,8}/.test(config.neighborhood || "") ? "" : (config.neighborhood || ""),
+        city: /^\d{4,8}/.test(config.city || "") ? "" : (config.city || ""),
+        state: /^\d{4,8}/.test(config.state || "") ? "" : (config.state || "")
+      });
+    } else if (config.fullAddress) {
       const parsed = parseFullAddress(config.fullAddress);
       setAddressData(parsed);
     } else {
@@ -321,12 +351,34 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
       if (streetNumComp) finalAddress += streetNumComp;
       if (addr.neighborhood) finalAddress += (finalAddress ? " - " : "") + addr.neighborhood;
       if (cityState) finalAddress += (finalAddress ? ", " : "") + cityState;
-      if (addr.cep) finalAddress += (finalAddress ? ", " : "") + addr.cep;
+      if (addr.cep) finalAddress += (finalAddress ? " | CEP: " : "") + addr.cep;
     }
 
-    const updatedFormData = {
+    const updatedFormData: PharmacyConfig = {
       ...formData,
-      fullAddress: finalAddress || formData.fullAddress
+      fullAddress: finalAddress || formData.fullAddress,
+      street: addr.street || "",
+      address_number: addr.number || "",
+      complement: addr.complement || "",
+      neighborhood: addr.neighborhood || "",
+      city: addr.city || "",
+      state: addr.state || "",
+      cep: addr.cep || "",
+      logradouro: addr.street || "",
+      numero: addr.number || "",
+      complemento: addr.complement || "",
+      bairro: addr.neighborhood || "",
+      cidade: addr.city || "",
+      uf: addr.state || "",
+      razao_social: formData.razao_social || formData.razaoSocial || "",
+      razaoSocial: formData.razao_social || formData.razaoSocial || "",
+      farmaceutico_responsavel: formData.farmaceutico_responsavel || formData.farmaceuticoResponsavel || "",
+      farmaceuticoResponsavel: formData.farmaceutico_responsavel || formData.farmaceuticoResponsavel || "",
+      crf: formData.crf || "",
+      horario_funcionamento: formData.horario_funcionamento || formData.horarioFuncionamento || "",
+      horarioFuncionamento: formData.horario_funcionamento || formData.horarioFuncionamento || "",
+      telefone_contato: formData.telefone_contato || "",
+      cnpj: formData.cnpj || "",
     };
 
     try {
@@ -429,7 +481,10 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
         </div>
 
         {activeTab === 'geral' && (
-          <form onSubmit={handleSubmit} className="space-y-10 animate-in fade-in">
+          <div className="space-y-8 animate-in fade-in">
+            <StoreShareCard tenant={formData} />
+
+            <form onSubmit={handleSubmit} className="space-y-10">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
               <div className="space-y-8">
               <div className="space-y-2">
@@ -566,8 +621,9 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
                       type="text"
                       className="w-full bg-gray-50 border-2 border-transparent focus:bg-white focus:border-brand rounded-2xl py-4 px-6 outline-none transition-all font-bold text-black"
                       value={formData.cnpj || ''}
-                      onChange={(e) => setFormData({ ...formData, cnpj: e.target.value })}
+                      onChange={(e) => setFormData({ ...formData, cnpj: formatCnpj(e.target.value) })}
                       placeholder="00.000.000/0000-00"
+                      maxLength={18}
                     />
                 </div>
                 <div className="space-y-2">
@@ -671,6 +727,107 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
                     </div>
                 </div>
              </div>
+          </div>
+
+          {/* Seção de Dados Regulatórios e Farmacêuticos (Anvisa RDC 44/2009) */}
+          <div className="border-t border-gray-50 pt-8">
+            <div className="mb-6">
+              <div className="flex items-center gap-2">
+                <ShieldCheck size={20} className="text-emerald-600" />
+                <h3 className="text-lg font-black text-gray-900">Dados Regulatórios e Farmacêuticos (Anvisa)</h3>
+              </div>
+              <p className="text-sm text-gray-500 mt-1">
+                Informações legais exigidas pela RDC 44/2009 que serão exibidas no rodapé da sua loja online.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+              {/* 1. Razão Social */}
+              <div className="space-y-2">
+                <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest flex items-center gap-2">
+                  <Building size={14} /> Razão Social
+                </label>
+                <input
+                  type="text"
+                  className="w-full bg-gray-50 border-2 border-transparent focus:bg-white focus:border-brand rounded-2xl py-4 px-6 outline-none transition-all font-bold text-black"
+                  value={formData.razao_social || formData.razaoSocial || ''}
+                  onChange={(e) => setFormData({ ...formData, razao_social: e.target.value, razaoSocial: e.target.value })}
+                  placeholder="Ex: Drogaria Trevo Ltda"
+                />
+              </div>
+
+              {/* 2. CNPJ */}
+              <div className="space-y-2">
+                <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest flex items-center gap-2">
+                  <FileText size={14} /> CNPJ
+                </label>
+                <input
+                  type="text"
+                  className="w-full bg-gray-50 border-2 border-transparent focus:bg-white focus:border-brand rounded-2xl py-4 px-6 outline-none transition-all font-bold text-black"
+                  value={formData.cnpj || ''}
+                  onChange={(e) => setFormData({ ...formData, cnpj: formatCnpj(e.target.value) })}
+                  placeholder="00.000.000/0000-00"
+                  maxLength={18}
+                />
+              </div>
+
+              {/* 3. Farmacêutico Responsável */}
+              <div className="space-y-2">
+                <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest flex items-center gap-2">
+                  <UserCheck size={14} /> Farmacêutico Responsável
+                </label>
+                <input
+                  type="text"
+                  className="w-full bg-gray-50 border-2 border-transparent focus:bg-white focus:border-brand rounded-2xl py-4 px-6 outline-none transition-all font-bold text-black"
+                  value={formData.farmaceutico_responsavel || formData.farmaceuticoResponsavel || ''}
+                  onChange={(e) => setFormData({ ...formData, farmaceutico_responsavel: e.target.value, farmaceuticoResponsavel: e.target.value })}
+                  placeholder="Ex: Dr. Nome Completo"
+                />
+              </div>
+
+              {/* 4. CRF / Registro Profissional */}
+              <div className="space-y-2">
+                <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest flex items-center gap-2">
+                  <Scale size={14} /> CRF / Registro Profissional
+                </label>
+                <input
+                  type="text"
+                  className="w-full bg-gray-50 border-2 border-transparent focus:bg-white focus:border-brand rounded-2xl py-4 px-6 outline-none transition-all font-bold text-black"
+                  value={formData.crf || ''}
+                  onChange={(e) => setFormData({ ...formData, crf: e.target.value })}
+                  placeholder="Ex: CRF/RJ - 12345"
+                />
+              </div>
+
+              {/* 5. Horário de Funcionamento */}
+              <div className="space-y-2">
+                <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest flex items-center gap-2">
+                  <Clock size={14} /> Horário de Funcionamento
+                </label>
+                <input
+                  type="text"
+                  className="w-full bg-gray-50 border-2 border-transparent focus:bg-white focus:border-brand rounded-2xl py-4 px-6 outline-none transition-all font-bold text-black"
+                  value={formData.horario_funcionamento || formData.horarioFuncionamento || ''}
+                  onChange={(e) => setFormData({ ...formData, horario_funcionamento: e.target.value, horarioFuncionamento: e.target.value })}
+                  placeholder="Ex: Segunda a Sábado das 07:00h às 22:00h"
+                />
+              </div>
+
+              {/* 6. Telefone de Contato / Atendimento */}
+              <div className="space-y-2">
+                <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest flex items-center gap-2">
+                  <Phone size={14} /> Telefone de Contato / Atendimento
+                </label>
+                <input
+                  type="text"
+                  className="w-full bg-gray-50 border-2 border-transparent focus:bg-white focus:border-brand rounded-2xl py-4 px-6 outline-none transition-all font-bold text-black"
+                  value={formData.telefone_contato || ''}
+                  onChange={(e) => setFormData({ ...formData, telefone_contato: formatPhone(e.target.value) })}
+                  placeholder="Ex: (22) 99876-5432"
+                  maxLength={15}
+                />
+              </div>
+            </div>
           </div>
 
           <div className="border-t border-gray-50 pt-8">
@@ -966,7 +1123,8 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
             </button>
           </div>
         </form>
-        )}
+      </div>
+      )}
 
         {activeTab === 'pagamentos' && (
           <div className="animate-in fade-in duration-300">

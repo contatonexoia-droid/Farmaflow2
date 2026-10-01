@@ -74,6 +74,7 @@ import {
   DEPARTMENT_MAPPING,
 } from "../lib/departments";
 import { CookieBanner } from "./CookieBanner";
+import { StorefrontFooter } from "./StorefrontFooter";
 
 const GENERIC_PLACEHOLDER = "https://i.imgur.com/fLz8F3X.png";
 
@@ -3215,7 +3216,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
   };
 
   return (
-    <div className="bg-gray-50/50 min-h-screen pb-24 font-sans relative">
+    <div className="bg-gray-50/50 min-h-screen font-sans relative flex flex-col justify-between">
       {onBack && (
         <div className="bg-gray-900 text-white text-[10px] md:text-xs py-1.5 px-4 flex items-center justify-center z-[60] relative">
           <button
@@ -3999,6 +4000,9 @@ export const Storefront: React.FC<StorefrontProps> = ({
           </section>
         )}
       </main>
+
+      {/* Rodapé Regulatório da Farmácia (Compliance Anvisa RDC 44/2009 & LGPD) */}
+      <StorefrontFooter tenant={tenant} />
 
       {/* Botão de Avaliação Discreto */}
       <button

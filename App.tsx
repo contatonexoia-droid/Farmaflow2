@@ -66,6 +66,7 @@ import {
 } from "./services/storage";
 
 import { supabase } from "./services/supabase";
+import { getStoreUrl } from "./lib/store";
 // Added Calendar to lucide-react imports to fix missing component error
 
 // Captura imediata de parâmetros de Deep Link antes que qualquer roteador altere o histórico
@@ -2252,6 +2253,72 @@ const App: React.FC = () => {
     return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
   }, [currentTenant]);
 
+  // Sincronização dinâmica de título, favicon e meta tags Open Graph para WhatsApp e redes sociais
+  useEffect(() => {
+    if (currentTenant && currentTenant.name) {
+      const loc = [currentTenant.neighborhood, currentTenant.city, currentTenant.state].filter(Boolean).join(" - ");
+      const pageTitle = `${currentTenant.name}${loc ? ` (${loc})` : ""} - Farmácia Online & Delivery`;
+      document.title = pageTitle;
+
+      const desc =
+        currentTenant.bannerSubtitle ||
+        currentTenant.bannersubtitle ||
+        currentTenant.bannerTitle ||
+        currentTenant.bannertitle ||
+        (loc
+          ? `Peça medicamentos, perfumaria e receba em casa com entrega rápida em ${loc}. Compre online pelo WhatsApp.`
+          : "Faça seu pedido online com rapidez e comodidade. Medicamentos, perfumaria e cuidados diários com tele-entrega direta no seu WhatsApp.");
+
+      const storeUrl = getStoreUrl(currentTenant);
+      const logoUrl =
+        currentTenant.logo && currentTenant.logo.startsWith("http")
+          ? currentTenant.logo
+          : `${window.location.origin}/api/v1/store/${currentTenant.slug || currentTenant.id}/logo.png`;
+
+      const setMeta = (attr: string, key: string, content: string) => {
+        let el = document.querySelector(`meta[${attr}="${key}"]`);
+        if (!el) {
+          el = document.createElement("meta");
+          el.setAttribute(attr, key);
+          document.head.appendChild(el);
+        }
+        el.setAttribute("content", content);
+      };
+
+      setMeta("property", "og:type", "website");
+      setMeta("property", "og:title", pageTitle);
+      setMeta("property", "og:description", desc);
+      setMeta("property", "og:url", storeUrl);
+      setMeta("property", "og:image", logoUrl);
+      setMeta("property", "og:image:secure_url", logoUrl);
+      setMeta("property", "og:image:type", "image/png");
+      setMeta("property", "og:image:width", "1200");
+      setMeta("property", "og:image:height", "630");
+      setMeta("property", "og:site_name", currentTenant.name);
+      setMeta("name", "twitter:card", "summary_large_image");
+      setMeta("name", "twitter:title", pageTitle);
+      setMeta("name", "twitter:description", desc);
+      setMeta("name", "twitter:image", logoUrl);
+      setMeta("name", "description", desc);
+
+      if (logoUrl) {
+        const iconLink = document.querySelector('link[rel="icon"]') as HTMLLinkElement;
+        if (iconLink) iconLink.href = logoUrl;
+        let appleIcon = document.querySelector('link[rel="apple-touch-icon"]') as HTMLLinkElement;
+        if (appleIcon) {
+          appleIcon.href = logoUrl;
+        } else {
+          appleIcon = document.createElement("link");
+          appleIcon.rel = "apple-touch-icon";
+          appleIcon.href = logoUrl;
+          document.head.appendChild(appleIcon);
+        }
+      }
+    } else {
+      document.title = "FarmaFlow - Farmácia e Perfumaria Online";
+    }
+  }, [currentTenant]);
+
   useEffect(() => {
     const init = async () => {
       setIsLoading(true);
@@ -2361,25 +2428,45 @@ const App: React.FC = () => {
             }) || null;
         }
 
-        // 3º: Como fallback, tenta obter pelo parâmetro de URL "?p" ou "?tenant"
+        // 3º: Como fallback, tenta obter pelo caminho /loja/:slug ou parâmetros de URL "?store", "?loja", "?p", "?tenant"
         const params = new URLSearchParams(window.location.search);
-        const pParam = params.get("p") || params.get("tenant");
+        const queryParam = params.get("store") || params.get("loja") || params.get("p") || params.get("tenant");
+        const lojaMatch = path.match(/^\/loja\/([^/?#]+)/);
+        const lojaParam = lojaMatch ? decodeURIComponent(lojaMatch[1]) : null;
+        const targetSearch = queryParam || lojaParam;
 
-        if (!targetTenant && pParam) {
+        if (!targetTenant && targetSearch) {
           const tenants = await getTenants();
+          const cleanTarget = targetSearch
+            .toLowerCase()
+            .normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "")
+            .replace(/[^a-z0-9]/g, "");
+
           targetTenant =
             tenants.find((t) => {
-              const cleanSlug = t.slug
-                ? t.slug
-                    .toLowerCase()
-                    .normalize("NFD")
-                    .replace(/[\u0300-\u036f]/g, "")
-                    .replace(/[^a-z0-9\s-]/g, "")
-                    .trim()
-                    .replace(/\s+/g, "-")
-                : "";
+              const cleanSlug = (t.slug || "")
+                .toLowerCase()
+                .normalize("NFD")
+                .replace(/[\u0300-\u036f]/g, "")
+                .replace(/[^a-z0-9]/g, "");
+              const cleanId = (t.id || "")
+                .toLowerCase()
+                .normalize("NFD")
+                .replace(/[\u0300-\u036f]/g, "")
+                .replace(/[^a-z0-9]/g, "");
+              const cleanName = (t.name || "")
+                .toLowerCase()
+                .normalize("NFD")
+                .replace(/[\u0300-\u036f]/g, "")
+                .replace(/[^a-z0-9]/g, "");
+
               return (
-                t.id === pParam || t.slug === pParam || cleanSlug === pParam
+                t.id === targetSearch ||
+                t.slug === targetSearch ||
+                cleanSlug === cleanTarget ||
+                cleanId === cleanTarget ||
+                cleanName === cleanTarget
               );
             }) || null;
         }

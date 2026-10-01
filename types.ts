@@ -230,6 +230,33 @@ export interface PharmacyConfig {
   welcomeMessageText?: string;
   welcomeMessageFormat?: 'button' | 'text';
   welcomeMessageLink?: string;
+  subdomain?: string;
+  neighborhood?: string;
+  city?: string;
+  state?: string;
+  cep?: string;
+  street?: string;
+  phone?: string;
+  bannertitle?: string;
+  bannersubtitle?: string;
+  razao_social?: string;
+  razaoSocial?: string;
+  farmaceutico_responsavel?: string;
+  farmaceuticoResponsavel?: string;
+  crf?: string;
+  horario_funcionamento?: string;
+  horarioFuncionamento?: string;
+  telefone_contato?: string;
+  address_number?: string;
+  full_address?: string;
+  complement?: string;
+  logradouro?: string;
+  numero?: string;
+  complemento?: string;
+  bairro?: string;
+  cidade?: string;
+  uf?: string;
+  nome_loja?: string;
   updatedAt?: string;
 }
 

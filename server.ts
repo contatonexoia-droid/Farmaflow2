@@ -39,6 +39,23 @@ if (typeof process !== "undefined" && !process.env.NODE_TLS_REJECT_UNAUTHORIZED)
 const app = express();
 const PORT = 3000;
 
+// Supabase Client for Server-side operations
+const SUPABASE_URL =
+  process.env.SUPABASE_URL || "https://nalshjhoiecxooejpiaw.supabase.co";
+const SUPABASE_SERVICE_ROLE_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_ANON_KEY ||
+  "sb_publishable_Y2lAqlvDUhdjSNtv80GkJA_SiOgynYy";
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+// Dedicated client for Supabase administrative actions (Service Role)
+const supabaseAdmin = createClient(SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY || SUPABASE_SERVICE_ROLE_KEY, {
+  auth: {
+    autoRefreshToken: false,
+    persistSession: false
+  }
+});
+
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
@@ -218,6 +235,358 @@ app.get("/api/v1/resolve-tenant", async (req, res) => {
         return res.status(404).json({ error: "Tenant not found for this domain" });
     }
     res.status(500).json({ error: e.message });
+  }
+});
+
+// ============================================================================
+// OPEN GRAPH / WHATSAPP RICH LINK PREVIEW MULTITENANT
+// ============================================================================
+
+const isSocialCrawler = (userAgent: string = ''): boolean => {
+  if (!userAgent) return false;
+  return /whatsapp|facebookexternalhit|facebot|twitterbot|telegrambot|linkedinbot|slackbot|discordbot|skypeuripreview|googlebot|bingbot|baiduspider|yandex|crawlers/i.test(userAgent);
+};
+
+interface TenantMetaRecord {
+  id: string;
+  name: string;
+  slug: string;
+  title: string;
+  description: string;
+  logoUrl: string;
+  canonicalUrl: string;
+  location: string;
+  phone: string;
+  rawTenant?: any;
+}
+
+async function getTenantMetaRecord(identifier: string, req: express.Request): Promise<TenantMetaRecord | null> {
+  if (!identifier) return null;
+  const cleanReq = identifier.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
+
+  let tenant: any = null;
+
+  // 1. Busca direta por ID ou Slug
+  try {
+    const { data, error } = await supabase
+      .from("tenants")
+      .select("id, name, slug, logo, banner_title, banner_subtitle, bannertitle, bannersubtitle, city, neighborhood, state, custom_domain, whatsapp")
+      .or(`id.eq.${identifier},slug.eq.${identifier}`)
+      .maybeSingle();
+
+    if (!error && data) {
+      tenant = data;
+    }
+  } catch (err) {}
+
+  // 2. Fallback: busca flexível comparando nomes e slugs normalizados
+  if (!tenant) {
+    try {
+      const { data: allTenants } = await supabase
+        .from("tenants")
+        .select("id, name, slug, logo, banner_title, banner_subtitle, bannertitle, bannersubtitle, city, neighborhood, state, custom_domain, whatsapp");
+
+      if (allTenants) {
+        tenant = allTenants.find((t: any) => {
+          const rawSlug = (t.slug || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
+          const rawId = (t.id || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
+          const rawName = (t.name || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
+          const rawCustom = (t.custom_domain || "").toLowerCase();
+          return rawSlug === cleanReq || rawId === cleanReq || rawName === cleanReq || rawCustom === identifier.toLowerCase();
+        }) || null;
+      }
+    } catch (err) {}
+  }
+
+  if (!tenant) return null;
+
+  // Resolução de URLs canônicas absolutas
+  const host = (req.headers["x-forwarded-host"] || req.headers.host || "farmaflow.online").toString().split(":")[0];
+  const proto = (req.headers["x-forwarded-proto"] || (req.secure ? "https" : "https")).toString();
+  const baseUrl = `${proto}://${host}`;
+
+  const storeName = tenant.name || "FarmaFlow Drogaria";
+  const locParts = [tenant.neighborhood, tenant.city, tenant.state].filter(Boolean);
+  const location = locParts.length > 0 ? locParts.join(" - ") : "";
+  const title = `${storeName}${location ? ` (${location})` : ""} - Farmácia Online & Delivery`;
+
+  const description =
+    tenant.banner_subtitle ||
+    tenant.bannersubtitle ||
+    tenant.banner_title ||
+    tenant.bannertitle ||
+    (location
+      ? `Peça medicamentos, perfumaria e receba em casa com entrega rápida em ${location}. Compre online com tele-entrega direta no seu WhatsApp.`
+      : "Faça seu pedido online com rapidez e comodidade. Medicamentos, perfumaria e cuidados diários com tele-entrega direta no seu WhatsApp.");
+
+  const tenantSlug = tenant.slug || tenant.id;
+  const logoUrl = `${baseUrl}/api/v1/store/${encodeURIComponent(tenantSlug)}/logo.png`;
+
+  let canonicalUrl = `${baseUrl}/loja/${encodeURIComponent(tenantSlug)}`;
+  if (tenant.custom_domain && tenant.custom_domain.trim()) {
+    canonicalUrl = `https://${tenant.custom_domain.replace(/^https?:\/\//, "").trim()}`;
+  } else if (host.endsWith(".farmaflow.online") && host !== "farmaflow.online" && host !== "www.farmaflow.online") {
+    canonicalUrl = `${proto}://${host}`;
+  }
+
+  return {
+    id: tenant.id,
+    name: storeName,
+    slug: tenantSlug,
+    title,
+    description,
+    logoUrl,
+    canonicalUrl,
+    location,
+    phone: tenant.whatsapp || "",
+    rawTenant: tenant,
+  };
+}
+
+function generateStoreOpenGraphHtml(meta: TenantMetaRecord): string {
+  const esc = (str: string = "") =>
+    str
+      .replace(/&/g, "&amp;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  
+  <!-- Metadados Padrão do Navegador -->
+  <title>${esc(meta.title)}</title>
+  <meta name="description" content="${esc(meta.description)}" />
+
+  <!-- Metadados de Compartilhamento / WhatsApp / Facebook / Open Graph -->
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="${esc(meta.name)}" />
+  <meta property="og:url" content="${esc(meta.canonicalUrl)}" />
+  <meta property="og:title" content="${esc(meta.title)}" />
+  <meta property="og:description" content="${esc(meta.description)}" />
+
+  <!-- Imagem de Destaque Oficial (Dimensões recomendadas para WhatsApp e Redes Sociais) -->
+  <meta property="og:image" content="${esc(meta.logoUrl)}" />
+  <meta property="og:image:secure_url" content="${esc(meta.logoUrl)}" />
+  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content="${esc(meta.name)}" />
+
+  <!-- Twitter / X Cards -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="${esc(meta.title)}" />
+  <meta name="twitter:description" content="${esc(meta.description)}" />
+  <meta name="twitter:image" content="${esc(meta.logoUrl)}" />
+
+  <!-- Ícones de Atalho e PWA -->
+  <link rel="apple-touch-icon" href="${esc(meta.logoUrl)}" />
+  <link rel="icon" type="image/png" href="${esc(meta.logoUrl)}" />
+
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f8fafc; color: #1e293b; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
+    .card { background: white; border-radius: 24px; padding: 32px; max-width: 440px; width: 100%; box-shadow: 0 20px 40px -15px rgba(0,0,0,0.1); text-align: center; border: 1px solid #e2e8f0; }
+    .logo { width: 96px; height: 96px; border-radius: 20px; object-fit: contain; margin: 0 auto 16px; box-shadow: 0 4px 14px rgba(0,0,0,0.08); background: #ffffff; padding: 6px; }
+    h1 { font-size: 20px; font-weight: 800; margin: 0 0 8px; color: #0f172a; line-height: 1.3; }
+    p { font-size: 14px; color: #64748b; line-height: 1.5; margin: 0 0 24px; }
+    .btn { display: block; background: #10b981; color: white; text-decoration: none; padding: 14px 24px; border-radius: 16px; font-weight: 700; font-size: 15px; box-shadow: 0 10px 20px -5px rgba(16,185,129,0.4); }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <img src="${esc(meta.logoUrl)}" alt="${esc(meta.name)}" class="logo" />
+    <h1>${esc(meta.name)}</h1>
+    <p>${esc(meta.description)}</p>
+    <a href="${esc(meta.canonicalUrl)}" class="btn">Acessar Loja Online &rarr;</a>
+  </div>
+</body>
+</html>`;
+}
+
+function injectStoreMetaIntoHtml(html: string, meta: TenantMetaRecord): string {
+  let updated = html;
+  
+  updated = updated.replace(/<title>.*?<\/title>/i, `<title>${meta.title}</title>`);
+  
+  if (updated.includes('property="og:title"')) {
+    updated = updated.replace(/<meta\s+property="og:title"\s+content="[^"]*"\s*\/?>/i, `<meta property="og:title" content="${meta.title}" />`);
+  }
+  if (updated.includes('property="og:description"')) {
+    updated = updated.replace(/<meta\s+property="og:description"\s+content="[^"]*"\s*\/?>/i, `<meta property="og:description" content="${meta.description}" />`);
+  }
+  if (updated.includes('property="og:url"')) {
+    updated = updated.replace(/<meta\s+property="og:url"\s+content="[^"]*"\s*\/?>/i, `<meta property="og:url" content="${meta.canonicalUrl}" />`);
+  }
+  if (updated.includes('property="og:site_name"')) {
+    updated = updated.replace(/<meta\s+property="og:site_name"\s+content="[^"]*"\s*\/?>/i, `<meta property="og:site_name" content="${meta.name}" />`);
+  }
+  if (updated.includes('property="og:image"')) {
+    updated = updated.replace(/<meta\s+property="og:image"\s+content="[^"]*"\s*\/?>/i, `<meta property="og:image" content="${meta.logoUrl}" />`);
+  }
+  if (updated.includes('property="og:image:secure_url"')) {
+    updated = updated.replace(/<meta\s+property="og:image:secure_url"\s+content="[^"]*"\s*\/?>/i, `<meta property="og:image:secure_url" content="${meta.logoUrl}" />`);
+  }
+  if (updated.includes('name="twitter:card"')) {
+    updated = updated.replace(/<meta\s+name="twitter:card"\s+content="[^"]*"\s*\/?>/i, `<meta name="twitter:card" content="summary_large_image" />`);
+  }
+  if (updated.includes('name="twitter:title"')) {
+    updated = updated.replace(/<meta\s+name="twitter:title"\s+content="[^"]*"\s*\/?>/i, `<meta name="twitter:title" content="${meta.title}" />`);
+  }
+  if (updated.includes('name="twitter:description"')) {
+    updated = updated.replace(/<meta\s+name="twitter:description"\s+content="[^"]*"\s*\/?>/i, `<meta name="twitter:description" content="${meta.description}" />`);
+  }
+  if (updated.includes('name="twitter:image"')) {
+    updated = updated.replace(/<meta\s+name="twitter:image"\s+content="[^"]*"\s*\/?>/i, `<meta name="twitter:image" content="${meta.logoUrl}" />`);
+  }
+  if (updated.includes('name="description"')) {
+    updated = updated.replace(/<meta\s+name="description"\s+content="[^"]*"\s*\/?>/i, `<meta name="description" content="${meta.description}" />`);
+  }
+
+  return updated;
+}
+
+// Endpoint de Servir Logo da Loja em Formato Binário Real (JPEG/PNG) para WhatsApp e Crawlers
+app.get(["/api/v1/store/:tenantId/logo.png", "/api/store-logo/:tenantId.png"], async (req, res) => {
+  try {
+    const tenantId = Array.isArray(req.params.tenantId) ? req.params.tenantId[0] : String(req.params.tenantId || "");
+    const meta = await getTenantMetaRecord(tenantId, req);
+    const tenant = meta?.rawTenant;
+
+    if (tenant && tenant.logo) {
+      const logoStr = String(tenant.logo).trim();
+      if (logoStr.startsWith("data:")) {
+        const match = logoStr.match(/^data:([a-zA-Z0-9\/+-]+);base64,(.+)$/);
+        if (match) {
+          const mime = match[1];
+          const buf = Buffer.from(match[2], "base64");
+          res.setHeader("Content-Type", mime);
+          res.setHeader("Cache-Control", "public, max-age=86400, stale-while-revalidate=604800");
+          return res.send(buf);
+        }
+      } else if (logoStr.startsWith("http://") || logoStr.startsWith("https://")) {
+        return res.redirect(302, logoStr);
+      }
+    }
+
+    // Fallback para o logotipo padrão preview-share.png
+    const previewPaths = [
+      path.join(process.cwd(), "public", "preview-share.png"),
+      path.join(process.cwd(), "dist", "preview-share.png"),
+    ];
+    for (const p of previewPaths) {
+      if (fs.existsSync(p)) {
+        res.setHeader("Content-Type", "image/png");
+        res.setHeader("Cache-Control", "public, max-age=86400");
+        return res.sendFile(p);
+      }
+    }
+
+    res.status(404).send("Logo não encontrada");
+  } catch (err: any) {
+    console.error("[StoreLogo] Erro ao servir logo da loja:", err);
+    res.status(500).send("Erro interno ao servir logo");
+  }
+});
+
+// Endpoint /api/og de Metadados / Rich Preview Card para Integrações e Crawlers
+app.get("/api/og", async (req, res) => {
+  try {
+    const ident = (req.query.store || req.query.slug || req.query.tenant || req.query.id || req.query.loja || "").toString().trim();
+    if (!ident) {
+      return res.status(400).json({ error: "Parâmetro store ou slug obrigatório" });
+    }
+    const meta = await getTenantMetaRecord(ident, req);
+    if (!meta) {
+      return res.status(404).json({ error: "Drogaria não encontrada" });
+    }
+
+    if (req.headers.accept?.includes("application/json") || req.query.format === "json") {
+      return res.json(meta);
+    }
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.setHeader("Cache-Control", "public, max-age=300, stale-while-revalidate=86400");
+    return res.send(generateStoreOpenGraphHtml(meta));
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Interceptor de Rota de Loja Pública (/loja/:slug)
+app.get(["/loja/:slug", "/loja/:slug/*all"], async (req, res, next) => {
+  try {
+    const slug = Array.isArray(req.params.slug) ? req.params.slug[0] : String(req.params.slug || "");
+    const meta = await getTenantMetaRecord(slug, req);
+    if (!meta) return next();
+
+    const isCrawler = isSocialCrawler((req.headers["user-agent"] as string) || "");
+    if (isCrawler) {
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.setHeader("Cache-Control", "public, max-age=300, stale-while-revalidate=86400");
+      return res.send(generateStoreOpenGraphHtml(meta));
+    }
+
+    // Para navegadores regulares: injeta as meta tags dinâmicas no index.html e serve
+    const distHtml = path.join(process.cwd(), "dist", "index.html");
+    const rootHtml = path.join(process.cwd(), "index.html");
+    const filePath = fs.existsSync(distHtml) ? distHtml : rootHtml;
+
+    if (fs.existsSync(filePath)) {
+      const original = fs.readFileSync(filePath, "utf-8");
+      const injected = injectStoreMetaIntoHtml(original, meta);
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+      return res.send(injected);
+    }
+
+    return next();
+  } catch (err) {
+    return next();
+  }
+});
+
+// Interceptor de Rota Raiz (/) para Crawlers de Redes Sociais com parâmetros de drogaria ou subdomínio
+app.get("/", async (req, res, next) => {
+  try {
+    const isCrawler = isSocialCrawler((req.headers["user-agent"] as string) || "");
+    const storeParam = (req.query.store || req.query.loja || req.query.tenant || req.query.p || "").toString().trim();
+    const host = (req.headers["x-forwarded-host"] || req.headers.host || "").toString().split(":")[0];
+    const isSubdomain = (host.endsWith(".farmaflow.online") || host.endsWith(".nexoia.online")) && !["www", "farmaflow", "nexoia", "app", "admin", "api", "portal"].includes(host.split(".")[0]);
+
+    if (isCrawler || storeParam || isSubdomain) {
+      let identifier = storeParam;
+      if (!identifier && isSubdomain) {
+        identifier = host.split(".")[0];
+      }
+
+      if (identifier) {
+        const meta = await getTenantMetaRecord(identifier, req);
+        if (meta) {
+          if (isCrawler) {
+            res.setHeader("Content-Type", "text/html; charset=utf-8");
+            res.setHeader("Cache-Control", "public, max-age=300, stale-while-revalidate=86400");
+            return res.send(generateStoreOpenGraphHtml(meta));
+          } else {
+            const distHtml = path.join(process.cwd(), "dist", "index.html");
+            const rootHtml = path.join(process.cwd(), "index.html");
+            const filePath = fs.existsSync(distHtml) ? distHtml : rootHtml;
+            if (fs.existsSync(filePath)) {
+              const original = fs.readFileSync(filePath, "utf-8");
+              const injected = injectStoreMetaIntoHtml(original, meta);
+              res.setHeader("Content-Type", "text/html; charset=utf-8");
+              return res.send(injected);
+            }
+          }
+        }
+      }
+    }
+    return next();
+  } catch (err) {
+    return next();
   }
 });
 
@@ -2819,18 +3188,44 @@ app.post("/api/v1/tenants/admin", async (req, res) => {
     let tenantData: any = null;
 
     if (isUpdate) {
-      const { data, error } = await supabase
+      let { data, error } = await supabase
         .from("tenants")
         .upsert(enrichedPayload)
         .select();
-      if (error) throw error;
+      if (error && (error.code === "42703" || error.message?.includes("does not exist"))) {
+        console.warn("[TENANTS ADMIN] Coluna não encontrada na tabela tenants, salvando via fallback:", error.message);
+        const cleanPayload = { ...enrichedPayload };
+        delete cleanPayload.razao_social;
+        delete cleanPayload.farmaceutico_responsavel;
+        delete cleanPayload.crf;
+        delete cleanPayload.horario_funcionamento;
+        delete cleanPayload.telefone_contato;
+        const retry = await supabase.from("tenants").upsert(cleanPayload).select();
+        if (retry.error) throw retry.error;
+        data = retry.data;
+      } else if (error) {
+        throw error;
+      }
       tenantData = data;
     } else {
-      const { data, error } = await supabase
+      let { data, error } = await supabase
         .from("tenants")
         .insert(enrichedPayload)
         .select();
-      if (error) throw error;
+      if (error && (error.code === "42703" || error.message?.includes("does not exist"))) {
+        console.warn("[TENANTS ADMIN] Coluna não encontrada na tabela tenants (insert), salvando via fallback:", error.message);
+        const cleanPayload = { ...enrichedPayload };
+        delete cleanPayload.razao_social;
+        delete cleanPayload.farmaceutico_responsavel;
+        delete cleanPayload.crf;
+        delete cleanPayload.horario_funcionamento;
+        delete cleanPayload.telefone_contato;
+        const retry = await supabase.from("tenants").insert(cleanPayload).select();
+        if (retry.error) throw retry.error;
+        data = retry.data;
+      } else if (error) {
+        throw error;
+      }
       tenantData = data;
     }
 
@@ -2906,23 +3301,6 @@ app.delete("/api/v1/tenants/admin/:id", async (req, res) => {
     res.json({ success: true });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
-  }
-});
-
-// Supabase Client for Server-side operations
-const SUPABASE_URL =
-  process.env.SUPABASE_URL || "https://nalshjhoiecxooejpiaw.supabase.co";
-const SUPABASE_SERVICE_ROLE_KEY =
-  process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  process.env.SUPABASE_ANON_KEY ||
-  "sb_publishable_Y2lAqlvDUhdjSNtv80GkJA_SiOgynYy";
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-
-// Dedicated client for Supabase administrative actions (Service Role)
-const supabaseAdmin = createClient(SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY || SUPABASE_SERVICE_ROLE_KEY, {
-  auth: {
-    autoRefreshToken: false,
-    persistSession: false
   }
 });
 

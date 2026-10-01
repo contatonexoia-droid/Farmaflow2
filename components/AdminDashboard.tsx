@@ -5,6 +5,7 @@ import { Package, CalendarDays, TrendingUp, DollarSign, X, ExternalLink, Copy, C
 import { getEmptySearches, isSupabaseConfigured, getTenants, getOrdersByTenant } from '../services/storage';
 import { getStoreUrl } from '../lib/store';
 import { supabase } from '../services/supabase';
+import { StoreShareCard } from './StoreShareCard';
 
 const isConfirmedOrder = (status: string): boolean => {
   const s = (status || "").toLowerCase();
@@ -724,35 +725,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     </a>
                     
                     <div className="pt-3 mt-1 border-t border-gray-100 dark:border-gray-700">
-                      <p className={`text-[10px] font-black mb-2 uppercase tracking-widest text-gray-400`}>Link da sua Loja</p>
-                      <div className={`flex items-center justify-between p-2 rounded-xl border-2 border-dashed ${isDarkMode ? 'bg-gray-800 border-gray-600 text-gray-300' : 'bg-gray-50 border-gray-200 text-gray-600'}`}>
-                          <span className="text-xs font-medium truncate max-w-[140px] select-all">
-                              {storeUrl}
-                          </span>
-                          <button 
-                              onClick={() => {
-                                  navigator.clipboard.writeText(storeUrl);
-                                  setCopied(true);
-                                  setTimeout(() => setCopied(false), 2000);
-                              }}
-                              className={`p-1.5 rounded-lg transition-colors ${copied ? 'bg-emerald-100 text-emerald-600' : 'bg-gray-200 hover:bg-gray-300 text-gray-700'}`}
-                              title="Copiar link"
-                          >
-                              {copied ? <CheckCircle size={14} /> : <Copy size={14} />}
-                          </button>
-                      </div>
-                      <a 
-                          href={`https://wa.me/?text=${encodeURIComponent(`Olá! Confira nossas ofertas em nossa loja online: ${storeUrl}`)}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="mt-2 w-full py-2.5 px-4 bg-[#25D366] hover:bg-[#20bd5a] text-white rounded-xl font-bold flex items-center justify-center gap-2 transition-all active:scale-[0.98] text-xs"
-                      >
-                          <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" className="css-i6dzq1"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
-                          Compartilhar no WhatsApp
-                      </a>
+                      <StoreShareCard
+                        compact
+                        tenant={tenant || { id: tenantId }}
+                        isDarkMode={isDarkMode}
+                      />
                     </div>
                 </div>
             </div>
+
+            <StoreShareCard
+              tenant={tenant || { id: tenantId }}
+              isDarkMode={isDarkMode}
+            />
 
             <div className={`p-5 rounded-2xl border shadow-sm transition-all duration-500 ${alertsGlow ? 'ring-4 ring-orange-400/50 shadow-orange-500/20' : ''} ${theme.cardBg} ${theme.cardBorder}`}>
                 <div className="mb-4 flex flex-col">

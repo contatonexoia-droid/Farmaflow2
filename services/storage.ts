@@ -165,6 +165,7 @@ let schemaSupport = {
   hasNetworkPromotions: true,
   hasDeliverySettings: true,
   hasIgnoreErpPrices: true,
+  hasRegulatoryFields: true,
   checked: false,
 };
 
@@ -172,6 +173,17 @@ export const checkSchemaSupport = async () => {
   if (schemaSupport.checked) return schemaSupport;
   
   if (!isSupabaseConfigured()) return schemaSupport;
+
+  try {
+    const { error: regError } = await supabase.from("tenants").select("razao_social, farmaceutico_responsavel, crf, horario_funcionamento, telefone_contato").limit(1);
+    if (regError && (regError.code === "42703" || regError.message?.includes("does not exist") || regError.message?.includes("razao_social"))) {
+      schemaSupport.hasRegulatoryFields = false;
+    } else {
+      schemaSupport.hasRegulatoryFields = true;
+    }
+  } catch (e) {
+    schemaSupport.hasRegulatoryFields = false;
+  }
 
   try {
     const { error: ignoreErpPricesError } = await supabase.from("tenants").select("ignore_erp_prices").limit(1);
@@ -226,6 +238,7 @@ export const checkSchemaSupport = async () => {
 export const mapDbTenantToApp = (t: any): PharmacyConfig => {
   const smartBannersObj = t.smart_banners || t.smartbanners || {};
   const fallbackSettings = smartBannersObj._deliverySettings || { enabled: false, fee: 0, minOrderForFreeDelivery: 0 };
+  const fallbackRegulatory = smartBannersObj._regulatoryData || {};
   
   return {
     id: t.id,
@@ -248,7 +261,7 @@ export const mapDbTenantToApp = (t: any): PharmacyConfig => {
     departments: t.departments || undefined,
     customManufacturers: t.custom_manufacturers || t.custommanufacturers || [],
     licenseExpiration: t.license_expiration || t.licenseexpiration,
-    cnpj: t.cnpj,
+    cnpj: t.cnpj || fallbackRegulatory.cnpj || "",
     fullAddress: t.full_address || t.fulladdress,
     corporateEmail: t.corporate_email || t.corporateemail,
     manufacturerLogos: t.manufacturer_logos || t.manufacturerlogos || {},
@@ -272,6 +285,25 @@ export const mapDbTenantToApp = (t: any): PharmacyConfig => {
     welcomeMessageLink: t.welcome_message_link || t.welcomemessagelink || "",
     isAiAgentEnabled: t.is_ai_agent_enabled === true || t.isaiagentenabled === true,
     aiAgentConfig: t.ai_agent_config || t.aiagentconfig || undefined,
+    razao_social: t.razao_social || t.razaosocial || fallbackRegulatory.razao_social || "",
+    farmaceutico_responsavel: t.farmaceutico_responsavel || t.farmaceuticoresponsavel || fallbackRegulatory.farmaceutico_responsavel || "",
+    crf: t.crf || fallbackRegulatory.crf || "",
+    horario_funcionamento: t.horario_funcionamento || t.horariofuncionamento || fallbackRegulatory.horario_funcionamento || "",
+    telefone_contato: t.telefone_contato || t.telefonecontato || fallbackRegulatory.telefone_contato || "",
+    street: t.street || "",
+    address_number: t.address_number || t.addressnumber || "",
+    complement: t.complement || "",
+    neighborhood: t.neighborhood || "",
+    city: t.city || "",
+    state: t.state || "",
+    cep: t.cep || "",
+    logradouro: t.street || "",
+    numero: t.address_number || t.addressnumber || "",
+    complemento: t.complement || "",
+    bairro: t.neighborhood || "",
+    cidade: t.city || "",
+    uf: t.state || "",
+    nome_loja: t.name || "",
   };
 };
 
@@ -303,6 +335,10 @@ export const getTenants = async (): Promise<PharmacyConfig[]> => {
       if (support.hasDeliverySettings) {
         fields += ", delivery_settings";
       }
+      if (support.hasRegulatoryFields) {
+        fields += ", razao_social, farmaceutico_responsavel, crf, horario_funcionamento, telefone_contato";
+      }
+      fields += ", street, address_number, complement, neighborhood, city, state, cep";
 
       const { data, error } = await supabase
         .from("tenants")
@@ -509,6 +545,36 @@ export const saveTenant = async (
       payload.is_network_master = tenant.isNetworkMaster || false;
       payload.network_id = tenant.networkId || "";
     }
+
+    const regData = {
+      razao_social: tenant.razao_social || tenant.razaoSocial || "",
+      cnpj: tenant.cnpj || "",
+      farmaceutico_responsavel: tenant.farmaceutico_responsavel || tenant.farmaceuticoResponsavel || "",
+      crf: tenant.crf || "",
+      horario_funcionamento: tenant.horario_funcionamento || tenant.horarioFuncionamento || "",
+      telefone_contato: tenant.telefone_contato || tenant.phone || "",
+    };
+
+    payload.smart_banners = {
+      ...(payload.smart_banners || {}),
+      _regulatoryData: regData
+    };
+
+    if (support.hasRegulatoryFields) {
+      payload.razao_social = regData.razao_social;
+      payload.farmaceutico_responsavel = regData.farmaceutico_responsavel;
+      payload.crf = regData.crf;
+      payload.horario_funcionamento = regData.horario_funcionamento;
+      payload.telefone_contato = regData.telefone_contato;
+    }
+
+    if (tenant.street !== undefined) payload.street = tenant.street || "";
+    if (tenant.address_number !== undefined) payload.address_number = tenant.address_number || "";
+    if (tenant.complement !== undefined) payload.complement = tenant.complement || "";
+    if (tenant.neighborhood !== undefined) payload.neighborhood = tenant.neighborhood || "";
+    if (tenant.city !== undefined) payload.city = tenant.city || "";
+    if (tenant.state !== undefined) payload.state = tenant.state || "";
+    if (tenant.cep !== undefined) payload.cep = tenant.cep || "";
 
     // CORREÇÃO CRÍTICA: Tenta Bypass RLS via API.
     await retryRequest(async () => {

@@ -415,12 +415,16 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
         if (data.erro) {
           setCepError("CEP não encontrado.");
         } else {
+          const newNeighborhood = typeof data.bairro === 'string' && data.bairro.trim() && !/^\d+$/.test(data.bairro.trim()) ? data.bairro.trim() : "";
+          const newCity = typeof data.localidade === 'string' && data.localidade.trim() && !/^\d+$/.test(data.localidade.trim()) ? data.localidade.trim() : "";
+          const newState = typeof data.uf === 'string' && data.uf.trim() && !/^\d+$/.test(data.uf.trim()) ? data.uf.trim().toUpperCase() : "";
+
           setAddressData(prev => ({
             ...prev,
-            street: data.logradouro || "",
-            neighborhood: data.bairro || "",
-            city: data.localidade || "",
-            state: data.uf || ""
+            street: typeof data.logradouro === 'string' ? data.logradouro : prev.street,
+            neighborhood: newNeighborhood || prev.neighborhood,
+            city: newCity || prev.city,
+            state: newState || prev.state
           }));
         }
       } catch (err) {
@@ -436,9 +440,17 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
   const handleEditClick = (e: React.MouseEvent, tenant: PharmacyConfig) => {
     e.stopPropagation();
     
-    // Attempt to parse existing fullAddress
+    // Attempt to parse existing fullAddress or use discrete columns
     let cep = "", street = "", number = "", complement = "", neighborhood = "", city = "", state = "";
-    if (tenant.fullAddress) {
+    if (tenant.street || tenant.neighborhood || tenant.city || tenant.cep) {
+      cep = tenant.cep || "";
+      street = tenant.street || "";
+      number = tenant.address_number || "";
+      complement = tenant.complement || "";
+      neighborhood = /^\d{4,8}/.test(tenant.neighborhood || "") ? "" : (tenant.neighborhood || "");
+      city = /^\d{4,8}/.test(tenant.city || "") ? "" : (tenant.city || "");
+      state = /^\d{4,8}/.test(tenant.state || "") ? "" : (tenant.state || "");
+    } else if (tenant.fullAddress) {
       // Basic parse: Logradouro, Número - Bairro, Cidade - UF, CEP
       const parts = tenant.fullAddress.split(',');
       if (parts.length >= 2) {
