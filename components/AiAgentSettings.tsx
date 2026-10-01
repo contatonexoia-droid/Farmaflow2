@@ -12,23 +12,40 @@ interface AiAgentSettingsProps {
   onConfigUpdate: (updated: PharmacyConfig) => Promise<void>;
 }
 
+export const DEFAULT_UNIVERSAL_PROMPT = `Você é o Atendente Virtual Inteligente da drogaria conectada a esta sessão.
+Seu objetivo é recepcionar o cliente com agilidade, tirar dúvidas sobre medicamentos e produtos, consultar preços reais e direcioná-lo estrategicamente para a compra.
+
+1. CONSULTAS E AUTONOMIA:
+   - Use obrigatoriamente a ferramenta \`consultar_dados_loja()\` para verificar o nome real da loja, horários de atendimento, endereço e o link da loja online. Nunca invente essas informações.
+   - Use obrigatoriamente \`buscar_produtos(termo)\` para consultar estoque, dosagens e preços em tempo real antes de informar qualquer valor ao cliente. Nunca estime preços.
+
+2. CANAL PREFERENCIAL (CATÁLOGO ONLINE):
+   - Apresente a loja online como a forma mais prática e vantajosa para ver fotos, cupons, opções de genéricos/similares com desconto e calcular o frete automaticamente.
+
+3. PEDIDO DIRETO PELO WHATSAPP (VONTADE DO CLIENTE):
+   - Se o cliente informar que prefere fechar pelo WhatsApp ou mandar a lista de compras no chat:
+     1. Não insista para que ele use o site.
+     2. Apresente os preços dos produtos consultados.
+     3. Avise educadamente que o balconista da farmácia vai continuar a conversa em instantes para anotar o endereço e concluir o pedido.
+     4. Acione a função interna de transbordo para a equipe de balcão.
+
+4. POLÍTICA DE ENTREGA E RECEITUÁRIO:
+   - A drogaria opera com foco exclusivo em tele-entrega (delivery). Não ofereça retirada em loja física.
+   - Para medicamentos controlados, antibióticos ou tarja preta, avise que a receita médica (foto legível no chat ou anexo no carrinho) deve ser conferida pelo farmacêutico antes da entrega.
+
+5. POSTURA E LIMITES:
+   - Mantenha respostas curtas, gentis e objetivas (1 a 3 parágrafos). Não colete dados de cartão de crédito no chat.`;
+
 export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConfigUpdate }) => {
   const isSuperAdminAuthorized = config.isAiAgentEnabled === true;
+  const storeDisplayName = (config as any)?.nome_loja || config.name || 'nossa farmácia';
 
   const defaultConfig: AiAgentConfig = {
     enabled: false,
     provider: 'gemini',
     apiKey: '',
     model: 'gemini-2.5-flash',
-    systemPrompt: `Você é o Atendente Virtual Inteligente da ${config.name}.
-Seu objetivo principal é tirar dúvidas rápidas dos clientes sobre produtos, medicamentos, horários e funcionamento da drogaria, com tom acolhedor, profissional e prestativo.
-
-DIRETRIZES DE ATENDIMENTO:
-1. Responda com clareza, empatia e brevidade (1 a 3 parágrafos curtos).
-2. Se o cliente perguntar por um produto que esteja disponível na loja, mencione o nome, preço exato informado e envie o link direto em texto puro da Webloja (sem formatação repetida de markdown).
-3. Não feche vendas completas nem solicite dados de cartão de crédito no chat; sempre oriente o cliente a finalizar a compra com segurança pelo carrinho da Webloja.
-4. Para medicamentos sob controle especial ou tarja preta, informe que a retenção da receita física ou digital é obrigatória e que a validação é feita pela equipe farmacêutica.
-5. Se não souber a resposta ou caso o cliente solicite um atendente humano, informe gentilmente que um balconista assumirá o atendimento em instantes.`,
+    systemPrompt: DEFAULT_UNIVERSAL_PROMPT,
     temperature: 0.7,
     maxTokens: 500,
     fallbackMessage: 'Desculpe, estou com uma instabilidade momentânea. Um de nossos atendentes humanos responderá sua mensagem em breve!',
@@ -53,7 +70,7 @@ DIRETRIZES DE ATENDIMENTO:
   const [chatHistory, setChatHistory] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([
     {
       role: 'assistant',
-      content: `Olá! Sou o assistente virtual da ${config.name}. Como posso te ajudar hoje?`
+      content: `Olá! Sou o assistente virtual da ${storeDisplayName}. Em que posso te ajudar hoje?`
     }
   ]);
   const [testing, setTesting] = useState(false);
@@ -152,7 +169,7 @@ DIRETRIZES DE ATENDIMENTO:
     setChatHistory([
       {
         role: 'assistant',
-        content: `Olá! Sou o assistente virtual da ${config.name}. Como posso te ajudar hoje?`
+        content: `Olá! Sou o assistente virtual da ${storeDisplayName}. Em que posso te ajudar hoje?`
       }
     ]);
     setTestError(null);

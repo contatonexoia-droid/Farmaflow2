@@ -3145,7 +3145,7 @@ app.post("/api/v1/tenants/admin", async (req, res) => {
     const pharmacySlug = enrichedPayload.slug || (enrichedPayload.id ? String(enrichedPayload.id).replace(/^store_/, '') : '');
 
     if (!enrichedPayload.welcome_message_text) {
-      enrichedPayload.welcome_message_text = `Olá! Seja muito bem-vindo(a) à ${pharmacyName}! 🌟\n\nComo podemos te ajudar hoje? Digite o nome do produto ou medicamento que deseja consultar!`;
+      enrichedPayload.welcome_message_text = `Olá! Sou o assistente virtual da ${pharmacyName}. Em que posso te ajudar hoje?`;
     }
     if (enrichedPayload.welcome_message_enabled === undefined) {
       enrichedPayload.welcome_message_enabled = true;
@@ -7882,8 +7882,8 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
     const cleanPhone = String(rawPhone).replace(/\D/g, '');
     if (!cleanPhone) return;
 
-    const storeName = tenant.name || "Nossa Farmácia";
-    const customText = tenant.welcome_message_text || tenant.welcomemessagetext || "Olá! Seja muito bem-vindo(a) à nossa farmácia! Como podemos te ajudar hoje?";
+    const storeName = tenant.nome_loja || tenant.name || "nossa farmácia";
+    const customText = tenant.welcome_message_text || tenant.welcomemessagetext || `Olá! Sou o assistente virtual da ${storeName}. Em que posso te ajudar hoje?`;
     let storeLink = tenant.welcome_message_link || tenant.welcomemessagelink;
     if (!storeLink) {
       if (tenant.custom_domain) {

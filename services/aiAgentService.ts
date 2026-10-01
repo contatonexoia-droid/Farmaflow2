@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 import { createClient } from "@supabase/supabase-js";
 import { AiAgentConfig, PharmacyConfig } from "../types.js";
 import { chatStore, sanitizeChatConversationPayload } from "./chatStore.js";
@@ -10,28 +10,29 @@ const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL ||
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_Y2lAqlvDUhdjSNtv80GkJA_SiOgynYy";
 const supabaseAdmin = createClient(supabaseUrl, supabaseKey);
 
-export const DEFAULT_AI_AGENT_PROMPT = `Você é o Atendente Virtual Inteligente da drogaria {STORE_NAME}.
-Sua missão é atender clientes pelo WhatsApp e canais digitais com máxima cortesia, rapidez, empatia e precisão.
+export const DEFAULT_AI_AGENT_PROMPT = `Você é o Atendente Virtual Inteligente da drogaria conectada a esta sessão.
+Seu objetivo é recepcionar o cliente com agilidade, tirar dúvidas sobre medicamentos e produtos, consultar preços reais e direcioná-lo estrategicamente para a compra.
 
-DIRETRIZES DE ATENDIMENTO E FORMATAÇÃO:
-1. Responda dúvidas sobre medicamentos, cosméticos, suplementos e produtos de higiene de forma simples, objetiva e acolhedora.
-2. NUNCA faça diagnósticos médicos ou recomende automedicação de risco. Para sintomas graves, oriente sempre a procurar atendimento médico.
-3. Para medicamentos sob controle especial (tarja preta/antibióticos), informe que a venda exige apresentação e retenção de receita médica na loja física ou envio no pedido.
-4. REGRAS INVIOLÁVEIS DE PREÇO E ESTOQUE:
-   - Você NUNCA deve inventar preços, supor valores de mercado ou usar preços genéricos da internet.
-   - Use APENAS e EXCLUSIVAMENTE os preços e produtos reais informados na seção [CATÁLOGO EM TEMPO REAL].
-   - Se um produto estiver listado no catálogo: informe o nome exato, a apresentação e o preço cadastrado, e forneça o link direto de compra ({STORE_LINK}?produto=ID) ou o link de busca ({STORE_LINK}?busca=termo).
-   - Se o produto solicitado NÃO estiver listado no catálogo: informe educadamente que não localizou o preço/item exato no momento e forneça o link de busca na Webloja ({STORE_LINK}?busca=termo) para o cliente pesquisar ou convide-o a falar com a equipe de balcão. JAMAIS cite um valor aleatório.
-5. REGRA MANDATÓRIA DE TRANSFERÊNCIA PARA ATENDIMENTO HUMANO / BALCÃO:
-   - Sempre que o cliente pedir ou demonstrar intenção de falar com um balconista, atendente, farmacêutico, pessoa humana ou balcão:
-   - Responda confirmando IMEDIATAMENTE com empatia e presteza que está transferindo o atendimento para a equipe de balcão.
-   - Exemplo: "Com certeza! Já estou transferindo seu atendimento para um de nossos balconistas. Um momento que um atendente já vai te responder por aqui! 👨‍⚕️"
-   - Adicione OBRIGATORIAMENTE no final da sua mensagem a tag especial [TRANSFERIR_ATENDIMENTO].
-   - NUNCA continue respondendo como robô quando o cliente solicitar falar com atendente ou balconista.
-6. FORMATO DE LINKS:
-   - Envie os links da loja sempre em TEXTO PURO (exemplo: Acesse na nossa Webloja: {STORE_LINK}?produto=123).
-   - NUNCA use formatação markdown de links repetidos como [link](link).
-7. Seja conciso (1 a 3 parágrafos curtos), educado e use quebras de linha confortáveis para leitura rápida no celular.`;
+1. CONSULTAS E AUTONOMIA:
+   - Use obrigatoriamente a ferramenta \`consultar_dados_loja()\` para verificar o nome real da loja, horários de atendimento, endereço e o link da loja online. Nunca invente essas informações.
+   - Use obrigatoriamente \`buscar_produtos(termo)\` para consultar estoque, dosagens e preços em tempo real antes de informar qualquer valor ao cliente. Nunca estime preços.
+
+2. CANAL PREFERENCIAL (CATÁLOGO ONLINE):
+   - Apresente a loja online como a forma mais prática e vantajosa para ver fotos, cupons, opções de genéricos/similares com desconto e calcular o frete automaticamente.
+
+3. PEDIDO DIRETO PELO WHATSAPP (VONTADE DO CLIENTE):
+   - Se o cliente informar que prefere fechar pelo WhatsApp ou mandar a lista de compras no chat:
+     1. Não insista para que ele use o site.
+     2. Apresente os preços dos produtos consultados.
+     3. Avise educadamente que o balconista da farmácia vai continuar a conversa em instantes para anotar o endereço e concluir o pedido.
+     4. Acione a função interna de transbordo para a equipe de balcão.
+
+4. POLÍTICA DE ENTREGA E RECEITUÁRIO:
+   - A drogaria opera com foco exclusivo em tele-entrega (delivery). Não ofereça retirada em loja física.
+   - Para medicamentos controlados, antibióticos ou tarja preta, avise que a receita médica (foto legível no chat ou anexo no carrinho) deve ser conferida pelo farmacêutico antes da entrega.
+
+5. POSTURA E LIMITES:
+   - Mantenha respostas curtas, gentis e objetivas (1 a 3 parágrafos). Não colete dados de cartão de crédito no chat.`;
 
 export interface AiChatMessage {
   role: 'user' | 'model' | 'assistant' | 'system';
@@ -568,10 +569,10 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
     // 8. Chamada ao Provedor Escolhido
     let rawResult: AiAgentExecutionResult;
     if (provider === 'openai') {
-      rawResult = await this.callOpenAi(apiKey, effectiveConfig.model || 'gpt-4o-mini', fullSystemInstruction, incomingMessage, chatHistory, storeLink);
+      rawResult = await this.callOpenAi(apiKey, effectiveConfig.model || 'gpt-4o-mini', fullSystemInstruction, incomingMessage, chatHistory, storeLink, tenant);
     } else {
       // Default: Google Gemini
-      rawResult = await this.callGemini(apiKey, effectiveConfig.model || 'gemini-2.5-flash', fullSystemInstruction, incomingMessage, chatHistory, storeLink);
+      rawResult = await this.callGemini(apiKey, effectiveConfig.model || 'gemini-2.5-flash', fullSystemInstruction, incomingMessage, chatHistory, storeLink, tenant);
     }
 
     // 9. Detecção Ativa de Pedido de Atendimento Humano ou Balconista
@@ -1190,13 +1191,134 @@ ${taskInstruction}`;
     };
   }
 
+  private async executeToolCall(
+    name: string,
+    args: any,
+    tenant?: any,
+    storeLink?: string
+  ): Promise<any> {
+    if (name === "consultar_dados_loja") {
+      const tenantId = tenant?.id;
+      let freshTenant = tenant || {};
+      if (tenantId) {
+        try {
+          const { data: dbTenant } = await supabaseAdmin
+            .from("tenants")
+            .select("*")
+            .eq("id", tenantId)
+            .maybeSingle();
+          if (dbTenant) {
+            freshTenant = { ...freshTenant, ...dbTenant };
+          }
+        } catch (e: any) {
+          console.warn("[consultar_dados_loja] Erro ao consultar tenant no Supabase:", e.message);
+        }
+      }
+
+      const regData = freshTenant.smart_banners?._regulatoryData || {};
+      const street = freshTenant.street || "";
+      const number = freshTenant.address_number || freshTenant.numero || "";
+      const comp = freshTenant.complement || freshTenant.complemento || "";
+      const neighborhood = freshTenant.neighborhood || freshTenant.bairro || "";
+      const city = freshTenant.city || freshTenant.cidade || "";
+      const state = freshTenant.state || freshTenant.uf || "";
+      const cep = freshTenant.cep || "";
+
+      let endereco = freshTenant.full_address || freshTenant.fullAddress || "";
+      if (!endereco && (street || city)) {
+        const streetComp = `${street}${number ? ', ' + number : ''}${comp ? ' (' + comp + ')' : ''}`.trim();
+        const cityState = `${city}${city && state ? ' - ' + state : (state || '')}`.trim();
+        endereco = [streetComp, neighborhood, cityState, cep ? `CEP: ${cep}` : ''].filter(Boolean).join(" - ");
+      }
+
+      const officialLink = freshTenant.welcome_message_link || (freshTenant.custom_domain ? `https://${freshTenant.custom_domain}` : `https://${freshTenant.slug || freshTenant.id || 'loja'}.farmaflow.online`);
+
+      return {
+        nome_oficial: freshTenant.name || freshTenant.nome_loja || "Nossa Drogaria",
+        razao_social: freshTenant.razao_social || regData.razao_social || freshTenant.name || "",
+        cnpj: freshTenant.cnpj || regData.cnpj || "Cadastrado no sistema",
+        link_loja_online: officialLink || storeLink || "https://farmaflow.online",
+        horarios_atendimento: freshTenant.horario_funcionamento || regData.horario_funcionamento || "Segunda a Sábado das 07:00h às 22:00h",
+        politica_entrega: "Tele-entrega rápida (delivery) no mesmo dia. Não realizamos retirada física na loja.",
+        endereco: endereco || "Consulte em nossa loja online",
+        whatsapp: freshTenant.whatsapp || freshTenant.telefone_contato || regData.telefone_contato || "",
+        telefone_contato: freshTenant.telefone_contato || regData.telefone_contato || freshTenant.whatsapp || "",
+        farmaceutico_responsavel: freshTenant.farmaceutico_responsavel || regData.farmaceutico_responsavel || "Consulte em loja",
+        crf: freshTenant.crf || regData.crf || "Consulte em loja"
+      };
+    }
+
+    if (name === "buscar_produtos") {
+      const termo = String(args?.termo || args?.query || "").trim();
+      if (!termo) {
+        return { total: 0, produtos: [], mensagem: "Nenhum termo informado para busca." };
+      }
+
+      const tenantIds = Array.from(
+        new Set(
+          [
+            tenant?.id,
+            tenant?.slug,
+            tenant?.network_id,
+            tenant?.networkid
+          ].filter(Boolean)
+        )
+      );
+
+      try {
+        const cleanTerm = termo.toLowerCase().replace(/[%_]/g, '');
+        const { data: prods, error } = await supabaseAdmin
+          .from("products")
+          .select("id, name, price, stock, presentation, category, active_principle, requires_prescription")
+          .in("tenant_id", tenantIds.length > 0 ? tenantIds : [tenant?.id || ''])
+          .or(`name.ilike.%${cleanTerm}%,active_principle.ilike.%${cleanTerm}%`)
+          .limit(6);
+
+        if (error) throw error;
+
+        const effectiveStoreLink = storeLink || (tenant?.custom_domain ? `https://${tenant.custom_domain}` : `https://${tenant?.slug || tenant?.id || 'loja'}.farmaflow.online`);
+
+        const items = (prods || []).map((p: any) => ({
+          id: p.id,
+          nome: p.name,
+          apresentacao: p.presentation || "",
+          preco: Number(p.price) || 0,
+          preco_formatado: `R$ ${(Number(p.price) || 0).toFixed(2)}`,
+          estoque: Number(p.stock) || 0,
+          disponivel: (Number(p.stock) || 0) > 0,
+          principio_ativo: p.active_principle || "",
+          exige_receita: Boolean(p.requires_prescription),
+          link_produto: `${effectiveStoreLink}?produto=${p.id}`
+        }));
+
+        return {
+          total: items.length,
+          termo_buscado: termo,
+          produtos: items,
+          link_busca_geral: `${effectiveStoreLink}?busca=${encodeURIComponent(termo)}`
+        };
+      } catch (e: any) {
+        console.warn("[buscar_produtos] Erro ao consultar produtos:", e.message);
+        return {
+          total: 0,
+          termo_buscado: termo,
+          produtos: [],
+          mensagem: "Erro ao consultar estoque no momento."
+        };
+      }
+    }
+
+    return { error: `Ferramenta não encontrada: ${name}` };
+  }
+
   private async callGemini(
     apiKey: string,
     modelName: string,
     systemInstruction: string,
     incomingMessage: string,
     chatHistory: AiChatMessage[],
-    storeLink: string
+    storeLink: string,
+    tenant?: any
   ): Promise<AiAgentExecutionResult> {
     try {
       const ai = new GoogleGenAI({ apiKey });
@@ -1221,15 +1343,88 @@ ${taskInstruction}`;
 
       const targetModel = modelName || 'gemini-2.5-flash';
 
-      const response = await ai.models.generateContent({
+      const tools: any[] = [];
+      if (tenant) {
+        tools.push({
+          functionDeclarations: [
+            {
+              name: "consultar_dados_loja",
+              description: "Retorna o nome oficial, link da loja online, horários de atendimento/delivery, endereço e WhatsApp da drogaria atual.",
+              parameters: {
+                type: Type.OBJECT,
+                properties: {}
+              }
+            },
+            {
+              name: "buscar_produtos",
+              description: "Consulta estoque, dosagens e preços em tempo real no banco de dados da drogaria.",
+              parameters: {
+                type: Type.OBJECT,
+                properties: {
+                  termo: {
+                    type: Type.STRING,
+                    description: "Nome do produto, medicamento ou princípio ativo a ser consultado."
+                  }
+                },
+                required: ["termo"]
+              }
+            }
+          ]
+        });
+      }
+
+      const geminiConfig: any = {
+        systemInstruction,
+        temperature: 0.4,
+        maxOutputTokens: 1000
+      };
+      if (tools.length > 0) {
+        geminiConfig.tools = tools;
+      }
+
+      let response = await ai.models.generateContent({
         model: targetModel,
         contents,
-        config: {
-          systemInstruction,
-          temperature: 0.4,
-          maxOutputTokens: 1000
-        }
+        config: geminiConfig
       });
+
+      // Loop de execução autônoma de ferramentas
+      let rounds = 0;
+      while (response.functionCalls && response.functionCalls.length > 0 && rounds < 3) {
+        rounds++;
+        const functionCalls = response.functionCalls;
+        const candidateContent = response.candidates?.[0]?.content;
+        if (candidateContent) {
+          contents.push(candidateContent);
+        } else {
+          contents.push({
+            role: 'model',
+            parts: functionCalls.map(c => ({ functionCall: c }))
+          });
+        }
+
+        const responseParts: any[] = [];
+        for (const call of functionCalls) {
+          const toolResult = await this.executeToolCall(call.name, call.args, tenant, storeLink);
+          responseParts.push({
+            functionResponse: {
+              name: call.name,
+              response: { result: toolResult }
+            }
+          });
+        }
+
+        contents.push({
+          role: 'user',
+          parts: responseParts
+        });
+
+        response = await ai.models.generateContent({
+          model: targetModel,
+          contents,
+          config: geminiConfig
+        });
+      }
 
       const rawReply = response.text || "Desculpe, não consegui processar a resposta no momento. Por favor, tente novamente.";
       // Limpa links com sintaxe markdown duplicada [url](url) para texto limpo e direto no WhatsApp
@@ -1273,7 +1468,8 @@ ${taskInstruction}`;
     systemInstruction: string,
     incomingMessage: string,
     chatHistory: AiChatMessage[],
-    storeLink: string
+    storeLink: string,
+    tenant?: any
   ): Promise<AiAgentExecutionResult> {
     try {
       const messages: any[] = [
@@ -1289,18 +1485,51 @@ ${taskInstruction}`;
 
       const targetModel = modelName || 'gpt-4o-mini';
 
-      const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      const openAiTools = tenant ? [
+        {
+          "type": "function",
+          "function": {
+            "name": "consultar_dados_loja",
+            "description": "Retorna o nome oficial, link da loja online, horários de atendimento/delivery, endereço e WhatsApp da drogaria atual.",
+            "parameters": { "type": "object", "properties": {} }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "buscar_produtos",
+            "description": "Consulta estoque, dosagens e preços em tempo real no banco de dados da drogaria.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "termo": {
+                  "type": "string",
+                  "description": "Nome do produto, medicamento ou princípio ativo a ser consultado."
+                }
+              },
+              "required": ["termo"]
+            }
+          }
+        }
+      ] : undefined;
+
+      const requestBody: any = {
+        model: targetModel,
+        messages,
+        temperature: 0.4,
+        max_tokens: 1000
+      };
+      if (openAiTools) {
+        requestBody.tools = openAiTools;
+      }
+
+      let res = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${apiKey}`
         },
-        body: JSON.stringify({
-          model: targetModel,
-          messages,
-          temperature: 0.4,
-          max_tokens: 1000
-        })
+        body: JSON.stringify(requestBody)
       });
 
       if (!res.ok) {
@@ -1325,8 +1554,48 @@ ${taskInstruction}`;
         throw new Error(`Erro na OpenAI: ${errorMsg}`);
       }
 
-      const data = await res.json();
-      const rawReply = data.choices?.[0]?.message?.content || "Desculpe, não foi possível obter resposta.";
+      let data = await res.json();
+      let assistantMsg = data.choices?.[0]?.message;
+
+      // Loop de execução autônoma de ferramentas OpenAI
+      let rounds = 0;
+      while (assistantMsg?.tool_calls && assistantMsg.tool_calls.length > 0 && rounds < 3) {
+        rounds++;
+        messages.push(assistantMsg);
+
+        for (const toolCall of assistantMsg.tool_calls) {
+          let callArgs: any = {};
+          try {
+            callArgs = toolCall.function?.arguments ? JSON.parse(toolCall.function.arguments) : {};
+          } catch (_) {}
+
+          const toolResult = await this.executeToolCall(toolCall.function?.name, callArgs, tenant, storeLink);
+
+          messages.push({
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: JSON.stringify(toolResult)
+          });
+        }
+
+        requestBody.messages = messages;
+
+        res = await fetch("https://api.openai.com/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${apiKey}`
+          },
+          body: JSON.stringify(requestBody)
+        });
+
+        if (!res.ok) break;
+
+        data = await res.json();
+        assistantMsg = data.choices?.[0]?.message;
+      }
+
+      const rawReply = assistantMsg?.content || "Desculpe, não foi possível obter resposta.";
       const cleanedReply = rawReply
         .replace(/\[(https?:\/\/[^\s\]]+)\]\(\1\)/gi, '$1')
         .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/gi, '$1 ($2)');

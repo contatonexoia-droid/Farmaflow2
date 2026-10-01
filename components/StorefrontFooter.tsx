@@ -52,15 +52,15 @@ export const StorefrontFooter: React.FC<StorefrontFooterProps> = ({ tenant }) =>
     const uf = store.uf || store.state;
     const cep = store.cep;
 
-    if (logradouro && (cidade || bairro)) {
-      let addr = `${logradouro}`;
+    if (logradouro || cidade || bairro) {
+      let addr = `${logradouro || ''}`;
       if (numero) addr += `, ${numero}`;
       if (complemento) addr += ` (${complemento})`;
       if (bairro) addr += `, ${bairro}`;
       if (cidade) addr += ` - ${cidade}`;
       if (uf) addr += `/${uf}`;
       if (cep) addr += ` | CEP: ${cep}`;
-      return addr;
+      return addr.replace(/^,\s*/, '').trim();
     }
 
     if (store.fullAddress && store.fullAddress.trim()) {
@@ -70,18 +70,7 @@ export const StorefrontFooter: React.FC<StorefrontFooterProps> = ({ tenant }) =>
       return store.full_address.trim();
     }
 
-    const parts = [
-      store.street
-        ? `${store.street}${store.address_number ? `, ${store.address_number}` : ""}`
-        : "",
-      store.neighborhood,
-      store.city
-        ? `${store.city}${store.state ? ` - ${store.state}` : ""}`
-        : "",
-      store.cep ? `CEP: ${store.cep}` : "",
-    ].filter(Boolean);
-
-    return parts.length > 0 ? parts.join(" - ") : "Consulte nosso endereço";
+    return "Consulte nosso endereço";
   };
 
   const razaoSocial =
@@ -103,7 +92,7 @@ export const StorefrontFooter: React.FC<StorefrontFooterProps> = ({ tenant }) =>
     store.horarioFuncionamento ||
     "Segunda a Sábado";
   const telefoneContato =
-    store.telefone_contato || store.phone || store.whatsapp || "";
+    store.telefone_contato || store.whatsapp || store.phone || "Consulte em loja";
 
   return (
     <>
