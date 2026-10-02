@@ -771,13 +771,12 @@ const App: React.FC = () => {
   const [coupons, setCoupons] = useState<CouponRule[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
   useSWR(currentTenant ? `orders-trigger-${currentTenant.id}` : null, async () => {
-    const ords = await getOrdersByTenant(currentTenant.id);
-    setOrders(ords);
-    return true;
-  });
-  useSWR(currentTenant ? `orders-trigger-${currentTenant.id}` : null, async () => {
-    const ords = await getOrdersByTenant(currentTenant.id);
-    setOrders(ords);
+    try {
+      const ords = await getOrdersByTenant(currentTenant.id);
+      if (ords) setOrders(ords);
+    } catch (e) {
+      console.warn("[Orders SWR] Ignored non-fatal orders fetch error:", e);
+    }
     return true;
   });
   const uniqueOrders = useMemo(() => {

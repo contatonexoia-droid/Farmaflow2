@@ -7,6 +7,23 @@ import App from './App';
 // Build version hash to force cache invalidation across all subdomains and main domain
 const APP_BUILD_VERSION = "ff_v2026_08_07_build4";
 
+// Prevenção de quebra por erros de rede transitórios em background ("Failed to fetch")
+if (typeof window !== 'undefined') {
+  window.addEventListener('unhandledrejection', (event) => {
+    const reason = event.reason;
+    const msg = reason?.message || String(reason || '');
+    if (
+      msg.includes('Failed to fetch') ||
+      msg.includes('NetworkError') ||
+      msg.includes('Load failed') ||
+      msg.includes('aborted')
+    ) {
+      console.warn('[FarmaFlow] Non-fatal background network rejection intercepted:', msg);
+      event.preventDefault();
+    }
+  });
+}
+
 // CACHE BUSTING & SW CLEANUP EXECUTION
 (async function purgeStaleCacheAndSW() {
   try {

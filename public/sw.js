@@ -49,9 +49,11 @@ self.addEventListener('fetch', (event) => {
         );
       }
       
-      // For static assets, modules, and other files, let them fail naturally with a network error.
-      // This is crucial for Vite's HMR/dynamic import mechanisms to handle loading errors properly.
-      throw err;
+      // For static assets, modules, and other files, return a clean offline fallback instead of throwing
+      return new Response('', {
+        status: 504,
+        statusText: 'Gateway Timeout (Offline)'
+      });
     })
   );
 });
