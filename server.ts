@@ -3136,7 +3136,7 @@ app.post("/api/v1/tenants/admin", async (req, res) => {
         model: 'gemini-2.5-flash',
         systemPrompt: DEFAULT_AI_AGENT_PROMPT,
         fallbackMessage: "Desculpe, estou com uma instabilidade momentânea. Um de nossos atendentes humanos responderá sua mensagem em breve!",
-        transitionToHumanMessage: "Encaminhei sua dúvida e o link da nossa loja. Um dos nossos balconistas humanos já vai te atender por aqui!",
+        transitionToHumanMessage: "Perfeito! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.",
         maxTokens: 500,
         temperature: 0.7,
         maxInteractionsPerSession: 4,

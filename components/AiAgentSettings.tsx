@@ -56,7 +56,7 @@ export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConf
     maxTokens: 500,
     fallbackMessage: 'Desculpe, estou com uma instabilidade momentânea. Um de nossos atendentes humanos responderá sua mensagem em breve!',
     maxInteractionsPerSession: 4,
-    transitionToHumanMessage: 'Encaminhei sua dúvida e o link da nossa loja. Um dos nossos balconistas humanos já vai te atender por aqui!',
+    transitionToHumanMessage: 'Perfeito! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.',
     antiAbuseGuardrailsEnabled: true,
     strictStoreLinkEnforcement: true,
   };
@@ -487,7 +487,7 @@ export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConf
                     type="button"
                     onClick={() => setAgentConfig({
                       ...agentConfig,
-                      transitionToHumanMessage: 'Encaminhei sua dúvida e o link da nossa loja. Um dos nossos balconistas humanos já vai te atender por aqui!'
+                      transitionToHumanMessage: 'Perfeito! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.'
                     })}
                     className="text-[11px] font-bold text-purple-600 hover:text-purple-800 transition-colors flex items-center gap-1"
                   >

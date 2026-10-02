@@ -93,6 +93,93 @@ export function detectHumanHandoffIntent(message: string): { isHumanRequested: b
 }
 
 /**
+ * Reconhecimento refinado de escolha de produto e intenção de compra do cliente
+ * (ex: "vou querer a da prati", "vou querer essa da ems de 4,49", "pode ser o número 1", "quero essa", etc.)
+ */
+export function detectCustomerChoiceIntent(
+  message: string,
+  history: Array<{ role: string; content: string }> = []
+): { isChoice: boolean; details?: string } {
+  if (!message || typeof message !== "string") return { isChoice: false };
+  const raw = message.trim();
+  const norm = normalizeTextForIntent(raw);
+  if (!norm) return { isChoice: false };
+
+  // 1. Padrões diretos de escolha e intenção de compra
+  const directChoicePatterns = [
+    /\b(vou\s+(querer|levar|ficar|pegar|comprar))\b/i,
+    /\b(quero\s+(essa|esse|esta|este|a\s+de|o\s+de|a\s+da|o\s+da|a\s+do|o\s+do|a\s+primeir|o\s+primeir|a\s+segund|o\s+segund|a\s+terceir|o\s+terceir|opcao|a\s+mais|o\s+mais))\b/i,
+    /\b(pode\s+ser\s+(essa|esse|esta|este|a|o|um|uma|opcao|numero|n[°ºo]?))\b/i,
+    /\b(adiciona|adicionar|separa|separar|separe|manda|mandar|coloca|colocar)\b.*(essa|esse|esta|este|pra\s+mim|pedido|carrinho|a\s+de|o\s+de|da|do)/i,
+    /\b(prefiro\s+(a|o|essa|esse|esta|este|a\s+mais|o\s+mais))\b/i,
+    /\b(vou\s+comprar|vou\s+fechar|quero\s+fechar|fechar\s+(esse|essa|pedido))\b/i,
+    /\b(gostei\s+d[ao]|fica\s+com\s+ess[ae])\b/i
+  ];
+
+  for (const pat of directChoicePatterns) {
+    if (pat.test(norm)) {
+      return { isChoice: true, details: "DIRECT_CHOICE_PATTERN" };
+    }
+  }
+
+  // 2. Frases curtas e objetivas indicando escolha de item específico
+  if (norm.length <= 40) {
+    if (/\b(quero|vou\s+querer|pode\s+ser|vou\s+levar)\b/i.test(norm)) {
+      return { isChoice: true, details: "SHORT_INTENT_KEYWORD" };
+    }
+    if (/\b(essa\s+mesm[ao]|ess[ae]\s+d[ae]|ess[ae]\s+de\s+\d+|o\s+de\s+\d+|a\s+de\s+\d+)\b/i.test(norm)) {
+      return { isChoice: true, details: "SPECIFIC_ITEM_REFERENCE" };
+    }
+  }
+
+  // 3. Análise do histórico recente: se o bot ofereceu opções no turno imediatamente anterior
+  const lastBotMsg = history.slice().reverse().find(m => m.role === "assistant" || m.role === "model");
+  const lastBotText = normalizeTextForIntent(lastBotMsg?.content || "");
+  const botOfferedOptions = lastBotText.includes("opc") || 
+                            lastBotText.includes("1") || 
+                            lastBotText.includes("qual dessas") || 
+                            lastBotText.includes("mais economica") ||
+                            lastBotText.includes("disponivel nas seguintes") ||
+                            lastBotText.includes("qual voce prefere");
+
+  if (botOfferedOptions) {
+    // Escolha por número simples ou ordinal isolado
+    if (/^(1|2|3|4|5|1\.|2\.|3\.|4\.|5\.|opc[aã]o\s*[1-5]|o\s*[1-5]|a\s*[1-5]|numero\s*[1-5]|n[°ºo]?\s*[1-5])$/i.test(norm)) {
+      return { isChoice: true, details: "NUMBER_SELECTION_FROM_OPTIONS" };
+    }
+    if (/^(primeir[ao]|segund[ao]|terceir[ao]|quart[ao]|a\s+primeir[ao]|a\s+segund[ao]|o\s+primeir[ao]|o\s+segund[ao])$/i.test(norm)) {
+      return { isChoice: true, details: "ORDINAL_SELECTION_FROM_OPTIONS" };
+    }
+    if (/\b(mais\s+barat[ao]|mais\s+economic[ao]|em\s+conta)\b/i.test(norm)) {
+      return { isChoice: true, details: "ECONOMIC_CHOICE_FROM_OPTIONS" };
+    }
+    // Menção isolada à marca após opções oferecidas (ex: "da prati", "a medley", "ems")
+    if (/\b(prati|ems|medley|neo\s*quimica|neoq|germed|germ|cimed|eurofarma|ache|sanofi)\b/i.test(norm)) {
+      return { isChoice: true, details: "LABORATORY_CHOICE_FROM_OPTIONS" };
+    }
+    if (/\b(essa|esse|esta|este)\b/i.test(norm)) {
+      return { isChoice: true, details: "DEMONSTRATIVE_CHOICE_FROM_OPTIONS" };
+    }
+  }
+
+  return { isChoice: false };
+}
+
+/**
+ * Mensagem de conclusão acolhedora e comercial com incentivo à Webloja e transbordo ao balconista
+ */
+export function buildHumanizedHandoffMessage(storeUrl: string): string {
+  const cleanUrl = (storeUrl || "https://farmaflow.online").replace(/\/+$/, "");
+  return `Perfeito! Já anotei a sua preferência. 😊
+
+🛒 **Dica para agilizar:** Você pode concluir seu pedido agora mesmo pela nossa loja online:
+👉 ${cleanUrl}
+*(É muito mais rápido, prático e 100% seguro — !)*
+
+💬 **Prefere continuar por aqui?** Sem problemas! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.`;
+}
+
+/**
  * Detector de mensagens de resumo de pedido originadas da Webloja / Loja Online FarmaFlow
  */
 export function isWeblojaOrderMessage(text: string): {

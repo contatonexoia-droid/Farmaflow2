@@ -2,7 +2,13 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { createClient } from "@supabase/supabase-js";
 import { AiAgentConfig, PharmacyConfig } from "../types.js";
 import { chatStore, sanitizeChatConversationPayload } from "./chatStore.js";
-import { botHandoffManager, detectHumanHandoffIntent, isWeblojaOrderMessage } from "./botHandoffManager.js";
+import { 
+  botHandoffManager, 
+  detectHumanHandoffIntent, 
+  isWeblojaOrderMessage,
+  detectCustomerChoiceIntent,
+  buildHumanizedHandoffMessage 
+} from "./botHandoffManager.js";
 import { realtimeHub } from "./realtimeHub.js";
 import { evolutionApiService } from "./evolutionApiService.js";
 
@@ -51,27 +57,41 @@ Seu objetivo é recepcionar o cliente com agilidade, tirar dúvidas sobre medica
    - Se o cliente pediu uma dosagem que realmente NÃO temos em estoque:
      * Diga educadamente que a dosagem específica não está disponível no momento, mas ofereça a dosagem mais próxima disponível (ex: "No momento não temos a dosagem de 500mg em estoque, mas temos a opção de 1g...").
 
-4. CANAL PREFERENCIAL (CATÁLOGO ONLINE):
+4. RECONHECIMENTO DE ESCOLHA DO CLIENTE E TRANSLADO/CONCLUSÃO:
+   - Se o cliente responder escolhendo uma opção (ex: "vou querer a [marca]", "vou querer essa", "pode ser o número 1", "adiciona a de 4,49", "vou levar", "prefiro a ems"):
+     * NUNCA repita a lista de produtos ou alternativas.
+     * NÃO apresente novas opções de medicamentos.
+     * Envie exatamente a seguinte resposta acolhedora e comercial:
+       "Perfeito! Já anotei a sua preferência. 😊
+
+       🛒 **Dica para agilizar:** Você pode concluir seu pedido agora mesmo pela nossa loja online:
+       👉 {STORE_LINK}
+       *(É muito mais rápido, prático e 100% seguro — !)*
+
+       💬 **Prefere continuar por aqui?** Sem problemas! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido."
+     * Inclua a tag [TRANSFERIR_ATENDIMENTO] para transferir a conversa para a equipe de balcão imediatamente.
+
+5. CANAL PREFERENCIAL (CATÁLOGO ONLINE):
    - Apresente a loja online como a forma mais prática e vantajosa para ver fotos, cupons, opções de genéricos/similares com desconto e calcular o frete automaticamente.
 
-5. PEDIDO DIRETO PELO WHATSAPP (VONTADE DO CLIENTE):
+6. PEDIDO DIRETO PELO WHATSAPP (VONTADE DO CLIENTE):
    - Se o cliente informar que prefere fechar pelo WhatsApp ou mandar a lista de compras no chat:
      1. Não insista para que ele use o site.
      2. Apresente os preços dos produtos consultados.
      3. Avise educadamente que o balconista da farmácia vai continuar a conversa em instantes para anotar o endereço e concluir o pedido.
-     4. Acione a função interna de transbordo para a equipe de balcão.
+     4. Acione a função interna de transbordo para a equipe de balcão [TRANSFERIR_ATENDIMENTO].
 
-6. POLÍTICA DE ENTREGA E RECEITUÁRIO:
+7. POLÍTICA DE ENTREGA E RECEITUÁRIO:
    - A drogaria opera com foco exclusivo em tele-entrega (delivery). Não ofereça retirada em loja física.
    - Para medicamentos controlados, antibióticos ou tarja preta, avise que a receita médica (foto legível no chat ou anexo no carrinho) deve ser conferida pelo farmacêutico antes da entrega.
 
-7. DIRETRIZES DE LINKS E FORMATAÇÃO VISUAL:
+8. DIRETRIZES DE LINKS E FORMATAÇÃO VISUAL:
    - Nunca polua o chat com múltiplos links na mesma mensagem.
    - Em buscas e listagens de preços, apresente apenas 'Nome - Preço' e inclua apenas o link geral da loja no final da mensagem.
    - Envie o link direto de um produto específico SOMENTE se o cliente solicitar a compra daquele item em particular.
    - Se o cliente optar por pedir pelo WhatsApp, não envie links de carrinho; apresente os valores e acione o balconista humano para concluir a tele-entrega.
 
-8. POSTURA E LIMITES:
+9. POSTURA E LIMITES:
    - Mantenha respostas curtas, gentis e comerciais (1 a 3 parágrafos). Não colete dados de cartão de crédito no chat.`;
 
 export interface AiChatMessage {
@@ -456,7 +476,9 @@ export class AiAgentService {
       openai_api_key: rawConfig.openai_api_key || (resolvedProvider === 'openai' ? resolvedApiKey : undefined),
       systemPrompt: rawConfig.systemPrompt || DEFAULT_AI_AGENT_PROMPT,
       fallbackMessage: rawConfig.fallbackMessage || "Desculpe, estou com uma instabilidade momentânea. Um de nossos atendentes humanos responderá sua mensagem em breve!",
-      transitionToHumanMessage: rawConfig.transitionToHumanMessage || "Encaminhei sua dúvida e o link da nossa loja. Um dos nossos balconistas humanos já vai te atender por aqui!",
+      transitionToHumanMessage: (rawConfig.transitionToHumanMessage && !rawConfig.transitionToHumanMessage.includes("Encaminhei sua dúvida"))
+        ? rawConfig.transitionToHumanMessage
+        : "Perfeito! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.",
       maxTokens: rawConfig.maxTokens || 500,
       temperature: rawConfig.temperature ?? 0.7,
       maxInteractionsPerSession: rawConfig.maxInteractionsPerSession || 4,
@@ -528,7 +550,7 @@ export class AiAgentService {
       const abuseCheck = detectAbuseOrPromptInjection(incomingMessage);
       if (abuseCheck.isSuspicious) {
         console.warn(`[AiAgentService] Prompt Injection ou Abuso detectado (${tenantId}):`, abuseCheck.reason);
-        const transitionMsg = effectiveConfig.transitionToHumanMessage || "Encaminhei sua dúvida e o link da nossa loja. Um dos nossos balconistas humanos já vai te atender por aqui!";
+        const transitionMsg = effectiveConfig.transitionToHumanMessage || buildHumanizedHandoffMessage(storeLink);
         const safeReply = `Olá! Para garantir sua segurança e o melhor suporte sobre nossos produtos e medicamentos, você pode consultar nosso catálogo completo e valores em nossa Webloja:\n👉 ${storeLink}\n\n${transitionMsg}`;
         return {
           reply: safeReply,
@@ -577,7 +599,21 @@ export class AiAgentService {
   * Diga educadamente que a dosagem específica não está disponível no momento, mas ofereça a dosagem mais próxima disponível (ex: "No momento não temos a dosagem de 500mg em estoque, mas temos a opção de 1g...").
 - 'CPR' ou 'COMP' indica comprimidos (ex: 8CPR = 8 comprimidos, 10CPR = 10 comprimidos, 30CPR = 30 comprimidos).
 - 'GTS' indica gotas, 'XPE' indica xarope, 'SOL' indica solução oral, 'EFERV' indica efervescente.
-- Siglas finais indicam o laboratório fabricante: EMS, PRATI ou PRTD (Prati-Donaduzzi), NEOQ (Neo Química), GERM (Germed), MDLY (Medley), CIMED (Cimed), EURO (Eurofarma), ACHÉ (Aché), SANOFI (Sanofi).`;
+- Siglas finais indicam o laboratório fabricante: EMS, PRATI ou PRTD (Prati-Donaduzzi), NEOQ (Neo Química), GERM (Germed), MDLY (Medley), CIMED (Cimed), EURO (Eurofarma), ACHÉ (Aché), SANOFI (Sanofi).
+
+RECONHECIMENTO DE ESCOLHA DO CLIENTE E TRANSLADO/CONCLUSÃO:
+- Se o cliente responder escolhendo uma opção (ex: "vou querer a [marca]", "vou querer essa da ems", "pode ser o número 1", "adiciona a de 4,49", "vou levar a medley", "quero essa", "prefiro a ems"):
+  * NUNCA repita a lista de produtos ou alternativas.
+  * NÃO apresente novas opções de medicamentos.
+  * Envie exatamente a seguinte resposta acolhedora e comercial:
+    "Perfeito! Já anotei a sua preferência. 😊
+
+    🛒 **Dica para agilizar:** Você pode concluir seu pedido agora mesmo pela nossa loja online:
+    👉 {STORE_LINK}
+    *(É muito mais rápido, prático e 100% seguro — !)*
+
+    💬 **Prefere continuar por aqui?** Sem problemas! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido."
+  * Inclua a tag [TRANSFERIR_ATENDIMENTO] para transferir a conversa para a equipe de balcão imediatamente.`;
 
     if (basePrompt.includes("REGRAS DE EQUIVALÊNCIA FARMACÊUTICA")) {
       basePrompt = basePrompt.replace(/REGRAS DE EQUIVALÊNCIA FARMACÊUTICA:[\s\S]*?(?=\n\n(?:[0-9]+\.|\bDIRETRIZ\b|\bCANAL\b|\bCATÁLOGO\b|\bPOSTURA\b|$))/i, EQUIVALENCE_RULES.trim());
@@ -587,55 +623,73 @@ export class AiAgentService {
 
     // 6. Busca contextual aprofundada de produtos no banco de dados real da drogaria
     let catalogContext = "";
-    const searchTerms = extractKeywordsAndIntents(incomingMessage);
-    const primarySearchTerm = searchTerms[0] || incomingMessage.trim().split(/\s+/)[0] || "";
+    const choiceCheck = detectCustomerChoiceIntent(incomingMessage, chatHistory);
 
-    const tenantIds = Array.from(
-      new Set(
-        [
-          tenantId,
-          tenant.id,
-          tenant.slug,
-          tenant.network_id,
-          tenant.networkid
-        ].filter(Boolean)
-      )
-    );
+    if (choiceCheck.isChoice) {
+      catalogContext = `\n\n[AVISO CRÍTICO DO SISTEMA - ESCOLHA DO CLIENTE DETECTADA]:
+O cliente escolheu uma opção ou demonstrou intenção de compra ("${incomingMessage}").
+- NUNCA repita a lista de produtos ou opções.
+- NÃO apresente novas opções de medicamentos.
+- Envie exatamente a resposta de conclusão e transbordo:
+Perfeito! Já anotei a sua preferência. 😊
 
-    try {
-      const matchedProducts = await this.searchProductsInDb(
-        tenantIds.length > 0 ? tenantIds : [tenant.id || tenantId],
-        incomingMessage,
-        6
+🛒 **Dica para agilizar:** Você pode concluir seu pedido agora mesmo pela nossa loja online:
+👉 ${storeLink}
+*(É muito mais rápido, prático e 100% seguro — !)*
+
+💬 **Prefere continuar por aqui?** Sem problemas! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.
+[TRANSFERIR_ATENDIMENTO]`;
+    } else {
+      const searchTerms = extractKeywordsAndIntents(incomingMessage);
+      const primarySearchTerm = searchTerms[0] || incomingMessage.trim().split(/\s+/)[0] || "";
+
+      const tenantIds = Array.from(
+        new Set(
+          [
+            tenantId,
+            tenant.id,
+            tenant.slug,
+            tenant.network_id,
+            tenant.networkid
+          ].filter(Boolean)
+        )
       );
 
-      if (matchedProducts && matchedProducts.length > 0) {
-        catalogContext = "\n\n[CATÁLOGO EM TEMPO REAL - PRODUTOS ENCONTRADOS NO BANCO DE DADOS DA DROGARIA]:\n" +
-          matchedProducts.map((p, idx) => {
-            const preco = (Number(p.price) || 0).toFixed(2);
-            const linkProd = `${storeLink}?produto=${p.id}`;
-            const statusEstoque = p.stock > 0 ? `Disponível (${p.stock} un)` : 'Temporariamente Esgotado';
-            const tarja = p.requires_prescription ? 'Exige Receita Médica' : 'Venda Livre';
-            return `${idx + 1}. ${p.name} ${p.presentation ? `(${p.presentation})` : ''} - R$ ${preco} [Estoque: ${statusEstoque} | ${tarja}] (ID/Link para compra específica: ${linkProd})`;
-          }).join("\n") +
-          `\n\nDIRETRIZ ESTRITA DE FORMATAÇÃO E RESPOSTA:
+      try {
+        const matchedProducts = await this.searchProductsInDb(
+          tenantIds.length > 0 ? tenantIds : [tenant.id || tenantId],
+          incomingMessage,
+          6
+        );
+
+        if (matchedProducts && matchedProducts.length > 0) {
+          catalogContext = "\n\n[CATÁLOGO EM TEMPO REAL - PRODUTOS ENCONTRADOS NO BANCO DE DADOS DA DROGARIA]:\n" +
+            matchedProducts.map((p, idx) => {
+              const preco = (Number(p.price) || 0).toFixed(2);
+              const linkProd = `${storeLink}?produto=${p.id}`;
+              const statusEstoque = p.stock > 0 ? `Disponível (${p.stock} un)` : 'Temporariamente Esgotado';
+              const tarja = p.requires_prescription ? 'Exige Receita Médica' : 'Venda Livre';
+              return `${idx + 1}. ${p.name} ${p.presentation ? `(${p.presentation})` : ''} - R$ ${preco} [Estoque: ${statusEstoque} | ${tarja}] (ID/Link para compra específica: ${linkProd})`;
+            }).join("\n") +
+            `\n\nDIRETRIZ ESTRITA DE FORMATAÇÃO E RESPOSTA:
 - Quando houver mais de uma opção em estoque, apresente de 2 a 4 alternativas com laboratório, apresentação e preço, destacando a de menor valor com ⭐ Mais econômica.
 - NUNCA envie links individuais por produto ao listar opções ou responder dúvidas iniciais. Liste apenas de forma limpa: 'Número. Nome - R$ Preço'.
 - Insira apenas UM ÚNICO link no rodapé da mensagem (o link geral da loja: ${storeLink}), convidando o cliente a explorar o catálogo ou calcular a tele-entrega.
 - Envie o link direto de um item específico SOMENTE se o cliente demonstrar intenção explícita de comprar aquele produto particular (ex: "vou levar o de 10 comprimidos", "como faço para pedir o Max?", "me manda o link desse").
 - Se o cliente preferir pedir pelo WhatsApp, não envie links de carrinho: confirme os valores e informe que o balconista humano concluirá o pedido.`;
-      } else if (searchTerms.length > 0) {
-        catalogContext = `\n\n[CATÁLOGO EM TEMPO REAL]:
+        } else if (searchTerms.length > 0) {
+          catalogContext = `\n\n[CATÁLOGO EM TEMPO REAL]:
 Nenhum produto com esses termos exatos foi localizado em estoque no banco de dados local.
 - Link de Busca na Webloja para enviar ao cliente: ${storeLink}?busca=${encodeURIComponent(primarySearchTerm)}
 - REGRA CRÍTICA: NÃO invente preços (como R$ 12,99 ou qualquer outro valor). Diga que não localizou o preço no momento, convide o cliente a consultar a Webloja pelo link acima ou a conversar com o atendente de plantão.`;
-      } else {
-        catalogContext = `\n\n[CATÁLOGO EM TEMPO REAL]:
+        } else {
+          catalogContext = `\n\n[CATÁLOGO EM TEMPO REAL]:
 Nenhum produto específico identificado na mensagem. Link geral da Webloja: ${storeLink}`;
+        }
+      } catch (catErr) {
+        console.warn("[AiAgentService] Falha ao consultar contexto de produtos:", catErr);
+        catalogContext = `\n\nLink da Webloja: ${storeLink}`;
       }
-    } catch (catErr) {
-      console.warn("[AiAgentService] Falha ao consultar contexto de produtos:", catErr);
-      catalogContext = `\n\nLink da Webloja: ${storeLink}`;
     }
 
     // 7. Trava de Interações: Se for a última interação da sessão antes do transbordo
@@ -680,33 +734,40 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       rawResult = await this.callGemini(apiKey, effectiveConfig.model || 'gemini-2.5-flash', fullSystemInstruction, incomingMessage, chatHistory, storeLink, tenant);
     }
 
-    // 9. Detecção Ativa de Pedido de Atendimento Humano ou Balconista
+    // 9. Detecção Ativa de Pedido de Atendimento Humano, Balconista ou Escolha de Produto
     const humanCheck = detectHumanHandoffIntent(incomingMessage);
     const hasTransferTag = /\[(TRANSFERIR_ATENDIMENTO|TRANSFER_TO_HUMAN|HANDOFF_HUMAN|TRANSBORDO)\]/i.test(rawResult.reply);
     const indicatesTransferInText = /((estou|vou)\s+(transferir|passar|encaminhar)|(um\s+de\s+nossos\s+balconistas|nossa\s+equipe\s+de\s+balconistas|um\s+atendente\s+humano|nossos\s+atendentes)\s+(ir[áa]|vai|ja\s+vai)\s+(te\s+)?(atender|responder))/i.test(rawResult.reply);
 
-    const shouldHandoff = isFinalSessionTurn || rawResult.transferredToHuman === true || humanCheck.isHumanRequested || hasTransferTag || indicatesTransferInText;
-    const handoffReason = humanCheck.isHumanRequested 
-      ? "HUMAN_REQUESTED" 
-      : (hasTransferTag || indicatesTransferInText 
+    const shouldHandoff = isFinalSessionTurn || rawResult.transferredToHuman === true || humanCheck.isHumanRequested || choiceCheck.isChoice || hasTransferTag || indicatesTransferInText;
+    const handoffReason = choiceCheck.isChoice
+      ? "PURCHASE_INTENT"
+      : (humanCheck.isHumanRequested 
           ? "HUMAN_REQUESTED" 
-          : (isFinalSessionTurn ? "MAX_INTERACTIONS_REACHED" : "HUMAN_REQUESTED"));
+          : (hasTransferTag || indicatesTransferInText 
+              ? "HUMAN_REQUESTED" 
+              : (isFinalSessionTurn ? "MAX_INTERACTIONS_REACHED" : "HUMAN_REQUESTED")));
 
     // 10. Limpeza de tags internas e garantia de presença do link da Webloja
     let enforcedReply = rawResult.reply
       .replace(/\[(TRANSFERIR_ATENDIMENTO|TRANSFER_TO_HUMAN|HANDOFF_HUMAN|TRANSBORDO)\]/gi, '')
       .trim();
 
-    // Sanitização de múltiplos links por produto em listagens (evita poluição visual)
-    enforcedReply = this.sanitizeExcessiveProductLinks(enforcedReply, incomingMessage, storeLink);
+    // Se o cliente escolheu uma opção, garante a mensagem oficial de conclusão e transbordo acolhedor
+    if (choiceCheck.isChoice) {
+      enforcedReply = buildHumanizedHandoffMessage(storeLink);
+    } else {
+      // Sanitização de múltiplos links por produto em listagens (evita poluição visual)
+      enforcedReply = this.sanitizeExcessiveProductLinks(enforcedReply, incomingMessage, storeLink);
 
-    if (!enforcedReply.includes("http") && !enforcedReply.includes(".online") && !enforcedReply.includes(".com")) {
-      enforcedReply = `${enforcedReply}\n\nPara conferir mais detalhes ou aproveitar as promoções, acesse nossa loja online:\n${storeLink}`;
+      if (!enforcedReply.includes("http") && !enforcedReply.includes(".online") && !enforcedReply.includes(".com")) {
+        enforcedReply = `${enforcedReply}\n\nPara conferir mais detalhes ou aproveitar as promoções, acesse nossa loja online:\n${storeLink}`;
+      }
     }
 
     // 11. Se for o último turno da sessão por limite, anexa mensagem de transição humana caso não tenha
-    const transitionMsg = effectiveConfig.transitionToHumanMessage || "Encaminhei sua dúvida e o link da nossa loja. Um dos nossos balconistas humanos já vai te atender por aqui!";
-    if (isFinalSessionTurn && !enforcedReply.includes("balconista") && !enforcedReply.includes("atendente humano")) {
+    const transitionMsg = effectiveConfig.transitionToHumanMessage || buildHumanizedHandoffMessage(storeLink);
+    if (isFinalSessionTurn && !choiceCheck.isChoice && !enforcedReply.includes("balconista") && !enforcedReply.includes("atendente humano")) {
       enforcedReply = `${enforcedReply}\n\n${transitionMsg}`;
     }
 
@@ -1018,16 +1079,19 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       }
       const cleanPhone = phoneToSend ? String(phoneToSend).replace(/\D/g, "") : null;
 
-      const currentCount = conv?.bot_interaction_count || 0;
-      const maxInteractions = Number(dbConfig.maxInteractionsPerSession) || 4;
-      const transitionMsg = dbConfig.transitionToHumanMessage || "Encaminhei sua dúvida e o link da nossa loja. Um dos nossos balconistas humanos já vai te atender por aqui!";
-
       // 3. Montar link da Loja Online
       let storeLink = dbConfig.storeLink || tenant.welcome_message_link || tenant.welcomemessagelink;
       if (!storeLink) {
         storeLink = tenant.custom_domain ? `https://${tenant.custom_domain}` : `https://${tenant.slug || tenant.id}.farmaflow.online`;
       }
       storeLink = storeLink.replace(/\/+$/, '');
+
+      const currentCount = conv?.bot_interaction_count || 0;
+      const maxInteractions = Number(dbConfig.maxInteractionsPerSession) || 4;
+      const rawTransitionMsg = dbConfig.transitionToHumanMessage || "";
+      const transitionMsg = (rawTransitionMsg && !rawTransitionMsg.includes("Encaminhei sua dúvida"))
+        ? rawTransitionMsg.replace(/\{store_url\}|\{STORE_URL\}|\{storeLink\}|\{STORE_LINK\}/g, storeLink)
+        : buildHumanizedHandoffMessage(storeLink);
 
       // 4. Tratamento especial para anexos e documentos (PDFs, receitas médicas, fotos)
       const isDocumentAttachment = incomingMessage.includes("[Documento]") || incomingMessage === "[Documento]";
@@ -1153,6 +1217,39 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       const history = options?.chatHistory || [];
       const nextCount = currentCount + 1;
       const isFinalTurn = nextCount >= maxInteractions;
+
+      // 8.1. Detecção Especial de Escolha de Produto / Intenção de Compra pelo Cliente
+      const choiceCheck = detectCustomerChoiceIntent(incomingMessage, history);
+      if (choiceCheck.isChoice) {
+        console.log(`[AiAgentService] 🎯 Escolha do cliente detectada ("${incomingMessage}") na conversa ${conversationId}. Disparando conclusão/transbordo humanizado sem repetir opções.`);
+        const humanizedReply = buildHumanizedHandoffMessage(storeLink);
+
+        const dispatchResult = await this.dispatchBotReplyAndRecord(
+          realTenantId,
+          conversationId,
+          targetInstanceName,
+          cleanPhone,
+          humanizedReply,
+          {
+            isHandoff: true,
+            handoffReason: "PURCHASE_INTENT",
+            transitionMsg: humanizedReply,
+            currentCount,
+            nextCount
+          }
+        );
+
+        if (!dispatchResult.success) {
+          return { handled: false, transferredToHuman: true, reason: dispatchResult.error };
+        }
+
+        return {
+          handled: true,
+          replyText: humanizedReply,
+          transferredToHuman: true,
+          reason: "PURCHASE_INTENT"
+        };
+      }
 
       // 9. Gerar resposta com a LLM
       const aiResult = await this.generateReply(
