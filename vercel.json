@@ -25,8 +25,24 @@
   ],
   "rewrites": [
     {
+      "source": "/api/og",
+      "destination": "/api/og-handler"
+    },
+    {
+      "source": "/api/og-handler",
+      "destination": "/api/og-handler"
+    },
+    {
       "source": "/api/(.*)",
-      "destination": "/api/$1"
+      "destination": "/api/index"
+    },
+    {
+      "source": "/api-docs/(.*)",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/api-docs",
+      "destination": "/api/index"
     },
     {
       "source": "/loja/(.*)",
@@ -51,7 +67,15 @@
       "destination": "/api/og-handler"
     },
     {
-      "source": "/(.*)",
+      "source": "/loja/(.*)",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/loja",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/((?!assets/|.*\\..*).*)",
       "destination": "/index.html"
     }
   ]
