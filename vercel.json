@@ -23,6 +23,32 @@
       ]
     }
   ],
+  "redirects": [
+    {
+      "source": "/",
+      "has": [
+        {
+          "type": "header",
+          "key": "user-agent",
+          "value": ".*([wW]hats[aA]pp|[fF]acebookexternalhit|[fF]acebot|[tT]witterbot|[tT]elegram[bB]ot|[lL]inkedin[bB]ot|[sS]lackbot|[dD]iscordbot).*"
+        }
+      ],
+      "destination": "/api/og-handler",
+      "permanent": false
+    },
+    {
+      "source": "/loja/(.*)",
+      "has": [
+        {
+          "type": "header",
+          "key": "user-agent",
+          "value": ".*([wW]hats[aA]pp|[fF]acebookexternalhit|[fF]acebot|[tT]witterbot|[tT]elegram[bB]ot|[lL]inkedin[bB]ot|[sS]lackbot|[dD]iscordbot).*"
+        }
+      ],
+      "destination": "/api/og-handler",
+      "permanent": false
+    }
+  ],
   "rewrites": [
     {
       "source": "/api/og-handler",
@@ -39,17 +65,6 @@
     {
       "source": "/api/(.*)",
       "destination": "/api/index"
-    },
-    {
-      "source": "/(.*)",
-      "has": [
-        {
-          "type": "header",
-          "key": "user-agent",
-          "value": ".*([wW]hats[aA]pp|[fF]acebookexternalhit|[fF]acebot|[tT]witterbot|[tT]elegram[bB]ot|[lL]inkedin[bB]ot|[sS]lackbot|[dD]iscordbot).*"
-        }
-      ],
-      "destination": "/api/og-handler"
     },
     {
       "source": "/(.*)",
