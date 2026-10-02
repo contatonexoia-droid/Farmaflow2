@@ -186,6 +186,8 @@ export interface PharmacyConfig {
   name: string;
   whatsapp: string;
   logo?: string;
+  logo_url?: string;
+  logoUrl?: string;
   primaryColor: string;
   secondaryColor?: string;
   accentColor?: string;

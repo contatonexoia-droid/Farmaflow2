@@ -10,6 +10,7 @@ ALTER TABLE public.tenants ADD COLUMN IF NOT EXISTS farmaceutico_responsavel TEX
 ALTER TABLE public.tenants ADD COLUMN IF NOT EXISTS crf TEXT;
 ALTER TABLE public.tenants ADD COLUMN IF NOT EXISTS horario_funcionamento TEXT;
 ALTER TABLE public.tenants ADD COLUMN IF NOT EXISTS telefone_contato TEXT;
+ALTER TABLE public.tenants ADD COLUMN IF NOT EXISTS logo_url TEXT;
 
 -- 2. Campos de Endereço Estruturado (Prevenção de contaminação de CEP)
 ALTER TABLE public.tenants ADD COLUMN IF NOT EXISTS logradouro TEXT;

@@ -195,6 +195,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
   const [cepError, setCepError] = useState("");
 
   const [isUploadingAudio, setIsUploadingAudio] = useState(false);
+  const [isUploadingLogo, setIsUploadingLogo] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
 
   const handleCepChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -279,16 +280,60 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
     return numbers.replace(/(\d{2})(\d{5})(\d{4})/, '($1) $2-$3');
   };
 
-  const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      if (file.size > 1024 * 1024) { 
-          alert("A imagem é muito grande (Máx: 1MB). Por favor, escolha uma imagem menor ou comprima-a.");
-          return;
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      alert("Apenas arquivos de imagem são permitidos.");
+      return;
+    }
+
+    if (file.size > 5 * 1024 * 1024) { 
+      alert("A imagem é muito grande (Máx: 5MB). Por favor, escolha uma imagem menor.");
+      return;
+    }
+
+    setIsUploadingLogo(true);
+    try {
+      const fileExt = file.name.split('.').pop() || 'png';
+      const safeStoreId = (config.id || 'loja').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const filePath = `logos/${safeStoreId}_logo_${Date.now()}.${fileExt}`;
+
+      const { data, error } = await supabase.storage
+        .from('product-images')
+        .upload(filePath, file, {
+          contentType: file.type,
+          upsert: true
+        });
+
+      if (error) {
+        console.warn("Upload direto para Supabase Storage falhou, gerando data URL:", error.message);
+        const reader = new FileReader();
+        reader.onload = (re) => {
+          const base64 = re.target?.result as string;
+          setFormData(prev => ({ ...prev, logo: base64, logo_url: base64 }));
+        };
+        reader.readAsDataURL(file);
+      } else {
+        const { data: publicUrlData } = supabase.storage
+          .from('product-images')
+          .getPublicUrl(filePath);
+
+        const publicUrl = publicUrlData.publicUrl;
+        setFormData(prev => ({
+          ...prev,
+          logo: publicUrl,
+          logo_url: publicUrl
+        }));
       }
+    } catch (err: any) {
+      console.error("Erro no upload do logotipo:", err);
       const reader = new FileReader();
-      reader.onload = (re) => setFormData(prev => ({ ...prev, logo: re.target?.result as string }));
+      reader.onload = (re) => setFormData(prev => ({ ...prev, logo: re.target?.result as string, logo_url: re.target?.result as string }));
       reader.readAsDataURL(file);
+    } finally {
+      setIsUploadingLogo(false);
     }
   };
 
@@ -379,6 +424,9 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
       horarioFuncionamento: formData.horario_funcionamento || formData.horarioFuncionamento || "",
       telefone_contato: formData.telefone_contato || "",
       cnpj: formData.cnpj || "",
+      logo: formData.logo_url || formData.logo || "",
+      logo_url: formData.logo_url || formData.logo || "",
+      logoUrl: formData.logo_url || formData.logo || "",
     };
 
     try {
@@ -522,24 +570,63 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
             </div>
 
             <div className="space-y-8">
-              <div className="space-y-2">
+              <div className="space-y-3">
                 <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest flex items-center gap-2">
-                  <Upload size={14} /> Logotipo da Empresa
+                  <Upload size={14} /> Logotipo da Drogaria (WhatsApp & Redes Sociais)
                 </label>
-                <div className="flex items-center gap-6">
-                  <div className="w-24 h-24 bg-gray-50 rounded-[2rem] border-2 border-dashed border-gray-200 flex items-center justify-center overflow-hidden shrink-0">
-                    {formData.logo ? (
-                      <img src={formData.logo} className="w-full h-full object-contain" alt="Preview" referrerPolicy="no-referrer" />
+                <div className="flex flex-col sm:flex-row items-start sm:items-center gap-6">
+                  <div className="w-24 h-24 bg-gray-50 rounded-[2rem] border-2 border-dashed border-gray-200 flex items-center justify-center overflow-hidden shrink-0 shadow-xs relative">
+                    {isUploadingLogo ? (
+                      <div className="flex flex-col items-center justify-center gap-1">
+                        <Loader2 className="animate-spin text-emerald-600" size={24} />
+                        <span className="text-[9px] font-bold text-gray-500">Enviando...</span>
+                      </div>
+                    ) : (formData.logo_url || formData.logo) ? (
+                      <img 
+                        src={formData.logo_url || formData.logo} 
+                        className="w-full h-full object-contain p-2" 
+                        alt="Preview" 
+                        referrerPolicy="no-referrer"
+                        onError={(e) => {
+                          (e.target as HTMLImageElement).src = "https://farmaflow.online/preview-share.png";
+                        }}
+                      />
                     ) : (
                       <Upload className="text-gray-300" />
                     )}
                   </div>
-                  <div className="flex flex-col gap-2">
-                    <label className="cursor-pointer bg-white border-2 border-gray-100 hover:border-brand text-gray-600 px-6 py-3 rounded-xl text-sm font-bold transition-all shadow-sm text-center">
-                        Selecionar Arquivo
-                        <input type="file" className="hidden" accept="image/*" onChange={handleLogoUpload} />
-                    </label>
-                    <p className="text-[10px] text-gray-400 px-1">Máximo: 1MB (Recomendado: PNG Transparente)</p>
+                  <div className="flex-1 flex flex-col gap-2 w-full">
+                    <div className="flex items-center gap-3">
+                      <label className={`cursor-pointer bg-white border-2 border-gray-200 hover:border-emerald-600 text-gray-700 px-5 py-2.5 rounded-xl text-xs font-bold transition-all shadow-xs flex items-center gap-2 ${isUploadingLogo ? 'opacity-50 pointer-events-none' : ''}`}>
+                        <Upload size={14} />
+                        {isUploadingLogo ? "Enviando ao Supabase Storage..." : "Selecionar Arquivo de Logo"}
+                        <input type="file" className="hidden" accept="image/*" onChange={handleLogoUpload} disabled={isUploadingLogo} />
+                      </label>
+                      {(formData.logo_url || formData.logo) && (
+                        <button
+                          type="button"
+                          onClick={() => setFormData({ ...formData, logo: "", logo_url: "" })}
+                          className="text-xs text-red-500 hover:text-red-700 font-bold px-2 py-1"
+                        >
+                          Remover
+                        </button>
+                      )}
+                    </div>
+                    <div className="mt-1">
+                      <label className="text-[10px] font-black text-gray-400 uppercase tracking-wider block mb-1">
+                        URL Pública do Logotipo (`logo_url`)
+                      </label>
+                      <input
+                        type="url"
+                        placeholder="https://...supabase.co/storage/v1/object/public/product-images/logos/... ou https://..."
+                        value={formData.logo_url || formData.logo || ""}
+                        onChange={(e) => setFormData({ ...formData, logo_url: e.target.value, logo: e.target.value })}
+                        className="w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-xs font-medium text-gray-800 outline-none focus:border-emerald-500 transition-colors"
+                      />
+                      <p className="text-[10px] text-gray-400 mt-1">
+                        Armazenado no bucket público do Supabase Storage para pré-visualização em links do WhatsApp e redes sociais. Fallback automático: <code>https://farmaflow.online/preview-share.png</code>.
+                      </p>
+                    </div>
                   </div>
                 </div>
               </div>

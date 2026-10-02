@@ -28,6 +28,7 @@ import { chatStore } from "./services/chatStore.js";
 import { teamStore } from "./services/teamStore.js";
 import { aiAgentService, DEFAULT_AI_AGENT_PROMPT } from "./services/aiAgentService.js";
 import { evolutionApiService } from "./services/evolutionApiService.js";
+import ogHandler, { buildCrawlerHtml, isCrawlerRequest } from "./api/og-handler.js";
 import QRCode from "qrcode";
 
 
@@ -270,7 +271,7 @@ async function getTenantMetaRecord(identifier: string, req: express.Request): Pr
   try {
     const { data, error } = await supabase
       .from("tenants")
-      .select("id, name, slug, logo, banner_title, banner_subtitle, bannertitle, bannersubtitle, city, neighborhood, state, custom_domain, whatsapp")
+      .select("id, name, slug, logo_url, logo, banner_title, banner_subtitle, bannertitle, bannersubtitle, description, razao_social, city, neighborhood, state, custom_domain, whatsapp, smart_banners")
       .or(`id.eq.${identifier},slug.eq.${identifier}`)
       .maybeSingle();
 
@@ -284,7 +285,7 @@ async function getTenantMetaRecord(identifier: string, req: express.Request): Pr
     try {
       const { data: allTenants } = await supabase
         .from("tenants")
-        .select("id, name, slug, logo, banner_title, banner_subtitle, bannertitle, bannersubtitle, city, neighborhood, state, custom_domain, whatsapp");
+        .select("id, name, slug, logo_url, logo, banner_title, banner_subtitle, bannertitle, bannersubtitle, description, razao_social, city, neighborhood, state, custom_domain, whatsapp, smart_banners");
 
       if (allTenants) {
         tenant = allTenants.find((t: any) => {
@@ -305,22 +306,27 @@ async function getTenantMetaRecord(identifier: string, req: express.Request): Pr
   const proto = (req.headers["x-forwarded-proto"] || (req.secure ? "https" : "https")).toString();
   const baseUrl = `${proto}://${host}`;
 
-  const storeName = tenant.name || "FarmaFlow Drogaria";
+  const storeName = tenant.name || tenant.razao_social || "FarmaFlow Drogaria";
   const locParts = [tenant.neighborhood, tenant.city, tenant.state].filter(Boolean);
   const location = locParts.length > 0 ? locParts.join(" - ") : "";
   const title = `${storeName}${location ? ` (${location})` : ""} - Farmácia Online & Delivery`;
 
   const description =
+    tenant.description ||
     tenant.banner_subtitle ||
     tenant.bannersubtitle ||
     tenant.banner_title ||
     tenant.bannertitle ||
-    (location
-      ? `Peça medicamentos, perfumaria e receba em casa com entrega rápida em ${location}. Compre online com tele-entrega direta no seu WhatsApp.`
-      : "Faça seu pedido online com rapidez e comodidade. Medicamentos, perfumaria e cuidados diários com tele-entrega direta no seu WhatsApp.");
+    "Faça seu pedido online com tele-entrega rápida direta no WhatsApp. Medicamentos, perfumaria e ofertas exclusivas.";
 
   const tenantSlug = tenant.slug || tenant.id;
-  const logoUrl = `${baseUrl}/api/v1/store/${encodeURIComponent(tenantSlug)}/logo.png`;
+
+  // Resolução do logotipo público da drogaria para Open Graph
+  const rawLogo = (tenant.logo_url || tenant.logo || tenant.smart_banners?._regulatoryData?.logo_url || "").trim();
+  let logoUrl = "https://farmaflow.online/preview-share.png";
+  if (rawLogo.startsWith("http://") || rawLogo.startsWith("https://")) {
+    logoUrl = rawLogo;
+  }
 
   let canonicalUrl = `${baseUrl}/loja/${encodeURIComponent(tenantSlug)}`;
   if (tenant.custom_domain && tenant.custom_domain.trim()) {
@@ -352,57 +358,33 @@ function generateStoreOpenGraphHtml(meta: TenantMetaRecord): string {
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;");
 
+  const nomeLoja = esc(meta.name || "FarmaFlow Drogaria");
+  const logoUrl = esc(meta.logoUrl || "https://farmaflow.online/preview-share.png");
+  const descricao = esc(
+    meta.description ||
+      "Faça seu pedido online com tele-entrega rápida direta no WhatsApp. Medicamentos, perfumaria e ofertas exclusivas."
+  );
+
   return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  
-  <!-- Metadados Padrão do Navegador -->
-  <title>${esc(meta.title)}</title>
-  <meta name="description" content="${esc(meta.description)}" />
-
-  <!-- Metadados de Compartilhamento / WhatsApp / Facebook / Open Graph -->
+  <title>${nomeLoja} - Farmácia e Perfumaria Online</title>
   <meta property="og:type" content="website" />
-  <meta property="og:site_name" content="${esc(meta.name)}" />
-  <meta property="og:url" content="${esc(meta.canonicalUrl)}" />
-  <meta property="og:title" content="${esc(meta.title)}" />
-  <meta property="og:description" content="${esc(meta.description)}" />
-
-  <!-- Imagem de Destaque Oficial (Dimensões recomendadas para WhatsApp e Redes Sociais) -->
-  <meta property="og:image" content="${esc(meta.logoUrl)}" />
-  <meta property="og:image:secure_url" content="${esc(meta.logoUrl)}" />
+  <meta property="og:site_name" content="${nomeLoja}" />
+  <meta property="og:title" content="${nomeLoja} - Peça Online" />
+  <meta property="og:description" content="${descricao}" />
+  <meta property="og:image" content="${logoUrl}" />
+  <meta property="og:image:secure_url" content="${logoUrl}" />
   <meta property="og:image:type" content="image/png" />
-  <meta property="og:image:width" content="1200" />
-  <meta property="og:image:height" content="630" />
-  <meta property="og:image:alt" content="${esc(meta.name)}" />
-
-  <!-- Twitter / X Cards -->
-  <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="${esc(meta.title)}" />
-  <meta name="twitter:description" content="${esc(meta.description)}" />
-  <meta name="twitter:image" content="${esc(meta.logoUrl)}" />
-
-  <!-- Ícones de Atalho e PWA -->
-  <link rel="apple-touch-icon" href="${esc(meta.logoUrl)}" />
-  <link rel="icon" type="image/png" href="${esc(meta.logoUrl)}" />
-
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f8fafc; color: #1e293b; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
-    .card { background: white; border-radius: 24px; padding: 32px; max-width: 440px; width: 100%; box-shadow: 0 20px 40px -15px rgba(0,0,0,0.1); text-align: center; border: 1px solid #e2e8f0; }
-    .logo { width: 96px; height: 96px; border-radius: 20px; object-fit: contain; margin: 0 auto 16px; box-shadow: 0 4px 14px rgba(0,0,0,0.08); background: #ffffff; padding: 6px; }
-    h1 { font-size: 20px; font-weight: 800; margin: 0 0 8px; color: #0f172a; line-height: 1.3; }
-    p { font-size: 14px; color: #64748b; line-height: 1.5; margin: 0 0 24px; }
-    .btn { display: block; background: #10b981; color: white; text-decoration: none; padding: 14px 24px; border-radius: 16px; font-weight: 700; font-size: 15px; box-shadow: 0 10px 20px -5px rgba(16,185,129,0.4); }
-  </style>
+  <meta property="og:image:width" content="600" />
+  <meta property="og:image:height" content="600" />
+  <meta name="twitter:card" content="summary" />
+  <meta name="twitter:title" content="${nomeLoja}" />
+  <meta name="twitter:image" content="${logoUrl}" />
 </head>
 <body>
-  <div class="card">
-    <img src="${esc(meta.logoUrl)}" alt="${esc(meta.name)}" class="logo" />
-    <h1>${esc(meta.name)}</h1>
-    <p>${esc(meta.description)}</p>
-    <a href="${esc(meta.canonicalUrl)}" class="btn">Acessar Loja Online &rarr;</a>
-  </div>
+  <script>window.location.href = window.location.href;</script>
 </body>
 </html>`;
 }
@@ -492,29 +474,8 @@ app.get(["/api/v1/store/:tenantId/logo.png", "/api/store-logo/:tenantId.png"], a
   }
 });
 
-// Endpoint /api/og de Metadados / Rich Preview Card para Integrações e Crawlers
-app.get("/api/og", async (req, res) => {
-  try {
-    const ident = (req.query.store || req.query.slug || req.query.tenant || req.query.id || req.query.loja || "").toString().trim();
-    if (!ident) {
-      return res.status(400).json({ error: "Parâmetro store ou slug obrigatório" });
-    }
-    const meta = await getTenantMetaRecord(ident, req);
-    if (!meta) {
-      return res.status(404).json({ error: "Drogaria não encontrada" });
-    }
-
-    if (req.headers.accept?.includes("application/json") || req.query.format === "json") {
-      return res.json(meta);
-    }
-
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.setHeader("Cache-Control", "public, max-age=300, stale-while-revalidate=86400");
-    return res.send(generateStoreOpenGraphHtml(meta));
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
-  }
-});
+// Endpoint /api/og e /api/og-handler de Metadados / Rich Preview Card para Integrações e Crawlers
+app.all(["/api/og-handler", "/api/og"], ogHandler);
 
 // Interceptor de Rota de Loja Pública (/loja/:slug)
 app.get(["/loja/:slug", "/loja/:slug/*all"], async (req, res, next) => {

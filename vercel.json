@@ -25,6 +25,14 @@
   ],
   "rewrites": [
     {
+      "source": "/api/og",
+      "destination": "/api/og-handler"
+    },
+    {
+      "source": "/api/og-handler",
+      "destination": "/api/og-handler"
+    },
+    {
       "source": "/api/(.*)",
       "destination": "/api/index"
     },
@@ -38,11 +46,14 @@
     },
     {
       "source": "/loja/(.*)",
-      "destination": "/api/index"
-    },
-    {
-      "source": "/loja",
-      "destination": "/api/index"
+      "has": [
+        {
+          "type": "header",
+          "key": "user-agent",
+          "value": "(?i).*(whatsapp|facebookexternalhit|facebot|twitterbot|telegrambot|linkedinbot|slackbot|discordbot|skypeuripreview).*"
+        }
+      ],
+      "destination": "/api/og-handler"
     },
     {
       "source": "/(.*)",
@@ -53,7 +64,15 @@
           "value": "(?i).*(whatsapp|facebookexternalhit|facebot|twitterbot|telegrambot|linkedinbot|slackbot|discordbot|skypeuripreview).*"
         }
       ],
-      "destination": "/api/index"
+      "destination": "/api/og-handler"
+    },
+    {
+      "source": "/loja/(.*)",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/loja",
+      "destination": "/index.html"
     },
     {
       "source": "/((?!assets/|.*\\..*).*)",
