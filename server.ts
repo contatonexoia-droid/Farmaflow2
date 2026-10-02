@@ -7707,7 +7707,7 @@ function getSaoPauloDateString(dateInput: Date | string = new Date()): string {
 }
 
 // Helper function to handle daily welcome messages for first message of the day
-async function handleDailyWelcomeMessage(storeId: string, conversation: any, instanceName?: string, incomingText?: string) {
+async function handleDailyWelcomeMessage(storeId: string, conversation: any, instanceName?: string, incomingText?: string): Promise<boolean> {
   try {
     const rawId = String(storeId || '').trim();
     const cleanStoreId = rawId.replace(/^store_/, '').replace(/^inbox_/, '').replace(/^tenant_/, '');
@@ -7763,14 +7763,14 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
     // 3. Se não encontrar o tenant específico, aborta o disparo para evitar misturar unidades
     if (!tenant) {
       console.warn(`[WelcomeMessage] Tenant não localizado de forma estrita para storeId="${storeId}" ou instanceName="${instanceName}". Disparo de boas-vindas cancelado.`);
-      return;
+      return false;
     }
 
     const isEnabled = Boolean(tenant.welcome_message_enabled ?? tenant.welcomemessageenabled ?? false);
     console.log(`[WEBHOOK] Verificando Saudação Automática para loja "${tenant.name}" (@${tenant.slug}): ${isEnabled ? 'ATIVADA' : 'DESATIVADA'}`);
     if (!isEnabled) {
       console.log(`[WEBHOOK] Saudação automática desativada nas configurações da loja "${tenant.name}".`);
-      return;
+      return false;
     }
 
     // Comparação precisa de virada de dia no fuso horário do Brasil (America/Sao_Paulo)
@@ -7793,7 +7793,7 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
     // Se a mensagem recebida for um resumo de pedido da Webloja, não envia boas-vindas para não sobrepor o pedido
     if (incomingText && isWeblojaOrderMessage(incomingText).isOrder) {
       console.log(`[WelcomeMessage] Mensagem identificada como pedido da Loja Online FarmaFlow. Omitindo mensagem de boas-vindas para a conversa ${conversation.id}.`);
-      return;
+      return false;
     }
 
     const isTest = incomingText?.trim().toLowerCase() === '#teste' || 
@@ -7810,7 +7810,7 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
       } catch (_) {}
     } else if (lastWelcomeDate && lastWelcomeDate === todayStr) {
       console.log(`[WEBHOOK] Boas-vindas diárias já enviadas hoje (${todayStr}) para a conversa ${conversation.id}.`);
-      return; // Já enviada hoje no fuso horário brasileiro
+      return false; // Já enviada hoje no fuso horário brasileiro
     }
 
     const nowIso = new Date().toISOString();
@@ -7837,11 +7837,11 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
 
     if (!rawPhone) {
       console.warn("[WelcomeMessage] Telefone do contato não encontrado para conversa:", conversation.id);
-      return;
+      return false;
     }
 
     const cleanPhone = String(rawPhone).replace(/\D/g, '');
-    if (!cleanPhone) return;
+    if (!cleanPhone) return false;
 
     const storeName = tenant.nome_loja || tenant.name || "nossa farmácia";
     const customText = tenant.welcome_message_text || tenant.welcomemessagetext || `Olá! Sou o assistente virtual da ${storeName}. Em que posso te ajudar hoje?`;
@@ -7937,6 +7937,9 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
         message: welcomeMsg,
         conversation
       });
+
+      console.log(`[WelcomeMessage] Fluxo de boas-vindas concluído para ${cleanPhone} (Loja: "${tenant.name}", Instância: "${targetInstanceName}", Status: ENTREGUE)`);
+      return true;
     } else {
       console.error(`[WelcomeMessage] [ERRO EVOLUTION] Falha no envio para WhatsApp (${cleanPhone}): HTTP ${dispatchResult?.status || 500} - ${dispatchResult?.error || 'Erro desconhecido'}. Não inserindo no chat como entregue.`);
       
@@ -7947,11 +7950,13 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
           .update({ last_welcome_sent_at: null })
           .eq("id", conversation.id);
       } catch (_) {}
-    }
 
-    console.log(`[WelcomeMessage] Fluxo de boas-vindas concluído para ${cleanPhone} (Loja: "${tenant.name}", Instância: "${targetInstanceName}", Status: ${dispatchSuccess ? 'ENTREGUE' : 'FALHA'})`);
+      console.log(`[WelcomeMessage] Fluxo de boas-vindas concluído para ${cleanPhone} (Loja: "${tenant.name}", Instância: "${targetInstanceName}", Status: FALHA)`);
+      return false;
+    }
   } catch (err: any) {
     console.error("[WelcomeMessage] Erro ao processar mensagem de boas-vindas:", err.message);
+    return false;
   }
 }
 
@@ -8265,12 +8270,19 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
               }
 
               // 4. Disparo da Mensagem Automática de Boas-Vindas da Primeira Mensagem do Dia em bloco isolado (apenas se não for pedido da webloja)
+              let welcomeSent = false;
               if (!isWeblojaOrder) {
                 try {
-                  await handleDailyWelcomeMessage(storeId, conversation, instanceName, text);
+                  welcomeSent = await handleDailyWelcomeMessage(storeId, conversation, instanceName, text);
                 } catch (welcomeErr: any) {
                   console.error('[WEBHOOK] Exceção ao processar boas-vindas diárias:', welcomeErr.message);
                 }
+              }
+
+              // Se a mensagem de boas-vindas foi efetivamente enviada nesta interação, interrompe o fluxo para não chamar a IA na mesma resposta
+              if (welcomeSent) {
+                console.log(`[WEBHOOK] Mensagem de boas-vindas enviada com sucesso para a conversa ${conversation.id}. Interrompendo fluxo para evitar resposta duplicada do Agente de IA.`);
+                return res.status(200).json({ success: true, handled: 'welcome_message' });
               }
 
               // 5. Se is_bot_active === true (ou estágio 'ia_atendendo') e is_human_controlled === false, force o dispatch imediato para o AiAgentService
