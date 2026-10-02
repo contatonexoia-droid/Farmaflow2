@@ -199,6 +199,49 @@ export class EvolutionApiService {
   }
 
   /**
+   * Envia evento de presença (digitando/composing, gravando áudio, etc.) para o WhatsApp via Evolution API
+   */
+  public async sendPresence(
+    instanceName: string,
+    phoneNumber: string,
+    presence: "composing" | "recording" | "available" | "unavailable" = "composing",
+    delay: number = 1200
+  ): Promise<{ success: boolean; data?: any; error?: string }> {
+    const cleanNumber = String(phoneNumber || "").replace(/\D/g, "");
+    if (!cleanNumber) {
+      return { success: false, error: "Número inválido" };
+    }
+
+    if (!instanceName || instanceName.trim() === "" || /^[0-9a-f-]{36}$/i.test(instanceName.trim())) {
+      return { success: false, error: "Instância inválida" };
+    }
+
+    try {
+      const { url, key: apiKeyToUse } = await this.getInstanceConfig(instanceName);
+      const targetUrl = `${url}/chat/sendPresence/${instanceName.trim()}`;
+      const payload = {
+        number: cleanNumber,
+        presence: presence,
+        delay: delay
+      };
+
+      const response = await fetch(targetUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "apikey": apiKeyToUse
+        },
+        body: JSON.stringify(payload)
+      });
+
+      return { success: response.ok };
+    } catch (networkError: any) {
+      console.warn(`[EvolutionAPI] Aviso ao enviar presença (${presence}) para ${cleanNumber}:`, networkError.message);
+      return { success: false, error: networkError.message };
+    }
+  }
+
+  /**
    * Envia mensagem interativa CTA URL via Evolution API v2 (/message/sendInteractive/{instance})
    * Compatível com Evolution API v2.3.7+ para botões de URL/Ação.
    * Se a Evolution API retornar qualquer status diferente de 200/201 ou falhar,

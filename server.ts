@@ -8269,39 +8269,171 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                 console.warn("[WEBHOOK] Aviso ao processar CSAT:", csatErr.message);
               }
 
-              // 4. Disparo da Mensagem Automática de Boas-Vindas da Primeira Mensagem do Dia em bloco isolado (apenas se não for pedido da webloja)
-              let welcomeSent = false;
-              if (!isWeblojaOrder) {
-                try {
-                  welcomeSent = await handleDailyWelcomeMessage(storeId, conversation, instanceName, text);
-                } catch (welcomeErr: any) {
-                  console.error('[WEBHOOK] Exceção ao processar boas-vindas diárias:', welcomeErr.message);
+              // 4. Verificação de elegibilidade para atendimento pela IA
+              const isHumanControlled = 
+                isWeblojaOrder ||
+                conversation.is_human_controlled === true ||
+                conversation.is_bot_active === false ||
+                Boolean(conversation.assigned_user_id) ||
+                conversation.kanban_stage === "em_atendimento";
+
+              if (isHumanControlled) {
+                console.log(`[WEBHOOK - IA] Conversa ${conversation.id} não despachada para IA: intervenção humana ativa (is_bot_active: ${conversation.is_bot_active}, is_human_controlled: ${conversation.is_human_controlled}, stage: ${conversation.kanban_stage})`);
+                if (!res.headersSent) {
+                  return res.status(200).json({ success: true, handled: 'human_controlled' });
                 }
+                continue;
               }
 
-              // Se a mensagem de boas-vindas foi efetivamente enviada nesta interação, interrompe o fluxo para não chamar a IA na mesma resposta
+              // =========================================================================
+              // 5. DEBOUNCE RESILIENTE A SERVERLESS (Vercel / Multi-Instância)
+              // =========================================================================
+              const currentMessage = result.message;
+              const currentMsgTimestamp = currentMessage?.created_at || new Date().toISOString();
+              const phone = conversation.contact?.phone_number || msg.key?.remoteJid?.replace(/@.*$/, '') || remoteJid.replace(/@.*$/, '');
+              const cleanPhone = String(phone || '').replace(/\D/g, '');
+
+              // a) Atualiza timestamp da última mensagem na conversa
+              try {
+                await supabaseAdmin
+                  .from("chat_conversations")
+                  .update({
+                    last_message_at: currentMsgTimestamp,
+                    last_message_content: typeof text === 'string' ? text.slice(0, 500) : text,
+                    updated_at: currentMsgTimestamp
+                  })
+                  .eq("id", conversation.id);
+              } catch (updateConvErr: any) {
+                console.warn("[WEBHOOK DEBOUNCE] Aviso ao atualizar last_message_at:", updateConvErr.message);
+              }
+
+              // b) Envia imediatamente status "composing" (digitando...) para a Evolution API
+              if (instanceName && cleanPhone) {
+                evolutionApiService.sendPresence(instanceName, cleanPhone, "composing", 2500).catch(err => {
+                  console.warn("[WEBHOOK PRESENCE] Falha ao enviar presença composing:", err.message);
+                });
+              }
+
+              // c) Aguarda janela de tolerância de digitação (20 segundos)
+              console.log(`[WEBHOOK DEBOUNCE] ⏳ Janela de 20s iniciada para msg ${currentMessage?.id} na conversa ${conversation.id}...`);
+              await new Promise(resolve => setTimeout(resolve, 20000));
+
+              // d) Verificação de Última Mensagem no Supabase (Evita disparos concorrentes no Serverless)
+              try {
+                const { data: latestMsg } = await supabaseAdmin
+                  .from('chat_messages')
+                  .select('id, created_at')
+                  .eq('conversation_id', conversation.id)
+                  .in('sender_type', ['CUSTOMER', 'CLIENT'])
+                  .order('created_at', { ascending: false })
+                  .limit(1)
+                  .maybeSingle();
+
+                if (latestMsg && currentMessage && latestMsg.id !== currentMessage.id) {
+                  console.log(`[WEBHOOK DEBOUNCE] ⏩ Mensagem mais recente detectada (${latestMsg.id} vs atual ${currentMessage.id}). Descartando execução desta requisição para consolidar na mais recente.`);
+                  return res.status(200).json({ handled: 'debounced_by_newer_message', latestMessageId: latestMsg.id });
+                }
+              } catch (checkErr: any) {
+                console.warn("[WEBHOOK DEBOUNCE] Erro ao consultar última mensagem:", checkErr.message);
+              }
+
+              // e) Verifica se durante os 20s um operador humano assumiu o chat
+              try {
+                const { data: recheckedConv } = await supabaseAdmin
+                  .from('chat_conversations')
+                  .select('is_bot_active, is_human_controlled, assigned_user_id, kanban_stage')
+                  .eq('id', conversation.id)
+                  .maybeSingle();
+
+                if (recheckedConv) {
+                  const nowHuman = recheckedConv.is_human_controlled === true ||
+                    recheckedConv.is_bot_active === false ||
+                    Boolean(recheckedConv.assigned_user_id) ||
+                    recheckedConv.kanban_stage === 'em_atendimento';
+                  if (nowHuman) {
+                    console.log(`[WEBHOOK DEBOUNCE] 👤 Conversa ${conversation.id} foi assumida por operador humano durante a espera de 20s. Abortando IA.`);
+                    return res.status(200).json({ handled: 'human_takeover_during_debounce' });
+                  }
+                }
+              } catch (convCheckErr: any) {
+                console.warn("[WEBHOOK DEBOUNCE] Erro ao re-verificar conversa:", convCheckErr.message);
+              }
+
+              // f) Consolidação de mensagens do cliente enviadas nos últimos 60 segundos
+              let consolidatedText = text;
+              try {
+                const { data: lastStaffMsg } = await supabaseAdmin
+                  .from('chat_messages')
+                  .select('created_at')
+                  .eq('conversation_id', conversation.id)
+                  .in('sender_type', ['BOT', 'USER', 'SYSTEM'])
+                  .order('created_at', { ascending: false })
+                  .limit(1)
+                  .maybeSingle();
+
+                const sixtySecondsAgo = new Date(Date.now() - 60000).toISOString();
+                const cutoffTime = (lastStaffMsg?.created_at && lastStaffMsg.created_at > sixtySecondsAgo)
+                  ? lastStaffMsg.created_at
+                  : sixtySecondsAgo;
+
+                const { data: pendingCustomerMsgs } = await supabaseAdmin
+                  .from('chat_messages')
+                  .select('id, content, created_at')
+                  .eq('conversation_id', conversation.id)
+                  .in('sender_type', ['CUSTOMER', 'CLIENT'])
+                  .gte('created_at', cutoffTime)
+                  .order('created_at', { ascending: true });
+
+                if (pendingCustomerMsgs && pendingCustomerMsgs.length > 0) {
+                  const texts = pendingCustomerMsgs
+                    .map(m => (m.content || '').trim())
+                    .filter(t => t.length > 0 && !t.startsWith('[') && !t.endsWith(']'));
+                  
+                  if (texts.length > 0) {
+                    consolidatedText = texts.join('\n');
+                  }
+                }
+              } catch (consolErr: any) {
+                console.warn("[WEBHOOK DEBOUNCE] Erro ao consolidar histórico recente:", consolErr.message);
+              }
+
+              console.log(`[WEBHOOK DEBOUNCE] 💬 Mensagem unificada para envio à IA na conversa ${conversation.id}:\n"${consolidatedText}"`);
+
+              // g) Disparo Único da Mensagem de Boas-Vindas (se elegível hoje)
+              let welcomeSent = false;
+              try {
+                welcomeSent = await handleDailyWelcomeMessage(storeId, conversation, instanceName, consolidatedText);
+              } catch (welcomeErr: any) {
+                console.error('[WEBHOOK] Exceção ao processar boas-vindas diárias:', welcomeErr.message);
+              }
+
               if (welcomeSent) {
                 console.log(`[WEBHOOK] Mensagem de boas-vindas enviada com sucesso para a conversa ${conversation.id}. Interrompendo fluxo para evitar resposta duplicada do Agente de IA.`);
                 return res.status(200).json({ success: true, handled: 'welcome_message' });
               }
 
-              // 5. Se is_bot_active === true (ou estágio 'ia_atendendo') e is_human_controlled === false, force o dispatch imediato para o AiAgentService
-              const shouldDispatchToAi = !isWeblojaOrder && (conversation.is_bot_active === true || conversation.kanban_stage === "ia_atendendo") && conversation.is_human_controlled !== true && !conversation.assigned_user_id;
-              if (shouldDispatchToAi) {
-                try {
-                  const phone = conversation.contact?.phone_number || msg.key?.remoteJid?.replace(/@.*$/, '');
-                  console.log(`[WEBHOOK - IA] Forçando dispatch imediato para AiAgentService na conversa ${conversation.id} (${phone})...`);
-                  aiAgentService.processConversationTurn(storeId, conversation.id, text, {
-                    instanceName,
-                    phoneNumber: phone
-                  }).catch(aiErr => {
-                    console.error('[WEBHOOK - IA ISOLADA] Exceção no processamento do Agente de IA (mensagem mantida no chat):', aiErr.message);
-                  });
-                } catch (aiSyncErr: any) {
-                  console.error('[WEBHOOK - IA ISOLADA] Erro ao despachar chamada do Agente de IA:', aiSyncErr.message);
-                }
-              } else {
-                console.log(`[WEBHOOK - IA] Conversa ${conversation.id} não despachada para IA: intervenção humana ativa (is_bot_active: ${conversation.is_bot_active}, is_human_controlled: ${conversation.is_human_controlled}, stage: ${conversation.kanban_stage})`);
+              // h) Mantém presença "composing" ativa durante a geração da resposta
+              if (instanceName && cleanPhone) {
+                evolutionApiService.sendPresence(instanceName, cleanPhone, "composing", 3500).catch(() => {});
+              }
+
+              // i) Disparo ÚNICO para o Agente de IA com o texto consolidado
+              try {
+                console.log(`[WEBHOOK - IA] 🤖 Despachando turno único consolidado para AiAgentService na conversa ${conversation.id} (${cleanPhone})...`);
+                const aiResult = await aiAgentService.processConversationTurn(storeId, conversation.id, consolidatedText, {
+                  instanceName,
+                  phoneNumber: cleanPhone
+                });
+
+                return res.status(200).json({
+                  success: true,
+                  handled: 'ai_processed',
+                  consolidatedText,
+                  aiResult
+                });
+              } catch (aiErr: any) {
+                console.error('[WEBHOOK - IA ISOLADA] Exceção no processamento do Agente de IA:', aiErr.message);
+                return res.status(200).json({ success: false, error: aiErr.message });
               }
             }
           }
