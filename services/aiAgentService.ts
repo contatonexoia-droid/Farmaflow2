@@ -17,28 +17,45 @@ Seu objetivo é recepcionar o cliente com agilidade, tirar dúvidas sobre medica
    - Use obrigatoriamente a ferramenta \`consultar_dados_loja()\` para verificar o nome real da loja, horários de atendimento, endereço e o link da loja online. Nunca invente essas informações.
    - Use obrigatoriamente \`buscar_produtos(termo)\` para consultar estoque, dosagens e preços em tempo real antes de informar qualquer valor ao cliente. Nunca estime preços.
 
-2. CANAL PREFERENCIAL (CATÁLOGO ONLINE):
+2. INTERPRETAÇÃO DE CADASTRO FARMACÊUTICO:
+   - 'SODICA' e 'MONO' (Monoidratada) são a mesma substância ativa (ex: Dipirona Sódica / Monoidratada).
+   - 'CPR', 'COMP' ou 'CP' indica comprimidos (ex: 8CPR = 8 comprimidos, 10CPR = 10 comprimidos, 30CPR = 30 comprimidos).
+   - 'GTS' indica gotas, 'XPE' indica xarope, 'SOL' indica solução oral, 'EFERV' indica efervescente.
+   - Siglas finais indicam o laboratório fabricante: EMS (EMS), PRAT ou PRTD (Prati-Donaduzzi), NEOQ (Neo Química), GERM (Germed), MDLY (Medley), CIMED (Cimed), EURO (Eurofarma), ACHÉ (Aché), SANOFI (Sanofi).
+
+3. REGRAS OBRIGATÓRIAS DE RESPOSTA AO CLIENTE:
+   - Quando o cliente pedir um medicamento genérico, princípio ativo ou dosagem específica (ex: "dipirona de 1g", "paracetamol", "amoxicilina") e houver mais de uma marca ou tamanho em estoque:
+     * NUNCA envie apenas uma opção. NUNCA responda no singular ("Temos a seguinte opção") quando houver alternativas disponíveis.
+     * Apresente de 2 a 4 alternativas com laboratório, quantidade de comprimidos/apresentação e preço, destacando a mais econômica primeiro com ⭐ Mais econômica.
+     * Exemplo de resposta:
+       "Temos dipirona de 1g disponível nas seguintes opções:
+       1️⃣ EMS (10 comprimidos) - R$ 11,49 ⭐ Mais econômica
+       2️⃣ Prati-Donaduzzi (8 comprimidos) - R$ 15,02
+       3️⃣ Prati-Donaduzzi (30 comprimidos) - R$ 24,70
+       Qual dessas opções você prefere?"
+
+4. CANAL PREFERENCIAL (CATÁLOGO ONLINE):
    - Apresente a loja online como a forma mais prática e vantajosa para ver fotos, cupons, opções de genéricos/similares com desconto e calcular o frete automaticamente.
 
-3. PEDIDO DIRETO PELO WHATSAPP (VONTADE DO CLIENTE):
+5. PEDIDO DIRETO PELO WHATSAPP (VONTADE DO CLIENTE):
    - Se o cliente informar que prefere fechar pelo WhatsApp ou mandar a lista de compras no chat:
      1. Não insista para que ele use o site.
      2. Apresente os preços dos produtos consultados.
      3. Avise educadamente que o balconista da farmácia vai continuar a conversa em instantes para anotar o endereço e concluir o pedido.
      4. Acione a função interna de transbordo para a equipe de balcão.
 
-4. POLÍTICA DE ENTREGA E RECEITUÁRIO:
+6. POLÍTICA DE ENTREGA E RECEITUÁRIO:
    - A drogaria opera com foco exclusivo em tele-entrega (delivery). Não ofereça retirada em loja física.
    - Para medicamentos controlados, antibióticos ou tarja preta, avise que a receita médica (foto legível no chat ou anexo no carrinho) deve ser conferida pelo farmacêutico antes da entrega.
 
-5. DIRETRIZES DE LINKS E FORMATAÇÃO VISUAL:
+7. DIRETRIZES DE LINKS E FORMATAÇÃO VISUAL:
    - Nunca polua o chat com múltiplos links na mesma mensagem.
    - Em buscas e listagens de preços, apresente apenas 'Nome - Preço' e inclua apenas o link geral da loja no final da mensagem.
    - Envie o link direto de um produto específico SOMENTE se o cliente solicitar a compra daquele item em particular.
    - Se o cliente optar por pedir pelo WhatsApp, não envie links de carrinho; apresente os valores e acione o balconista humano para concluir a tele-entrega.
 
-6. POSTURA E LIMITES:
-   - Mantenha respostas curtas, gentis e objetivas (1 a 3 parágrafos). Não colete dados de cartão de crédito no chat.`;
+8. POSTURA E LIMITES:
+   - Mantenha respostas curtas, gentis e comerciais (1 a 3 parágrafos). Não colete dados de cartão de crédito no chat.`;
 
 export interface AiChatMessage {
   role: 'user' | 'model' | 'assistant' | 'system';
@@ -154,7 +171,7 @@ function extractKeywordsAndIntents(message: string): string[] {
   const keywords: string[] = [];
 
   for (const token of rawTokens) {
-    if (!STOP_WORDS.has(token) && token.length >= 3) {
+    if (!STOP_WORDS.has(token) && token.length >= 2) {
       keywords.push(token);
     }
   }
@@ -415,6 +432,26 @@ export class AiAgentService {
       .replace(/\{NOME_FARMACIA\}/g, storeName)
       .replace(/\{LINK_LOJA\}/g, storeLink);
 
+    // Garantir que as diretrizes de interpretação farmacêutica e resposta de múltiplas opções estejam sempre presentes
+    if (!basePrompt.includes("INTERPRETAÇÃO DE CADASTRO FARMACÊUTICO")) {
+      basePrompt += `\n\nINTERPRETAÇÃO DE CADASTRO FARMACÊUTICO:
+- 'SODICA' e 'MONO' (Monoidratada) são a mesma substância ativa (ex: Dipirona Sódica / Monoidratada).
+- 'CPR', 'COMP' ou 'CP' indica comprimidos (ex: 8CPR = 8 comprimidos, 10CPR = 10 comprimidos, 30CPR = 30 comprimidos).
+- 'GTS' indica gotas, 'XPE' indica xarope, 'SOL' indica solução oral, 'EFERV' indica efervescente.
+- Siglas finais indicam o laboratório fabricante: EMS (EMS), PRAT ou PRTD (Prati-Donaduzzi), NEOQ (Neo Química), GERM (Germed), MDLY (Medley), CIMED (Cimed), EURO (Eurofarma), ACHÉ (Aché), SANOFI (Sanofi).
+
+REGRAS OBRIGATÓRIAS DE RESPOSTA AO CLIENTE:
+- Quando o cliente pedir um medicamento genérico, princípio ativo ou dosagem específica (ex: "dipirona de 1g", "paracetamol", "amoxicilina") e houver mais de uma marca ou tamanho em estoque:
+  * NUNCA envie apenas uma opção. NUNCA responda no singular ("Temos a seguinte opção") quando houver alternativas disponíveis.
+  * Apresente de 2 a 4 alternativas com laboratório, quantidade de comprimidos/apresentação e preço, destacando a mais econômica primeiro com ⭐ Mais econômica.
+  * Exemplo de resposta:
+    "Temos dipirona de 1g disponível nas seguintes opções:
+    1️⃣ EMS (10 comprimidos) - R$ 11,49 ⭐ Mais econômica
+    2️⃣ Prati-Donaduzzi (8 comprimidos) - R$ 15,02
+    3️⃣ Prati-Donaduzzi (30 comprimidos) - R$ 24,70
+    Qual dessas opções você prefere?"`;
+    }
+
     // 6. Busca contextual aprofundada de produtos no banco de dados real da drogaria
     let catalogContext = "";
     const searchTerms = extractKeywordsAndIntents(incomingMessage);
@@ -433,104 +470,32 @@ export class AiAgentService {
     );
 
     try {
-      let matchedProducts: any[] = [];
+      const matchedProducts = await this.searchProductsInDb(
+        tenantIds.length > 0 ? tenantIds : [tenant.id || tenantId],
+        incomingMessage,
+        6
+      );
 
-      if (searchTerms.length > 0) {
-        // Estratégia 1: Busca direta termo a termo no nome do produto
-        for (const term of searchTerms.slice(0, 3)) {
-          if (matchedProducts.length >= 6) break;
-
-          const { data: byName, error: errName } = await supabaseAdmin
-            .from("products")
-            .select("id, name, price, stock, presentation, category, active_principle, requires_prescription")
-            .in("tenant_id", tenantIds)
-            .ilike("name", `%${term}%`)
-            .limit(6);
-
-          if (!errName && byName && byName.length > 0) {
-            for (const p of byName) {
-              if (!matchedProducts.some(mp => String(mp.id) === String(p.id))) {
-                matchedProducts.push(p);
-              }
-            }
-          }
-
-          // Se ainda não encontrou ou tem poucos, busca por princípio ativo
-          if (matchedProducts.length < 6) {
-            const { data: byPrinciple, error: errPrinciple } = await supabaseAdmin
-              .from("products")
-              .select("id, name, price, stock, presentation, category, active_principle, requires_prescription")
-              .in("tenant_id", tenantIds)
-              .ilike("active_principle", `%${term}%`)
-              .limit(6);
-
-            if (!errPrinciple && byPrinciple && byPrinciple.length > 0) {
-              for (const p of byPrinciple) {
-                if (!matchedProducts.some(mp => String(mp.id) === String(p.id))) {
-                  matchedProducts.push(p);
-                }
-              }
-            }
-          }
-        }
-
-        // Estratégia 2: Busca por orConditions combinando os termos (sem coluna slug)
-        if (matchedProducts.length === 0) {
-          const orFilter = searchTerms.slice(0, 3).map(t => 
-            `name.ilike.%${t}%,active_principle.ilike.%${t}%`
-          ).join(",");
-
-          const { data: orResults, error: orError } = await supabaseAdmin
-            .from("products")
-            .select("id, name, price, stock, presentation, category, active_principle, requires_prescription")
-            .in("tenant_id", tenantIds)
-            .or(orFilter)
-            .limit(6);
-
-          if (!orError && orResults && orResults.length > 0) {
-            matchedProducts = orResults;
-          }
-        }
-
-        // Estratégia 3: Tentar RPC de busca postgres se existir
-        if (matchedProducts.length === 0) {
-          for (const tid of tenantIds) {
-            try {
-              const { data: rpcData, error: rpcErr } = await supabaseAdmin.rpc("search_products_v2", {
-                p_tenant_id: tid,
-                p_search_term: primarySearchTerm,
-                p_category: "Todos",
-                p_limit: 6,
-                p_offset: 0
-              });
-              if (!rpcErr && Array.isArray(rpcData) && rpcData.length > 0) {
-                matchedProducts = rpcData;
-                break;
-              }
-            } catch {}
-          }
-        }
-
-        if (matchedProducts && matchedProducts.length > 0) {
-          catalogContext = "\n\n[CATÁLOGO EM TEMPO REAL - PRODUTOS ENCONTRADOS NO BANCO DE DADOS DA DROGARIA]:\n" +
-            matchedProducts.map((p, idx) => {
-              const preco = (Number(p.price) || 0).toFixed(2);
-              const linkProd = `${storeLink}?produto=${p.id}`;
-              const statusEstoque = p.stock > 0 ? `Disponível (${p.stock} un)` : 'Temporariamente Esgotado';
-              const tarja = p.requires_prescription ? 'Exige Receita Médica' : 'Venda Livre';
-              return `${idx + 1}. ${p.name} ${p.presentation ? `(${p.presentation})` : ''} - R$ ${preco} [Estoque: ${statusEstoque} | ${tarja}] (ID/Link para compra específica: ${linkProd})`;
-            }).join("\n") +
-            `\n\nDIRETRIZ ESTRITA DE FORMATAÇÃO E LINKS:
+      if (matchedProducts && matchedProducts.length > 0) {
+        catalogContext = "\n\n[CATÁLOGO EM TEMPO REAL - PRODUTOS ENCONTRADOS NO BANCO DE DADOS DA DROGARIA]:\n" +
+          matchedProducts.map((p, idx) => {
+            const preco = (Number(p.price) || 0).toFixed(2);
+            const linkProd = `${storeLink}?produto=${p.id}`;
+            const statusEstoque = p.stock > 0 ? `Disponível (${p.stock} un)` : 'Temporariamente Esgotado';
+            const tarja = p.requires_prescription ? 'Exige Receita Médica' : 'Venda Livre';
+            return `${idx + 1}. ${p.name} ${p.presentation ? `(${p.presentation})` : ''} - R$ ${preco} [Estoque: ${statusEstoque} | ${tarja}] (ID/Link para compra específica: ${linkProd})`;
+          }).join("\n") +
+          `\n\nDIRETRIZ ESTRITA DE FORMATAÇÃO E RESPOSTA:
+- Quando houver mais de uma opção em estoque, apresente de 2 a 4 alternativas com laboratório, apresentação e preço, destacando a de menor valor com ⭐ Mais econômica.
 - NUNCA envie links individuais por produto ao listar opções ou responder dúvidas iniciais. Liste apenas de forma limpa: 'Número. Nome - R$ Preço'.
 - Insira apenas UM ÚNICO link no rodapé da mensagem (o link geral da loja: ${storeLink}), convidando o cliente a explorar o catálogo ou calcular a tele-entrega.
 - Envie o link direto de um item específico SOMENTE se o cliente demonstrar intenção explícita de comprar aquele produto particular (ex: "vou levar o de 10 comprimidos", "como faço para pedir o Max?", "me manda o link desse").
 - Se o cliente preferir pedir pelo WhatsApp, não envie links de carrinho: confirme os valores e informe que o balconista humano concluirá o pedido.`;
-        } else {
-          catalogContext = `\n\n[CATÁLOGO EM TEMPO REAL]:
-Nenhum produto com esses termos exatos foi localizado no banco de dados local.
+      } else if (searchTerms.length > 0) {
+        catalogContext = `\n\n[CATÁLOGO EM TEMPO REAL]:
+Nenhum produto com esses termos exatos foi localizado em estoque no banco de dados local.
 - Link de Busca na Webloja para enviar ao cliente: ${storeLink}?busca=${encodeURIComponent(primarySearchTerm)}
 - REGRA CRÍTICA: NÃO invente preços (como R$ 12,99 ou qualquer outro valor). Diga que não localizou o preço no momento, convide o cliente a consultar a Webloja pelo link acima ou a conversar com o atendente de plantão.`;
-        }
       } else {
         catalogContext = `\n\n[CATÁLOGO EM TEMPO REAL]:
 Nenhum produto específico identificado na mensagem. Link geral da Webloja: ${storeLink}`;
@@ -1233,6 +1198,193 @@ ${taskInstruction}`;
     };
   }
 
+  /**
+   * Busca inteligente de produtos no Supabase com suporte a:
+   * - Decomposição em princípio ativo e dosagem (ex: "dipirona de 1g" -> "dipirona" + ["1g", "1000mg"])
+   * - AND flexível entre substância e dosagem (capturando "G DIPIRONA 1G", "G DIPIRONA SODICA 1G", "G DIPIRONA MONO 1G")
+   * - Filtro estrito de estoque ativo (> 0)
+   * - Ordenação pelo MENOR PREÇO (custo-benefício)
+   * - Retorno de 4 a 6 opções
+   */
+  public async searchProductsInDb(
+    tenantIds: string[],
+    searchTerm: string,
+    limit: number = 6
+  ): Promise<any[]> {
+    if (!searchTerm || !searchTerm.trim() || tenantIds.length === 0) {
+      return [];
+    }
+
+    const normalized = searchTerm
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9\s]/g, " ")
+      .trim();
+
+    // 1. Extração de Dosagem / Apresentação
+    let dosageMatch = normalized.match(/\b(\d+(?:[.,]\d+)?)\s*(mg|g|mcg|ml|gotas|gts)\b/i);
+    let detectedDosage = dosageMatch ? dosageMatch[0].replace(/\s+/g, "") : null;
+    if (!detectedDosage) {
+      const numMatch = normalized.match(/\b(1000|500|750|250|125|100|50|40|25|20|10|5)\b/);
+      if (numMatch) {
+        detectedDosage = numMatch[1] === "1000" ? "1g" : `${numMatch[1]}mg`;
+      }
+    }
+
+    let dosageVariants: string[] = [];
+    if (detectedDosage) {
+      if (detectedDosage === "1g" || detectedDosage === "1000mg" || detectedDosage === "1.000mg") {
+        dosageVariants = ["1g", "1000mg", "1 g", "1000 mg", "1000"];
+      } else if (detectedDosage === "500mg" || detectedDosage === "0.5g" || detectedDosage === "0,5g") {
+        dosageVariants = ["500mg", "500 mg", "0.5g", "500"];
+      } else if (detectedDosage === "750mg") {
+        dosageVariants = ["750mg", "750 mg", "750"];
+      } else if (detectedDosage === "250mg") {
+        dosageVariants = ["250mg", "250 mg", "250"];
+      } else if (detectedDosage.endsWith("mg")) {
+        const val = detectedDosage.replace("mg", "");
+        dosageVariants = [detectedDosage, `${val} mg`, val];
+      } else if (detectedDosage.endsWith("g")) {
+        const val = detectedDosage.replace("g", "");
+        dosageVariants = [detectedDosage, `${val} g`];
+      } else {
+        dosageVariants = [detectedDosage];
+      }
+    }
+
+    // 2. Extração de Princípio Ativo / Palavras-chave principais
+    const STOP_SEARCH_WORDS = new Set([
+      "de", "do", "da", "dos", "das", "em", "para", "com", "sem", "por", "favor",
+      "tem", "têm", "ter", "qual", "quais", "preco", "precos", "valor", "valores",
+      "quanto", "custa", "opcao", "opcoes", "remedio", "remedios", "medicamento",
+      "medicamentos", "generico", "genericos", "similar", "similares", "caixa",
+      "cartela", "comprimido", "comprimidos", "cpr", "comp", "cp", "un", "unidades",
+      "ola", "oi", "bom", "dia", "boa", "tarde", "noite", "voces", "vc", "vcs"
+    ]);
+
+    const tokens = normalized.split(/\s+/).filter(t => t.length >= 2);
+    const mainTerms = tokens.filter(t => 
+      !STOP_SEARCH_WORDS.has(t) && 
+      !dosageVariants.includes(t) && 
+      t !== "1" && t !== "g" && t !== "mg" && t !== "ml"
+    );
+
+    const matchedProducts: any[] = [];
+    const addedIds = new Set<string>();
+
+    const addProduct = (p: any) => {
+      if (p && p.id && !addedIds.has(String(p.id))) {
+        addedIds.add(String(p.id));
+        matchedProducts.push(p);
+      }
+    };
+
+    try {
+      // ETAPA 1: Busca combinada com nome exato da substância + dosagem (AND flexível)
+      // Captura tanto G DIPIRONA 1G, G DIPIRONA SODICA 1G, G DIPIRONA MONO 1G
+      if (mainTerms.length > 0) {
+        let q1 = supabaseAdmin
+          .from("products")
+          .select("id, name, price, stock, presentation, category, active_principle, requires_prescription")
+          .in("tenant_id", tenantIds)
+          .gt("stock", 0)
+          .order("price", { ascending: true });
+
+        for (const term of mainTerms) {
+          q1 = q1.ilike("name", `%${term}%`);
+        }
+
+        if (dosageVariants.length > 0) {
+          const dosageOr = dosageVariants.map(v => `name.ilike.%${v}%,presentation.ilike.%${v}%`).join(",");
+          q1 = q1.or(dosageOr);
+        }
+
+        const { data: d1 } = await q1.limit(limit);
+        (d1 || []).forEach(addProduct);
+      }
+
+      // ETAPA 2: Se ainda temos espaço na lista (< limit), busca por princípio ativo + dosagem
+      // Isso traz opções de referência/marca (ex: Novalgina, Dorflex Uno quando o cliente pede Dipirona 1g)
+      if (matchedProducts.length < limit && mainTerms.length > 0) {
+        let q2 = supabaseAdmin
+          .from("products")
+          .select("id, name, price, stock, presentation, category, active_principle, requires_prescription")
+          .in("tenant_id", tenantIds)
+          .gt("stock", 0)
+          .order("price", { ascending: true });
+
+        for (const term of mainTerms) {
+          q2 = q2.or(`name.ilike.%${term}%,active_principle.ilike.%${term}%`);
+        }
+
+        if (dosageVariants.length > 0) {
+          const dosageOr = dosageVariants.map(v => `name.ilike.%${v}%,presentation.ilike.%${v}%`).join(",");
+          q2 = q2.or(dosageOr);
+        }
+
+        const { data: d2 } = await q2.limit(limit);
+        (d2 || []).forEach(addProduct);
+      }
+
+      // ETAPA 3: Se não encontrou produtos com dosagem específica, busca pelas palavras-chave principais
+      if (matchedProducts.length === 0 && mainTerms.length > 0) {
+        let q3 = supabaseAdmin
+          .from("products")
+          .select("id, name, price, stock, presentation, category, active_principle, requires_prescription")
+          .in("tenant_id", tenantIds)
+          .gt("stock", 0)
+          .order("price", { ascending: true });
+
+        for (const term of mainTerms) {
+          q3 = q3.or(`name.ilike.%${term}%,active_principle.ilike.%${term}%`);
+        }
+
+        const { data: d3 } = await q3.limit(limit);
+        (d3 || []).forEach(addProduct);
+      }
+
+      // ETAPA 4: Fallback amplo por tokens livres caso termos principais não retornem nada
+      if (matchedProducts.length === 0) {
+        const rawTokens = normalized.split(/\s+/).filter(t => t.length >= 3 && !STOP_SEARCH_WORDS.has(t));
+        if (rawTokens.length > 0) {
+          const tokenOr = rawTokens.slice(0, 3).map(t => `name.ilike.%${t}%,active_principle.ilike.%${t}%`).join(",");
+          const { data: d4 } = await supabaseAdmin
+            .from("products")
+            .select("id, name, price, stock, presentation, category, active_principle, requires_prescription")
+            .in("tenant_id", tenantIds)
+            .gt("stock", 0)
+            .or(tokenOr)
+            .order("price", { ascending: true })
+            .limit(limit);
+          (d4 || []).forEach(addProduct);
+        }
+      }
+
+      // ETAPA 5: Se mesmo assim não encontrou itens em estoque, busca itens sem filtro de estoque
+      // para que a IA possa informar honestamente: "Estamos temporariamente sem estoque de..."
+      if (matchedProducts.length === 0 && mainTerms.length > 0) {
+        let q5 = supabaseAdmin
+          .from("products")
+          .select("id, name, price, stock, presentation, category, active_principle, requires_prescription")
+          .in("tenant_id", tenantIds)
+          .order("price", { ascending: true });
+
+        for (const term of mainTerms) {
+          q5 = q5.or(`name.ilike.%${term}%,active_principle.ilike.%${term}%`);
+        }
+
+        const { data: d5 } = await q5.limit(limit);
+        (d5 || []).forEach(addProduct);
+      }
+
+      return matchedProducts.slice(0, limit);
+    } catch (e: any) {
+      console.warn("[searchProductsInDb] Erro ao buscar produtos:", e.message);
+      return [];
+    }
+  }
+
   private async executeToolCall(
     name: string,
     args: any,
@@ -1308,15 +1460,11 @@ ${taskInstruction}`;
       );
 
       try {
-        const cleanTerm = termo.toLowerCase().replace(/[%_]/g, '');
-        const { data: prods, error } = await supabaseAdmin
-          .from("products")
-          .select("id, name, price, stock, presentation, category, active_principle, requires_prescription")
-          .in("tenant_id", tenantIds.length > 0 ? tenantIds : [tenant?.id || ''])
-          .or(`name.ilike.%${cleanTerm}%,active_principle.ilike.%${cleanTerm}%`)
-          .limit(6);
-
-        if (error) throw error;
+        const prods = await this.searchProductsInDb(
+          tenantIds.length > 0 ? tenantIds : [tenant?.id || ''],
+          termo,
+          6
+        );
 
         const effectiveStoreLink = storeLink || (tenant?.custom_domain ? `https://${tenant.custom_domain}` : `https://${tenant?.slug || tenant?.id || 'loja'}.farmaflow.online`);
 
@@ -1338,7 +1486,7 @@ ${taskInstruction}`;
           termo_buscado: termo,
           produtos: items,
           link_loja_geral: effectiveStoreLink,
-          instrucao_formatacao_links: "Ao listar as opções encontradas, apresente apenas 'Número. Nome - R$ Preço' e inclua apenas o link geral da loja ao final. Nunca envie links individuais de cada produto a menos que o cliente expresse intenção direta de fechar a compra daquele item específico."
+          instrucao_obrigatoria: "Quando houver mais de uma opção em estoque, NUNCA responda no singular ou com apenas uma opção. Apresente de 2 a 4 alternativas com laboratório, quantidade de comprimidos/apresentação e preço, destacando a mais econômica primeiro com ⭐ Mais econômica. Exemplo: 'Temos dipirona de 1g disponível nas seguintes opções: 1️⃣ EMS (10 comprimidos) - R$ 11,49 ⭐ Mais econômica 2️⃣ Prati-Donaduzzi (8 comprimidos) - R$ 15,02... Qual dessas opções você prefere?'. Inclua apenas o link geral da loja ao final da mensagem."
         };
       } catch (e: any) {
         console.warn("[buscar_produtos] Erro ao consultar produtos:", e.message);
