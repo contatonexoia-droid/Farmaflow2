@@ -25,8 +25,20 @@
   ],
   "rewrites": [
     {
+      "source": "/api/og-handler",
+      "destination": "/api/og-handler"
+    },
+    {
+      "source": "/api/og",
+      "destination": "/api/og-handler"
+    },
+    {
+      "source": "/api/v1/(.*)",
+      "destination": "/api/index"
+    },
+    {
       "source": "/api/(.*)",
-      "destination": "/api/$1"
+      "destination": "/api/index"
     },
     {
       "source": "/loja/(.*)",
