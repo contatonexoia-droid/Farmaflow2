@@ -18,7 +18,7 @@ const DEFAULT_SHARE_IMAGE = 'https://farmaflow.online/preview-share.png';
 
 export function isCrawlerRequest(userAgent: string = ''): boolean {
   if (!userAgent) return false;
-  return /([wW]hats[aA]pp|[fF]acebookexternalhit|[fF]acebot|[tT]witterbot|[tT]elegram[bB]ot|[lL]inkedin[bB]ot|[sS]lackbot|[dD]iscordbot|[sS]kype[uU]ri[pP]review)/.test(
+  return /([wW]hats[aA]pp|[fF]acebookexternalhit|[fF]acebot|[tT]witterbot|[tT]elegram[bB]ot|[lL]inkedin[bB]ot|[sS]lackbot|[dD]iscordbot|[sS]kype[uU]ri[pP]review|axios|node-fetch|got|undici|curl|[eE]volution|[bB]aileys)/i.test(
     userAgent
   );
 }
@@ -211,12 +211,16 @@ export default async function handler(req: any, res: any) {
             storeName;
 
           // Se logo_url for uma URL válida iniciando com http, utilizá-la
-          const candidateLogo = (store.logo_url || store.logo || '').trim();
+          const candidateLogo = (store.logo_url || store.logo || store.smart_banners?._regulatoryData?.logo_url || '').trim();
           if (
             candidateLogo &&
-            (candidateLogo.startsWith('http://') || candidateLogo.startsWith('https://'))
+            (candidateLogo.startsWith('http://') || candidateLogo.startsWith('https://')) &&
+            !candidateLogo.startsWith('data:')
           ) {
             logoUrl = candidateLogo;
+          } else if (store?.id) {
+            const baseOrigin = hostStr ? `https://${hostStr}` : 'https://farmaflow.online';
+            logoUrl = `${baseOrigin}/api/v1/store/${encodeURIComponent(store.id)}/logo.png`;
           }
 
           if (store.description || store.banner_subtitle || store.bannersubtitle) {

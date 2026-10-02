@@ -172,11 +172,13 @@ export function buildHumanizedHandoffMessage(storeUrl: string): string {
   const cleanUrl = (storeUrl || "https://farmaflow.online").replace(/\/+$/, "");
   return `Perfeito! Já anotei a sua preferência. 😊
 
-🛒 **Dica para agilizar:** Você pode concluir seu pedido agora mesmo pela nossa loja online:
-👉 ${cleanUrl}
-*(É muito mais rápido, prático e 100% seguro — !)*
+🛒 *Dica para agilizar:* Você pode concluir seu pedido agora mesmo pela nossa loja online:
 
-💬 **Prefere continuar por aqui?** Sem problemas! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.`;
+${cleanUrl}
+
+*(É muito mais rápido, prático e 100% seguro!)*
+
+💬 *Prefere continuar por aqui?* Sem problemas! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.`;
 }
 
 /**

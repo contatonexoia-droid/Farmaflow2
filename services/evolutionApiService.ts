@@ -136,18 +136,33 @@ export class EvolutionApiService {
 
     const { url, key: apiKeyToUse } = await this.getInstanceConfig(instanceName);
     const targetUrl = `${url}/message/sendText/${instanceName.trim()}`;
-    const payload = {
+
+    const hasLink = /(https?:\/\/[^\s]+)/i.test(text);
+    const wantsLinkPreview = options?.linkPreview !== false;
+    const shouldEnableLinkPreview = wantsLinkPreview && hasLink;
+
+    // Quando há link, garantimos tempo de resolução suficiente (2000ms - 2500ms) para a Evolution API / Baileys
+    // resolver o DNS, buscar as tags Open Graph (og:image) e renderizar a miniatura (thumbnail) do WhatsApp
+    const defaultDelay = shouldEnableLinkPreview ? 2500 : 1200;
+    const effectiveDelay = options?.delay !== undefined 
+      ? Math.max(options.delay, shouldEnableLinkPreview ? 2000 : 800) 
+      : defaultDelay;
+
+    const payload: any = {
       number: cleanNumber,
       text: text,
+      linkPreview: shouldEnableLinkPreview,
+      link_preview: shouldEnableLinkPreview,
       options: {
-        delay: options?.delay ?? 1200,
+        delay: effectiveDelay,
         presence: options?.presence ?? "composing",
-        linkPreview: options?.linkPreview ?? true,
+        linkPreview: shouldEnableLinkPreview,
+        link_preview: shouldEnableLinkPreview,
         ...(options?.quoted ? { quoted: options.quoted } : {})
       }
     };
 
-    console.log(`[EvolutionAPI] Disparando sendText para ${cleanNumber} via instância "${instanceName}" | URL: ${targetUrl}`);
+    console.log(`[EvolutionAPI] Disparando sendText para ${cleanNumber} via instância "${instanceName}" (linkPreview: ${shouldEnableLinkPreview}, delay: ${effectiveDelay}ms) | URL: ${targetUrl}`);
     console.log(`[EvolutionAPI] Enviando requisição com apikey iniciando em: ${apiKeyToUse ? apiKeyToUse.substring(0, 6) + '...' : 'NULA/INDIFINIDA'}`);
     console.log(`[EvolutionAPI] Payload enviado:`, JSON.stringify(payload, null, 2));
 

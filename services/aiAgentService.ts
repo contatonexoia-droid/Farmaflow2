@@ -64,11 +64,13 @@ Seu objetivo é recepcionar o cliente com agilidade, tirar dúvidas sobre medica
      * Envie exatamente a seguinte resposta acolhedora e comercial:
        "Perfeito! Já anotei a sua preferência. 😊
 
-       🛒 **Dica para agilizar:** Você pode concluir seu pedido agora mesmo pela nossa loja online:
-       👉 {STORE_LINK}
-       *(É muito mais rápido, prático e 100% seguro — !)*
+       🛒 *Dica para agilizar:* Você pode concluir seu pedido agora mesmo pela nossa loja online:
 
-       💬 **Prefere continuar por aqui?** Sem problemas! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido."
+       {STORE_LINK}
+
+       *(É muito mais rápido, prático e 100% seguro!)*
+
+       💬 *Prefere continuar por aqui?* Sem problemas! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido."
      * Inclua a tag [TRANSFERIR_ATENDIMENTO] para transferir a conversa para a equipe de balcão imediatamente.
 
 5. CANAL PREFERENCIAL (CATÁLOGO ONLINE):
@@ -86,8 +88,9 @@ Seu objetivo é recepcionar o cliente com agilidade, tirar dúvidas sobre medica
    - Para medicamentos controlados, antibióticos ou tarja preta, avise que a receita médica (foto legível no chat ou anexo no carrinho) deve ser conferida pelo farmacêutico antes da entrega.
 
 8. DIRETRIZES DE LINKS E FORMATAÇÃO VISUAL:
+   - Formate SEMPRE a URL da loja online em uma linha isolada, com uma linha em branco antes e uma linha em branco depois (ex: '\n\nhttps://...farmaflow.online\n\n'), sem emojis ou símbolos grudados na mesma linha da URL, para que o WhatsApp gere perfeitamente o card com a logo da drogaria e a visualização completa do link (Link Preview).
    - Nunca polua o chat com múltiplos links na mesma mensagem.
-   - Em buscas e listagens de preços, apresente apenas 'Nome - Preço' e inclua apenas o link geral da loja no final da mensagem.
+   - Em buscas e listagens de preços, apresente apenas 'Nome - Preço' e inclua apenas o link geral da loja no final da mensagem em linha própria isolada.
    - Envie o link direto de um produto específico SOMENTE se o cliente solicitar a compra daquele item em particular.
    - Se o cliente optar por pedir pelo WhatsApp, não envie links de carrinho; apresente os valores e acione o balconista humano para concluir a tele-entrega.
 
@@ -329,6 +332,27 @@ function productMatchesDosage(product: any, detectedDosage: string | null): bool
   }
 
   return false;
+}
+
+/**
+ * Garante que qualquer link de loja/produto esteja estritamente em uma linha isolada,
+ * com quebras de linha antes e depois, sem prefixos colados (como "👉 http..."),
+ * permitindo que a Evolution API e o WhatsApp identifiquem a URL e gerem o Link Preview com thumbnail.
+ */
+export function isolateUrlsInText(text: string): string {
+  if (!text || typeof text !== "string") return text;
+  return text
+    .replace(/(?:[\t ]*(?:👉|🔗|🛒|🛍️|🌐)[\t ]*)?(https?:\/\/[^\s)]+)/gi, (match, rawUrl) => {
+      let url = rawUrl.trim();
+      let trailingPunct = "";
+      if (/[.,;!]$/.test(url)) {
+        trailingPunct = url.slice(-1);
+        url = url.slice(0, -1);
+      }
+      return `\n\n${url}\n\n${trailingPunct}`;
+    })
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 export class AiAgentService {
@@ -608,9 +632,11 @@ RECONHECIMENTO DE ESCOLHA DO CLIENTE E TRANSLADO/CONCLUSÃO:
   * Envie exatamente a seguinte resposta acolhedora e comercial:
     "Perfeito! Já anotei a sua preferência. 😊
 
-    🛒 **Dica para agilizar:** Você pode concluir seu pedido agora mesmo pela nossa loja online:
-    👉 {STORE_LINK}
-    *(É muito mais rápido, prático e 100% seguro — !)*
+    🛒 *Dica para agilizar:* Você pode concluir seu pedido agora mesmo pela nossa loja online:
+
+    {STORE_LINK}
+
+    *(É muito mais rápido, prático e 100% seguro!)*
 
     💬 **Prefere continuar por aqui?** Sem problemas! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido."
   * Inclua a tag [TRANSFERIR_ATENDIMENTO] para transferir a conversa para a equipe de balcão imediatamente.`;
@@ -633,9 +659,11 @@ O cliente escolheu uma opção ou demonstrou intenção de compra ("${incomingMe
 - Envie exatamente a resposta de conclusão e transbordo:
 Perfeito! Já anotei a sua preferência. 😊
 
-🛒 **Dica para agilizar:** Você pode concluir seu pedido agora mesmo pela nossa loja online:
-👉 ${storeLink}
-*(É muito mais rápido, prático e 100% seguro — !)*
+🛒 *Dica para agilizar:* Você pode concluir seu pedido agora mesmo pela nossa loja online:
+
+${storeLink}
+
+*(É muito mais rápido, prático e 100% seguro!)*
 
 💬 **Prefere continuar por aqui?** Sem problemas! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.
 [TRANSFERIR_ATENDIMENTO]`;
@@ -854,14 +882,17 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       return { success: false, error: err };
     }
 
+    // Garante que qualquer URL no texto esteja em linha isolada com quebras antes e depois
+    const finalReplyText = isolateUrlsInText(replyText);
+
     // 2. Disparo na API externa da Evolution API (WhatsApp) com confirmação síncrona
     console.log(`[AiAgentService] Disparando resposta do BOT para ${cleanPhone} via instância "${targetInstanceName}" (Handoff: ${params.isHandoff ? params.handoffReason : 'NÃO'})...`);
     const sendResult = await evolutionApiService.sendTextMessage(
       targetInstanceName,
       cleanPhone,
-      replyText,
+      finalReplyText,
       {
-        delay: 1000,
+        delay: 2200,
         linkPreview: true
       }
     );
@@ -878,7 +909,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       realTenantId,
       conversationId,
       "BOT",
-      replyText,
+      finalReplyText,
       false,
       undefined,
       undefined,
@@ -901,7 +932,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         bot_handoff_reason: handoffReason,
         bot_handoff_at: nowIso,
         last_message_at: nowIso,
-        last_message_content: replyText,
+        last_message_content: finalReplyText,
         updated_at: nowIso
       };
 
@@ -964,7 +995,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         bot_handoff_reason: null,
         bot_handoff_at: null,
         last_message_at: nowIso,
-        last_message_content: replyText,
+        last_message_content: finalReplyText,
         updated_at: nowIso
       };
 
