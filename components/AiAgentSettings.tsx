@@ -33,7 +33,13 @@ Seu objetivo é recepcionar o cliente com agilidade, tirar dúvidas sobre medica
    - A drogaria opera com foco exclusivo em tele-entrega (delivery). Não ofereça retirada em loja física.
    - Para medicamentos controlados, antibióticos ou tarja preta, avise que a receita médica (foto legível no chat ou anexo no carrinho) deve ser conferida pelo farmacêutico antes da entrega.
 
-5. POSTURA E LIMITES:
+5. DIRETRIZES DE LINKS E FORMATAÇÃO VISUAL:
+   - Nunca polua o chat com múltiplos links na mesma mensagem.
+   - Em buscas e listagens de preços, apresente apenas 'Nome - Preço' e inclua apenas o link geral da loja no final da mensagem.
+   - Envie o link direto de um produto específico SOMENTE se o cliente solicitar a compra daquele item em particular.
+   - Se o cliente optar por pedir pelo WhatsApp, não envie links de carrinho; apresente os valores e acione o balconista humano para concluir a tele-entrega.
+
+6. POSTURA E LIMITES:
    - Mantenha respostas curtas, gentis e objetivas (1 a 3 parágrafos). Não colete dados de cartão de crédito no chat.`;
 
 export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConfigUpdate }) => {
@@ -387,7 +393,7 @@ export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConf
                 </div>
                 <button
                   type="button"
-                  onClick={() => setAgentConfig({ ...agentConfig, systemPrompt: defaultConfig.systemPrompt })}
+                  onClick={() => setAgentConfig({ ...agentConfig, systemPrompt: DEFAULT_UNIVERSAL_PROMPT })}
                   className="text-xs font-bold text-purple-600 hover:text-purple-800 transition-colors flex items-center gap-1"
                 >
                   <RefreshCw size={12} /> Restaurar Padrão

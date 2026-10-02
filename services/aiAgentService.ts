@@ -31,7 +31,13 @@ Seu objetivo é recepcionar o cliente com agilidade, tirar dúvidas sobre medica
    - A drogaria opera com foco exclusivo em tele-entrega (delivery). Não ofereça retirada em loja física.
    - Para medicamentos controlados, antibióticos ou tarja preta, avise que a receita médica (foto legível no chat ou anexo no carrinho) deve ser conferida pelo farmacêutico antes da entrega.
 
-5. POSTURA E LIMITES:
+5. DIRETRIZES DE LINKS E FORMATAÇÃO VISUAL:
+   - Nunca polua o chat com múltiplos links na mesma mensagem.
+   - Em buscas e listagens de preços, apresente apenas 'Nome - Preço' e inclua apenas o link geral da loja no final da mensagem.
+   - Envie o link direto de um produto específico SOMENTE se o cliente solicitar a compra daquele item em particular.
+   - Se o cliente optar por pedir pelo WhatsApp, não envie links de carrinho; apresente os valores e acione o balconista humano para concluir a tele-entrega.
+
+6. POSTURA E LIMITES:
    - Mantenha respostas curtas, gentis e objetivas (1 a 3 parágrafos). Não colete dados de cartão de crédito no chat.`;
 
 export interface AiChatMessage {
@@ -400,6 +406,9 @@ export class AiAgentService {
     // 5. Preparar Prompt do Sistema com variáveis
     const storeName = tenant.name || "Nossa Drogaria";
     let basePrompt = effectiveConfig.systemPrompt || DEFAULT_AI_AGENT_PROMPT;
+    if (basePrompt.includes("Explendido") || basePrompt.includes("Explêndido") || basePrompt.includes("Esplendido")) {
+      basePrompt = DEFAULT_AI_AGENT_PROMPT;
+    }
     basePrompt = basePrompt
       .replace(/\{STORE_NAME\}/g, storeName)
       .replace(/\{STORE_LINK\}/g, storeLink)
@@ -507,17 +516,15 @@ export class AiAgentService {
             matchedProducts.map((p, idx) => {
               const preco = (Number(p.price) || 0).toFixed(2);
               const linkProd = `${storeLink}?produto=${p.id}`;
-              const linkBusca = `${storeLink}?busca=${encodeURIComponent(p.name.split(' ')[0] || primarySearchTerm)}`;
-              const statusEstoque = p.stock > 0 ? `Disponível (${p.stock} unidades)` : 'Temporariamente Esgotado';
-              const tarja = p.requires_prescription ? 'Exige Apresentação de Receita Médica' : 'Venda Livre';
-              return `${idx + 1}. PRODUTO: ${p.name} ${p.presentation ? `(${p.presentation})` : ''}
-   - Preço no Sistema: R$ ${preco}
-   - Estoque: ${statusEstoque}
-   - Classificação: ${tarja}
-   - Link Direto do Produto: ${linkProd}
-   - Link da Busca: ${linkBusca}`;
-            }).join("\n\n") +
-            `\n\nATENÇÃO OBRIGATÓRIA: Utilize os preços e nomes EXATOS listados acima. Ao recomendar o produto, informe o link direto dele ou o link de busca em texto puro.`;
+              const statusEstoque = p.stock > 0 ? `Disponível (${p.stock} un)` : 'Temporariamente Esgotado';
+              const tarja = p.requires_prescription ? 'Exige Receita Médica' : 'Venda Livre';
+              return `${idx + 1}. ${p.name} ${p.presentation ? `(${p.presentation})` : ''} - R$ ${preco} [Estoque: ${statusEstoque} | ${tarja}] (ID/Link para compra específica: ${linkProd})`;
+            }).join("\n") +
+            `\n\nDIRETRIZ ESTRITA DE FORMATAÇÃO E LINKS:
+- NUNCA envie links individuais por produto ao listar opções ou responder dúvidas iniciais. Liste apenas de forma limpa: 'Número. Nome - R$ Preço'.
+- Insira apenas UM ÚNICO link no rodapé da mensagem (o link geral da loja: ${storeLink}), convidando o cliente a explorar o catálogo ou calcular a tele-entrega.
+- Envie o link direto de um item específico SOMENTE se o cliente demonstrar intenção explícita de comprar aquele produto particular (ex: "vou levar o de 10 comprimidos", "como faço para pedir o Max?", "me manda o link desse").
+- Se o cliente preferir pedir pelo WhatsApp, não envie links de carrinho: confirme os valores e informe que o balconista humano concluirá o pedido.`;
         } else {
           catalogContext = `\n\n[CATÁLOGO EM TEMPO REAL]:
 Nenhum produto com esses termos exatos foi localizado no banco de dados local.
@@ -592,8 +599,11 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       .replace(/\[(TRANSFERIR_ATENDIMENTO|TRANSFER_TO_HUMAN|HANDOFF_HUMAN|TRANSBORDO)\]/gi, '')
       .trim();
 
+    // Sanitização de múltiplos links por produto em listagens (evita poluição visual)
+    enforcedReply = this.sanitizeExcessiveProductLinks(enforcedReply, incomingMessage, storeLink);
+
     if (!enforcedReply.includes("http") && !enforcedReply.includes(".online") && !enforcedReply.includes(".com")) {
-      enforcedReply = `${enforcedReply}\n\n🛍️ *Consulte nosso catálogo e compre online:* ${storeLink}`;
+      enforcedReply = `${enforcedReply}\n\nPara conferir mais detalhes ou aproveitar as promoções, acesse nossa loja online:\n${storeLink}`;
     }
 
     // 11. Se for o último turno da sessão por limite, anexa mensagem de transição humana caso não tenha
@@ -610,6 +620,38 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       transferredToHuman: shouldHandoff,
       handoffReason: shouldHandoff ? handoffReason : undefined
     };
+  }
+
+  /**
+   * Sanitiza múltiplos links por produto ao listar itens, garantindo visual limpo e apenas um link geral ao final.
+   */
+  private sanitizeExcessiveProductLinks(reply: string, userMessage: string, storeLink: string): string {
+    if (!reply || typeof reply !== 'string') return reply;
+
+    const buyIntent = /(levar|comprar|pedir|manda o link|link d|quero ess|quero o|vou ficar com|finalizar)/i.test(userMessage);
+
+    // Se o cliente tem intenção explícita de compra de um produto, não interfere no link direto
+    if (buyIntent) {
+      return reply;
+    }
+
+    // Se houver 2 ou mais links de produtos (?produto=) no corpo da mensagem, remove os links individuais repetitivos
+    const productLinks = reply.match(/https?:\/\/[^\s)]+\?produto=\w+/gi) || [];
+    if (productLinks.length >= 2) {
+      let cleaned = reply;
+      // Remove linhas ou trechos de link do produto (ex: "- Link: https://..." ou "👉 https://...produto=...")
+      cleaned = cleaned.replace(/[-*•]?\s*(Link\s*(do\s*produto|direto)?:\s*)?https?:\/\/[^\s)]+\?produto=\w+/gi, '');
+      cleaned = cleaned.replace(/\[([^\]]+)\]\(https?:\/\/[^\s)]+\?produto=\w+\)/gi, '$1');
+      cleaned = cleaned.replace(/\n{3,}/g, '\n\n').trim();
+
+      // Garante que o rodapé contenha o link geral da loja
+      if (!cleaned.includes(storeLink)) {
+        cleaned = `${cleaned}\n\nPara conferir mais detalhes ou aproveitar as promoções, acesse nossa loja online:\n${storeLink}`;
+      }
+      return cleaned;
+    }
+
+    return reply;
   }
 
   /**
@@ -1295,7 +1337,8 @@ ${taskInstruction}`;
           total: items.length,
           termo_buscado: termo,
           produtos: items,
-          link_busca_geral: `${effectiveStoreLink}?busca=${encodeURIComponent(termo)}`
+          link_loja_geral: effectiveStoreLink,
+          instrucao_formatacao_links: "Ao listar as opções encontradas, apresente apenas 'Número. Nome - R$ Preço' e inclua apenas o link geral da loja ao final. Nunca envie links individuais de cada produto a menos que o cliente expresse intenção direta de fechar a compra daquele item específico."
         };
       } catch (e: any) {
         console.warn("[buscar_produtos] Erro ao consultar produtos:", e.message);
