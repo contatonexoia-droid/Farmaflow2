@@ -41,23 +41,12 @@
       "destination": "/api/index"
     },
     {
-      "source": "/loja/(.*)",
-      "has": [
-        {
-          "type": "header",
-          "key": "user-agent",
-          "value": "(?i).*(whatsapp|facebookexternalhit|facebot|twitterbot|telegrambot|linkedinbot|slackbot|discordbot|skypeuripreview).*"
-        }
-      ],
-      "destination": "/api/og-handler"
-    },
-    {
       "source": "/(.*)",
       "has": [
         {
           "type": "header",
           "key": "user-agent",
-          "value": "(?i).*(whatsapp|facebookexternalhit|facebot|twitterbot|telegrambot|linkedinbot|slackbot|discordbot|skypeuripreview).*"
+          "value": ".*([wW]hats[aA]pp|[fF]acebookexternalhit|[fF]acebot|[tT]witterbot|[tT]elegram[bB]ot|[lL]inkedin[bB]ot|[sS]lackbot|[dD]iscordbot).*"
         }
       ],
       "destination": "/api/og-handler"

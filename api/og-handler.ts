@@ -18,9 +18,16 @@ const DEFAULT_SHARE_IMAGE = 'https://farmaflow.online/preview-share.png';
 
 export function isCrawlerRequest(userAgent: string = ''): boolean {
   if (!userAgent) return false;
-  return /whatsapp|facebookexternalhit|facebot|twitterbot|telegrambot|linkedinbot|slackbot|discordbot|skypeuripreview/i.test(
+  return /([wW]hats[aA]pp|[fF]acebookexternalhit|[fF]acebot|[tT]witterbot|[tT]elegram[bB]ot|[lL]inkedin[bB]ot|[sS]lackbot|[dD]iscordbot|[sS]kype[uU]ri[pP]review)/.test(
     userAgent
   );
+}
+
+function detectImageType(url: string): string {
+  const lower = url.toLowerCase();
+  if (lower.includes('.jpg') || lower.includes('.jpeg')) return 'image/jpeg';
+  if (lower.includes('.webp')) return 'image/webp';
+  return 'image/png';
 }
 
 export function buildCrawlerHtml(store: {
@@ -30,6 +37,7 @@ export function buildCrawlerHtml(store: {
   logo_url?: string;
   descricao?: string;
   description?: string;
+  url?: string;
 }): string {
   const esc = (str: string = '') =>
     str
@@ -50,7 +58,8 @@ export function buildCrawlerHtml(store: {
   if (!logoUrl.startsWith('http://') && !logoUrl.startsWith('https://')) {
     logoUrl = DEFAULT_SHARE_IMAGE;
   }
-  logoUrl = esc(logoUrl);
+  const safeLogo = esc(logoUrl);
+  const imageType = detectImageType(logoUrl);
 
   const descricao = esc(
     store.descricao ||
@@ -58,24 +67,28 @@ export function buildCrawlerHtml(store: {
       'Faça seu pedido online com tele-entrega rápida direta no WhatsApp. Medicamentos, perfumaria e ofertas exclusivas.'
   );
 
+  const siteUrl = esc(store.url || 'https://farmaflow.online');
+
   return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8" />
   <title>${nomeLoja}</title>
   <meta property="og:type" content="website" />
+  <meta property="og:url" content="${siteUrl}" />
   <meta property="og:site_name" content="${nomeLoja}" />
   <meta property="og:title" content="${nomeLoja} - Peça Online" />
   <meta property="og:description" content="${descricao}" />
-  <meta property="og:image" content="${logoUrl}" />
-  <meta property="og:image:secure_url" content="${logoUrl}" />
-  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image" content="${safeLogo}" />
+  <meta property="og:image:secure_url" content="${safeLogo}" />
+  <meta property="og:image:type" content="${imageType}" />
   <meta property="og:image:width" content="600" />
   <meta property="og:image:height" content="600" />
+  <meta property="og:image:alt" content="${nomeLoja}" />
   <meta name="twitter:card" content="summary" />
   <meta name="twitter:title" content="${nomeLoja}" />
   <meta name="twitter:description" content="${descricao}" />
-  <meta name="twitter:image" content="${logoUrl}" />
+  <meta name="twitter:image" content="${safeLogo}" />
 </head>
 <body>
   <p>A redirecionar para a loja online...</p>
@@ -229,22 +242,26 @@ export default async function handler(req: any, res: any) {
     const safeTitle = esc(storeName);
     const safeLogo = esc(logoUrl);
     const safeDesc = esc(description);
+    const imageType = detectImageType(logoUrl);
+    const safeUrl = esc(hostStr ? `https://${hostStr}` : 'https://farmaflow.online');
 
-    // Cabeçalho HTML com metadados Open Graph dinâmicos
+    // Cabeçalho HTML com metadados Open Graph dinâmicos e enriquecidos
     const html = `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8" />
   <title>${safeTitle}</title>
   <meta property="og:type" content="website" />
+  <meta property="og:url" content="${safeUrl}" />
   <meta property="og:site_name" content="${safeTitle}" />
   <meta property="og:title" content="${safeTitle} - Peça Online" />
   <meta property="og:description" content="${safeDesc}" />
   <meta property="og:image" content="${safeLogo}" />
   <meta property="og:image:secure_url" content="${safeLogo}" />
-  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:type" content="${imageType}" />
   <meta property="og:image:width" content="600" />
   <meta property="og:image:height" content="600" />
+  <meta property="og:image:alt" content="${safeTitle}" />
   <meta name="twitter:card" content="summary" />
   <meta name="twitter:title" content="${safeTitle}" />
   <meta name="twitter:description" content="${safeDesc}" />
