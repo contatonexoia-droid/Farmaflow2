@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
+import { ensureStoreUrlCacheBuster } from "./aiAgentService.js";
 
 const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || "https://nalshjhoiecxooejpiaw.supabase.co";
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_Y2lAqlvDUhdjSNtv80GkJA_SiOgynYy";
@@ -39,7 +40,7 @@ export class EvolutionApiService {
    * Resolve o instanceName correto do WhatsApp, garantindo que NUNCA seja repassado um UUID para a Evolution API.
    */
   public async resolveInstanceName(
-    storeIdOrTenantId: string,
+    storeIdOrTenantId: string = "",
     explicitInstanceName?: string
   ): Promise<string> {
     if (explicitInstanceName && explicitInstanceName.trim() && !/^[0-9a-f-]{36}$/i.test(explicitInstanceName.trim())) {
@@ -113,14 +114,51 @@ export class EvolutionApiService {
   }
 
   /**
-   * Envia uma mensagem de texto simples via Evolution API com tratamento completo de erros e logs
+   * Envia uma mensagem de texto simples via Evolution API com tratamento completo de erros e logs.
+   * Suporta chamada posicional (instanceName, phone, text, options) ou com objeto ({ number, text, linkPreview, ... }).
    */
   public async sendTextMessage(
-    instanceName: string,
-    phoneNumber: string,
-    text: string,
-    options?: SendMessageOptions
+    firstParam: string | {
+      instanceName?: string;
+      number?: string;
+      phoneNumber?: string;
+      text: string;
+      options?: SendMessageOptions;
+      linkPreview?: boolean;
+      delay?: number;
+      presence?: "composing" | "recording" | "available" | "unavailable";
+      quoted?: any;
+    },
+    secondParam?: string,
+    thirdParam?: string,
+    fourthParam?: SendMessageOptions
   ): Promise<{ success: boolean; data?: any; error?: string; status?: number }> {
+    let instanceName: string;
+    let phoneNumber: string;
+    let text: string;
+    let options: SendMessageOptions | undefined;
+
+    if (typeof firstParam === "object" && firstParam !== null) {
+      instanceName = String(firstParam.instanceName || "").trim();
+      phoneNumber = String(firstParam.number || firstParam.phoneNumber || "").trim();
+      text = String(firstParam.text || "");
+      options = {
+        delay: firstParam.delay,
+        presence: firstParam.presence,
+        linkPreview: firstParam.linkPreview,
+        quoted: firstParam.quoted,
+        ...(firstParam.options || {})
+      };
+      if (!instanceName) {
+        instanceName = (await this.resolveInstanceName()) || "";
+      }
+    } else {
+      instanceName = String(firstParam || "").trim();
+      phoneNumber = String(secondParam || "").trim();
+      text = String(thirdParam || "");
+      options = fourthParam;
+    }
+
     const cleanNumber = String(phoneNumber || "").replace(/\D/g, "");
     if (!cleanNumber) {
       const err = `Número de telefone inválido ou vazio: "${phoneNumber}"`;
@@ -338,19 +376,35 @@ export class EvolutionApiService {
       console.error(`[EvolutionAPI] Falha no sendInteractive (${err.message || err}). Executando fallback sendText imediato...`);
     }
 
-    // Execução real e garantida do Fallback elegante (sendTextMessage)
-    const fallbackFormattedText = `👋 *${title || footer || "FarmaFlow"}*\n\n${body}\n\n🛍️ *Acesse nossa Loja Online:*\n👉 ${buttonUrl}`;
-    console.log(`[EvolutionAPI] Disparando fallback sendText para ${cleanNumber} com link da loja...`);
-
-    const textFallbackResult = await this.sendTextMessage(
+    // Execução real e garantida do Fallback elegante em 2 balões separados
+    const balloon1Text = `👋 *${title || footer || "FarmaFlow"}*\n\n${body}`;
+    console.log(`[EvolutionAPI] Disparando fallback Balão 1 (Texto Principal) para ${cleanNumber}...`);
+    const balloon1Result = await this.sendTextMessage(
       instanceName,
       cleanNumber,
-      fallbackFormattedText,
-      { delay: 1200, linkPreview: true }
+      balloon1Text,
+      { delay: 1000, linkPreview: false }
+    );
+
+    if (!balloon1Result.success) {
+      return { ...balloon1Result, isFallback: true };
+    }
+
+    // Delay de 1200ms para ordenação visual no WhatsApp
+    await new Promise(resolve => setTimeout(resolve, 1200));
+
+    // Balão 2: EXCLUSIVAMENTE a URL pura com cache-buster (gera preview perfeito com logo oficial)
+    const freshUrl = ensureStoreUrlCacheBuster(buttonUrl);
+    console.log(`[EvolutionAPI] Disparando fallback Balão 2 (URL Pura com Cache-Buster) para ${cleanNumber}: ${freshUrl}`);
+    const balloon2Result = await this.sendTextMessage(
+      instanceName,
+      cleanNumber,
+      freshUrl,
+      { delay: 1500, linkPreview: true }
     );
 
     return {
-      ...textFallbackResult,
+      ...balloon2Result,
       isFallback: true
     };
   }

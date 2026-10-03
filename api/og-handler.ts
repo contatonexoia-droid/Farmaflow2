@@ -55,7 +55,10 @@ export function buildCrawlerHtml(store: {
   );
 
   let logoUrl = (store.logo_url || '').trim();
-  if (!logoUrl.startsWith('http://') && !logoUrl.startsWith('https://')) {
+  if (logoUrl.startsWith('http://')) {
+    logoUrl = logoUrl.replace('http://', 'https://');
+  }
+  if (!logoUrl.startsWith('https://')) {
     logoUrl = DEFAULT_SHARE_IMAGE;
   }
   const safeLogo = esc(logoUrl);
@@ -217,7 +220,7 @@ export default async function handler(req: any, res: any) {
             (candidateLogo.startsWith('http://') || candidateLogo.startsWith('https://')) &&
             !candidateLogo.startsWith('data:')
           ) {
-            logoUrl = candidateLogo;
+            logoUrl = candidateLogo.startsWith('http://') ? candidateLogo.replace('http://', 'https://') : candidateLogo;
           } else if (store?.id) {
             const baseOrigin = hostStr ? `https://${hostStr}` : 'https://farmaflow.online';
             logoUrl = `${baseOrigin}/api/v1/store/${encodeURIComponent(store.id)}/logo.png`;

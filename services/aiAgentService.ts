@@ -75,13 +75,12 @@ Seu objetivo é recepcionar o cliente com agilidade, tirar dúvidas sobre medica
        "Perfeito! Já separei para você:
        💊 *{nome_produto_escolhido}* - R$ {preco} 😊
 
-       🛒 **Link direto para concluir seu pedido:**
-       👉 {link_direto_do_produto}
-
        *(Pelo link você fecha em menos de 1 minuto, escolhe a forma de pagamento e seu pedido chega mais rápido!)*
 
        💬 **Prefere continuar aqui pelo WhatsApp?**
-       Sem problemas! Um dos nossos balconistas já vai assumir o atendimento para finalizar seu pedido."
+       Sem problemas! Um dos nossos balconistas já vai assumir o atendimento para finalizar seu pedido.
+
+       {link_direto_do_produto}"
      * Inclua a tag [TRANSFERIR_ATENDIMENTO] para transferir a conversa para a equipe de balcão imediatamente.
 
 5. CANAL PREFERENCIAL (CATÁLOGO ONLINE):
@@ -501,6 +500,31 @@ export function extractUrlAndCleanText(text: string): { mainText: string; url: s
   return { mainText, url: rawUrl };
 }
 
+/**
+ * Garante que a URL da loja ou do produto contenha parâmetros de versão/quebra de cache (Cache Buster),
+ * forçando os servidores do WhatsApp e da Evolution API a descartarem o preview antigo em cache
+ * e renderizarem imediatamente a logo oficial da drogaria (og:image).
+ * Exemplo: https://drogaria-esplendido.farmaflow.online?ref=wpp&v=2
+ */
+export function ensureStoreUrlCacheBuster(rawUrl: string, version: string | number = "2"): string {
+  if (!rawUrl || typeof rawUrl !== "string") return rawUrl;
+  const trimmed = rawUrl.trim();
+  if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) return trimmed;
+  try {
+    const u = new URL(trimmed);
+    if (!u.searchParams.has("ref")) {
+      u.searchParams.set("ref", "wpp");
+    }
+    if (!u.searchParams.has("v")) {
+      u.searchParams.set("v", String(version));
+    }
+    return u.toString();
+  } catch (_) {
+    const sep = trimmed.includes("?") ? "&" : "?";
+    return `${trimmed}${sep}ref=wpp&v=${version}`;
+  }
+}
+
 export interface ChosenProductDetails {
   isChoice: boolean;
   productName: string;
@@ -660,7 +684,7 @@ export async function resolveCustomerChosenProduct(
 
   if (dbProduct && (dbProduct.grouping_slug || dbProduct.slug || dbProduct.id)) {
     const slugOrId = dbProduct.slug || dbProduct.grouping_slug || dbProduct.id;
-    directProductUrl = `${cleanStoreUrl}/produto/${slugOrId}`;
+    directProductUrl = ensureStoreUrlCacheBuster(`${cleanStoreUrl}/produto/${slugOrId}`);
     if (!chosenName) {
       chosenName = formatMedicineLabel(dbProduct) || dbProduct.name;
     }
@@ -669,7 +693,7 @@ export async function resolveCustomerChosenProduct(
     }
   } else {
     const term = chosenName || searchWord || incomingMessage.trim();
-    directProductUrl = `${cleanStoreUrl}/?busca=${encodeURIComponent(term)}`;
+    directProductUrl = ensureStoreUrlCacheBuster(`${cleanStoreUrl}/?busca=${encodeURIComponent(term)}`);
   }
 
   if (!chosenName) chosenName = "Medicamento Selecionado";
@@ -888,15 +912,16 @@ export class AiAgentService {
     let storeLink = effectiveConfig.storeLink || tenant.welcome_message_link || tenant.welcomemessagelink;
     if (!storeLink) {
       if (tenant.custom_domain) {
-        storeLink = `https://${tenant.custom_domain}`;
+        storeLink = `https://${tenant.custom_domain.replace(/^https?:\/\//, '')}`;
       } else if (tenant.slug) {
-        storeLink = `https://${tenant.slug}.farmaflow.online`;
+        const cleanSub = tenant.slug.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+        storeLink = `https://${cleanSub}.farmaflow.online`;
       } else {
         storeLink = `https://${tenant.id}.farmaflow.online`;
       }
     }
-    // Remover barra final para padronizar parâmetros
-    storeLink = storeLink.replace(/\/+$/, '');
+    // Remover barra final para padronizar parâmetros e adicionar cache-buster
+    storeLink = ensureStoreUrlCacheBuster(storeLink.replace(/\/+$/, ''));
 
     // 4. Detecção Ativa de Prompt Injection e Padrões Abusivos (Proteção de Custos e Tokens)
     const guardrailsEnabled = effectiveConfig.antiAbuseGuardrailsEnabled !== false;
@@ -1285,15 +1310,16 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         message: msg1
       });
 
-      // Intervalo entre balões de 800ms a 1200ms (1000ms)
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      // Delay de 1200ms para ordenação visual no WhatsApp
+      await new Promise(resolve => setTimeout(resolve, 1200));
 
-      // DISPARO DO BALÃO 2: EXCLUSIVAMENTE a URL (ativa o Link Preview perfeito sem poluição de texto)
-      console.log(`[AiAgentService] Disparando Balão 2 (URL Pura com Link Preview) para ${cleanPhone} via "${targetInstanceName}": ${url}`);
+      // DISPARO DO BALÃO 2: EXCLUSIVAMENTE a URL pura com cache-buster (ativa o Link Preview perfeito com a logo oficial da drogaria)
+      const freshUrl = ensureStoreUrlCacheBuster(url);
+      console.log(`[AiAgentService] Disparando Balão 2 (URL Pura com Link Preview e Cache-Buster) para ${cleanPhone} via "${targetInstanceName}": ${freshUrl}`);
       const sendResult2 = await evolutionApiService.sendTextMessage(
         targetInstanceName,
         cleanPhone,
-        url,
+        freshUrl,
         {
           delay: 1500,
           linkPreview: true
@@ -1308,7 +1334,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
           realTenantId,
           conversationId,
           "BOT",
-          url,
+          freshUrl,
           false,
           undefined,
           undefined,
@@ -1322,15 +1348,17 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         });
       }
     } else {
-      // Disparo único convencional (sem URL ou caso especial)
+      // Disparo único (mensagem pura ou URL única)
+      const hasUrl = /(https?:\/\/[^\s]+)/i.test(finalReplyText);
+      const payloadText = hasUrl ? ensureStoreUrlCacheBuster(finalReplyText) : finalReplyText;
       console.log(`[AiAgentService] Disparando resposta única do BOT para ${cleanPhone} via instância "${targetInstanceName}" (Handoff: ${params.isHandoff ? params.handoffReason : 'NÃO'})...`);
       const sendResult = await evolutionApiService.sendTextMessage(
         targetInstanceName,
         cleanPhone,
-        finalReplyText,
+        payloadText,
         {
           delay: 1200,
-          linkPreview: false
+          linkPreview: hasUrl
         }
       );
 
@@ -1344,7 +1372,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         realTenantId,
         conversationId,
         "BOT",
-        finalReplyText,
+        payloadText,
         false,
         undefined,
         undefined,
@@ -2233,7 +2261,18 @@ ${taskInstruction}`;
         endereco = [streetComp, neighborhood, cityState, cep ? `CEP: ${cep}` : ''].filter(Boolean).join(" - ");
       }
 
-      const officialLink = freshTenant.welcome_message_link || (freshTenant.custom_domain ? `https://${freshTenant.custom_domain}` : `https://${freshTenant.slug || freshTenant.id || 'loja'}.farmaflow.online`);
+      let officialLink = freshTenant.welcome_message_link;
+      if (!officialLink) {
+        if (freshTenant.custom_domain) {
+          officialLink = `https://${freshTenant.custom_domain.replace(/^https?:\/\//, '')}`;
+        } else if (freshTenant.slug) {
+          const cleanSub = freshTenant.slug.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+          officialLink = `https://${cleanSub}.farmaflow.online`;
+        } else {
+          officialLink = `https://${freshTenant.slug || freshTenant.id || 'loja'}.farmaflow.online`;
+        }
+      }
+      officialLink = ensureStoreUrlCacheBuster(officialLink);
 
       return {
         nome_oficial: freshTenant.name || freshTenant.nome_loja || "Nossa Drogaria",

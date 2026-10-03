@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { realtimeHub } from "./realtimeHub.js";
 import { chatStore, sanitizeChatConversationPayload } from "./chatStore.js";
+import { ensureStoreUrlCacheBuster } from "./aiAgentService.js";
 
 const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || "https://nalshjhoiecxooejpiaw.supabase.co";
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_Y2lAqlvDUhdjSNtv80GkJA_SiOgynYy";
@@ -173,19 +174,16 @@ export function buildProductHandoffMessage(
   priceFormatted: string,
   directProductUrl: string
 ): string {
-  const cleanUrl = String(directProductUrl || "").trim();
+  const cleanUrl = ensureStoreUrlCacheBuster(String(directProductUrl || "").trim());
   return `Perfeito! Já separei para você:
 💊 *${productName}* - R$ ${priceFormatted} 😊
-
-🛒 **Link direto para concluir seu pedido:**
-👉 
-
-${cleanUrl}
 
 *(Pelo link você fecha em menos de 1 minuto, escolhe a forma de pagamento e seu pedido chega mais rápido!)*
 
 💬 **Prefere continuar aqui pelo WhatsApp?**
-Sem problemas! Um dos nossos balconistas já vai assumir o atendimento para finalizar seu pedido.`;
+Sem problemas! Um dos nossos balconistas já vai assumir o atendimento para finalizar seu pedido.
+
+${cleanUrl}`;
 }
 
 /**
@@ -198,16 +196,15 @@ export function buildHumanizedHandoffMessage(
   if (productInfo && productInfo.name && productInfo.link) {
     return buildProductHandoffMessage(productInfo.name, productInfo.price, productInfo.link);
   }
-  const cleanUrl = (storeUrl || "https://farmaflow.online").replace(/\/+$/, "");
+  const cleanUrl = ensureStoreUrlCacheBuster((storeUrl || "https://farmaflow.online").replace(/\/+$/, ""));
   return `Perfeito! Já anotei a sua preferência. 😊
 
-🛒 *Dica para agilizar:* Você pode concluir seu pedido agora mesmo pela nossa loja online:
+*(Pela nossa loja online você fecha seu pedido muito mais rápido, escolhe a forma de pagamento e é 100% seguro!)*
 
-${cleanUrl}
+💬 *Prefere continuar por aqui?*
+Sem problemas! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.
 
-*(É muito mais rápido, prático e 100% seguro!)*
-
-💬 *Prefere continuar por aqui?* Sem problemas! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.`;
+${cleanUrl}`;
 }
 
 /**
