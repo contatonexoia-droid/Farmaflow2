@@ -211,12 +211,16 @@ export default async function handler(req: any, res: any) {
             storeName;
 
           // Se logo_url for uma URL válida iniciando com http, utilizá-la
-          const candidateLogo = (store.logo_url || store.logo || '').trim();
+          const candidateLogo = (store.logo_url || store.logo || store.smart_banners?._regulatoryData?.logo_url || '').trim();
           if (
             candidateLogo &&
-            (candidateLogo.startsWith('http://') || candidateLogo.startsWith('https://'))
+            (candidateLogo.startsWith('http://') || candidateLogo.startsWith('https://')) &&
+            !candidateLogo.startsWith('data:')
           ) {
             logoUrl = candidateLogo;
+          } else if (store?.id) {
+            const baseOrigin = hostStr ? `https://${hostStr}` : 'https://farmaflow.online';
+            logoUrl = `${baseOrigin}/api/v1/store/${encodeURIComponent(store.id)}/logo.png`;
           }
 
           if (store.description || store.banner_subtitle || store.bannersubtitle) {

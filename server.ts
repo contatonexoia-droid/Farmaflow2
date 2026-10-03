@@ -26,7 +26,7 @@ import { contactMergeManager } from "./services/contactMergeManager.js";
 import { inboxStore } from "./services/inboxStore.js";
 import { chatStore } from "./services/chatStore.js";
 import { teamStore } from "./services/teamStore.js";
-import { aiAgentService, DEFAULT_AI_AGENT_PROMPT } from "./services/aiAgentService.js";
+import { aiAgentService, DEFAULT_AI_AGENT_PROMPT, isolateUrlsInText } from "./services/aiAgentService.js";
 import { evolutionApiService } from "./services/evolutionApiService.js";
 import ogHandler, { buildCrawlerHtml, isCrawlerRequest } from "./api/og-handler.js";
 import QRCode from "qrcode";
@@ -245,7 +245,7 @@ app.get("/api/v1/resolve-tenant", async (req, res) => {
 
 const isSocialCrawler = (userAgent: string = ''): boolean => {
   if (!userAgent) return false;
-  return /whatsapp|facebookexternalhit|facebot|twitterbot|telegrambot|linkedinbot|slackbot|discordbot|skypeuripreview|googlebot|bingbot|baiduspider|yandex|crawlers/i.test(userAgent);
+  return /whatsapp|facebookexternalhit|facebot|twitterbot|telegrambot|linkedinbot|slackbot|discordbot|skypeuripreview|googlebot|bingbot|baiduspider|yandex|crawlers|axios|node-fetch|got|undici|curl|evolution|baileys/i.test(userAgent);
 };
 
 interface TenantMetaRecord {
@@ -324,8 +324,10 @@ async function getTenantMetaRecord(identifier: string, req: express.Request): Pr
   // Resolução do logotipo público da drogaria para Open Graph
   const rawLogo = (tenant.logo_url || tenant.logo || tenant.smart_banners?._regulatoryData?.logo_url || "").trim();
   let logoUrl = "https://farmaflow.online/preview-share.png";
-  if (rawLogo.startsWith("http://") || rawLogo.startsWith("https://")) {
+  if ((rawLogo.startsWith("http://") || rawLogo.startsWith("https://")) && !rawLogo.startsWith("data:")) {
     logoUrl = rawLogo;
+  } else if (tenant.id && (rawLogo.length > 0 || tenant.logo)) {
+    logoUrl = `${baseUrl}/api/v1/store/${encodeURIComponent(tenant.id)}/logo.png`;
   }
 
   let canonicalUrl = `${baseUrl}/loja/${encodeURIComponent(tenantSlug)}`;
@@ -7888,13 +7890,13 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
           storeName || "FarmaFlow"
         );
       } else {
-        const directText = `👋 *${storeName}*\n\n${customText}\n\n🛍️ *Acesse nossa Loja Online:*\n👉 ${storeLink}`;
+        const directText = isolateUrlsInText(`👋 *${storeName}*\n\n${customText}\n\n🛍️ *Acesse nossa Loja Online:*\n\n${storeLink}\n`);
         console.log(`[WelcomeMessage] Disparando mensagem de texto com link direto para ${cleanPhone} via instância "${targetInstanceName}"...`);
         dispatchResult = await evolutionApiService.sendTextMessage(
           targetInstanceName,
           cleanPhone,
           directText,
-          { delay: 1200, linkPreview: true }
+          { delay: 2200, linkPreview: true }
         );
       }
 
