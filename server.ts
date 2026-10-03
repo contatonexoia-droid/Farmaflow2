@@ -8252,17 +8252,47 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                      (msg.message?.documentMessage ? "[Documento]" : 
                      (msg.message?.stickerMessage ? "[Figurinha]" : "[Mensagem WhatsApp]")))));
 
-        const isAudio = Boolean(
-          msg.message?.audioMessage ||
-          msg.messageType === "audioMessage" ||
-          msg.type === "audio" ||
-          (msg.message?.documentMessage?.mimetype && msg.message.documentMessage.mimetype.startsWith("audio/")) ||
-          (msg.mimetype && msg.mimetype.startsWith("audio/"))
-        );
+        const messageType = String(
+          msg.messageType || 
+          msg.type || 
+          (msg.message?.audioMessage ? 'audioMessage' :
+           msg.message?.imageMessage ? 'imageMessage' :
+           msg.message?.documentMessage ? 'documentMessage' :
+           msg.message?.videoMessage ? 'videoMessage' :
+           msg.message?.stickerMessage ? 'stickerMessage' : 'conversation')
+        ).toLowerCase();
+
+        const mimetype = String(
+          msg.mimetype || 
+          msg.message?.audioMessage?.mimetype || 
+          msg.message?.imageMessage?.mimetype || 
+          msg.message?.documentMessage?.mimetype || 
+          msg.data?.message?.audioMessage?.mimetype ||
+          ''
+        ).toLowerCase();
+
+        const isAudio = 
+          messageType === 'audiomessage' ||
+          messageType === 'ptt' ||
+          messageType === 'audio' ||
+          Boolean(msg.message?.audioMessage) ||
+          Boolean(msg.data?.message?.audioMessage) ||
+          mimetype.startsWith('audio/');
+
+        const isDocumentOrImage = 
+          !isAudio && (
+            messageType === 'imagemessage' ||
+            messageType === 'documentmessage' ||
+            Boolean(msg.message?.imageMessage) ||
+            Boolean(msg.message?.documentMessage) ||
+            mimetype.startsWith('image/') ||
+            mimetype.startsWith('application/pdf')
+          );
+
         let effectiveText = typeof text === "string" ? text : "";
         let isAudioMessage = isAudio;
 
-        console.log(`[WEBHOOK] Mensagem de: ${remoteJid} | fromMe: ${fromMe} | isAudio: ${isAudio} | Texto: "${typeof text === 'string' ? text.slice(0, 50) : ''}"`);
+        console.log(`[WEBHOOK] Mensagem de: ${remoteJid} | fromMe: ${fromMe} | isAudio: ${isAudio} | isDocImg: ${isDocumentOrImage} | Texto: "${typeof text === 'string' ? text.slice(0, 50) : ''}"`);
 
         try {
           // 1. SEMPRE salva primeiro a mensagem no banco de dados e cria/atualiza o contato e a conversa
@@ -8320,11 +8350,13 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                     conversation: result.conversation
                   });
                 } else {
-                  console.warn(`[WEBHOOK - AUDIO] ⚠️ Transcrição do áudio retornou vazia para ${remoteJid}`);
+                  console.warn(`[WEBHOOK - AUDIO] ⚠️ Transcrição do áudio retornou vazia para ${remoteJid}. Usando texto descritivo de áudio para a IA.`);
+                  effectiveText = "Olá, enviei uma mensagem de áudio com uma dúvida de medicamentos e produtos.";
                 }
               }
             } catch (audioErr: any) {
               console.error("[WEBHOOK - AUDIO] Erro na transcrição de áudio:", audioErr.message);
+              effectiveText = "Olá, enviei uma mensagem de áudio com uma dúvida de medicamentos e produtos.";
             }
           }
 
@@ -8523,8 +8555,14 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                   const texts = pendingCustomerMsgs
                     .map(m => {
                       let raw = (m.content || '').trim();
-                      if (raw.startsWith('🎤') || raw.toLowerCase().includes('[áudio]')) {
-                        raw = raw.replace(/^🎤\s*\[Áudio\]:?\s*"?/i, '').replace(/"?\s*$/, '').replace(/^\[Áudio\]:?\s*/i, '').trim();
+                      if (raw.startsWith('🎤') || raw.toLowerCase().includes('[áudio]') || raw.toLowerCase().includes('[audio]')) {
+                        raw = raw
+                          .replace(/^🎤\s*\[Áudio\]:?\s*"?/i, '')
+                          .replace(/^🎤\s*\[Audio\]:?\s*"?/i, '')
+                          .replace(/"?\s*$/, '')
+                          .replace(/^\[Áudio\]:?\s*/i, '')
+                          .replace(/^\[Audio\]:?\s*/i, '')
+                          .trim();
                       }
                       return raw;
                     })
@@ -8532,6 +8570,14 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                   
                   if (texts.length > 0) {
                     consolidatedText = texts.join('\n');
+                  }
+                }
+
+                if (!consolidatedText || (consolidatedText.startsWith('[') && consolidatedText.endsWith(']'))) {
+                  if (effectiveText && !effectiveText.startsWith('[')) {
+                    consolidatedText = effectiveText;
+                  } else if (isAudioMessage) {
+                    consolidatedText = "Olá, enviei uma mensagem de áudio com uma dúvida de medicamentos e produtos.";
                   }
                 }
               } catch (consolErr: any) {

@@ -1697,16 +1697,20 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       // Normalização da mensagem recebida: se for transcrição de áudio, limpa o prefixo visual
       let cleanIncoming = (incomingMessage || "").trim();
       let shouldReplyWithAudio = Boolean(options?.replyWithAudio);
-      if (cleanIncoming.startsWith("🎤") || cleanIncoming.toLowerCase().includes("[áudio]")) {
+      if (cleanIncoming.startsWith("🎤") || cleanIncoming.toLowerCase().includes("[áudio]") || cleanIncoming.toLowerCase().includes("[audio]")) {
         shouldReplyWithAudio = true;
         cleanIncoming = cleanIncoming
           .replace(/^🎤\s*\[Áudio\]:?\s*"?/i, "")
+          .replace(/^🎤\s*\[Audio\]:?\s*"?/i, "")
           .replace(/"?\s*$/, "")
           .replace(/^\[Áudio\]:?\s*/i, "")
+          .replace(/^\[Audio\]:?\s*/i, "")
           .trim();
       }
       if (cleanIncoming.length > 0) {
         incomingMessage = cleanIncoming;
+      } else if (shouldReplyWithAudio) {
+        incomingMessage = "Olá, enviei um áudio com uma dúvida sobre medicamentos e produtos.";
       }
 
       // 1. Obter tenant e validar se o módulo de IA está autorizado (resolvendo o UUID real)
@@ -1783,12 +1787,15 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         ? rawTransitionMsg.replace(/\{store_url\}|\{STORE_URL\}|\{storeLink\}|\{STORE_LINK\}/g, storeLink)
         : buildHumanizedHandoffMessage(storeLink);
 
-      // 4. Tratamento especial para anexos e documentos (PDFs, receitas médicas, fotos)
-      const isDocumentAttachment = incomingMessage.includes("[Documento]") || incomingMessage === "[Documento]";
-      const isMediaAttachment = incomingMessage === "[Imagem]" || incomingMessage === "[Áudio]" || incomingMessage === "[Vídeo]" || incomingMessage === "[Figurinha]";
+      // 4. Tratamento especial EXCLUSIVO para documentos e imagens de receitas médicas (PDFs, fotos)
+      // NUNCA acionar para áudio de voz!
+      const isAudioInput = shouldReplyWithAudio || incomingMessage.toLowerCase().includes("[áudio]") || incomingMessage.toLowerCase().includes("[audio]") || incomingMessage.startsWith("🎤");
+      const isDocumentAttachment = !isAudioInput && (incomingMessage.includes("[Documento]") || incomingMessage === "[Documento]");
+      const isImageAttachment = !isAudioInput && (incomingMessage === "[Imagem]" || incomingMessage.includes("[Imagem]"));
+      const isOtherMedia = !isAudioInput && (incomingMessage === "[Vídeo]" || incomingMessage === "[Figurinha]");
 
-      if (isDocumentAttachment || isMediaAttachment) {
-        console.log(`[AiAgentService] Anexo detectado (${incomingMessage}) para conversa ${conversationId}. Registrando e acionando transbordo para conferência humana.`);
+      if (isDocumentAttachment || isImageAttachment || isOtherMedia) {
+        console.log(`[AiAgentService] Anexo de documento/imagem detectado (${incomingMessage}) para conversa ${conversationId}. Registrando e acionando transbordo para conferência humana.`);
         const attachmentType = isDocumentAttachment ? "documento/receita" : "arquivo";
         const replyText = `Olá! Recebemos o seu ${attachmentType} com sucesso. 📄\n\nJá encaminhei para a nossa equipe de atendimento para conferência e orçamento. Um de nossos balconistas humanos irá responder em instantes!\n\n🛍️ *Nossa Loja Online:* ${storeLink}`;
 
@@ -1803,7 +1810,9 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
             handoffReason: isDocumentAttachment ? "DOCUMENT_RECEIVED" : "MEDIA_RECEIVED",
             transitionMsg,
             currentCount,
-            nextCount: currentCount + 1
+            nextCount: currentCount + 1,
+            replyWithAudio: false,
+            tenantAiConfig: dbConfig
           }
         );
 
