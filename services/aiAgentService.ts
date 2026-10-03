@@ -25,37 +25,46 @@ Seu objetivo é recepcionar o cliente com agilidade, tirar dúvidas sobre medica
 
 2. REGRAS DE EQUIVALÊNCIA FARMACÊUTICA:
    - 'DIPIRONA MONO' (Monoidratada) e 'DIPIRONA SODICA' são rigorosamente o mesmo medicamento (Dipirona).
+   - Maxalgina, Dipimed, Novalgina e Nevraldor são nomes comerciais de Dipirona.
+   - Frascos de 10ml e 20ml com 'GTS' ou 'SOL' SÃO gotas! NUNCA diga que são "(solução, mas não em gotas)".
+   - Se o cliente pediu gotas e houver produtos com GTS ou SOL (10ml, 20ml) em estoque, ELE ESTÁ DISPONÍVEL! Diga imediatamente que temos em gotas e NUNCA ofereça comprimidos como alternativa se houver gotas disponíveis.
    - Se o cliente pediu 500mg e houver '500MG' ou '500 MG' em qualquer produto da lista (seja MONO ou SODICA), ELE ESTÁ DISPONÍVEL! NUNCA diga que não tem.
-   - Quando o produto solicitado estiver disponível:
-     * Diga imediatamente que temos disponível.
-     * Apresente as opções encontradas com o nome comercial/laboratório, formato (comprimidos, gotas) e preço de forma amigável, destacando a mais barata.
-     * Exemplo de resposta correta para 'tem dipirona 500mg':
-       'Temos sim! Temos a Dipirona 500mg da Medley com 10 comprimidos por apenas R$ 5,49.
-       Gostaria de adicionar ao seu pedido ou prefere dar uma olhada em outras marcas?'
-   - NUNCA liste produtos de 1G ou gotas se o cliente pediu expressamente 500mg e houver 500mg em estoque.
+   - NUNCA liste produtos de 1G ou gotas se o cliente pediu expressamente 500mg em comprimidos e houver 500mg em estoque.
    - 'CPR' ou 'COMP' indica comprimidos (ex: 8CPR = 8 comprimidos, 10CPR = 10 comprimidos, 30CPR = 30 comprimidos).
-   - 'GTS' indica gotas, 'XPE' indica xarope, 'SOL' indica solução oral, 'EFERV' indica efervescente.
-   - Siglas finais indicam o laboratório fabricante: EMS, PRATI ou PRTD (Prati-Donaduzzi), NEOQ (Neo Química), GERM (Germed), MDLY (Medley), CIMED (Cimed), EURO (Eurofarma), ACHÉ (Aché), SANOFI (Sanofi).
+   - 'GTS' indica gotas, 'XPE' indica xarope, 'SOL' indica solução oral (gotas), 'EFERV' indica efervescente.
+   - Siglas finais indicam o laboratório fabricante: EMS, PRATI ou PRTD (Prati-Donaduzzi), NEOQ ou NQ (Neo Química), GERM ou GERMED (Germed), MDLY (Medley), CIMED (Cimed), EURO (Eurofarma), ACHÉ (Aché), SANOFI (Sanofi).
 
-3. REGRAS OBRIGATÓRIAS DE RESPOSTA AO CLIENTE:
+3. CONCISÃO E DIRETO AO PONTO (REGRAS OBRIGATÓRIAS DE RESPOSTA):
+   - Respostas no WhatsApp devem ser CURTAS, humanizadas e sem enrolação.
+   - NUNCA dê explicações técnicas desnecessárias como "(solução, mas não em gotas)" ou justificativas longas.
    - Quando o produto solicitado estiver disponível:
      * Diga imediatamente que temos disponível ("Temos sim!"). NUNCA diga que não tem se o item constar na lista de produtos.
-     * NUNCA liste produtos de 1G ou gotas se o cliente pediu expressamente 500mg e houver 500mg em estoque.
-     * Apresente as opções encontradas com o nome comercial/laboratório, formato (comprimidos, gotas) e preço de forma amigável, destacando a mais barata.
-     * Exemplo de resposta correta para 'tem dipirona 500mg':
-       'Temos sim! Temos a Dipirona 500mg da Medley com 10 comprimidos por apenas R$ 5,49.
-       Gostaria de adicionar ao seu pedido ou prefere dar uma olhada em outras marcas?'
-     * Quando o cliente pedir um medicamento genérico ou dosagem específica e houver mais de uma marca ou tamanho em estoque:
-       NUNCA envie apenas uma opção.
-       Apresente de 2 a 4 alternativas com laboratório, quantidade de comprimidos/apresentação e preço, destacando a mais econômica primeiro com ⭐ Mais econômica.
-       Exemplo:
-       'Temos dipirona de 1g disponível nas seguintes opções:
-       1️⃣ EMS (10 comprimidos) - R$ 11,49 ⭐ Mais econômica
-       2️⃣ Prati-Donaduzzi (8 comprimidos) - R$ 15,02
-       3️⃣ Prati-Donaduzzi (30 comprimidos) - R$ 24,70
-       Qual dessas opções você prefere?'
-   - Se o cliente pediu uma dosagem que realmente NÃO temos em estoque:
-     * Diga educadamente que a dosagem específica não está disponível no momento, mas ofereça a dosagem mais próxima disponível (ex: "No momento não temos a dosagem de 500mg em estoque, mas temos a opção de 1g...").
+     * Apresente NO MÁXIMO 2 A 3 OPÇÕES (as mais econômicas e relevantes) com laboratório/marca, apresentação/tamanho e preço, destacando a primeira com ⭐ Mais econômica.
+     * Finalize com uma pergunta curta convidando à ação.
+   
+   ESTRUTURA DE RESPOSTA (MÁXIMO 2 A 3 OPÇÕES):
+   - Se o cliente pedir dipirona em gotas e tivermos em estoque:
+     Exemplo ideal de resposta curta:
+     "Temos dipirona em gotas sim! 😊
+
+     1️⃣ Germed 20ml (500mg/ml) - R$ 7,49 ⭐ Mais econômica
+     2️⃣ Germed 10ml (500mg/ml) - R$ 9,14
+     3️⃣ Medley 10ml (500mg/ml) - R$ 14,55
+
+     Qual dessas você prefere levar? Posso separar para você ou enviar o link da loja!"
+
+   - Se o cliente pedir comprimidos (ex: dipirona 500mg ou 1g):
+     Exemplo ideal de resposta curta:
+     "Temos dipirona disponível nas seguintes opções:
+
+     1️⃣ EMS (10 comprimidos) - R$ 4,49 ⭐ Mais econômica
+     2️⃣ Prati-Donaduzzi (10 comprimidos) - R$ 4,49
+     3️⃣ Medley (10 comprimidos) - R$ 5,49
+
+     Qual dessas opções você prefere?"
+
+   - Se o cliente pediu uma dosagem ou formato que realmente NÃO temos em estoque:
+     * Diga educadamente e de forma curta que o formato específico não está disponível no momento e ofereça a alternativa mais próxima.
 
 4. RECONHECIMENTO DE ESCOLHA DO CLIENTE E TRANSLADO/CONCLUSÃO:
    - Se o cliente responder escolhendo uma opção (ex: "vou querer a [marca]", "vou querer essa", "pode ser o número 1", "adiciona a de 4,49", "vou levar", "prefiro a ems"):
@@ -273,9 +282,10 @@ function extractDosageAndPresentation(text: string): {
     }
   }
 
-  const isDrops = /\b(gotas?|gts?)\b/i.test(norm);
+  // Mapeamento amplo e robusto de formas farmacêuticas
+  const isDrops = /\b(gotas?|gts?|gotinha|gotinhas|liquida|liquido|solucao|sol)\b/i.test(norm);
   const isSyrup = /\b(xaropes?|xpe)\b/i.test(norm);
-  const isTablets = /\b(comprimidos?|cpr|comp|cps?|capsulas?)\b/i.test(norm);
+  const isTablets = /\b(comprimidos?|cpr|comp|cps?|capsulas?|pilula|pilulas|drageas?)\b/i.test(norm);
 
   return {
     detectedDosage,
@@ -284,6 +294,106 @@ function extractDosageAndPresentation(text: string): {
     isSyrup,
     isTablets
   };
+}
+
+/**
+ * Identifica se um produto é em gotas / solução oral gotejadora (10ml, 20ml, GTS, etc.)
+ */
+export function isProductDrops(product: any): boolean {
+  if (!product) return false;
+  const str = `${product.name || ''} ${product.presentation || ''}`.toLowerCase();
+  
+  // Se for comprimido/cápsula explícito sem menção a gotas/gts, não é gotas
+  const isStrictTablet = /\b(cpr|comp|comprimido|cps|capsula|dragea|blister|cartela)\b/i.test(str) && 
+    !/\b(gts|gota|gotas|gotejador)\b/i.test(str);
+  if (isStrictTablet) return false;
+
+  return (
+    /\b(gts|gota|gotas|gotejador)\b/i.test(str) ||
+    str.includes("gts") ||
+    str.includes("gota") ||
+    str.includes("sol oral") ||
+    str.includes("sol 10ml") ||
+    str.includes("sol 20ml") ||
+    str.includes("sol 15ml") ||
+    str.includes("sol 30ml") ||
+    str.includes("sol 50ml") ||
+    str.includes("sol 60ml") ||
+    str.includes("frasco com 10ml") ||
+    str.includes("frasco com 20ml") ||
+    str.includes("frasco conta-gotas") ||
+    str.includes("frasco gotejador")
+  );
+}
+
+/**
+ * Identifica se um produto é em comprimidos / cápsulas / sólidos
+ */
+export function isProductTablets(product: any): boolean {
+  if (!product) return false;
+  if (isProductDrops(product)) return false;
+  const str = `${product.name || ''} ${product.presentation || ''}`.toLowerCase();
+  return (
+    /\b(cpr|comp|comprimido|comprimidos|cps|capsula|capsulas|dragea|drageas|blister|cartela)\b/i.test(str) ||
+    str.includes("cpr") ||
+    str.includes("comp")
+  );
+}
+
+/**
+ * Identifica se um produto é em xarope
+ */
+export function isProductSyrup(product: any): boolean {
+  if (!product) return false;
+  const str = `${product.name || ''} ${product.presentation || ''}`.toLowerCase();
+  return /\b(xpe|xarope)\b/i.test(str) || str.includes("xpe") || str.includes("xarope");
+}
+
+/**
+ * Formata o rótulo comercial legível e humanizado do medicamento para apresentação ao cliente
+ */
+export function formatMedicineLabel(product: any): string {
+  if (!product) return "";
+  const name = String(product.name || "").trim();
+  const pres = String(product.presentation || "").trim();
+
+  let lab = "";
+  if (/- (GERM|GERMED)\b/i.test(name)) lab = "Germed";
+  else if (/- (MDLY|MEDLEY)\b/i.test(name)) lab = "Medley";
+  else if (/- (EMS)\b/i.test(name)) lab = "EMS";
+  else if (/- (PRATI|PRTD)\b/i.test(name)) lab = "Prati-Donaduzzi";
+  else if (/- (NEOQ|NQ|NEO QUIMICA)\b/i.test(name)) lab = "Neo Química";
+  else if (/- (CIMED)\b/i.test(name)) lab = "Cimed";
+  else if (/- (EURO|EUROFARMA)\b/i.test(name)) lab = "Eurofarma";
+  else if (/- (ACHE|ACHÉ)\b/i.test(name)) lab = "Aché";
+  else if (/- (SANOFI)\b/i.test(name)) lab = "Sanofi";
+  else if (/MAXALGINA/i.test(name)) lab = "Maxalgina";
+  else if (/DIPIMED/i.test(name)) lab = "Dipimed";
+  else if (/NOVALGINA/i.test(name)) lab = "Novalgina";
+  else if (/NEVRALDOR/i.test(name)) lab = "Nevraldor";
+
+  const volMatch = name.match(/\b(\d+)\s*ML\b/i) || pres.match(/\b(\d+)\s*ml\b/i);
+  const vol = volMatch ? `${volMatch[1]}ml` : "";
+
+  const doseMatch = name.match(/\b(\d+(?:[.,]\d+)?\s*(?:mg|g))\b/i) || pres.match(/\b(\d+(?:[.,]\d+)?\s*(?:mg|g))\b/i);
+  let dose = doseMatch ? doseMatch[1].toLowerCase().replace(/\s+/g, "") : "";
+  if (vol && dose && !dose.includes("/ml")) {
+    dose = `${dose}/ml`;
+  }
+
+  if (isProductDrops(product)) {
+    const brand = lab || (name.toLowerCase().includes("dipirona") ? "Genérico" : name);
+    const details = [vol, dose ? `(${dose})` : ""].filter(Boolean).join(" ");
+    return details ? `${brand} ${details}` : brand;
+  }
+
+  const compMatch = name.match(/\b(\d+)\s*(?:CPR|COMP|CPS)\b/i) || pres.match(/\b(\d+)\s*comprimidos?\b/i);
+  if (compMatch) {
+    const brand = lab || name;
+    return `${brand} (${compMatch[1]} comprimidos)`;
+  }
+
+  return name;
 }
 
 /**
@@ -602,28 +712,46 @@ export class AiAgentService {
     // Garantir que as diretrizes de equivalência farmacêutica e resposta de múltiplas opções estejam sempre presentes e rigorosamente atualizadas
     const EQUIVALENCE_RULES = `\n\nREGRAS DE EQUIVALÊNCIA FARMACÊUTICA:
 - 'DIPIRONA MONO' (Monoidratada) e 'DIPIRONA SODICA' são rigorosamente o mesmo medicamento (Dipirona).
+- Maxalgina, Dipimed, Novalgina e Nevraldor são nomes comerciais de Dipirona.
+- Frascos de 10ml e 20ml com 'GTS' ou 'SOL' SÃO gotas! NUNCA diga que são "(solução, mas não em gotas)".
+- Se o cliente pediu gotas e houver produtos com GTS ou SOL (10ml, 20ml) em estoque, ELE ESTÁ DISPONÍVEL! Diga imediatamente que temos em gotas e NUNCA ofereça comprimidos como alternativa se houver gotas disponíveis.
 - Se o cliente pediu 500mg e houver '500MG' ou '500 MG' em qualquer produto da lista (seja MONO ou SODICA), ELE ESTÁ DISPONÍVEL! NUNCA diga que não tem.
+- NUNCA liste produtos de 1G ou gotas se o cliente pediu expressamente 500mg em comprimidos e houver 500mg em estoque.
+- 'CPR' ou 'COMP' indica comprimidos (ex: 8CPR = 8 comprimidos, 10CPR = 10 comprimidos, 30CPR = 30 comprimidos).
+- 'GTS' indica gotas, 'XPE' indica xarope, 'SOL' indica solução oral (gotas), 'EFERV' indica efervescente.
+- Siglas finais indicam o laboratório fabricante: EMS, PRATI ou PRTD (Prati-Donaduzzi), NEOQ ou NQ (Neo Química), GERM ou GERMED (Germed), MDLY (Medley), CIMED (Cimed), EURO (Eurofarma), ACHÉ (Aché), SANOFI (Sanofi).
+
+CONCISÃO E DIRETO AO PONTO (REGRAS OBRIGATÓRIAS DE RESPOSTA):
+- Respostas no WhatsApp devem ser CURTAS, humanizadas e sem enrolação.
+- NUNCA dê explicações técnicas desnecessárias como "(solução, mas não em gotas)" ou justificativas longas.
 - Quando o produto solicitado estiver disponível:
   * Diga imediatamente que temos disponível ("Temos sim!"). NUNCA diga que não tem se o item constar na lista de produtos.
-  * NUNCA liste produtos de 1G ou gotas se o cliente pediu expressamente 500mg e houver 500mg em estoque.
-  * Apresente as opções encontradas com o nome comercial/laboratório, formato (comprimidos, gotas) e preço de forma amigável, destacando a mais barata.
-  * Exemplo de resposta correta para 'tem dipirona 500mg':
-    'Temos sim! Temos a Dipirona 500mg da Medley com 10 comprimidos por apenas R$ 5,49.
-    Gostaria de adicionar ao seu pedido ou prefere dar uma olhada em outras marcas?'
-  * Quando o cliente pedir um medicamento genérico ou dosagem específica e houver mais de uma marca ou tamanho em estoque:
-    NUNCA envie apenas uma opção.
-    Apresente de 2 a 4 alternativas com laboratório, quantidade de comprimidos/apresentação e preço, destacando a mais econômica primeiro com ⭐ Mais econômica.
-    Exemplo:
-    'Temos dipirona de 1g disponível nas seguintes opções:
-    1️⃣ EMS (10 comprimidos) - R$ 11,49 ⭐ Mais econômica
-    2️⃣ Prati-Donaduzzi (8 comprimidos) - R$ 15,02
-    3️⃣ Prati-Donaduzzi (30 comprimidos) - R$ 24,70
-    Qual dessas opções você prefere?'
-- Se o cliente pediu uma dosagem que realmente NÃO temos em estoque:
-  * Diga educadamente que a dosagem específica não está disponível no momento, mas ofereça a dosagem mais próxima disponível (ex: "No momento não temos a dosagem de 500mg em estoque, mas temos a opção de 1g...").
-- 'CPR' ou 'COMP' indica comprimidos (ex: 8CPR = 8 comprimidos, 10CPR = 10 comprimidos, 30CPR = 30 comprimidos).
-- 'GTS' indica gotas, 'XPE' indica xarope, 'SOL' indica solução oral, 'EFERV' indica efervescente.
-- Siglas finais indicam o laboratório fabricante: EMS, PRATI ou PRTD (Prati-Donaduzzi), NEOQ (Neo Química), GERM (Germed), MDLY (Medley), CIMED (Cimed), EURO (Eurofarma), ACHÉ (Aché), SANOFI (Sanofi).
+  * Apresente NO MÁXIMO 2 A 3 OPÇÕES (as mais econômicas e relevantes) com laboratório/marca, apresentação/tamanho e preço, destacando a primeira com ⭐ Mais econômica.
+  * Finalize com uma pergunta curta convidando à ação.
+
+ESTRUTURA DE RESPOSTA (MÁXIMO 2 A 3 OPÇÕES):
+- Se o cliente pedir dipirona em gotas e tivermos em estoque:
+  Exemplo ideal de resposta curta:
+  "Temos dipirona em gotas sim! 😊
+
+  1️⃣ Germed 20ml (500mg/ml) - R$ 7,49 ⭐ Mais econômica
+  2️⃣ Germed 10ml (500mg/ml) - R$ 9,14
+  3️⃣ Medley 10ml (500mg/ml) - R$ 14,55
+
+  Qual dessas você prefere levar? Posso separar para você ou enviar o link da loja!"
+
+- Se o cliente pedir comprimidos (ex: dipirona 500mg ou 1g):
+  Exemplo ideal de resposta curta:
+  "Temos dipirona disponível nas seguintes opções:
+
+  1️⃣ EMS (10 comprimidos) - R$ 4,49 ⭐ Mais econômica
+  2️⃣ Prati-Donaduzzi (10 comprimidos) - R$ 4,49
+  3️⃣ Medley (10 comprimidos) - R$ 5,49
+
+  Qual dessas opções você prefere?"
+
+- Se o cliente pediu uma dosagem ou formato que realmente NÃO temos em estoque:
+  * Diga educadamente e de forma curta que o formato específico não está disponível no momento e ofereça a alternativa mais próxima.
 
 RECONHECIMENTO DE ESCOLHA DO CLIENTE E TRANSLADO/CONCLUSÃO:
 - Se o cliente responder escolhendo uma opção (ex: "vou querer a [marca]", "vou querer essa da ems", "pode ser o número 1", "adiciona a de 4,49", "vou levar a medley", "quero essa", "prefiro a ems"):
@@ -687,24 +815,26 @@ ${storeLink}
         const matchedProducts = await this.searchProductsInDb(
           tenantIds.length > 0 ? tenantIds : [tenant.id || tenantId],
           incomingMessage,
-          6
+          4
         );
 
         if (matchedProducts && matchedProducts.length > 0) {
+          const displayProducts = matchedProducts.slice(0, 3);
           catalogContext = "\n\n[CATÁLOGO EM TEMPO REAL - PRODUTOS ENCONTRADOS NO BANCO DE DADOS DA DROGARIA]:\n" +
-            matchedProducts.map((p, idx) => {
+            displayProducts.map((p, idx) => {
               const preco = (Number(p.price) || 0).toFixed(2);
               const linkProd = `${storeLink}?produto=${p.id}`;
               const statusEstoque = p.stock > 0 ? `Disponível (${p.stock} un)` : 'Temporariamente Esgotado';
               const tarja = p.requires_prescription ? 'Exige Receita Médica' : 'Venda Livre';
-              return `${idx + 1}. ${p.name} ${p.presentation ? `(${p.presentation})` : ''} - R$ ${preco} [Estoque: ${statusEstoque} | ${tarja}] (ID/Link para compra específica: ${linkProd})`;
+              const label = formatMedicineLabel(p);
+              return `${idx + 1}. ${label} [Cadastro: ${p.name}] - R$ ${preco} [Estoque: ${statusEstoque} | ${tarja}] (Link: ${linkProd})`;
             }).join("\n") +
-            `\n\nDIRETRIZ ESTRITA DE FORMATAÇÃO E RESPOSTA:
-- Quando houver mais de uma opção em estoque, apresente de 2 a 4 alternativas com laboratório, apresentação e preço, destacando a de menor valor com ⭐ Mais econômica.
-- NUNCA envie links individuais por produto ao listar opções ou responder dúvidas iniciais. Liste apenas de forma limpa: 'Número. Nome - R$ Preço'.
-- Insira apenas UM ÚNICO link no rodapé da mensagem (o link geral da loja: ${storeLink}), convidando o cliente a explorar o catálogo ou calcular a tele-entrega.
-- Envie o link direto de um item específico SOMENTE se o cliente demonstrar intenção explícita de comprar aquele produto particular (ex: "vou levar o de 10 comprimidos", "como faço para pedir o Max?", "me manda o link desse").
-- Se o cliente preferir pedir pelo WhatsApp, não envie links de carrinho: confirme os valores e informe que o balconista humano concluirá o pedido.`;
+            `\n\nDIRETRIZ ESTRITA DE CONCISÃO E RESPOSTA:
+- Respostas no WhatsApp devem ser CURTAS, humanizadas e sem enrolação. NUNCA dê explicações técnicas desnecessárias como '(solução, mas não em gotas)'.
+- Apresente NO MÁXIMO 2 A 3 OPÇÕES mais econômicas, numeradas (1️⃣, 2️⃣, 3️⃣) com Marca/Apresentação e R$ Preço, destacando a primeira com ⭐ Mais econômica.
+- Finalize com uma pergunta curta convidando à ação (ex: 'Qual dessas você prefere levar? Posso separar para você ou enviar o link da loja!').
+- NUNCA envie links individuais por produto ao listar opções. Insira apenas UM ÚNICO link geral da loja no rodapé (${storeLink}).
+- Se o cliente pediu gotas, frascos com 'GTS' ou 'SOL' (10ml, 20ml) como Maxalgina, Germed, Medley SÃO gotas! NUNCA ofereça comprimidos se houver gotas disponíveis.`;
         } else if (searchTerms.length > 0) {
           catalogContext = `\n\n[CATÁLOGO EM TEMPO REAL]:
 Nenhum produto com esses termos exatos foi localizado em estoque no banco de dados local.
@@ -1477,7 +1607,7 @@ ${taskInstruction}`;
       return [];
     }
 
-    const { detectedDosage, isDrops, isSyrup } =
+    const { detectedDosage, isDrops, isSyrup, isTablets } =
       extractDosageAndPresentation(searchTerm);
 
     const normalized = searchTerm
@@ -1493,6 +1623,8 @@ ${taskInstruction}`;
       "quanto", "custa", "opcao", "opcoes", "remedio", "remedios", "medicamento",
       "medicamentos", "generico", "genericos", "similar", "similares", "caixa",
       "cartela", "comprimido", "comprimidos", "cpr", "comp", "cp", "un", "unidades",
+      "gotas", "gota", "gotinha", "gotinhas", "liquida", "liquido", "solucao", "sol", "gts",
+      "xarope", "xaropes", "xpe", "pilula", "pilulas", "cps", "capsula", "capsulas",
       "ola", "oi", "bom", "dia", "boa", "tarde", "noite", "voces", "vc", "vcs"
     ]);
 
@@ -1503,6 +1635,22 @@ ${taskInstruction}`;
       t !== "500" && t !== "1000" && t !== "750" && t !== "250" &&
       t !== "500mg" && t !== "1g" && t !== "1000mg" && t !== "750mg"
     );
+
+    let formSqlFilter: string | null = null;
+    if (isDrops) {
+      formSqlFilter = "name.ilike.%gts%,name.ilike.%gota%,name.ilike.%sol oral%,name.ilike.%sol%,presentation.ilike.%gts%,presentation.ilike.%gota%,presentation.ilike.%sol%";
+    } else if (isTablets) {
+      formSqlFilter = "name.ilike.%cpr%,name.ilike.%comp%,name.ilike.%cps%,presentation.ilike.%comprimido%,presentation.ilike.%cpr%";
+    } else if (isSyrup) {
+      formSqlFilter = "name.ilike.%xpe%,name.ilike.%xarope%,presentation.ilike.%xarope%";
+    }
+
+    const buildTermOrClause = (term: string) => {
+      if (term === "dipirona") {
+        return "name.ilike.%dipirona%,active_principle.ilike.%dipirona%,name.ilike.%maxalgina%,name.ilike.%novalgina%";
+      }
+      return `name.ilike.%${term}%,active_principle.ilike.%${term}%`;
+    };
 
     // =========================================================================
     // PRIORIDADE 1: SE O CLIENTE ESPECIFICOU DOSAGEM (ex: "500mg" ou "1g")
@@ -1516,7 +1664,11 @@ ${taskInstruction}`;
         .order("price", { ascending: true });
 
       for (const term of mainTerms) {
-        qExact = qExact.or(`name.ilike.%${term}%,active_principle.ilike.%${term}%`);
+        qExact = qExact.or(buildTermOrClause(term));
+      }
+
+      if (formSqlFilter) {
+        qExact = qExact.or(formSqlFilter);
       }
 
       // Aplica filtro SQL de dosagem diretamente
@@ -1538,56 +1690,40 @@ ${taskInstruction}`;
       const matchingDosage = (exactProducts || []).filter(p => productMatchesDosage(p, detectedDosage));
 
       if (matchingDosage.length > 0) {
-        let filtered = matchingDosage;
-
-        // Se o cliente NÃO pediu gotas ou xarope expressamente, prioriza comprimidos/sólidos
-        if (!isDrops && !isSyrup) {
-          const nonDrops = matchingDosage.filter(p => {
-            const n = (p.name || '').toLowerCase();
-            return !n.includes('gts') && !n.includes('gota') && !n.includes('sol oral') && !n.includes('sol 10ml') && !n.includes('sol 20ml') && !n.includes('xpe') && !n.includes('xarope');
-          });
-          if (nonDrops.length > 0) {
-            filtered = nonDrops;
-          }
-        } else if (isDrops) {
-          // Se pediu gotas expressamente, filtra/prioriza gotas
-          const dropsOnly = matchingDosage.filter(p => {
-            const n = (p.name || '').toLowerCase();
-            return n.includes('gts') || n.includes('gota') || n.includes('sol');
-          });
+        if (isDrops) {
+          const dropsOnly = matchingDosage.filter(isProductDrops);
           if (dropsOnly.length > 0) {
-            filtered = dropsOnly;
+            const seen = new Set<string>();
+            const unique = dropsOnly.filter(p => {
+              const lbl = formatMedicineLabel(p).toLowerCase();
+              if (seen.has(lbl)) return false;
+              seen.add(lbl);
+              return true;
+            });
+            return unique.slice(0, limit);
+          }
+          // Se pediu gotas expressamente e não achou nesta dosagem, não retorne comprimidos! Continue para busca geral
+        } else if (isTablets) {
+          const tabletsOnly = matchingDosage.filter(isProductTablets);
+          if (tabletsOnly.length > 0) {
+            return tabletsOnly.slice(0, limit);
           }
         } else if (isSyrup) {
-          // Se pediu xarope expressamente, filtra/prioriza xarope
-          const syrupOnly = matchingDosage.filter(p => {
-            const n = (p.name || '').toLowerCase();
-            return n.includes('xpe') || n.includes('xarope');
-          });
+          const syrupOnly = matchingDosage.filter(isProductSyrup);
           if (syrupOnly.length > 0) {
-            filtered = syrupOnly;
+            return syrupOnly.slice(0, limit);
           }
+        } else {
+          // Cliente não pediu gotas ou xarope: prioriza comprimidos/sólidos
+          const nonDrops = matchingDosage.filter(p => !isProductDrops(p) && !isProductSyrup(p));
+          return (nonDrops.length > 0 ? nonDrops : matchingDosage).slice(0, limit);
         }
-
-        // CRÍTICO: Se existem produtos com a dosagem solicitada em estoque,
-        // NUNCA incluir outras dosagens (como 1g)! Retorna EXCLUSIVAMENTE a dosagem solicitada!
-        return filtered.slice(0, limit);
       }
     }
 
     // =========================================================================
     // PRIORIDADE 2: BUSCA GERAL POR PRINCÍPIO ATIVO (SE NÃO ENCONTROU A DOSAGEM OU NÃO ESPECIFICOU)
     // =========================================================================
-    let matchedProducts: any[] = [];
-    const addedIds = new Set<string>();
-
-    const addProduct = (p: any) => {
-      if (p && p.id && !addedIds.has(String(p.id))) {
-        addedIds.add(String(p.id));
-        matchedProducts.push(p);
-      }
-    };
-
     if (mainTerms.length > 0) {
       let qGeneral = supabaseAdmin
         .from("products")
@@ -1597,79 +1733,125 @@ ${taskInstruction}`;
         .order("price", { ascending: true });
 
       for (const term of mainTerms) {
-        qGeneral = qGeneral.or(`name.ilike.%${term}%,active_principle.ilike.%${term}%`);
+        qGeneral = qGeneral.or(buildTermOrClause(term));
       }
 
-      const { data: dGeneral } = await qGeneral.limit(limit * 3);
-      const candidates = dGeneral || [];
+      if (formSqlFilter) {
+        qGeneral = qGeneral.or(formSqlFilter);
+      }
 
-      // Se havia dosagem solicitada, verifica se algum dos produtos gerais atende à dosagem
-      if (detectedDosage) {
-        const fromGeneral = candidates.filter(p => productMatchesDosage(p, detectedDosage));
-        if (fromGeneral.length > 0) {
-          let filtered = fromGeneral;
-          if (!isDrops && !isSyrup) {
-            const nonDrops = fromGeneral.filter(p => {
-              const n = (p.name || '').toLowerCase();
-              return !n.includes('gts') && !n.includes('gota') && !n.includes('sol oral') && !n.includes('sol 10ml') && !n.includes('sol 20ml') && !n.includes('xpe') && !n.includes('xarope');
-            });
-            if (nonDrops.length > 0) filtered = nonDrops;
-          }
-          return filtered.slice(0, limit);
+      const { data: dGeneral } = await qGeneral.limit(limit * 4);
+      let candidates = dGeneral || [];
+
+      // Se aplicou formSqlFilter e veio vazio, tenta uma busca sem o filtro SQL para avaliar em memória
+      if (candidates.length === 0 && formSqlFilter) {
+        let qBroad = supabaseAdmin
+          .from("products")
+          .select("id, name, price, stock, presentation, category, active_principle, requires_prescription")
+          .in("tenant_id", tenantIds)
+          .gt("stock", 0)
+          .order("price", { ascending: true });
+        for (const term of mainTerms) {
+          qBroad = qBroad.or(buildTermOrClause(term));
         }
+        const { data: dBroad } = await qBroad.limit(limit * 4);
+        candidates = dBroad || [];
       }
 
-      // Se NÃO existia a dosagem solicitada em estoque (ou não foi especificada),
-      // inclui as outras opções disponíveis ordenadas por menor preço
-      if (!isDrops && !isSyrup) {
-        const nonDrops = candidates.filter(p => {
-          const n = (p.name || '').toLowerCase();
-          return !n.includes('gts') && !n.includes('gota') && !n.includes('sol oral') && !n.includes('sol 10ml') && !n.includes('sol 20ml') && !n.includes('xpe') && !n.includes('xarope');
-        });
-        (nonDrops.length > 0 ? nonDrops : candidates).forEach(addProduct);
-      } else {
-        candidates.forEach(addProduct);
+      // 1. Se o cliente pediu GOTAS
+      if (isDrops) {
+        const drops = candidates.filter(isProductDrops);
+        if (drops.length > 0) {
+          const seen = new Set<string>();
+          const uniqueDrops = drops.filter(p => {
+            const lbl = formatMedicineLabel(p).toLowerCase();
+            if (seen.has(lbl)) return false;
+            seen.add(lbl);
+            return true;
+          });
+          return uniqueDrops.slice(0, limit);
+        }
+        // REGRA CRÍTICA: Se o cliente pediu gotas e não há gotas em estoque,
+        // NUNCA retorne comprimidos! Retorne array vazio para a IA informar adequadamente
+        return [];
       }
+
+      // 2. Se o cliente pediu COMPRIMIDOS
+      if (isTablets) {
+        const tablets = candidates.filter(isProductTablets);
+        if (tablets.length > 0) {
+          const seen = new Set<string>();
+          const uniqueTablets = tablets.filter(p => {
+            const lbl = formatMedicineLabel(p).toLowerCase();
+            if (seen.has(lbl)) return false;
+            seen.add(lbl);
+            return true;
+          });
+          return uniqueTablets.slice(0, limit);
+        }
+        return [];
+      }
+
+      // 3. Se o cliente pediu XAROPE
+      if (isSyrup) {
+        const syrups = candidates.filter(isProductSyrup);
+        if (syrups.length > 0) {
+          return syrups.slice(0, limit);
+        }
+        return [];
+      }
+
+      // 4. Se não especificou forma líquida ou gotas: prioriza comprimidos/sólidos
+      const nonDrops = candidates.filter(p => !isProductDrops(p) && !isProductSyrup(p));
+      const chosen = nonDrops.length > 0 ? nonDrops : candidates;
+      const seen = new Set<string>();
+      const unique = chosen.filter(p => {
+        const lbl = formatMedicineLabel(p).toLowerCase();
+        if (seen.has(lbl)) return false;
+        seen.add(lbl);
+        return true;
+      });
+      return unique.slice(0, limit);
     }
 
     // =========================================================================
     // PRIORIDADE 3: FALLBACK POR TOKENS LIVRES
     // =========================================================================
-    if (matchedProducts.length === 0) {
-      const rawTokens = normalized.split(/\s+/).filter(t => t.length >= 3 && !STOP_SEARCH_WORDS.has(t));
-      if (rawTokens.length > 0) {
-        const tokenOr = rawTokens.slice(0, 3).map(t => `name.ilike.%${t}%,active_principle.ilike.%${t}%`).join(",");
-        const { data: dFallback } = await supabaseAdmin
-          .from("products")
-          .select("id, name, price, stock, presentation, category, active_principle, requires_prescription")
-          .in("tenant_id", tenantIds)
-          .gt("stock", 0)
-          .or(tokenOr)
-          .order("price", { ascending: true })
-          .limit(limit);
-        (dFallback || []).forEach(addProduct);
-      }
-    }
-
-    // =========================================================================
-    // PRIORIDADE 4: SE NÃO HÁ ESTOQUE, BUSCA GERAL PARA INFORMAR FALTA DE ESTOQUE
-    // =========================================================================
-    if (matchedProducts.length === 0 && mainTerms.length > 0) {
-      let qOutOfStock = supabaseAdmin
+    const rawTokens = normalized.split(/\s+/).filter(t => t.length >= 3 && !STOP_SEARCH_WORDS.has(t));
+    if (rawTokens.length > 0) {
+      const tokenOr = rawTokens.slice(0, 3).map(t => buildTermOrClause(t)).join(",");
+      let qFallback = supabaseAdmin
         .from("products")
         .select("id, name, price, stock, presentation, category, active_principle, requires_prescription")
         .in("tenant_id", tenantIds)
+        .gt("stock", 0)
+        .or(tokenOr)
         .order("price", { ascending: true });
 
-      for (const term of mainTerms) {
-        qOutOfStock = qOutOfStock.or(`name.ilike.%${term}%,active_principle.ilike.%${term}%`);
+      if (formSqlFilter) {
+        qFallback = qFallback.or(formSqlFilter);
       }
 
-      const { data: dOutOfStock } = await qOutOfStock.limit(limit);
-      (dOutOfStock || []).forEach(addProduct);
+      const { data: dFallback } = await qFallback.limit(limit * 3);
+      const candidates = dFallback || [];
+
+      if (isDrops) {
+        const drops = candidates.filter(isProductDrops);
+        return drops.slice(0, limit);
+      }
+      if (isTablets) {
+        const tablets = candidates.filter(isProductTablets);
+        return tablets.slice(0, limit);
+      }
+      if (isSyrup) {
+        const syrups = candidates.filter(isProductSyrup);
+        return syrups.slice(0, limit);
+      }
+
+      return candidates.slice(0, limit);
     }
 
-    return matchedProducts.slice(0, limit);
+    return [];
   }
 
   private async executeToolCall(
@@ -1736,12 +1918,19 @@ ${taskInstruction}`;
         return { total: 0, produtos: [], mensagem: "Nenhum termo informado para busca." };
       }
 
-      // Se o usuário especificou dosagem na mensagem (ex: 500mg) e o termo da IA omitiu, adiciona
+      // Se o usuário especificou dosagem ou forma na mensagem (ex: 500mg, gotas, comprimidos, xarope) e o termo da IA omitiu, adiciona
       if (userMessage) {
         const userDosage = extractDosageAndPresentation(userMessage);
         const termDosage = extractDosageAndPresentation(termo);
         if (userDosage.detectedDosage && !termDosage.detectedDosage) {
           termo = `${termo} ${userDosage.detectedDosage}`;
+        }
+        if (userDosage.isDrops && !termDosage.isDrops) {
+          termo = `${termo} gotas`;
+        } else if (userDosage.isTablets && !termDosage.isTablets) {
+          termo = `${termo} comprimidos`;
+        } else if (userDosage.isSyrup && !termDosage.isSyrup) {
+          termo = `${termo} xarope`;
         }
       }
 
@@ -1760,7 +1949,7 @@ ${taskInstruction}`;
         const prods = await this.searchProductsInDb(
           tenantIds.length > 0 ? tenantIds : [tenant?.id || ''],
           termo,
-          6
+          4
         );
 
         const effectiveStoreLink = storeLink || (tenant?.custom_domain ? `https://${tenant.custom_domain}` : `https://${tenant?.slug || tenant?.id || 'loja'}.farmaflow.online`);
@@ -1768,6 +1957,7 @@ ${taskInstruction}`;
         const items = (prods || []).map((p: any) => ({
           id: p.id,
           nome: p.name,
+          nome_formatado: formatMedicineLabel(p),
           apresentacao: p.presentation || "",
           preco: Number(p.price) || 0,
           preco_formatado: `R$ ${(Number(p.price) || 0).toFixed(2)}`,
@@ -1785,9 +1975,9 @@ ${taskInstruction}`;
           link_loja_geral: effectiveStoreLink,
           regras_obrigatorias_atendimento: [
             "1. 'DIPIRONA MONO' (Monoidratada) e 'DIPIRONA SODICA' são rigorosamente o mesmo medicamento (Dipirona).",
-            "2. Se o cliente pediu 500mg e houver '500MG' ou '500 MG' em qualquer produto da lista (seja MONO ou SODICA), ELE ESTÁ DISPONÍVEL! NUNCA diga que não tem. Diga imediatamente: 'Temos sim!'.",
-            "3. NUNCA liste produtos de 1G ou gotas se o cliente pediu expressamente 500mg e houver 500mg em estoque.",
-            "4. Apresente as opções encontradas com o nome comercial/laboratório, formato (comprimidos, gotas) e preço de forma amigável, destacando a mais barata. Exemplo: 'Temos sim! Temos a Dipirona 500mg da Medley com 10 comprimidos por apenas R$ 5,49. Gostaria de adicionar ao seu pedido ou prefere dar uma olhada em outras marcas?'"
+            "2. Maxalgina, Dipimed, Novalgina e Nevraldor são nomes comerciais de Dipirona. Frascos de 10ml e 20ml com 'GTS' ou 'SOL' SÃO gotas! NUNCA diga que são '(solução, mas não em gotas)'.",
+            "3. Se o cliente pediu gotas e houver produtos com GTS ou SOL (10ml, 20ml) na lista, ELE ESTÁ DISPONÍVEL! Diga imediatamente que temos em gotas e NUNCA ofereça comprimidos.",
+            "4. CONCISÃO E DIRETO AO PONTO: Responda de forma CURTA e humanizada no WhatsApp (apresente no MÁXIMO 2 a 3 opções numeradas com 1️⃣, 2️⃣, 3️⃣, destacando a primeira com ⭐ Mais econômica e faça uma pergunta objetiva no final)."
           ]
         };
       } catch (e: any) {
