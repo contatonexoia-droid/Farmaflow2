@@ -458,6 +458,106 @@ export class EvolutionApiService {
   }
 
   /**
+   * Envia uma mensagem de áudio nativa no WhatsApp (Push-to-Talk / gravação de voz)
+   * através da Evolution API (/message/sendWhatsAppAudio).
+   */
+  public async sendWhatsAppAudio(
+    firstParam: string | {
+      instanceName?: string;
+      number?: string;
+      phoneNumber?: string;
+      audio: string;
+      ptt?: boolean;
+      delay?: number;
+      encoding?: boolean;
+    },
+    secondParam?: string,
+    thirdParam?: string,
+    fourthParam?: { ptt?: boolean; delay?: number; encoding?: boolean }
+  ): Promise<{ success: boolean; data?: any; error?: string; status?: number }> {
+    let instanceName: string;
+    let phoneNumber: string;
+    let audio: string;
+    let options: { ptt?: boolean; delay?: number; encoding?: boolean } = {};
+
+    if (typeof firstParam === "object" && firstParam !== null) {
+      instanceName = (firstParam.instanceName || "").trim();
+      phoneNumber = String(firstParam.number || firstParam.phoneNumber || "");
+      audio = firstParam.audio;
+      options = {
+        ptt: firstParam.ptt !== false,
+        delay: firstParam.delay || 1200,
+        encoding: firstParam.encoding !== false
+      };
+    } else {
+      instanceName = (typeof firstParam === "string" ? firstParam : "").trim();
+      phoneNumber = String(secondParam || "");
+      audio = String(thirdParam || "");
+      options = {
+        ptt: fourthParam?.ptt !== false,
+        delay: fourthParam?.delay || 1200,
+        encoding: fourthParam?.encoding !== false
+      };
+    }
+
+    const cleanNumber = phoneNumber.replace(/\D/g, "");
+    if (!instanceName || !cleanNumber || !audio) {
+      const err = `Parâmetros inválidos para sendWhatsAppAudio: instance="${instanceName}", number="${cleanNumber}", audioPresent=${Boolean(audio)}`;
+      console.error(`[EvolutionAPI] ${err}`);
+      return { success: false, error: err };
+    }
+
+    const { url, key: apiKeyToUse } = await this.getInstanceConfig(instanceName);
+    const cleanInstance = instanceName.trim();
+
+    const payload = {
+      number: cleanNumber,
+      audio: audio,
+      delay: options.delay || 1200,
+      encoding: true,
+      ptt: options.ptt !== false
+    };
+
+    console.log(`[EvolutionAPI] 🎙️ Disparando sendWhatsAppAudio (PTT: ${options.ptt !== false}) para ${cleanNumber} via instância "${cleanInstance}" | Tamanho áudio: ${audio.length} chars`);
+
+    const endpoints = [
+      `${url}/message/sendWhatsAppAudio/${cleanInstance}`,
+      `${url}/chat/sendWhatsAppAudio/${cleanInstance}`
+    ];
+
+    for (const endpoint of endpoints) {
+      try {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "apikey": apiKeyToUse
+          },
+          body: JSON.stringify(payload)
+        });
+
+        const responseText = await response.text();
+        let responseJson: any = null;
+        try {
+          responseJson = JSON.parse(responseText);
+        } catch (_) {
+          responseJson = { raw: responseText };
+        }
+
+        if (response.status === 200 || response.status === 201) {
+          console.log(`[EvolutionAPI] ✅ Áudio WhatsApp (PTT) entregue com sucesso à Evolution API para ${cleanNumber}`);
+          return { success: true, status: response.status, data: responseJson };
+        }
+        console.warn(`[EvolutionAPI] Endpoint ${endpoint} retornou status ${response.status}:`, responseText);
+      } catch (err: any) {
+        console.warn(`[EvolutionAPI] Falha ao tentar endpoint ${endpoint}:`, err.message);
+      }
+    }
+
+    return { success: false, error: "Falha ao enviar áudio em todos os endpoints da Evolution API" };
+  }
+
+  /**
    * Baixa a mídia da mensagem em Base64 através da Evolution API v2 (/chat/getBase64FromMediaMessage)
    * e garante o retorno de uma Data URI completa e válida (data:mime;base64,...)
    */

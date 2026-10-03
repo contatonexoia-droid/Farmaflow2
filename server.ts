@@ -28,6 +28,7 @@ import { chatStore } from "./services/chatStore.js";
 import { teamStore } from "./services/teamStore.js";
 import { aiAgentService, DEFAULT_AI_AGENT_PROMPT, isolateUrlsInText, extractUrlAndCleanText, ensureStoreUrlCacheBuster } from "./services/aiAgentService.js";
 import { evolutionApiService } from "./services/evolutionApiService.js";
+import { transcribeAudio } from "./services/audioAiService.js";
 import ogHandler, { buildCrawlerHtml, isCrawlerRequest } from "./api/og-handler.js";
 import QRCode from "qrcode";
 
@@ -8251,11 +8252,81 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                      (msg.message?.documentMessage ? "[Documento]" : 
                      (msg.message?.stickerMessage ? "[Figurinha]" : "[Mensagem WhatsApp]")))));
 
-        console.log(`[WEBHOOK] Mensagem de: ${remoteJid} | fromMe: ${fromMe} | Texto: "${typeof text === 'string' ? text.slice(0, 50) : ''}"`);
+        const isAudio = Boolean(
+          msg.message?.audioMessage ||
+          msg.messageType === "audioMessage" ||
+          msg.type === "audio" ||
+          (msg.message?.documentMessage?.mimetype && msg.message.documentMessage.mimetype.startsWith("audio/")) ||
+          (msg.mimetype && msg.mimetype.startsWith("audio/"))
+        );
+        let effectiveText = typeof text === "string" ? text : "";
+        let isAudioMessage = isAudio;
+
+        console.log(`[WEBHOOK] Mensagem de: ${remoteJid} | fromMe: ${fromMe} | isAudio: ${isAudio} | Texto: "${typeof text === 'string' ? text.slice(0, 50) : ''}"`);
 
         try {
           // 1. SEMPRE salva primeiro a mensagem no banco de dados e cria/atualiza o contato e a conversa
           const result = await chatStore.processWhatsAppMessage(storeId, msg, instanceName);
+
+          // Se for mensagem de áudio enviada pelo cliente, transcreve via Whisper / Gemini
+          if (!fromMe && isAudio && result?.message) {
+            try {
+              console.log(`[WEBHOOK - AUDIO] 🎙️ Áudio recebido de ${remoteJid}. Baixando buffer para transcrição...`);
+              let audioData = result.message.media_url || result.message.mediaUrl;
+              if (!audioData) {
+                audioData = await evolutionApiService.getBase64FromMediaMessage(instanceName, msg);
+              }
+
+              if (audioData) {
+                const transcribed = await transcribeAudio({
+                  audioBase64OrUrl: audioData,
+                  apiKey: resolvedTenant?.ai_agent_config?.apiKey,
+                  openaiApiKey: resolvedTenant?.ai_agent_config?.openai_api_key,
+                  geminiApiKey: resolvedTenant?.ai_agent_config?.gemini_api_key,
+                  provider: resolvedTenant?.ai_agent_config?.provider
+                });
+
+                if (transcribed && transcribed.trim().length > 0) {
+                  effectiveText = transcribed.trim();
+                  const audioDisplay = `🎤 [Áudio]: "${effectiveText}"`;
+                  console.log(`[WEBHOOK - AUDIO] ✅ Áudio transcrito com sucesso para ${remoteJid}: "${effectiveText}"`);
+
+                  try {
+                    await supabaseAdmin
+                      .from("chat_messages")
+                      .update({ content: audioDisplay })
+                      .eq("id", result.message.id);
+
+                    if (result.conversation) {
+                      await supabaseAdmin
+                        .from("chat_conversations")
+                        .update({
+                          last_message_content: audioDisplay,
+                          updated_at: new Date().toISOString()
+                        })
+                        .eq("id", result.conversation.id);
+
+                      result.conversation.last_message_content = audioDisplay;
+                    }
+
+                    result.message.content = audioDisplay;
+                  } catch (dbAudioErr: any) {
+                    console.warn("[WEBHOOK - AUDIO] Erro ao atualizar transcrição no banco:", dbAudioErr.message);
+                  }
+
+                  realtimeHub.broadcastToStore(storeId, "chat_message", {
+                    conversationId: result.conversation.id,
+                    message: { ...result.message, content: audioDisplay },
+                    conversation: result.conversation
+                  });
+                } else {
+                  console.warn(`[WEBHOOK - AUDIO] ⚠️ Transcrição do áudio retornou vazia para ${remoteJid}`);
+                }
+              }
+            } catch (audioErr: any) {
+              console.error("[WEBHOOK - AUDIO] Erro na transcrição de áudio:", audioErr.message);
+            }
+          }
 
           if (result && result.conversation) {
             const conversation = result.conversation;
@@ -8324,7 +8395,7 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
 
               // 3. Processamento CSAT isolado
               try {
-                const ratingNum = parseInt(String(text).trim(), 10);
+                const ratingNum = parseInt(String(effectiveText || text).trim(), 10);
                 if (!isNaN(ratingNum) && ratingNum >= 1 && ratingNum <= 5) {
                   await csatManager.recordCsatResponse(storeId, conversation.id, ratingNum);
                 }
@@ -8358,11 +8429,12 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
 
               // a) Atualiza timestamp da última mensagem na conversa
               try {
+                const lastMsgToSave = typeof effectiveText === 'string' && effectiveText.length > 0 ? effectiveText.slice(0, 500) : (typeof text === 'string' ? text.slice(0, 500) : text);
                 await supabaseAdmin
                   .from("chat_conversations")
                   .update({
                     last_message_at: currentMsgTimestamp,
-                    last_message_content: typeof text === 'string' ? text.slice(0, 500) : text,
+                    last_message_content: lastMsgToSave,
                     updated_at: currentMsgTimestamp
                   })
                   .eq("id", conversation.id);
@@ -8423,7 +8495,7 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
               }
 
               // f) Consolidação de mensagens do cliente enviadas nos últimos 60 segundos
-              let consolidatedText = text;
+              let consolidatedText = effectiveText || text;
               try {
                 const { data: lastStaffMsg } = await supabaseAdmin
                   .from('chat_messages')
@@ -8449,7 +8521,13 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
 
                 if (pendingCustomerMsgs && pendingCustomerMsgs.length > 0) {
                   const texts = pendingCustomerMsgs
-                    .map(m => (m.content || '').trim())
+                    .map(m => {
+                      let raw = (m.content || '').trim();
+                      if (raw.startsWith('🎤') || raw.toLowerCase().includes('[áudio]')) {
+                        raw = raw.replace(/^🎤\s*\[Áudio\]:?\s*"?/i, '').replace(/"?\s*$/, '').replace(/^\[Áudio\]:?\s*/i, '').trim();
+                      }
+                      return raw;
+                    })
                     .filter(t => t.length > 0 && !t.startsWith('[') && !t.endsWith(']'));
                   
                   if (texts.length > 0) {
@@ -8460,7 +8538,7 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                 console.warn("[WEBHOOK DEBOUNCE] Erro ao consolidar histórico recente:", consolErr.message);
               }
 
-              console.log(`[WEBHOOK DEBOUNCE] 💬 Mensagem unificada para envio à IA na conversa ${conversation.id}:\n"${consolidatedText}"`);
+              console.log(`[WEBHOOK DEBOUNCE] 💬 Mensagem unificada para envio à IA na conversa ${conversation.id} (replyWithAudio: ${isAudioMessage}):\n"${consolidatedText}"`);
 
               // g) Disparo Único da Mensagem de Boas-Vindas (se elegível hoje)
               let welcomeSent = false;
@@ -8475,17 +8553,19 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                 return res.status(200).json({ success: true, handled: 'welcome_message' });
               }
 
-              // h) Mantém presença "composing" ativa durante a geração da resposta
+              // h) Mantém presença ativa ("recording" se for áudio ou "composing" se for texto)
               if (instanceName && cleanPhone) {
-                evolutionApiService.sendPresence(instanceName, cleanPhone, "composing", 3500).catch(() => {});
+                const presenceType = isAudioMessage ? "recording" : "composing";
+                evolutionApiService.sendPresence(instanceName, cleanPhone, presenceType, 3500).catch(() => {});
               }
 
               // i) Disparo ÚNICO para o Agente de IA com o texto consolidado
               try {
-                console.log(`[WEBHOOK - IA] 🤖 Despachando turno único consolidado para AiAgentService na conversa ${conversation.id} (${cleanPhone})...`);
+                console.log(`[WEBHOOK - IA] 🤖 Despachando turno único consolidado para AiAgentService na conversa ${conversation.id} (${cleanPhone}, replyWithAudio: ${isAudioMessage})...`);
                 const aiResult = await aiAgentService.processConversationTurn(storeId, conversation.id, consolidatedText, {
                   instanceName,
-                  phoneNumber: cleanPhone
+                  phoneNumber: cleanPhone,
+                  replyWithAudio: isAudioMessage
                 });
 
                 return res.status(200).json({

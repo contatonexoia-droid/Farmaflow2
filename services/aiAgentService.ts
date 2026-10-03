@@ -12,6 +12,7 @@ import {
 } from "./botHandoffManager.js";
 import { realtimeHub } from "./realtimeHub.js";
 import { evolutionApiService } from "./evolutionApiService.js";
+import { generateTextToSpeech, prepareTextForSpeech } from "./audioAiService.js";
 
 const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || "https://nalshjhoiecxooejpiaw.supabase.co";
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_Y2lAqlvDUhdjSNtv80GkJA_SiOgynYy";
@@ -1238,6 +1239,8 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       transitionMsg?: string;
       currentCount: number;
       nextCount: number;
+      replyWithAudio?: boolean;
+      tenantAiConfig?: any;
     }
   ): Promise<{ success: boolean; error?: string }> {
     // 1. Validação Estrita de Envio: Garantir que a conversa NÃO esteja sob controle humano
@@ -1271,6 +1274,183 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
     const finalReplyText = isolateUrlsInText(replyText);
     const nowIso = new Date().toISOString();
     const nextCount = params.nextCount;
+
+    // FLUXO DE RESPOSTA EM ÁUDIO (Áudio com Áudio):
+    // Se o cliente enviou mensagem por áudio, converte a resposta em áudio (PTT)
+    // e envia o Balão 2 em TEXTO com as opções resumidas, valores e link para compra rápida.
+    if (params.replyWithAudio) {
+      console.log(`[AiAgentService] 🎙️ Fluxo de Resposta em ÁUDIO (PTT) ativado para ${cleanPhone} via "${targetInstanceName}"`);
+      
+      let speechAudio: { audioBase64: string; mimeType: string } | null = null;
+      try {
+        speechAudio = await generateTextToSpeech({
+          text: replyText,
+          apiKey: params.tenantAiConfig?.apiKey,
+          openaiApiKey: params.tenantAiConfig?.openai_api_key,
+          geminiApiKey: params.tenantAiConfig?.gemini_api_key,
+          provider: params.tenantAiConfig?.provider,
+          voice: "alloy"
+        });
+      } catch (ttsErr: any) {
+        console.warn("[AiAgentService] Aviso ao sintetizar áudio TTS:", ttsErr.message);
+      }
+
+      if (speechAudio?.audioBase64) {
+        // Envia presença "recording" para o cliente ver "Gravando áudio..."
+        evolutionApiService.sendPresence(targetInstanceName, cleanPhone, "recording", 2500).catch(() => {});
+
+        // DISPARO DO BALÃO 1 EM ÁUDIO (PTT nativo de voz)
+        console.log(`[AiAgentService] Disparando Balão 1 em ÁUDIO (PTT) para ${cleanPhone} via "${targetInstanceName}"...`);
+        const audioSendResult = await evolutionApiService.sendWhatsAppAudio(
+          targetInstanceName,
+          cleanPhone,
+          speechAudio.audioBase64,
+          { ptt: true, delay: 1000 }
+        );
+
+        if (audioSendResult.success) {
+          const spokenPreview = prepareTextForSpeech(replyText);
+          const { message: audioMsg } = await chatStore.addMessage(
+            realTenantId,
+            conversationId,
+            "BOT",
+            `🎤 [Áudio]: "${spokenPreview}"`,
+            false,
+            speechAudio.audioBase64,
+            "audio",
+            targetInstanceName,
+            true
+          );
+
+          realtimeHub.broadcastToStore(realTenantId, "chat_message", {
+            conversationId,
+            message: audioMsg
+          });
+
+          // Delay de 1200ms para ordenação visual no WhatsApp
+          await new Promise(resolve => setTimeout(resolve, 1200));
+
+          // DISPARO DO BALÃO 2 EM TEXTO: Opções resumidas, valores e link para compra rápida na loja virtual
+          if (hasUrlToSplit && mainText && mainText.trim().length > 0) {
+            console.log(`[AiAgentService] Disparando Balão 2 em TEXTO (Opções) para ${cleanPhone}...`);
+            await evolutionApiService.sendTextMessage(
+              targetInstanceName,
+              cleanPhone,
+              mainText,
+              { delay: 1000, linkPreview: false }
+            );
+
+            const { message: textMsg } = await chatStore.addMessage(
+              realTenantId,
+              conversationId,
+              "BOT",
+              mainText,
+              false,
+              undefined,
+              undefined,
+              targetInstanceName,
+              true
+            );
+
+            realtimeHub.broadcastToStore(realTenantId, "chat_message", {
+              conversationId,
+              message: textMsg
+            });
+
+            await new Promise(resolve => setTimeout(resolve, 1200));
+
+            // Balão da URL pura com cache-buster (ativa Link Preview com logo oficial)
+            const freshUrl = ensureStoreUrlCacheBuster(url);
+            console.log(`[AiAgentService] Disparando Balão com Link da Loja para ${cleanPhone}: ${freshUrl}`);
+            await evolutionApiService.sendTextMessage(
+              targetInstanceName,
+              cleanPhone,
+              freshUrl,
+              { delay: 1500, linkPreview: true }
+            );
+
+            const { message: urlMsg } = await chatStore.addMessage(
+              realTenantId,
+              conversationId,
+              "BOT",
+              freshUrl,
+              false,
+              undefined,
+              undefined,
+              targetInstanceName,
+              true
+            );
+
+            realtimeHub.broadcastToStore(realTenantId, "chat_message", {
+              conversationId,
+              message: urlMsg
+            });
+          } else {
+            const hasUrl = /(https?:\/\/[^\s]+)/i.test(finalReplyText);
+            const payloadText = hasUrl ? ensureStoreUrlCacheBuster(finalReplyText) : finalReplyText;
+            console.log(`[AiAgentService] Disparando Balão 2 em TEXTO para ${cleanPhone}...`);
+            await evolutionApiService.sendTextMessage(
+              targetInstanceName,
+              cleanPhone,
+              payloadText,
+              { delay: 1200, linkPreview: hasUrl }
+            );
+
+            const { message: textMsg } = await chatStore.addMessage(
+              realTenantId,
+              conversationId,
+              "BOT",
+              payloadText,
+              false,
+              undefined,
+              undefined,
+              targetInstanceName,
+              true
+            );
+
+            realtimeHub.broadcastToStore(realTenantId, "chat_message", {
+              conversationId,
+              message: textMsg
+            });
+          }
+
+          // Atualiza estado e contador da conversa
+          const audioUpdatePayload: any = {
+            bot_interaction_count: nextCount,
+            last_interaction_at: nowIso,
+            last_message_at: nowIso,
+            last_message_content: `🎤 [Áudio]: "${spokenPreview}"`,
+            updated_at: nowIso,
+            ...(params.isHandoff ? {
+              is_bot_active: false,
+              is_human_controlled: true,
+              kanban_stage: "novos_triagem",
+              bot_handoff_reason: params.handoffReason || "CUSTOMER_REQUEST"
+            } : {
+              is_bot_active: true,
+              is_human_controlled: false,
+              kanban_stage: "ia_atendendo"
+            })
+          };
+
+          const sanitized = sanitizeChatConversationPayload(audioUpdatePayload);
+          try {
+            await supabaseAdmin
+              .from("chat_conversations")
+              .update(sanitized)
+              .eq("id", conversationId);
+          } catch (dbErr: any) {
+            console.warn("[AiAgentService] Erro ao atualizar conversa:", dbErr.message);
+          }
+          await chatStore.updateConversationBotStatus(conversationId, audioUpdatePayload);
+
+          console.log(`[AiAgentService] ✅ Resposta Áudio + Balão Texto entregue com sucesso para ${cleanPhone}`);
+          return { success: true };
+        } else {
+          console.warn(`[AiAgentService] Falha no envio do áudio (${audioSendResult.error}). Fazendo fallback para texto...`);
+        }
+      }
+    }
 
     if (hasUrlToSplit && mainText && mainText.trim().length > 0) {
       console.log(`[AiAgentService] 💬 Fluxo de 2 balões ativado para ${cleanPhone} (Handoff: ${params.isHandoff ? params.handoffReason : 'NÃO'})`);
@@ -1505,6 +1685,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       instanceName?: string;
       phoneNumber?: string;
       chatHistory?: AiChatMessage[];
+      replyWithAudio?: boolean;
     }
   ): Promise<{
     handled: boolean;
@@ -1513,6 +1694,21 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
     reason?: string;
   }> {
     try {
+      // Normalização da mensagem recebida: se for transcrição de áudio, limpa o prefixo visual
+      let cleanIncoming = (incomingMessage || "").trim();
+      let shouldReplyWithAudio = Boolean(options?.replyWithAudio);
+      if (cleanIncoming.startsWith("🎤") || cleanIncoming.toLowerCase().includes("[áudio]")) {
+        shouldReplyWithAudio = true;
+        cleanIncoming = cleanIncoming
+          .replace(/^🎤\s*\[Áudio\]:?\s*"?/i, "")
+          .replace(/"?\s*$/, "")
+          .replace(/^\[Áudio\]:?\s*/i, "")
+          .trim();
+      }
+      if (cleanIncoming.length > 0) {
+        incomingMessage = cleanIncoming;
+      }
+
       // 1. Obter tenant e validar se o módulo de IA está autorizado (resolvendo o UUID real)
       const tenant = await this.verifyTenantAuthorization(storeId);
       const realTenantId = tenant.id || storeId;
@@ -1762,7 +1958,9 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
             handoffReason: "PURCHASE_INTENT",
             transitionMsg: humanizedReply,
             currentCount,
-            nextCount
+            nextCount,
+            replyWithAudio: shouldReplyWithAudio,
+            tenantAiConfig: dbConfig
           }
         );
 
@@ -1807,7 +2005,9 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
             handoffReason: resolvedReason,
             transitionMsg,
             currentCount,
-            nextCount
+            nextCount,
+            replyWithAudio: shouldReplyWithAudio,
+            tenantAiConfig: dbConfig
           }
         );
 
@@ -1833,7 +2033,9 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         {
           isHandoff: false,
           currentCount,
-          nextCount
+          nextCount,
+          replyWithAudio: shouldReplyWithAudio,
+          tenantAiConfig: dbConfig
         }
       );
 
