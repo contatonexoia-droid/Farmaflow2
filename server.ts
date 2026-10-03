@@ -26,7 +26,7 @@ import { contactMergeManager } from "./services/contactMergeManager.js";
 import { inboxStore } from "./services/inboxStore.js";
 import { chatStore } from "./services/chatStore.js";
 import { teamStore } from "./services/teamStore.js";
-import { aiAgentService, DEFAULT_AI_AGENT_PROMPT, isolateUrlsInText } from "./services/aiAgentService.js";
+import { aiAgentService, DEFAULT_AI_AGENT_PROMPT, isolateUrlsInText, extractUrlAndCleanText } from "./services/aiAgentService.js";
 import { evolutionApiService } from "./services/evolutionApiService.js";
 import ogHandler, { buildCrawlerHtml, isCrawlerRequest } from "./api/og-handler.js";
 import QRCode from "qrcode";
@@ -7913,73 +7913,149 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
           storeLink,
           storeName || "FarmaFlow"
         );
+        dispatchSuccess = Boolean(dispatchResult?.success);
+
+        if (dispatchSuccess) {
+          console.log(`[WelcomeMessage] ✅ Mensagem interativa de boas-vindas entregue com sucesso à Evolution API para ${cleanPhone}. Registrando no banco local...`);
+          const welcomeMsgId = crypto.randomUUID();
+          const welcomeMsg = {
+            id: welcomeMsgId,
+            conversation_id: conversation.id,
+            sender_type: "BOT",
+            content: displayContent,
+            is_private: false,
+            created_at: nowIso
+          };
+
+          try {
+            await supabaseAdmin.from("chat_messages").insert([welcomeMsg]);
+            await supabaseAdmin.from("chat_conversations").update({
+              last_message_at: nowIso,
+              last_message_content: displayContent,
+              updated_at: nowIso
+            }).eq("id", conversation.id);
+            
+            conversation.last_message_at = nowIso;
+            conversation.last_message_content = displayContent;
+          } catch (dbErr: any) {
+            console.warn("[WelcomeMessage] Erro ao persistir mensagem de boas-vindas no banco local:", dbErr.message);
+          }
+
+          realtimeHub.broadcastToStore(storeId, "chat_message", {
+            conversationId: conversation.id,
+            message: welcomeMsg,
+            conversation
+          });
+
+          console.log(`[WelcomeMessage] Fluxo de boas-vindas concluído para ${cleanPhone} (Loja: "${tenant.name}", Instância: "${targetInstanceName}", Status: ENTREGUE)`);
+          return true;
+        }
       } else {
-        const directText = isolateUrlsInText(`👋 *${storeName}*\n\n${customText}\n\n🛍️ *Acesse nossa Loja Online:*\n\n${storeLink}\n`);
-        console.log(`[WelcomeMessage] Disparando mensagem de texto com link direto para ${cleanPhone} via instância "${targetInstanceName}"...`);
+        // Fluxo em 2 balões separados:
+        // Balão 1: Saudação e orientação (sem o link)
+        const welcomeGreeting = `👋 *${storeName}*\n\n${customText}\n\n🛍️ *Acesse nossa Loja Online:*`;
+        console.log(`[WelcomeMessage] Disparando Balão 1 (Texto) para ${cleanPhone} via instância "${targetInstanceName}"...`);
+        const firstResult = await evolutionApiService.sendTextMessage(
+          targetInstanceName,
+          cleanPhone,
+          welcomeGreeting,
+          { delay: 1000, linkPreview: false }
+        );
+
+        if (!firstResult.success) {
+          throw new Error(firstResult.error || "Falha ao enviar primeiro balão de boas-vindas");
+        }
+
+        // Grava Balão 1 no banco e transmite no WebSocket
+        const welcomeMsgId1 = crypto.randomUUID();
+        const welcomeMsg1 = {
+          id: welcomeMsgId1,
+          conversation_id: conversation.id,
+          sender_type: "BOT",
+          content: welcomeGreeting,
+          is_private: false,
+          created_at: nowIso
+        };
+
+        try {
+          await supabaseAdmin.from("chat_messages").insert([welcomeMsg1]);
+        } catch (dbErr: any) {
+          console.warn("[WelcomeMessage] Erro ao persistir Balão 1 no banco:", dbErr.message);
+        }
+
+        realtimeHub.broadcastToStore(storeId, "chat_message", {
+          conversationId: conversation.id,
+          message: welcomeMsg1,
+          conversation
+        });
+
+        // Intervalo de 800ms a 1200ms (1000ms)
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        // Balão 2: EXCLUSIVAMENTE a URL pura (com linkPreview ativado para gerar a logo da farmácia perfeitamente)
+        console.log(`[WelcomeMessage] Disparando Balão 2 (Link Puro da Loja) para ${cleanPhone} via instância "${targetInstanceName}": ${storeLink.trim()}`);
         dispatchResult = await evolutionApiService.sendTextMessage(
           targetInstanceName,
           cleanPhone,
-          directText,
-          { delay: 2200, linkPreview: true }
+          storeLink.trim(),
+          { delay: 1500, linkPreview: true }
         );
-      }
 
-      dispatchSuccess = Boolean(dispatchResult?.success);
+        dispatchSuccess = Boolean(dispatchResult?.success);
+
+        if (dispatchSuccess) {
+          const nowIso2 = new Date().toISOString();
+          const welcomeMsgId2 = crypto.randomUUID();
+          const welcomeMsg2 = {
+            id: welcomeMsgId2,
+            conversation_id: conversation.id,
+            sender_type: "BOT",
+            content: storeLink.trim(),
+            is_private: false,
+            created_at: nowIso2
+          };
+
+          try {
+            await supabaseAdmin.from("chat_messages").insert([welcomeMsg2]);
+            await supabaseAdmin.from("chat_conversations").update({
+              last_message_at: nowIso2,
+              last_message_content: storeLink.trim(),
+              updated_at: nowIso2
+            }).eq("id", conversation.id);
+            
+            conversation.last_message_at = nowIso2;
+            conversation.last_message_content = storeLink.trim();
+          } catch (dbErr: any) {
+            console.warn("[WelcomeMessage] Erro ao persistir Balão 2 no banco:", dbErr.message);
+          }
+
+          realtimeHub.broadcastToStore(storeId, "chat_message", {
+            conversationId: conversation.id,
+            message: welcomeMsg2,
+            conversation
+          });
+
+          console.log(`[WelcomeMessage] Fluxo de boas-vindas em 2 balões concluído para ${cleanPhone} (Loja: "${tenant.name}", Instância: "${targetInstanceName}", Status: ENTREGUE)`);
+          return true;
+        }
+      }
     } catch (evoDispatchErr: any) {
       console.error(`[WelcomeMessage] [ERRO EVOLUTION] Falha crítica ao disparar mensagem para o WhatsApp do cliente (${cleanPhone}): ${evoDispatchErr.message || evoDispatchErr}`);
       dispatchSuccess = false;
     }
 
-    // 2. Ordem de Persistência no Banco Local e Broadcast WebSocket:
-    // A mensagem só é registrada e exibida no painel após a confirmação de entrega da Evolution API
-    if (dispatchSuccess) {
-      console.log(`[WelcomeMessage] ✅ Mensagem de boas-vindas entregue com sucesso à Evolution API para ${cleanPhone}. Registrando no banco local...`);
-      const welcomeMsgId = crypto.randomUUID();
-      const welcomeMsg = {
-        id: welcomeMsgId,
-        conversation_id: conversation.id,
-        sender_type: "BOT",
-        content: displayContent,
-        is_private: false,
-        created_at: nowIso
-      };
+    console.error(`[WelcomeMessage] [ERRO EVOLUTION] Falha no envio para WhatsApp (${cleanPhone}): HTTP ${dispatchResult?.status || 500} - ${dispatchResult?.error || 'Erro desconhecido'}. Não inserindo no chat como entregue.`);
+    
+    // Reseta last_welcome_sent_at para permitir nova tentativa em mensagens futuras
+    try {
+      await supabaseAdmin
+        .from("chat_conversations")
+        .update({ last_welcome_sent_at: null })
+        .eq("id", conversation.id);
+    } catch (_) {}
 
-      try {
-        await supabaseAdmin.from("chat_messages").insert([welcomeMsg]);
-        await supabaseAdmin.from("chat_conversations").update({
-          last_message_at: nowIso,
-          last_message_content: displayContent,
-          updated_at: nowIso
-        }).eq("id", conversation.id);
-        
-        conversation.last_message_at = nowIso;
-        conversation.last_message_content = displayContent;
-      } catch (dbErr: any) {
-        console.warn("[WelcomeMessage] Erro ao persistir mensagem de boas-vindas no banco local:", dbErr.message);
-      }
-
-      realtimeHub.broadcastToStore(storeId, "chat_message", {
-        conversationId: conversation.id,
-        message: welcomeMsg,
-        conversation
-      });
-
-      console.log(`[WelcomeMessage] Fluxo de boas-vindas concluído para ${cleanPhone} (Loja: "${tenant.name}", Instância: "${targetInstanceName}", Status: ENTREGUE)`);
-      return true;
-    } else {
-      console.error(`[WelcomeMessage] [ERRO EVOLUTION] Falha no envio para WhatsApp (${cleanPhone}): HTTP ${dispatchResult?.status || 500} - ${dispatchResult?.error || 'Erro desconhecido'}. Não inserindo no chat como entregue.`);
-      
-      // Reseta last_welcome_sent_at para permitir nova tentativa em mensagens futuras
-      try {
-        await supabaseAdmin
-          .from("chat_conversations")
-          .update({ last_welcome_sent_at: null })
-          .eq("id", conversation.id);
-      } catch (_) {}
-
-      console.log(`[WelcomeMessage] Fluxo de boas-vindas concluído para ${cleanPhone} (Loja: "${tenant.name}", Instância: "${targetInstanceName}", Status: FALHA)`);
-      return false;
-    }
+    console.log(`[WelcomeMessage] Fluxo de boas-vindas concluído para ${cleanPhone} (Loja: "${tenant.name}", Instância: "${targetInstanceName}", Status: FALHA)`);
+    return false;
   } catch (err: any) {
     console.error("[WelcomeMessage] Erro ao processar mensagem de boas-vindas:", err.message);
     return false;

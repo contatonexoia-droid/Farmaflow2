@@ -138,14 +138,16 @@ export class EvolutionApiService {
     const targetUrl = `${url}/message/sendText/${instanceName.trim()}`;
 
     const hasLink = /(https?:\/\/[^\s]+)/i.test(text);
+    const isPureUrl = /^\s*https?:\/\/[^\s]+\s*$/i.test(text.trim());
     const wantsLinkPreview = options?.linkPreview !== false;
     const shouldEnableLinkPreview = wantsLinkPreview && hasLink;
 
-    // Quando há link, garantimos tempo de resolução suficiente (2000ms - 2500ms) para a Evolution API / Baileys
+    // Quando há link (especialmente URL pura isolada em seu próprio balão),
+    // garantimos tempo de resolução suficiente para a Evolution API / Baileys
     // resolver o DNS, buscar as tags Open Graph (og:image) e renderizar a miniatura (thumbnail) do WhatsApp
-    const defaultDelay = shouldEnableLinkPreview ? 2500 : 1200;
+    const defaultDelay = isPureUrl ? 2000 : (shouldEnableLinkPreview ? 2500 : 1200);
     const effectiveDelay = options?.delay !== undefined 
-      ? Math.max(options.delay, shouldEnableLinkPreview ? 2000 : 800) 
+      ? Math.max(options.delay, isPureUrl ? 1500 : (shouldEnableLinkPreview ? 2000 : 800)) 
       : defaultDelay;
 
     const payload: any = {

@@ -468,6 +468,39 @@ export function isolateUrlsInText(text: string): string {
     .trim();
 }
 
+/**
+ * Separa o texto explicativo da URL para permitir o envio em 2 balões separados no WhatsApp:
+ * Balão 1: Texto de atendimento/orientação (sem o link)
+ * Balão 2: EXCLUSIVAMENTE a URL pura (para que a Evolution API e o WhatsApp gerem o Link Preview perfeito com a logo da farmácia)
+ */
+export function extractUrlAndCleanText(text: string): { mainText: string; url: string | null } {
+  if (!text || typeof text !== "string") return { mainText: "", url: null };
+
+  const urlMatch = text.match(/(https?:\/\/[^\s)]+)/i);
+  if (!urlMatch) {
+    return { mainText: text.trim(), url: null };
+  }
+
+  let rawUrl = urlMatch[1].trim();
+  if (/[.,;!]$/.test(rawUrl)) {
+    rawUrl = rawUrl.slice(0, -1);
+  }
+
+  // Remove a URL e marcadores/emojis associados diretamente
+  let mainText = text
+    .replace(/(?:[\t ]*(?:👉|🔗|🛒|🛍️|🌐)[\t ]*)?(https?:\/\/[^\s)]+)/gi, "")
+    // Remove linhas que continham apenas emojis de indicação de link
+    .replace(/^\s*(?:👉|🔗|🛒|🛍️|🌐)\s*$/gm, "")
+    // Limpa quebras de linha excessivas
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  // Limpa espaços no final de cada linha
+  mainText = mainText.replace(/[\t ]+$/gm, "").trim();
+
+  return { mainText, url: rawUrl };
+}
+
 export interface ChosenProductDetails {
   isChoice: boolean;
   productName: string;
@@ -1205,45 +1238,130 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       return { success: false, error: err };
     }
 
-    // Garante que qualquer URL no texto esteja em linha isolada com quebras antes e depois
+    // 1. Verificar se a mensagem contém link para separação estratégica em 2 balões:
+    // Balão 1: Texto explicativo/atendimento (sem URL)
+    // Balão 2: EXCLUSIVAMENTE a URL pura (para que a Evolution API e o WhatsApp gerem o Link Preview perfeito com a logo da farmácia)
+    const { mainText, url } = extractUrlAndCleanText(replyText);
+    const hasUrlToSplit = Boolean(url && url.startsWith("http"));
     const finalReplyText = isolateUrlsInText(replyText);
-
-    // 2. Disparo na API externa da Evolution API (WhatsApp) com confirmação síncrona
-    console.log(`[AiAgentService] Disparando resposta do BOT para ${cleanPhone} via instância "${targetInstanceName}" (Handoff: ${params.isHandoff ? params.handoffReason : 'NÃO'})...`);
-    const sendResult = await evolutionApiService.sendTextMessage(
-      targetInstanceName,
-      cleanPhone,
-      finalReplyText,
-      {
-        delay: 2200,
-        linkPreview: true
-      }
-    );
-
-    if (!sendResult.success) {
-      console.error(`[AiAgentService] ❌ Falha no envio para o WhatsApp do cliente (${cleanPhone}):`, sendResult.error);
-      return { success: false, error: sendResult.error || "WHATSAPP_DELIVERY_FAILED" };
-    }
-
-    console.log(`[AiAgentService] ✅ Mensagem entregue com sucesso ao WhatsApp de ${cleanPhone}. Gravando no banco de dados e atualizando estado da conversa.`);
-
-    // 3. Registra a resposta da IA na tabela messages / chat_messages do Supabase APENAS após confirmação
-    const { message: recordedMsg } = await chatStore.addMessage(
-      realTenantId,
-      conversationId,
-      "BOT",
-      finalReplyText,
-      false,
-      undefined,
-      undefined,
-      targetInstanceName,
-      true // skipWhatsAppDispatch: true (já entregue via Evolution API)
-    );
-
     const nowIso = new Date().toISOString();
     const nextCount = params.nextCount;
 
+    if (hasUrlToSplit && mainText && mainText.trim().length > 0) {
+      console.log(`[AiAgentService] 💬 Fluxo de 2 balões ativado para ${cleanPhone} (Handoff: ${params.isHandoff ? params.handoffReason : 'NÃO'})`);
+      
+      // DISPARO DO BALÃO 1: Texto Principal (sem o link)
+      console.log(`[AiAgentService] Disparando Balão 1 (Texto Principal) para ${cleanPhone} via "${targetInstanceName}"...`);
+      const sendResult1 = await evolutionApiService.sendTextMessage(
+        targetInstanceName,
+        cleanPhone,
+        mainText,
+        {
+          delay: 1000,
+          linkPreview: false
+        }
+      );
+
+      if (!sendResult1.success) {
+        console.error(`[AiAgentService] ❌ Falha no envio do Balão 1 para o WhatsApp do cliente (${cleanPhone}):`, sendResult1.error);
+        return { success: false, error: sendResult1.error || "WHATSAPP_DELIVERY_FAILED" };
+      }
+
+      // Registra Balão 1 na tabela de mensagens e no chatStore
+      const { message: msg1 } = await chatStore.addMessage(
+        realTenantId,
+        conversationId,
+        "BOT",
+        mainText,
+        false,
+        undefined,
+        undefined,
+        targetInstanceName,
+        true
+      );
+
+      realtimeHub.broadcastToStore(realTenantId, "chat_message", {
+        conversationId,
+        message: msg1
+      });
+
+      // Intervalo entre balões de 800ms a 1200ms (1000ms)
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      // DISPARO DO BALÃO 2: EXCLUSIVAMENTE a URL (ativa o Link Preview perfeito sem poluição de texto)
+      console.log(`[AiAgentService] Disparando Balão 2 (URL Pura com Link Preview) para ${cleanPhone} via "${targetInstanceName}": ${url}`);
+      const sendResult2 = await evolutionApiService.sendTextMessage(
+        targetInstanceName,
+        cleanPhone,
+        url,
+        {
+          delay: 1500,
+          linkPreview: true
+        }
+      );
+
+      if (!sendResult2.success) {
+        console.warn(`[AiAgentService] ⚠️ Aviso: Balão 2 (URL) falhou no WhatsApp, mas Balão 1 já foi entregue:`, sendResult2.error);
+      } else {
+        // Registra Balão 2 na tabela de mensagens e no chatStore
+        const { message: msg2 } = await chatStore.addMessage(
+          realTenantId,
+          conversationId,
+          "BOT",
+          url,
+          false,
+          undefined,
+          undefined,
+          targetInstanceName,
+          true
+        );
+
+        realtimeHub.broadcastToStore(realTenantId, "chat_message", {
+          conversationId,
+          message: msg2
+        });
+      }
+    } else {
+      // Disparo único convencional (sem URL ou caso especial)
+      console.log(`[AiAgentService] Disparando resposta única do BOT para ${cleanPhone} via instância "${targetInstanceName}" (Handoff: ${params.isHandoff ? params.handoffReason : 'NÃO'})...`);
+      const sendResult = await evolutionApiService.sendTextMessage(
+        targetInstanceName,
+        cleanPhone,
+        finalReplyText,
+        {
+          delay: 1200,
+          linkPreview: false
+        }
+      );
+
+      if (!sendResult.success) {
+        console.error(`[AiAgentService] ❌ Falha no envio para o WhatsApp do cliente (${cleanPhone}):`, sendResult.error);
+        return { success: false, error: sendResult.error || "WHATSAPP_DELIVERY_FAILED" };
+      }
+
+      // Registra a resposta única
+      const { message: singleMsg } = await chatStore.addMessage(
+        realTenantId,
+        conversationId,
+        "BOT",
+        finalReplyText,
+        false,
+        undefined,
+        undefined,
+        targetInstanceName,
+        true
+      );
+
+      realtimeHub.broadcastToStore(realTenantId, "chat_message", {
+        conversationId,
+        message: singleMsg
+      });
+    }
+
+    console.log(`[AiAgentService] ✅ Mensagem(ns) entregue(s) com sucesso ao WhatsApp de ${cleanPhone}. Atualizando estado da conversa.`);
+
     // 4. Incremento do Contador de Interações e Atualização Atômica de Estado
+    const lastContentRecorded = url || mainText || finalReplyText;
     if (params.isHandoff) {
       const handoffReason = params.handoffReason || "HUMAN_REQUESTED";
       const handoffPayload: any = {
@@ -1255,7 +1373,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         bot_handoff_reason: handoffReason,
         bot_handoff_at: nowIso,
         last_message_at: nowIso,
-        last_message_content: finalReplyText,
+        last_message_content: lastContentRecorded,
         updated_at: nowIso
       };
 
@@ -1318,7 +1436,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         bot_handoff_reason: null,
         bot_handoff_at: null,
         last_message_at: nowIso,
-        last_message_content: finalReplyText,
+        last_message_content: lastContentRecorded,
         updated_at: nowIso
       };
 
@@ -1343,12 +1461,6 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         kanban_stage: "ia_atendendo"
       });
     }
-
-    // 5. Broadcast da mensagem gravada para o chat em tempo real
-    realtimeHub.broadcastToStore(realTenantId, "chat_message", {
-      conversationId,
-      message: recordedMsg
-    });
 
     return { success: true };
   }
