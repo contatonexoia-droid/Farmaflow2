@@ -309,9 +309,9 @@ async function getTenantMetaRecord(identifier: string, req: express.Request): Pr
   const storeName = tenant.name || tenant.razao_social || "FarmaFlow Drogaria";
   const locParts = [tenant.neighborhood, tenant.city, tenant.state].filter(Boolean);
   const location = locParts.length > 0 ? locParts.join(" - ") : "";
-  const title = `${storeName}${location ? ` (${location})` : ""} - Farmácia Online & Delivery`;
+  let title = `${storeName}${location ? ` (${location})` : ""} - Farmácia Online & Delivery`;
 
-  const description =
+  let description =
     tenant.description ||
     tenant.banner_subtitle ||
     tenant.bannersubtitle ||
@@ -335,6 +335,29 @@ async function getTenantMetaRecord(identifier: string, req: express.Request): Pr
     canonicalUrl = `https://${tenant.custom_domain.replace(/^https?:\/\//, "").trim()}`;
   } else if (host.endsWith(".farmaflow.online") && host !== "farmaflow.online" && host !== "www.farmaflow.online") {
     canonicalUrl = `${proto}://${host}`;
+  }
+
+  // Enriquecimento com dados de produto específico para Link Preview no WhatsApp
+  const targetProdId = (req.query?.produto || req.query?.prod || req.query?.product || req.params?.id || "").toString().trim();
+  if (targetProdId) {
+    try {
+      const { data: prodData } = await supabase
+        .from("products")
+        .select("id, name, slug, price, presentation, image, image_url")
+        .or(`id.eq.${targetProdId},slug.eq.${targetProdId}`)
+        .limit(1)
+        .maybeSingle();
+
+      if (prodData) {
+        const prodPrice = Number(prodData.price) > 0 ? ` - R$ ${Number(prodData.price).toFixed(2).replace('.', ',')}` : "";
+        title = `${prodData.name}${prodPrice} | ${storeName}`;
+        description = `${prodData.presentation ? `${prodData.presentation}. ` : ""}Peça online na ${storeName} com entrega rápida e pagamento facilitado no WhatsApp.`;
+        const prodImg = (prodData.image || prodData.image_url || "").trim();
+        if ((prodImg.startsWith("http://") || prodImg.startsWith("https://")) && !prodImg.startsWith("data:")) {
+          logoUrl = prodImg;
+        }
+      }
+    } catch (_) {}
   }
 
   return {
@@ -479,11 +502,12 @@ app.get(["/api/v1/store/:tenantId/logo.png", "/api/store-logo/:tenantId.png"], a
 // Endpoint /api/og e /api/og-handler de Metadados / Rich Preview Card para Integrações e Crawlers
 app.all(["/api/og-handler", "/api/og"], ogHandler);
 
-// Interceptor de Rota de Loja Pública (/loja/:slug)
-app.get(["/loja/:slug", "/loja/:slug/*all"], async (req, res, next) => {
+// Interceptor de Rota de Loja Pública (/loja/:slug e /produto/:id)
+app.get(["/loja/:slug", "/loja/:slug/*all", "/produto/:id", "/produto/:id/*all", "/loja/:slug/produto/:id"], async (req, res, next) => {
   try {
     const slug = Array.isArray(req.params.slug) ? req.params.slug[0] : String(req.params.slug || "");
-    const meta = await getTenantMetaRecord(slug, req);
+    const prodId = Array.isArray(req.params.id) ? req.params.id[0] : String(req.params.id || "");
+    const meta = await getTenantMetaRecord(slug || prodId, req);
     if (!meta) return next();
 
     const isCrawler = isSocialCrawler((req.headers["user-agent"] as string) || "");

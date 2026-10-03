@@ -73,7 +73,11 @@ import { getStoreUrl } from "./lib/store";
 if (typeof window !== "undefined") {
   try {
     const p = new URLSearchParams(window.location.search);
-    const prod = p.get("produto") || p.get("prod") || p.get("product") || p.get("p_id") || p.get("item");
+    let prod = p.get("produto") || p.get("prod") || p.get("product") || p.get("p_id") || p.get("item");
+    const pathMatch = window.location.pathname.match(/\/produto\/([^\/?#]+)/i);
+    if (!prod && pathMatch && pathMatch[1]) {
+      prod = decodeURIComponent(pathMatch[1]);
+    }
     const search = p.get("busca") || p.get("q") || p.get("search") || p.get("termo");
     if (prod) {
       sessionStorage.setItem("ff_deeplink_produto", prod.trim());

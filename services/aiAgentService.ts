@@ -7,7 +7,8 @@ import {
   detectHumanHandoffIntent, 
   isWeblojaOrderMessage,
   detectCustomerChoiceIntent,
-  buildHumanizedHandoffMessage 
+  buildHumanizedHandoffMessage,
+  buildProductHandoffMessage 
 } from "./botHandoffManager.js";
 import { realtimeHub } from "./realtimeHub.js";
 import { evolutionApiService } from "./evolutionApiService.js";
@@ -66,20 +67,21 @@ Seu objetivo é recepcionar o cliente com agilidade, tirar dúvidas sobre medica
    - Se o cliente pediu uma dosagem ou formato que realmente NÃO temos em estoque:
      * Diga educadamente e de forma curta que o formato específico não está disponível no momento e ofereça a alternativa mais próxima.
 
-4. RECONHECIMENTO DE ESCOLHA DO CLIENTE E TRANSLADO/CONCLUSÃO:
+4. RECONHECIMENTO DE ESCOLHA DO CLIENTE E LINK DIRETO DO PRODUTO:
    - Se o cliente responder escolhendo uma opção (ex: "vou querer a [marca]", "vou querer essa", "pode ser o número 1", "adiciona a de 4,49", "vou levar", "prefiro a ems"):
      * NUNCA repita a lista de produtos ou alternativas.
      * NÃO apresente novas opções de medicamentos.
-     * Envie exatamente a seguinte resposta acolhedora e comercial:
-       "Perfeito! Já anotei a sua preferência. 😊
+     * Envie a confirmação personalizada com o nome do item escolhido, valor e link direto:
+       "Perfeito! Já separei para você:
+       💊 *{nome_produto_escolhido}* - R$ {preco} 😊
 
-       🛒 *Dica para agilizar:* Você pode concluir seu pedido agora mesmo pela nossa loja online:
+       🛒 **Link direto para concluir seu pedido:**
+       👉 {link_direto_do_produto}
 
-       {STORE_LINK}
+       *(Pelo link você fecha em menos de 1 minuto, escolhe a forma de pagamento e seu pedido chega mais rápido!)*
 
-       *(É muito mais rápido, prático e 100% seguro!)*
-
-       💬 *Prefere continuar por aqui?* Sem problemas! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido."
+       💬 **Prefere continuar aqui pelo WhatsApp?**
+       Sem problemas! Um dos nossos balconistas já vai assumir o atendimento para finalizar seu pedido."
      * Inclua a tag [TRANSFERIR_ATENDIMENTO] para transferir a conversa para a equipe de balcão imediatamente.
 
 5. CANAL PREFERENCIAL (CATÁLOGO ONLINE):
@@ -452,17 +454,202 @@ function productMatchesDosage(product: any, detectedDosage: string | null): bool
 export function isolateUrlsInText(text: string): string {
   if (!text || typeof text !== "string") return text;
   return text
-    .replace(/(?:[\t ]*(?:👉|🔗|🛒|🛍️|🌐)[\t ]*)?(https?:\/\/[^\s)]+)/gi, (match, rawUrl) => {
+    .replace(/([\t ]*(?:👉|🔗|🛒|🛍️|🌐)[\t ]*)?(https?:\/\/[^\s)]+)/gi, (match, emojiPrefix, rawUrl) => {
       let url = rawUrl.trim();
       let trailingPunct = "";
       if (/[.,;!]$/.test(url)) {
         trailingPunct = url.slice(-1);
         url = url.slice(0, -1);
       }
-      return `\n\n${url}\n\n${trailingPunct}`;
+      const prefix = emojiPrefix && emojiPrefix.trim() ? `${emojiPrefix.trim()}\n\n` : "";
+      return `\n\n${prefix}${url}\n\n${trailingPunct}`;
     })
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+export interface ChosenProductDetails {
+  isChoice: boolean;
+  productName: string;
+  priceFormatted: string;
+  directProductUrl: string;
+  productId?: string;
+  matchedOption?: any;
+}
+
+/**
+ * Identifica com precisão o produto escolhido pelo cliente no histórico recente
+ * e gera o link direto do produto na loja online para conclusão imediata.
+ */
+export async function resolveCustomerChosenProduct(
+  incomingMessage: string,
+  history: Array<{ role: string; content: string }>,
+  tenantIds: string[],
+  storeLink: string
+): Promise<ChosenProductDetails | null> {
+  const choiceCheck = detectCustomerChoiceIntent(incomingMessage, history);
+  if (!choiceCheck.isChoice) return null;
+
+  // 1. Procurar na história a última mensagem do bot que apresentou opções ao cliente
+  const lastBotMsg = history.slice().reverse().find(m => m.role === "assistant" || m.role === "model");
+  const optionsText = lastBotMsg?.content || "";
+
+  // 2. Extrair opções numeradas ou listadas (ex: "1️⃣ Germed 20ml (500mg/ml) - R$ 7,49")
+  const lines = optionsText.split("\n");
+  const options: Array<{ idx: number; name: string; price: string; rawLine: string }> = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const m = trimmed.match(/^(?:([1-9])(?:️⃣|⃣|\.|\)|\s*[-–])\s*)(.+)/u);
+    if (m) {
+      const idx = parseInt(m[1], 10);
+      const rest = m[2].trim();
+      const priceMatch = rest.match(/R\$\s*([0-9]+[.,][0-9]{2})/i);
+      const price = priceMatch ? priceMatch[1].replace(".", ",") : "";
+      let cleanName = rest
+        .replace(/⭐\s*Mais\s*econômica/gi, "")
+        .replace(/⭐\s*Mais\s*economica/gi, "")
+        .replace(/-?\s*R\$\s*[0-9]+[.,][0-9]{2}.*/i, "")
+        .trim();
+      options.push({ idx, name: cleanName, price, rawLine: trimmed });
+    }
+  }
+
+  // 3. Identificar qual opção foi escolhida pelo cliente
+  let matchedOption: { idx: number; name: string; price: string; rawLine: string } | null = null;
+  const norm = incomingMessage.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+  // Por número ou ordinal (ex: "1", "o número 2", "a primeira", "opção 3")
+  const numMatch = norm.match(/\b(?:numero|opcao|n[°ºo]?|o|a)?\s*([1-9])\b/i);
+  if (numMatch) {
+    const idx = parseInt(numMatch[1], 10);
+    matchedOption = options.find(o => o.idx === idx) || null;
+  }
+  if (!matchedOption && /\b(primeir[ao]|1[aªoº])\b/i.test(norm)) matchedOption = options.find(o => o.idx === 1) || null;
+  if (!matchedOption && /\b(segund[ao]|2[aªoº])\b/i.test(norm)) matchedOption = options.find(o => o.idx === 2) || null;
+  if (!matchedOption && /\b(terceir[ao]|3[aªoº])\b/i.test(norm)) matchedOption = options.find(o => o.idx === 3) || null;
+  if (!matchedOption && /\b(quart[ao]|4[aªoº])\b/i.test(norm)) matchedOption = options.find(o => o.idx === 4) || null;
+
+  // Por valor monetário mencionado (ex: "essa de 5,99", "o de 7,49")
+  if (!matchedOption) {
+    const priceMatch = norm.match(/([0-9]+[.,][0-9]{2})/);
+    if (priceMatch) {
+      const pStr = priceMatch[1].replace(".", ",");
+      matchedOption = options.find(o => o.price === pStr) || null;
+    }
+  }
+
+  // Por critério econômico ("a mais barata", "mais econômica", "em conta")
+  if (!matchedOption && /\b(mais\s+barat[ao]|mais\s+economic[ao]|em\s+conta)\b/i.test(norm)) {
+    matchedOption = options[0] || null;
+  }
+
+  // Por marca ou palavra-chave mencionada (ex: "vou querer a dipimed", "quero a germed", "a medley", "ems")
+  if (!matchedOption && options.length > 0) {
+    for (const opt of options) {
+      const optNorm = opt.name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      const words = optNorm.split(/[\s()\-/,]+/).filter(w => w.length >= 3 && !["comprimidos", "gotas", "solucao"].includes(w));
+      for (const w of words) {
+        if (norm.includes(w)) {
+          matchedOption = opt;
+          break;
+        }
+      }
+      if (matchedOption) break;
+    }
+  }
+
+  // Se o cliente usou demonstrativo ("quero essa", "pode ser essa", "vou levar") sem especificar número
+  if (!matchedOption && options.length > 0) {
+    matchedOption = options[0];
+  }
+
+  // 4. Localizar o produto correspondente no banco de dados da farmácia
+  let chosenName = matchedOption?.name || "";
+  let chosenPrice = matchedOption?.price || "";
+  let dbProduct: any = null;
+
+  // Identificar termo de busca para localizar o produto no DB
+  let searchWord = "";
+  if (matchedOption) {
+    const tokens = matchedOption.name.split(/[\s()\-/,]+/).filter(w => w.length >= 3);
+    searchWord = tokens[0] || matchedOption.name;
+  } else {
+    // Tenta extrair a marca/item mencionado diretamente na mensagem (ex: "vou querer a dipimed" -> "dipimed")
+    searchWord = norm
+      .replace(/\b(vou\s+(querer|levar|ficar|comprar|pegar)|quero|pode\s+ser|adiciona|separa|prefiro|a|o|da|do|de|essa|esse|esta|este)\b/g, " ")
+      .trim()
+      .split(/\s+/)[0] || "";
+  }
+
+  const effectiveTenantIds = tenantIds.length > 0 ? tenantIds : ["nosso-catalogo"];
+
+  if (searchWord && searchWord.length >= 2) {
+    try {
+      const { data: prods } = await supabaseAdmin
+        .from("products")
+        .select("id, name, price, stock, presentation, manufacturer, grouping_slug")
+        .in("tenant_id", effectiveTenantIds)
+        .or(`name.ilike.%${searchWord}%,manufacturer.ilike.%${searchWord}%`)
+        .order("stock", { ascending: false })
+        .limit(25);
+
+      if (prods && prods.length > 0) {
+        // Se tiver preço conhecido, buscar produto com preço exato ou mais próximo
+        if (chosenPrice) {
+          const pNum = parseFloat(chosenPrice.replace(",", "."));
+          const matchPrice = prods.find(p => Math.abs(Number(p.price) - pNum) < 0.05);
+          if (matchPrice) dbProduct = matchPrice;
+        }
+
+        // Se a opção contiver "20ml" ou "10ml", filtrar
+        if (!dbProduct && chosenName) {
+          const volMatch = chosenName.match(/\b(\d+ml)\b/i);
+          if (volMatch) {
+            const vol = volMatch[1].toLowerCase();
+            const matchVol = prods.find(p => `${p.name} ${p.presentation}`.toLowerCase().includes(vol));
+            if (matchVol) dbProduct = matchVol;
+          }
+        }
+
+        if (!dbProduct) {
+          dbProduct = prods[0];
+        }
+      }
+    } catch (e: any) {
+      console.warn("[AiAgentService] Erro ao buscar produto escolhido no banco:", e.message);
+    }
+  }
+
+  // 5. Construir o Link Direto e Dados Finais do Produto
+  const cleanStoreUrl = (storeLink || "https://farmaflow.online").replace(/\/+$/, "");
+  let directProductUrl = "";
+
+  if (dbProduct && (dbProduct.grouping_slug || dbProduct.slug || dbProduct.id)) {
+    const slugOrId = dbProduct.slug || dbProduct.grouping_slug || dbProduct.id;
+    directProductUrl = `${cleanStoreUrl}/produto/${slugOrId}`;
+    if (!chosenName) {
+      chosenName = formatMedicineLabel(dbProduct) || dbProduct.name;
+    }
+    if (!chosenPrice && dbProduct.price) {
+      chosenPrice = Number(dbProduct.price).toFixed(2).replace(".", ",");
+    }
+  } else {
+    const term = chosenName || searchWord || incomingMessage.trim();
+    directProductUrl = `${cleanStoreUrl}/?busca=${encodeURIComponent(term)}`;
+  }
+
+  if (!chosenName) chosenName = "Medicamento Selecionado";
+  if (!chosenPrice) chosenPrice = "Consulte na loja";
+
+  return {
+    isChoice: true,
+    productName: chosenName,
+    priceFormatted: chosenPrice,
+    directProductUrl,
+    productId: dbProduct?.id,
+    matchedOption
+  };
 }
 
 export class AiAgentService {
@@ -778,38 +965,42 @@ RECONHECIMENTO DE ESCOLHA DO CLIENTE E TRANSLADO/CONCLUSÃO:
     // 6. Busca contextual aprofundada de produtos no banco de dados real da drogaria
     let catalogContext = "";
     const choiceCheck = detectCustomerChoiceIntent(incomingMessage, chatHistory);
+    let resolvedChoice: ChosenProductDetails | null = null;
+
+    const tenantIds = Array.from(
+      new Set(
+        [
+          tenantId,
+          tenant.id,
+          tenant.slug,
+          tenant.network_id,
+          tenant.networkid
+        ].filter(Boolean)
+      )
+    );
 
     if (choiceCheck.isChoice) {
+      resolvedChoice = await resolveCustomerChosenProduct(
+        incomingMessage,
+        chatHistory,
+        tenantIds.length > 0 ? tenantIds : [tenant.id || tenantId],
+        storeLink
+      );
+
+      const chosenMsg = resolvedChoice
+        ? buildProductHandoffMessage(resolvedChoice.productName, resolvedChoice.priceFormatted, resolvedChoice.directProductUrl)
+        : buildHumanizedHandoffMessage(storeLink);
+
       catalogContext = `\n\n[AVISO CRÍTICO DO SISTEMA - ESCOLHA DO CLIENTE DETECTADA]:
 O cliente escolheu uma opção ou demonstrou intenção de compra ("${incomingMessage}").
 - NUNCA repita a lista de produtos ou opções.
 - NÃO apresente novas opções de medicamentos.
-- Envie exatamente a resposta de conclusão e transbordo:
-Perfeito! Já anotei a sua preferência. 😊
-
-🛒 *Dica para agilizar:* Você pode concluir seu pedido agora mesmo pela nossa loja online:
-
-${storeLink}
-
-*(É muito mais rápido, prático e 100% seguro!)*
-
-💬 **Prefere continuar por aqui?** Sem problemas! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.
+- Envie exatamente a seguinte resposta oficial de conclusão com link direto e transbordo:
+${chosenMsg}
 [TRANSFERIR_ATENDIMENTO]`;
     } else {
       const searchTerms = extractKeywordsAndIntents(incomingMessage);
       const primarySearchTerm = searchTerms[0] || incomingMessage.trim().split(/\s+/)[0] || "";
-
-      const tenantIds = Array.from(
-        new Set(
-          [
-            tenantId,
-            tenant.id,
-            tenant.slug,
-            tenant.network_id,
-            tenant.networkid
-          ].filter(Boolean)
-        )
-      );
 
       try {
         const matchedProducts = await this.searchProductsInDb(
@@ -911,9 +1102,11 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       .replace(/\[(TRANSFERIR_ATENDIMENTO|TRANSFER_TO_HUMAN|HANDOFF_HUMAN|TRANSBORDO)\]/gi, '')
       .trim();
 
-    // Se o cliente escolheu uma opção, garante a mensagem oficial de conclusão e transbordo acolhedor
+    // Se o cliente escolheu uma opção, garante a mensagem oficial de conclusão e transbordo acolhedor com link direto do produto
     if (choiceCheck.isChoice) {
-      enforcedReply = buildHumanizedHandoffMessage(storeLink);
+      enforcedReply = resolvedChoice
+        ? buildProductHandoffMessage(resolvedChoice.productName, resolvedChoice.priceFormatted, resolvedChoice.directProductUrl)
+        : buildHumanizedHandoffMessage(storeLink);
     } else {
       // Sanitização de múltiplos links por produto em listagens (evita poluição visual)
       enforcedReply = this.sanitizeExcessiveProductLinks(enforcedReply, incomingMessage, storeLink);
@@ -1375,15 +1568,48 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       }
 
       // 8. Carregar histórico recente da conversa para contexto
-      const history = options?.chatHistory || [];
+      let history = options?.chatHistory || [];
+      if (!history || history.length === 0) {
+        try {
+          const rawMsgs = await chatStore.getMessages(conversationId);
+          if (rawMsgs && rawMsgs.length > 0) {
+            history = rawMsgs.slice(-15).map((m: any) => ({
+              role: (m.sender_type === "CUSTOMER" || m.sender === "CUSTOMER" || m.senderType === "CUSTOMER") ? "user" : "assistant",
+              content: m.content || ""
+            }));
+          }
+        } catch (_) {}
+      }
+
       const nextCount = currentCount + 1;
       const isFinalTurn = nextCount >= maxInteractions;
 
       // 8.1. Detecção Especial de Escolha de Produto / Intenção de Compra pelo Cliente
       const choiceCheck = detectCustomerChoiceIntent(incomingMessage, history);
       if (choiceCheck.isChoice) {
-        console.log(`[AiAgentService] 🎯 Escolha do cliente detectada ("${incomingMessage}") na conversa ${conversationId}. Disparando conclusão/transbordo humanizado sem repetir opções.`);
-        const humanizedReply = buildHumanizedHandoffMessage(storeLink);
+        console.log(`[AiAgentService] 🎯 Escolha do cliente detectada ("${incomingMessage}") na conversa ${conversationId}. Identificando produto selecionado para gerar link direto.`);
+        const tenantIds = Array.from(
+          new Set(
+            [
+              realTenantId,
+              tenant.id,
+              tenant.slug,
+              tenant.network_id,
+              tenant.networkid
+            ].filter(Boolean)
+          )
+        );
+
+        const resolvedChoice = await resolveCustomerChosenProduct(
+          incomingMessage,
+          history,
+          tenantIds.length > 0 ? tenantIds : [realTenantId],
+          storeLink
+        );
+
+        const humanizedReply = resolvedChoice
+          ? buildProductHandoffMessage(resolvedChoice.productName, resolvedChoice.priceFormatted, resolvedChoice.directProductUrl)
+          : buildHumanizedHandoffMessage(storeLink);
 
         const dispatchResult = await this.dispatchBotReplyAndRecord(
           realTenantId,

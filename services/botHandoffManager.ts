@@ -166,9 +166,38 @@ export function detectCustomerChoiceIntent(
 }
 
 /**
+ * Mensagem de confirmação personalizada com o link direto do produto escolhido
+ */
+export function buildProductHandoffMessage(
+  productName: string,
+  priceFormatted: string,
+  directProductUrl: string
+): string {
+  const cleanUrl = String(directProductUrl || "").trim();
+  return `Perfeito! Já separei para você:
+💊 *${productName}* - R$ ${priceFormatted} 😊
+
+🛒 **Link direto para concluir seu pedido:**
+👉 
+
+${cleanUrl}
+
+*(Pelo link você fecha em menos de 1 minuto, escolhe a forma de pagamento e seu pedido chega mais rápido!)*
+
+💬 **Prefere continuar aqui pelo WhatsApp?**
+Sem problemas! Um dos nossos balconistas já vai assumir o atendimento para finalizar seu pedido.`;
+}
+
+/**
  * Mensagem de conclusão acolhedora e comercial com incentivo à Webloja e transbordo ao balconista
  */
-export function buildHumanizedHandoffMessage(storeUrl: string): string {
+export function buildHumanizedHandoffMessage(
+  storeUrl: string,
+  productInfo?: { name: string; price: string; link: string }
+): string {
+  if (productInfo && productInfo.name && productInfo.link) {
+    return buildProductHandoffMessage(productInfo.name, productInfo.price, productInfo.link);
+  }
   const cleanUrl = (storeUrl || "https://farmaflow.online").replace(/\/+$/, "");
   return `Perfeito! Já anotei a sua preferência. 😊
 
