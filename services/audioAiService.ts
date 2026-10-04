@@ -123,51 +123,60 @@ export async function transcribeAudio(params: TranscribeAudioParams): Promise<st
   const { audioBase64OrUrl } = params;
   if (!audioBase64OrUrl) return null;
 
-  // 1. Extração do Base64 puro e do MimeType
-  let base64Data = audioBase64OrUrl;
-  let resolvedMime = params.mimeType || "audio/ogg";
+  // a) Validação e Log da API Key
+  const resolvedApiKey = resolveOpenAiApiKey(params);
+  console.log('[AUDIO_DEBUG] OpenAI API Key presente?', Boolean(resolvedApiKey), 'Tam:', resolvedApiKey?.length);
 
-  if (audioBase64OrUrl.startsWith("data:")) {
-    const match = audioBase64OrUrl.match(/^data:([^;]+);base64,(.+)$/);
-    if (match) {
-      resolvedMime = match[1];
-      base64Data = match[2];
-    }
-  } else if (audioBase64OrUrl.startsWith("http://") || audioBase64OrUrl.startsWith("https://")) {
+  if (!resolvedApiKey) {
+    console.error('[AUDIO_DEBUG] Nenhuma API Key encontrada para transcrição.');
+    return null;
+  }
+
+  // 1. Extração do Base64 puro se for URL remota
+  let base64Data = audioBase64OrUrl;
+  if (audioBase64OrUrl.startsWith("http://") || audioBase64OrUrl.startsWith("https://")) {
     try {
+      console.log('[AUDIO_DEBUG] Baixando áudio de URL remota:', audioBase64OrUrl.slice(0, 60));
       const fetchRes = await fetch(audioBase64OrUrl);
       if (fetchRes.ok) {
         const arrayBuf = await fetchRes.arrayBuffer();
         base64Data = Buffer.from(arrayBuf).toString("base64");
-        const ct = fetchRes.headers.get("content-type");
-        if (ct) resolvedMime = ct.split(";")[0].trim();
+      } else {
+        console.error('[AUDIO_DEBUG] Falha ao baixar áudio da URL:', fetchRes.status, await fetchRes.text());
       }
     } catch (e: any) {
       console.warn("[AUDIO_DEBUG] Erro ao baixar áudio da URL:", e.message);
     }
   }
 
-  const cleanBase64 = base64Data.replace(/^data:[^;]+;base64,/, '').replace(/\s/g, '');
-  if (!cleanBase64 || cleanBase64.length < 50) {
-    console.warn("[AUDIO_DEBUG] Buffer de áudio vazio ou muito pequeno para transcrição.");
+  // b) Sanitização Rigorosa do Base64
+  let rawBase64 = base64Data;
+  if (rawBase64.includes(',')) {
+    rawBase64 = rawBase64.split(',')[1];
+  }
+  rawBase64 = rawBase64.replace(/\s/g, '');
+  const audioBuffer = Buffer.from(rawBase64, 'base64');
+  console.log('[AUDIO_DEBUG] Tamanho do buffer de áudio decodificado (bytes):', audioBuffer.length);
+
+  if (!audioBuffer || audioBuffer.length < 50) {
+    console.warn("[AUDIO_DEBUG] Buffer de áudio vazio ou muito pequeno para transcrição:", audioBuffer.length);
     return null;
   }
 
-  console.log(`[AUDIO_DEBUG] Tentando obter base64 da mensagem... tamanho: ${cleanBase64.length} bytes`);
-
+  // c) Detecção de Formato e Envio Seguro para o Whisper
   try {
-    const resolvedApiKey = resolveOpenAiApiKey(params);
-    if (!resolvedApiKey) {
-      console.error("[AUDIO_DEBUG] Nenhuma chave OpenAI encontrada nas configurações do tenant ou em OPENAI_API_KEY.");
-      return null;
-    }
-
     const openai = new OpenAI({ apiKey: resolvedApiKey });
 
-    const audioBuffer = Buffer.from(cleanBase64, 'base64');
-    const ext = resolvedMime.includes("mp3") ? "mp3" : resolvedMime.includes("wav") ? "wav" : resolvedMime.includes("m4a") ? "m4a" : "ogg";
-    const mime = ext === "ogg" ? "audio/ogg" : `audio/${ext}`;
-    const audioFile = await toFile(audioBuffer, `audio.${ext}`, { type: mime });
+    // Se começar com ID3 ou 0xFF 0xFB/0xF3 é MP3, caso contrário tratar como OGG
+    const isMp3 = audioBuffer.length > 3 && (
+      (audioBuffer[0] === 0x49 && audioBuffer[1] === 0x44 && audioBuffer[2] === 0x33) ||
+      (audioBuffer[0] === 0xFF && (audioBuffer[1] & 0xE0) === 0xE0)
+    );
+    const fileName = isMp3 ? 'audio.mp3' : 'audio.ogg';
+    const mimeType = isMp3 ? 'audio/mpeg' : 'audio/ogg';
+
+    console.log('[AUDIO_DEBUG] Formato detectado:', fileName, mimeType);
+    const audioFile = await toFile(audioBuffer, fileName, { type: mimeType });
 
     const transcriptionResponse = await openai.audio.transcriptions.create({
       file: audioFile,
@@ -178,8 +187,9 @@ export async function transcribeAudio(params: TranscribeAudioParams): Promise<st
     const transcribedText = transcriptionResponse.text?.trim();
     console.log('[AUDIO_DEBUG] Transcrição Whisper com sucesso:', transcribedText);
     return transcribedText || null;
-  } catch (err: any) {
-    console.error("[AUDIO_DEBUG] Falha na transcrição OpenAI Whisper:", err?.message || err);
+  } catch (error: any) {
+    // d) Log do Erro Real no Catch
+    console.error('[AUDIO_DEBUG] Erro detalhado no transcribeAudio:', error?.response?.data || error?.message || error);
     return null;
   }
 }

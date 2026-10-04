@@ -613,19 +613,29 @@ export class EvolutionApiService {
       }
 
       // Formas de payload suportadas pela Evolution API v2
+      const rawKey = message.key || message.data?.key || message.message?.key || {};
+      const rawMessageContent = message.message || message.data?.message || message;
+
+      const messagePayload = {
+        message: {
+          key: rawKey,
+          message: rawMessageContent
+        },
+        convertToMp3: true
+      };
+
       const payloadsToTry = [
+        messagePayload,
         {
           message: message,
-          convertToMp3: isAudioMsg,
+          convertToMp3: true,
           convertToMp4: false
         },
         {
           message: {
-            key: message.key || message.data?.key,
-            message: message.message || message.data?.message || message
-          },
-          convertToMp3: isAudioMsg,
-          convertToMp4: false
+            key: rawKey,
+            message: rawMessageContent
+          }
         },
         {
           message: message
@@ -640,6 +650,7 @@ export class EvolutionApiService {
       for (const endpoint of endpoints) {
         for (const payload of payloadsToTry) {
           try {
+            console.log(`[AUDIO_DEBUG] Chamando Evolution API (${endpoint}) para obter mídia...`);
             const res = await fetch(endpoint, {
               method: "POST",
               headers: {
@@ -666,10 +677,15 @@ export class EvolutionApiService {
                 // Se for base64 puro, limpa espaços/newlines e monta a Data URI completa
                 const cleanBase64 = rawBase64.replace(/\s/g, '');
                 return `data:${returnedMime};base64,${cleanBase64}`;
+              } else {
+                console.warn(`[AUDIO_DEBUG] Evolution API retornou status 200 no endpoint ${endpoint}, mas sem base64 válido:`, JSON.stringify(data));
               }
+            } else {
+              const errText = await res.text();
+              console.error(`[AUDIO_DEBUG] Evolution API retornou status ${res.status} no endpoint ${endpoint}:`, errText);
             }
           } catch (fetchErr: any) {
-            // Continua para o próximo endpoint/payload
+            console.error(`[AUDIO_DEBUG] Falha de conexão ao chamar Evolution API (${endpoint}):`, fetchErr?.message || fetchErr);
           }
         }
       }

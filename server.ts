@@ -8316,11 +8316,15 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
 
               if (directBase64) {
                 audioData = directBase64;
-                console.log('[AUDIO_DEBUG] Base64 obtido com sucesso? Tam:', audioData?.length);
+                console.log('[AUDIO_DEBUG] Base64 obtido com sucesso direto do payload! Tam:', audioData?.length);
               } else {
                 // 2. Se não veio no payload, faça a chamada para a Evolution API com tratamento rigoroso de log e erro
                 audioData = await evolutionApiService.getBase64FromMediaMessage(instanceName, msg);
-                console.log('[AUDIO_DEBUG] Base64 obtido com sucesso? Tam:', audioData?.length);
+                console.log('[AUDIO_DEBUG] Base64 obtido com sucesso da Evolution API? Tam:', audioData?.length);
+              }
+
+              if (!audioData) {
+                console.error('[AUDIO_DEBUG] ❌ Não foi possível obter o Base64 do áudio nem do payload nem da Evolution API.');
               }
 
               let transcribed: string | null = null;
@@ -8334,6 +8338,8 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                   (tenantAiCfg.apiKey?.startsWith('sk-') ? tenantAiCfg.apiKey : undefined) ||
                   (tenantAiCfg.provider === 'openai' ? (tenantAiCfg.apiKey || tenantAiCfg.api_key) : undefined) ||
                   process.env.OPENAI_API_KEY;
+
+                console.log('[AUDIO_DEBUG] [server.ts] OpenAI Key encontrada para tenant:', resolvedTenant?.slug || resolvedTenant?.id, Boolean(openAiKey), 'Tam:', openAiKey?.length);
 
                 transcribed = await transcribeAudio({
                   audioBase64OrUrl: audioData,
