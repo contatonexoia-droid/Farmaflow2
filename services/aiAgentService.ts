@@ -508,24 +508,22 @@ export function extractUrlAndCleanText(text: string): { mainText: string; url: s
  * Garante que a URL da loja ou do produto contenha parâmetros de versão/quebra de cache (Cache Buster),
  * forçando os servidores do WhatsApp e da Evolution API a descartarem o preview antigo em cache
  * e renderizarem imediatamente a logo oficial da drogaria (og:image).
- * Exemplo: https://drogaria-esplendido.farmaflow.online?ref=wpp&v=2
+ * Exemplo: https://drogaria-esplendido.farmaflow.online?ref=wpp&v=4
  */
-export function ensureStoreUrlCacheBuster(rawUrl: string, version: string | number = "2"): string {
+export function ensureStoreUrlCacheBuster(rawUrl: string, version: string | number = "4"): string {
   if (!rawUrl || typeof rawUrl !== "string") return rawUrl;
   const trimmed = rawUrl.trim();
   if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) return trimmed;
   try {
     const u = new URL(trimmed);
-    if (!u.searchParams.has("ref")) {
-      u.searchParams.set("ref", "wpp");
-    }
-    if (!u.searchParams.has("v")) {
-      u.searchParams.set("v", String(version));
-    }
+    u.searchParams.set("ref", "wpp");
+    u.searchParams.set("v", String(version));
     return u.toString();
   } catch (_) {
-    const sep = trimmed.includes("?") ? "&" : "?";
-    return `${trimmed}${sep}ref=wpp&v=${version}`;
+    let clean = trimmed.replace(/([?&])ref=[^&]*/g, "").replace(/([?&])v=[^&]*/g, "");
+    clean = clean.replace(/[?&]+$/, "");
+    const sep = clean.includes("?") ? "&" : "?";
+    return `${clean}${sep}ref=wpp&v=${version}`;
   }
 }
 
@@ -1344,16 +1342,16 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
           // Delay de 1200ms para ordenação visual no WhatsApp
           await new Promise(resolve => setTimeout(resolve, 1200));
 
-          // DISPARO DO BALÃO 2 EM TEXTO: Opções resumidas, valores e link para compra rápida na loja virtual com cache-buster (?ref=wpp&v=2)
+          // DISPARO DO BALÃO 2 EM TEXTO: Opções resumidas, valores e link para compra rápida na loja virtual com cache-buster (?ref=wpp&v=4)
           let balloon2Text = "";
           if (hasUrlToSplit && url) {
-            const freshUrl = ensureStoreUrlCacheBuster(url, "2");
+            const freshUrl = ensureStoreUrlCacheBuster(url, "4");
             balloon2Text = (mainText && mainText.trim().length > 0)
               ? `${mainText}\n\n${freshUrl}`
               : freshUrl;
           } else {
             const hasUrl = /(https?:\/\/[^\s]+)/i.test(finalReplyText);
-            balloon2Text = hasUrl ? ensureStoreUrlCacheBuster(finalReplyText, "2") : finalReplyText;
+            balloon2Text = hasUrl ? ensureStoreUrlCacheBuster(finalReplyText, "4") : finalReplyText;
           }
 
           console.log(`[AiAgentService] Disparando Balão 2 em TEXTO (Opções + Link com cache-buster) para ${cleanPhone}...`);

@@ -62,6 +62,142 @@ app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
+// ============================================================================
+// INTERCEPTAÇÃO DO CRAWLER DE OPEN GRAPH (WhatsApp, Facebook, Twitter, LinkedIn)
+// ============================================================================
+app.use(async (req, res, next) => {
+  // Ignora rotas de API internas (exceto /api/og) e arquivos estáticos (js, css, imagens, etc.)
+  if (req.path.startsWith('/api/') && !req.path.startsWith('/api/og')) return next();
+  if (/\.(js|css|png|jpg|jpeg|gif|svg|ico|json|woff|woff2|ttf|map)$/i.test(req.path)) return next();
+
+  const userAgent = (req.headers['user-agent'] || '').toLowerCase();
+  const isBot = /facebookexternalhit|whatsapp|facebot|twitterbot|linkedinbot/i.test(userAgent);
+
+  if (!isBot) {
+    return next();
+  }
+
+  try {
+    const host = (req.headers['x-forwarded-host'] || req.headers.host || '').toString().split(':')[0].toLowerCase();
+
+    // 1. Identificar identificador da drogaria / subdomínio
+    let identifier = (req.query?.store || req.query?.loja || req.query?.tenant || req.query?.slug || req.query?.id || '').toString().trim();
+
+    if (!identifier && host.includes('.')) {
+      const parts = host.split('.');
+      if (
+        parts[0] !== 'www' &&
+        parts[0] !== 'farmaflow' &&
+        parts[0] !== 'nexoia' &&
+        parts[0] !== 'app' &&
+        parts[0] !== 'admin' &&
+        parts[0] !== 'api' &&
+        parts[0] !== 'portal' &&
+        parts[0] !== 'localhost'
+      ) {
+        identifier = parts[0];
+      }
+    }
+
+    if (!identifier && req.path) {
+      const match = req.path.match(/(?:\/loja|\/store)\/([^\/?#]+)/i);
+      if (match && match[1]) {
+        identifier = decodeURIComponent(match[1]).trim();
+      }
+    }
+
+    if (!identifier) {
+      identifier = 'drogaria-esplendido';
+    }
+
+    // 2. Consulta à drogaria no Supabase utilizando SUPABASE_SERVICE_ROLE_KEY (supabaseAdmin) para contornar RLS
+    let tenant: any = null;
+    const cleanIdentifier = identifier.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+
+    // Busca direta por ID ou Slug
+    try {
+      const { data } = await supabaseAdmin
+        .from('tenants')
+        .select('*')
+        .or(`id.eq.${identifier},slug.eq.${identifier}`)
+        .maybeSingle();
+
+      if (data) {
+        tenant = data;
+      }
+    } catch (_) {}
+
+    // Busca ampla com normalização e tolerância fonética/ortográfica
+    if (!tenant) {
+      try {
+        const { data: allTenants } = await supabaseAdmin
+          .from('tenants')
+          .select('*');
+
+        if (allTenants && allTenants.length > 0) {
+          tenant = allTenants.find((t: any) => {
+            const s = (t.slug || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+            const i = (t.id || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+            const n = (t.name || t.nome_loja || t.razao_social || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+            const tn = (t.trade_name || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+            const c = (t.custom_domain || '').toLowerCase().trim();
+
+            if (s === cleanIdentifier || i === cleanIdentifier || n === cleanIdentifier || tn === cleanIdentifier || c === identifier.toLowerCase().trim()) return true;
+            if (cleanIdentifier.replace(/x/g, 's') === s.replace(/x/g, 's') || cleanIdentifier.replace(/x/g, 's') === n.replace(/x/g, 's') || cleanIdentifier.replace(/x/g, 's') === tn.replace(/x/g, 's')) return true;
+            return false;
+          }) || null;
+        }
+      } catch (_) {}
+    }
+
+    if (!tenant) {
+      tenant = {
+        name: 'Drogaria Explendido',
+        trade_name: 'Drogaria Explendido',
+        logo_url: 'https://nalshjhoiecxooejpiaw.supabase.co/storage/v1/object/public/product-images/logos/nosso-catalogo_logo_1790958337014.png'
+      };
+    }
+
+    const proto = (req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'https')).toString();
+    const currentHost = host || 'drogaria-esplendido.farmaflow.online';
+    const currentUrl = `${proto}://${currentHost}${req.originalUrl || req.url || '/'}`;
+
+    const title = tenant.trade_name || tenant.name || 'Drogaria Explendido';
+    const description = `Faça seu pedido online com rapidez e comodidade na ${tenant.trade_name || 'nossa drogaria'}.`;
+    let logoUrl = (tenant.logo_url || tenant.logo || 'https://nalshjhoiecxooejpiaw.supabase.co/storage/v1/object/public/product-images/logos/nosso-catalogo_logo_1790958337014.png').trim();
+    if (logoUrl.startsWith('http://')) {
+      logoUrl = logoUrl.replace('http://', 'https://');
+    }
+
+    console.log(`[CRAWLER_OG] 🤖 Scraper detectado (${userAgent.substring(0, 30)}...). Retornando meta tags para "${title}": logo=${logoUrl}`);
+
+    const html = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>${title}</title>
+  <meta property="og:title" content="${title}" />
+  <meta property="og:description" content="${description}" />
+  <meta property="og:image" content="${logoUrl}" />
+  <meta property="og:image:secure_url" content="${logoUrl}" />
+  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:width" content="600" />
+  <meta property="og:image:height" content="600" />
+  <meta property="og:url" content="${currentUrl}" />
+  <meta property="og:type" content="website" />
+</head>
+<body></body>
+</html>`;
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=300, stale-while-revalidate=86400');
+    return res.status(200).send(html);
+  } catch (crawlerErr) {
+    console.error('[CRAWLER_OG] Erro ao servir meta tags para crawler:', crawlerErr);
+    return next();
+  }
+});
+
 const upload = multer({ storage: multer.memoryStorage() });
 
 app.post("/api/v1/parse-excel", upload.single("file"), (req, res) => {
@@ -385,34 +521,28 @@ function generateStoreOpenGraphHtml(meta: TenantMetaRecord): string {
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;");
 
-  const nomeLoja = esc(meta.name || "FarmaFlow Drogaria");
-  const logoUrl = esc(meta.logoUrl || "https://farmaflow.online/preview-share.png");
-  const descricao = esc(
-    meta.description ||
-      "Faça seu pedido online com tele-entrega rápida direta no WhatsApp. Medicamentos, perfumaria e ofertas exclusivas."
-  );
+  const titleName = esc(meta.rawTenant?.trade_name || meta.name || "Drogaria Explendido");
+  const logoUrl = esc(meta.logoUrl || "https://nalshjhoiecxooejpiaw.supabase.co/storage/v1/object/public/product-images/logos/nosso-catalogo_logo_1790958337014.png");
+  const descName = esc(meta.rawTenant?.trade_name || "nossa drogaria");
+  const descricao = esc(`Faça seu pedido online com rapidez e comodidade na ${descName}.`);
+  const currentUrl = esc(meta.canonicalUrl || "https://drogaria-esplendido.farmaflow.online");
 
   return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-  <meta charset="UTF-8" />
-  <title>${nomeLoja} - Farmácia e Perfumaria Online</title>
-  <meta property="og:type" content="website" />
-  <meta property="og:site_name" content="${nomeLoja}" />
-  <meta property="og:title" content="${nomeLoja} - Peça Online" />
+  <meta charset="UTF-8">
+  <title>${titleName}</title>
+  <meta property="og:title" content="${titleName}" />
   <meta property="og:description" content="${descricao}" />
   <meta property="og:image" content="${logoUrl}" />
   <meta property="og:image:secure_url" content="${logoUrl}" />
   <meta property="og:image:type" content="image/png" />
   <meta property="og:image:width" content="600" />
   <meta property="og:image:height" content="600" />
-  <meta name="twitter:card" content="summary" />
-  <meta name="twitter:title" content="${nomeLoja}" />
-  <meta name="twitter:image" content="${logoUrl}" />
+  <meta property="og:url" content="${currentUrl}" />
+  <meta property="og:type" content="website" />
 </head>
-<body>
-  <script>window.location.href = window.location.href;</script>
-</body>
+<body></body>
 </html>`;
 }
 

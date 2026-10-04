@@ -18,9 +18,7 @@ const DEFAULT_SHARE_IMAGE = 'https://farmaflow.online/preview-share.png';
 
 export function isCrawlerRequest(userAgent: string = ''): boolean {
   if (!userAgent) return false;
-  return /([wW]hats[aA]pp|[fF]acebookexternalhit|[fF]acebot|[tT]witterbot|[tT]elegram[bB]ot|[lL]inkedin[bB]ot|[sS]lackbot|[dD]iscordbot|[sS]kype[uU]ri[pP]review|axios|node-fetch|got|undici|curl|[eE]volution|[bB]aileys)/i.test(
-    userAgent
-  );
+  return /facebookexternalhit|whatsapp|facebot|twitterbot|linkedinbot/i.test(userAgent);
 }
 
 function detectImageType(url: string): string {
@@ -31,6 +29,7 @@ function detectImageType(url: string): string {
 }
 
 export function buildCrawlerHtml(store: {
+  trade_name?: string;
   nome_loja?: string;
   name?: string;
   razao_social?: string;
@@ -47,11 +46,12 @@ export function buildCrawlerHtml(store: {
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
 
-  const nomeLoja = esc(
-    store.nome_loja ||
-      store.razao_social ||
+  const titleName = esc(
+    store.trade_name ||
       store.name ||
-      'FarmaFlow - Drogaria e Perfumaria Online'
+      store.nome_loja ||
+      store.razao_social ||
+      'Drogaria Explendido'
   );
 
   let logoUrl = (store.logo_url || '').trim();
@@ -59,44 +59,31 @@ export function buildCrawlerHtml(store: {
     logoUrl = logoUrl.replace('http://', 'https://');
   }
   if (!logoUrl.startsWith('https://')) {
-    logoUrl = DEFAULT_SHARE_IMAGE;
+    logoUrl = 'https://nalshjhoiecxooejpiaw.supabase.co/storage/v1/object/public/product-images/logos/nosso-catalogo_logo_1790958337014.png';
   }
   const safeLogo = esc(logoUrl);
   const imageType = detectImageType(logoUrl);
 
-  const descricao = esc(
-    store.descricao ||
-      store.description ||
-      'Faça seu pedido online com tele-entrega rápida direta no WhatsApp. Medicamentos, perfumaria e ofertas exclusivas.'
-  );
-
-  const siteUrl = esc(store.url || 'https://farmaflow.online');
+  const descName = esc(store.trade_name || 'nossa drogaria');
+  const description = esc(`Faça seu pedido online com rapidez e comodidade na ${descName}.`);
+  const currentUrl = esc(store.url || 'https://drogaria-esplendido.farmaflow.online');
 
   return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-  <meta charset="UTF-8" />
-  <title>${nomeLoja}</title>
-  <meta property="og:type" content="website" />
-  <meta property="og:url" content="${siteUrl}" />
-  <meta property="og:site_name" content="${nomeLoja}" />
-  <meta property="og:title" content="${nomeLoja} - Peça Online" />
-  <meta property="og:description" content="${descricao}" />
+  <meta charset="UTF-8">
+  <title>${titleName}</title>
+  <meta property="og:title" content="${titleName}" />
+  <meta property="og:description" content="${description}" />
   <meta property="og:image" content="${safeLogo}" />
   <meta property="og:image:secure_url" content="${safeLogo}" />
   <meta property="og:image:type" content="${imageType}" />
   <meta property="og:image:width" content="600" />
   <meta property="og:image:height" content="600" />
-  <meta property="og:image:alt" content="${nomeLoja}" />
-  <meta name="twitter:card" content="summary" />
-  <meta name="twitter:title" content="${nomeLoja}" />
-  <meta name="twitter:description" content="${descricao}" />
-  <meta name="twitter:image" content="${safeLogo}" />
+  <meta property="og:url" content="${currentUrl}" />
+  <meta property="og:type" content="website" />
 </head>
-<body>
-  <p>A redirecionar para a loja online...</p>
-  <script>window.location.href = "/";</script>
-</body>
+<body></body>
 </html>`;
 }
 
@@ -192,28 +179,47 @@ export default async function handler(req: any, res: any) {
                   .normalize('NFD')
                   .replace(/[\u0300-\u036f]/g, '')
                   .replace(/[^a-z0-9]/g, '');
+                const tn = (t.trade_name || '')
+                  .toLowerCase()
+                  .normalize('NFD')
+                  .replace(/[\u0300-\u036f]/g, '')
+                  .replace(/[^a-z0-9]/g, '');
                 const c = (t.custom_domain || '').toLowerCase().trim();
-                return (
+
+                if (
                   s === cleanNorm ||
                   i === cleanNorm ||
                   n === cleanNorm ||
+                  tn === cleanNorm ||
                   c === cleanSlug ||
                   c === hostStr.toLowerCase()
-                );
+                ) {
+                  return true;
+                }
+
+                // Equivalência fonética / ortográfica para esplendido / explendido
+                if (
+                  cleanNorm.replace(/x/g, 's') === s.replace(/x/g, 's') ||
+                  cleanNorm.replace(/x/g, 's') === n.replace(/x/g, 's') ||
+                  cleanNorm.replace(/x/g, 's') === tn.replace(/x/g, 's')
+                ) {
+                  return true;
+                }
+
+                return false;
               }) || null;
           }
         }
 
         // Se store for encontrado, aplicar os dados da drogaria
         if (store) {
-          // Defina o título com store.nome_loja ou store.razao_social (com fallback para store.name)
           storeName =
+            store.trade_name ||
             store.nome_loja ||
             store.razao_social ||
             store.name ||
             storeName;
 
-          // Se logo_url for uma URL válida iniciando com http, utilizá-la
           const candidateLogo = (store.logo_url || store.logo || store.smart_banners?._regulatoryData?.logo_url || '').trim();
           if (
             candidateLogo &&
@@ -222,15 +228,14 @@ export default async function handler(req: any, res: any) {
           ) {
             logoUrl = candidateLogo.startsWith('http://') ? candidateLogo.replace('http://', 'https://') : candidateLogo;
           } else if (store?.id) {
-            const baseOrigin = hostStr ? `https://${hostStr}` : 'https://farmaflow.online';
+            const baseOrigin = hostStr ? `https://${hostStr}` : 'https://drogaria-esplendido.farmaflow.online';
             logoUrl = `${baseOrigin}/api/v1/store/${encodeURIComponent(store.id)}/logo.png`;
           }
 
-          if (store.description || store.banner_subtitle || store.bannersubtitle) {
-            description =
-              store.description ||
-              store.banner_subtitle ||
-              store.bannersubtitle;
+          if (store.trade_name) {
+            description = `Faça seu pedido online com rapidez e comodidade na ${store.trade_name}.`;
+          } else if (store.name) {
+            description = `Faça seu pedido online com rapidez e comodidade na ${store.name}.`;
           }
         }
       } catch (dbErr) {
@@ -250,34 +255,24 @@ export default async function handler(req: any, res: any) {
     const safeLogo = esc(logoUrl);
     const safeDesc = esc(description);
     const imageType = detectImageType(logoUrl);
-    const safeUrl = esc(hostStr ? `https://${hostStr}` : 'https://farmaflow.online');
+    const safeUrl = esc(hostStr ? `https://${hostStr}` : 'https://drogaria-esplendido.farmaflow.online');
 
-    // Cabeçalho HTML com metadados Open Graph dinâmicos e enriquecidos
     const html = `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="UTF-8">
   <title>${safeTitle}</title>
-  <meta property="og:type" content="website" />
-  <meta property="og:url" content="${safeUrl}" />
-  <meta property="og:site_name" content="${safeTitle}" />
-  <meta property="og:title" content="${safeTitle} - Peça Online" />
+  <meta property="og:title" content="${safeTitle}" />
   <meta property="og:description" content="${safeDesc}" />
   <meta property="og:image" content="${safeLogo}" />
   <meta property="og:image:secure_url" content="${safeLogo}" />
   <meta property="og:image:type" content="${imageType}" />
   <meta property="og:image:width" content="600" />
   <meta property="og:image:height" content="600" />
-  <meta property="og:image:alt" content="${safeTitle}" />
-  <meta name="twitter:card" content="summary" />
-  <meta name="twitter:title" content="${safeTitle}" />
-  <meta name="twitter:description" content="${safeDesc}" />
-  <meta name="twitter:image" content="${safeLogo}" />
+  <meta property="og:url" content="${safeUrl}" />
+  <meta property="og:type" content="website" />
 </head>
-<body>
-  <p>A redirecionar para a loja online...</p>
-  <script>window.location.href = "/";</script>
-</body>
+<body></body>
 </html>`;
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
