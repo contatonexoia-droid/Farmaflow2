@@ -479,9 +479,22 @@ export function isolateUrlsInText(text: string): string {
 export function extractUrlAndCleanText(text: string): { mainText: string; url: string | null } {
   if (!text || typeof text !== "string") return { mainText: "", url: null };
 
+  const cleanOrphans = (str: string): string => {
+    return str
+      .replace(/(?:em\s+nossa\s+|nossa\s+)?loja\s+online\s*[:\-–—]?\s*\(\s*\)/gi, "")
+      .replace(/Loja Online\s*\(\s*\)/gi, "")
+      .replace(/\(\s*\)/g, "")
+      .replace(/(?:em\s+nossa\s+|nossa\s+)?loja\s+online\s*[:\-–—]?\s*$/gim, "")
+      .replace(/^\s*(?:👉|🔗|🛒|🛍️|🌐)\s*$/gm, "")
+      .replace(/[\t ]{2,}/g, " ")
+      .replace(/\n{3,}/g, "\n\n")
+      .replace(/[\t ]+$/gm, "")
+      .trim();
+  };
+
   const urlMatch = text.match(/(https?:\/\/[^\s)]+)/i);
   if (!urlMatch) {
-    return { mainText: text.trim(), url: null };
+    return { mainText: cleanOrphans(text), url: null };
   }
 
   let rawUrl = urlMatch[1].trim();
@@ -491,15 +504,9 @@ export function extractUrlAndCleanText(text: string): { mainText: string; url: s
 
   // Remove a URL e marcadores/emojis associados diretamente
   let mainText = text
-    .replace(/(?:[\t ]*(?:👉|🔗|🛒|🛍️|🌐)[\t ]*)?(https?:\/\/[^\s)]+)/gi, "")
-    // Remove linhas que continham apenas emojis de indicação de link
-    .replace(/^\s*(?:👉|🔗|🛒|🛍️|🌐)\s*$/gm, "")
-    // Limpa quebras de linha excessivas
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+    .replace(/(?:[\t ]*(?:👉|🔗|🛒|🛍️|🌐)[\t ]*)?(https?:\/\/[^\s)]+)/gi, "");
 
-  // Limpa espaços no final de cada linha
-  mainText = mainText.replace(/[\t ]+$/gm, "").trim();
+  mainText = cleanOrphans(mainText);
 
   return { mainText, url: rawUrl };
 }
@@ -508,9 +515,9 @@ export function extractUrlAndCleanText(text: string): { mainText: string; url: s
  * Garante que a URL da loja ou do produto contenha parâmetros de versão/quebra de cache (Cache Buster),
  * forçando os servidores do WhatsApp e da Evolution API a descartarem o preview antigo em cache
  * e renderizarem imediatamente a logo oficial da drogaria (og:image).
- * Exemplo: https://drogaria-esplendido.farmaflow.online?ref=wpp&v=4
+ * Exemplo: https://drogaria-esplendido.farmaflow.online?ref=wpp&v=6
  */
-export function ensureStoreUrlCacheBuster(rawUrl: string, version: string | number = "4"): string {
+export function ensureStoreUrlCacheBuster(rawUrl: string, version: string | number = "6"): string {
   if (!rawUrl || typeof rawUrl !== "string") return rawUrl;
   const trimmed = rawUrl.trim();
   if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) return trimmed;
@@ -1342,16 +1349,21 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
           // Delay de 1200ms para ordenação visual no WhatsApp
           await new Promise(resolve => setTimeout(resolve, 1200));
 
-          // DISPARO DO BALÃO 2 EM TEXTO: Opções resumidas, valores e link para compra rápida na loja virtual com cache-buster (?ref=wpp&v=4)
+          // DISPARO DO BALÃO 2 EM TEXTO: Opções resumidas, valores e link para compra rápida na loja virtual com cache-buster (?ref=wpp&v=6)
           let balloon2Text = "";
           if (hasUrlToSplit && url) {
-            const freshUrl = ensureStoreUrlCacheBuster(url, "4");
-            balloon2Text = (mainText && mainText.trim().length > 0)
-              ? `${mainText}\n\n${freshUrl}`
+            const freshUrl = ensureStoreUrlCacheBuster(url, "6");
+            const cleanBalloonMain = (mainText || "")
+              .replace(/Loja Online\s*\(\s*\)/gi, "")
+              .replace(/\(\s*\)/g, "")
+              .replace(/(?:nossa\s+)?loja\s+online\s*[:\-–—]?\s*$/gim, "")
+              .trim();
+            balloon2Text = (cleanBalloonMain && cleanBalloonMain.length > 0)
+              ? `${cleanBalloonMain}\n\n${freshUrl}`
               : freshUrl;
           } else {
             const hasUrl = /(https?:\/\/[^\s]+)/i.test(finalReplyText);
-            balloon2Text = hasUrl ? ensureStoreUrlCacheBuster(finalReplyText, "4") : finalReplyText;
+            balloon2Text = hasUrl ? ensureStoreUrlCacheBuster(finalReplyText, "6") : finalReplyText;
           }
 
           console.log(`[AiAgentService] Disparando Balão 2 em TEXTO (Opções + Link com cache-buster) para ${cleanPhone}...`);
@@ -1420,12 +1432,18 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
     if (hasUrlToSplit && mainText && mainText.trim().length > 0) {
       console.log(`[AiAgentService] 💬 Fluxo de 2 balões ativado para ${cleanPhone} (Handoff: ${params.isHandoff ? params.handoffReason : 'NÃO'})`);
       
-      // DISPARO DO BALÃO 1: Texto Principal (sem o link)
+      // DISPARO DO BALÃO 1: Texto Principal (sem o link e sem rótulo órfão)
+      const cleanedBalloon1 = (mainText || "")
+        .replace(/Loja Online\s*\(\s*\)/gi, "")
+        .replace(/\(\s*\)/g, "")
+        .replace(/(?:nossa\s+)?loja\s+online\s*[:\-–—]?\s*$/gim, "")
+        .trim();
+
       console.log(`[AiAgentService] Disparando Balão 1 (Texto Principal) para ${cleanPhone} via "${targetInstanceName}"...`);
       const sendResult1 = await evolutionApiService.sendTextMessage(
         targetInstanceName,
         cleanPhone,
-        mainText,
+        cleanedBalloon1,
         {
           delay: 1000,
           linkPreview: false
@@ -1442,7 +1460,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         realTenantId,
         conversationId,
         "BOT",
-        mainText,
+        cleanedBalloon1,
         false,
         undefined,
         undefined,
@@ -1459,7 +1477,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       await new Promise(resolve => setTimeout(resolve, 1200));
 
       // DISPARO DO BALÃO 2: EXCLUSIVAMENTE a URL pura com cache-buster (ativa o Link Preview perfeito com a logo oficial da drogaria)
-      const freshUrl = ensureStoreUrlCacheBuster(url);
+      const freshUrl = ensureStoreUrlCacheBuster(url, "6");
       console.log(`[AiAgentService] Disparando Balão 2 (URL Pura com Link Preview e Cache-Buster) para ${cleanPhone} via "${targetInstanceName}": ${freshUrl}`);
       const sendResult2 = await evolutionApiService.sendTextMessage(
         targetInstanceName,

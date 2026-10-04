@@ -159,7 +159,7 @@ app.use(async (req, res, next) => {
     }
 
     const proto = (req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'https')).toString();
-    const currentHost = host || 'drogaria-esplendido.farmaflow.online';
+    const currentHost = (!host || host === 'localhost' || host === '127.0.0.1') ? 'drogaria-esplendido.farmaflow.online' : host;
     const currentUrl = `${proto}://${currentHost}${req.originalUrl || req.url || '/'}`;
 
     const title = tenant.trade_name || tenant.name || 'Drogaria Explendido';
@@ -190,7 +190,9 @@ app.use(async (req, res, next) => {
 </html>`;
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Cache-Control', 'public, max-age=300, stale-while-revalidate=86400');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0, s-maxage=0');
+    res.setHeader('CDN-Cache-Control', 'no-store');
+    res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
     return res.status(200).send(html);
   } catch (crawlerErr) {
     console.error('[CRAWLER_OG] Erro ao servir meta tags para crawler:', crawlerErr);
@@ -655,7 +657,9 @@ app.get(["/loja/:slug", "/loja/:slug/*all", "/produto/:id", "/produto/:id/*all",
     const isCrawler = isSocialCrawler((req.headers["user-agent"] as string) || "");
     if (isCrawler) {
       res.setHeader("Content-Type", "text/html; charset=utf-8");
-      res.setHeader("Cache-Control", "public, max-age=300, stale-while-revalidate=86400");
+      res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0, s-maxage=0");
+      res.setHeader("CDN-Cache-Control", "no-store");
+      res.setHeader("Vercel-CDN-Cache-Control", "no-store");
       return res.send(generateStoreOpenGraphHtml(meta));
     }
 
@@ -697,7 +701,9 @@ app.get("/", async (req, res, next) => {
         if (meta) {
           if (isCrawler) {
             res.setHeader("Content-Type", "text/html; charset=utf-8");
-            res.setHeader("Cache-Control", "public, max-age=300, stale-while-revalidate=86400");
+            res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0, s-maxage=0");
+            res.setHeader("CDN-Cache-Control", "no-store");
+            res.setHeader("Vercel-CDN-Cache-Control", "no-store");
             return res.send(generateStoreOpenGraphHtml(meta));
           } else {
             const distHtml = path.join(process.cwd(), "dist", "index.html");

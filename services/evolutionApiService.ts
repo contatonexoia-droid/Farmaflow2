@@ -510,20 +510,30 @@ export class EvolutionApiService {
     const { url, key: apiKeyToUse } = await this.getInstanceConfig(instanceName);
     const cleanInstance = instanceName.trim();
 
+    // 1. Limpeza estrita do Base64 (A Evolution API v2 rejeita Data URI com 400! Exige Base64 puro)
+    let cleanBase64 = audio;
+    if (cleanBase64.includes(',')) {
+      cleanBase64 = cleanBase64.split(',')[1];
+    }
+    cleanBase64 = cleanBase64.replace(/\s/g, '');
+
+    // 2. Payload oficial para /message/sendWhatsAppAudio:
     const payload = {
       number: cleanNumber,
-      audio: audio,
+      audio: cleanBase64, // APENAS base64 puro!
       delay: options.delay || 1200,
-      encoding: true,
-      ptt: options.ptt !== false
+      encoding: true
     };
 
-    console.log(`[EvolutionAPI] 🎙️ Disparando sendWhatsAppAudio (PTT: ${options.ptt !== false}) para ${cleanNumber} via instância "${cleanInstance}" | Tamanho áudio: ${audio.length} chars`);
+    console.log(`[EvolutionAPI] 🎙️ Disparando sendWhatsAppAudio para ${cleanNumber} via instância "${cleanInstance}" | Tamanho áudio Base64: ${cleanBase64.length} chars`);
 
     const endpoints = [
       `${url}/message/sendWhatsAppAudio/${cleanInstance}`,
       `${url}/chat/sendWhatsAppAudio/${cleanInstance}`
     ];
+
+    let lastErrorStatus: number | null = null;
+    let lastErrorText: string = "";
 
     for (const endpoint of endpoints) {
       try {
@@ -548,13 +558,65 @@ export class EvolutionApiService {
           console.log(`[EvolutionAPI] ✅ Áudio WhatsApp (PTT) entregue com sucesso à Evolution API para ${cleanNumber}`);
           return { success: true, status: response.status, data: responseJson };
         }
+        lastErrorStatus = response.status;
+        lastErrorText = responseText;
         console.warn(`[EvolutionAPI] Endpoint ${endpoint} retornou status ${response.status}:`, responseText);
       } catch (err: any) {
         console.warn(`[EvolutionAPI] Falha ao tentar endpoint ${endpoint}:`, err.message);
+        lastErrorText = err.message;
       }
     }
 
-    return { success: false, error: "Falha ao enviar áudio em todos os endpoints da Evolution API" };
+    // 3. Fallback inteligente: se retornar erro 400 ou 404, use imediatamente /message/sendMedia
+    console.warn(`[EvolutionAPI] ⚠️ Endpoints sendWhatsAppAudio falharam (status ${lastErrorStatus}). Acionando fallback inteligente /message/sendMedia para ${cleanNumber}...`);
+    const mediaFallbackPayload = {
+      number: cleanNumber,
+      mediatype: 'audio',
+      mimetype: 'audio/mp3',
+      caption: '',
+      media: cleanBase64,
+      fileName: 'audio.mp3'
+    };
+
+    const mediaEndpoints = [
+      `${url}/message/sendMedia/${cleanInstance}`,
+      `${url}/chat/sendMedia/${cleanInstance}`
+    ];
+
+    for (const mediaEndpoint of mediaEndpoints) {
+      try {
+        const mediaRes = await fetch(mediaEndpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "apikey": apiKeyToUse
+          },
+          body: JSON.stringify(mediaFallbackPayload)
+        });
+
+        const mediaResText = await mediaRes.text();
+        let mediaResJson: any = null;
+        try {
+          mediaResJson = JSON.parse(mediaResText);
+        } catch (_) {
+          mediaResJson = { raw: mediaResText };
+        }
+
+        if (mediaRes.status === 200 || mediaRes.status === 201) {
+          console.log(`[EvolutionAPI] ✅ Áudio WhatsApp entregue com sucesso via fallback sendMedia para ${cleanNumber}`);
+          return { success: true, status: mediaRes.status, data: mediaResJson };
+        }
+        console.warn(`[EvolutionAPI] Fallback ${mediaEndpoint} retornou status ${mediaRes.status}:`, mediaResText);
+      } catch (mediaErr: any) {
+        console.warn(`[EvolutionAPI] Falha no fallback sendMedia (${mediaEndpoint}):`, mediaErr.message);
+      }
+    }
+
+    return { 
+      success: false, 
+      error: `Falha ao enviar áudio em todos os endpoints da Evolution API: ${lastErrorText}`,
+      status: lastErrorStatus || 500
+    };
   }
 
   /**
