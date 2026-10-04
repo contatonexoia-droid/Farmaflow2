@@ -480,16 +480,32 @@ export function extractUrlAndCleanText(text: string): { mainText: string; url: s
   if (!text || typeof text !== "string") return { mainText: "", url: null };
 
   const cleanOrphans = (str: string): string => {
-    return str
+    let res = str
       .replace(/(?:em\s+nossa\s+|nossa\s+)?loja\s+online\s*[:\-–—]?\s*\(\s*\)/gi, "")
       .replace(/Loja Online\s*\(\s*\)/gi, "")
       .replace(/\(\s*\)/g, "")
-      .replace(/(?:em\s+nossa\s+|nossa\s+)?loja\s+online\s*[:\-–—]?\s*$/gim, "")
       .replace(/^\s*(?:👉|🔗|🛒|🛍️|🌐)\s*$/gm, "")
       .replace(/[\t ]{2,}/g, " ")
       .replace(/\n{3,}/g, "\n\n")
       .replace(/[\t ]+$/gm, "")
       .trim();
+
+    // Se o texto terminou com chamada para o link ou loja (ex: "Para conferir mais detalhes ou aproveitar as promoções, acesse...")
+    if (/Para conferir mais detalhes ou aproveitar as promoções/i.test(res)) {
+      res = res.replace(
+        /Para conferir mais detalhes ou aproveitar as promoções[^\n]*$/i,
+        "Para conferir mais detalhes ou aproveitar as promoções, acesse o link abaixo 👇:"
+      );
+    } else {
+      // Remove rótulo de loja online órfão no final
+      res = res
+        .replace(/(?:em\s+nossa\s+|nossa\s+)?loja\s+online\s*[:\-–—]?\s*$/gim, "")
+        .trim();
+      // Se a frase terminou com "acesse", "confira", etc., direciona elegantemente para o link abaixo
+      res = res.replace(/(?:acesse|confira|veja)\s*[:\-–—]?\s*$/i, "acesse o link abaixo 👇:");
+    }
+
+    return res.trim();
   };
 
   const urlMatch = text.match(/(https?:\/\/[^\s)]+)/i);
@@ -515,9 +531,9 @@ export function extractUrlAndCleanText(text: string): { mainText: string; url: s
  * Garante que a URL da loja ou do produto contenha parâmetros de versão/quebra de cache (Cache Buster),
  * forçando os servidores do WhatsApp e da Evolution API a descartarem o preview antigo em cache
  * e renderizarem imediatamente a logo oficial da drogaria (og:image).
- * Exemplo: https://drogaria-esplendido.farmaflow.online?ref=wpp&v=6
+ * Exemplo: https://drogaria-esplendido.farmaflow.online/?ref=wpp&v=8
  */
-export function ensureStoreUrlCacheBuster(rawUrl: string, version: string | number = "6"): string {
+export function ensureStoreUrlCacheBuster(rawUrl: string, version: string | number = "8"): string {
   if (!rawUrl || typeof rawUrl !== "string") return rawUrl;
   const trimmed = rawUrl.trim();
   if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) return trimmed;
@@ -529,6 +545,9 @@ export function ensureStoreUrlCacheBuster(rawUrl: string, version: string | numb
   } catch (_) {
     let clean = trimmed.replace(/([?&])ref=[^&]*/g, "").replace(/([?&])v=[^&]*/g, "");
     clean = clean.replace(/[?&]+$/, "");
+    if (!clean.includes("/", 8)) {
+      clean = `${clean}/`;
+    }
     const sep = clean.includes("?") ? "&" : "?";
     return `${clean}${sep}ref=wpp&v=${version}`;
   }
@@ -1187,7 +1206,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       enforcedReply = this.sanitizeExcessiveProductLinks(enforcedReply, incomingMessage, storeLink);
 
       if (!enforcedReply.includes("http") && !enforcedReply.includes(".online") && !enforcedReply.includes(".com")) {
-        enforcedReply = `${enforcedReply}\n\nPara conferir mais detalhes ou aproveitar as promoções, acesse nossa loja online:\n${storeLink}`;
+        enforcedReply = `${enforcedReply}\n\nPara conferir mais detalhes ou aproveitar as promoções, acesse o link abaixo 👇:\n${storeLink}`;
       }
     }
 
@@ -1231,7 +1250,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
 
       // Garante que o rodapé contenha o link geral da loja
       if (!cleaned.includes(storeLink)) {
-        cleaned = `${cleaned}\n\nPara conferir mais detalhes ou aproveitar as promoções, acesse nossa loja online:\n${storeLink}`;
+        cleaned = `${cleaned}\n\nPara conferir mais detalhes ou aproveitar as promoções, acesse o link abaixo 👇:\n${storeLink}`;
       }
       return cleaned;
     }
@@ -1298,11 +1317,26 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       console.log(`[AiAgentService] 💬 Fluxo de 2 balões ativado para ${cleanPhone} (Handoff: ${params.isHandoff ? params.handoffReason : 'NÃO'})`);
       
       // DISPARO DO BALÃO 1: Texto Principal (sem o link e sem rótulo órfão)
-      const cleanedBalloon1 = (mainText || "")
+      let cleanedBalloon1 = (mainText || "")
         .replace(/Loja Online\s*\(\s*\)/gi, "")
         .replace(/\(\s*\)/g, "")
-        .replace(/(?:nossa\s+)?loja\s+online\s*[:\-–—]?\s*$/gim, "")
         .trim();
+
+      if (/Para conferir mais detalhes ou aproveitar as promoções/i.test(cleanedBalloon1)) {
+        cleanedBalloon1 = cleanedBalloon1.replace(
+          /Para conferir mais detalhes ou aproveitar as promoções[^\n]*$/i,
+          "Para conferir mais detalhes ou aproveitar as promoções, acesse o link abaixo 👇:"
+        );
+      } else if (/(?:acesse|confira|veja)(?:\s+(?:em\s+nossa|na\s+nossa|nossa|no|na|o)?\s*(?:loja\s+online|loja|catálogo|site))?\s*[:\-–—]?\s*$/i.test(cleanedBalloon1)) {
+        cleanedBalloon1 = cleanedBalloon1.replace(
+          /(?:acesse|confira|veja)(?:\s+(?:em\s+nossa|na\s+nossa|nossa|no|na|o)?\s*(?:loja\s+online|loja|catálogo|site))?\s*[:\-–—]?\s*$/i,
+          "acesse o link abaixo 👇:"
+        );
+      } else {
+        cleanedBalloon1 = cleanedBalloon1
+          .replace(/(?:nossa\s+)?loja\s+online\s*[:\-–—]?\s*$/gim, "")
+          .trim();
+      }
 
       console.log(`[AiAgentService] Disparando Balão 1 (Texto Principal) para ${cleanPhone} via "${targetInstanceName}"...`);
       const sendResult1 = await evolutionApiService.sendTextMessage(
@@ -1342,7 +1376,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       await new Promise(resolve => setTimeout(resolve, 1200));
 
       // DISPARO DO BALÃO 2: EXCLUSIVAMENTE a URL pura com cache-buster (ativa o Link Preview perfeito com a logo oficial da drogaria)
-      const freshUrl = ensureStoreUrlCacheBuster(url, "6");
+      const freshUrl = ensureStoreUrlCacheBuster(url, "8");
       console.log(`[AiAgentService] Disparando Balão 2 (URL Pura com Link Preview e Cache-Buster) para ${cleanPhone} via "${targetInstanceName}": ${freshUrl}`);
       const sendResult2 = await evolutionApiService.sendTextMessage(
         targetInstanceName,
