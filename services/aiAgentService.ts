@@ -12,7 +12,6 @@ import {
 } from "./botHandoffManager.js";
 import { realtimeHub } from "./realtimeHub.js";
 import { evolutionApiService } from "./evolutionApiService.js";
-import { generateTextToSpeech, prepareTextForSpeech } from "./audioAiService.js";
 
 const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || "https://nalshjhoiecxooejpiaw.supabase.co";
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_Y2lAqlvDUhdjSNtv80GkJA_SiOgynYy";
@@ -108,8 +107,9 @@ Seu objetivo é recepcionar o cliente com agilidade, tirar dúvidas sobre medica
 9. POSTURA E LIMITES:
    - Mantenha respostas curtas, gentis e comerciais (1 a 3 parágrafos). Não colete dados de cartão de crédito no chat.
 
-10. MENSAGENS DE ÁUDIO (TRANSCRIÇÃO WHISPER):
-   - NUNCA diga que não consegue ouvir áudios. Os áudios são transcritos pelo Whisper antes de chegarem a você. Se a mensagem contiver o que o cliente falou em áudio, responda diretamente à dúvida sobre os medicamentos.`;
+10. MENSAGENS DE ÁUDIO (TRANSCRIÇÃO AUTOMÁTICA):
+   - NUNCA diga que não consegue ouvir áudios. Os áudios dos clientes são automaticamente transcritos pelo sistema antes de chegarem a você.
+   - Responda SEMPRE em TEXTO, de forma concisa, educada e direta (1 a 3 parágrafos), apresentando as opções com valores e o link da loja virtual para fechamento.`;
 
 export interface AiChatMessage {
   role: 'user' | 'model' | 'assistant' | 'system';
@@ -1030,9 +1030,10 @@ RECONHECIMENTO DE ESCOLHA DO CLIENTE E TRANSLADO/CONCLUSÃO:
     }
 
     const AUDIO_PROMPT_RULE = `\n\nDIRETRIZ OBRIGATÓRIA PARA ÁUDIOS:
-- NUNCA diga que não consegue ouvir áudios. Os áudios são transcritos pelo Whisper antes de chegarem a você. Se a mensagem contiver o que o cliente falou em áudio, responda diretamente à dúvida sobre os medicamentos.`;
+- NUNCA diga que não consegue ouvir áudios. Os áudios dos clientes são automaticamente transcritos pelo sistema antes de chegarem a você.
+- Responda SEMPRE em TEXTO, de forma concisa, educada e direta (1 a 3 parágrafos), apresentando as opções com valores e o link da loja virtual para fechamento.`;
 
-    if (!basePrompt.includes("Os áudios são transcritos pelo Whisper")) {
+    if (!basePrompt.includes("Os áudios dos clientes são automaticamente transcritos")) {
       basePrompt += AUDIO_PROMPT_RULE;
     }
 
@@ -1290,145 +1291,9 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
     const nowIso = new Date().toISOString();
     const nextCount = params.nextCount;
 
-    // FLUXO DE RESPOSTA EM ÁUDIO (Áudio com Áudio):
-    // Se o cliente enviou mensagem por áudio, converte a resposta em áudio (PTT)
-    // e envia o Balão 2 em TEXTO com as opções resumidas, valores e link para compra rápida.
-    if (params.replyWithAudio) {
-      console.log(`[AiAgentService] 🎙️ Fluxo de Resposta 100% via OpenAI (Áudio PTT + Balão 2 Texto) ativado para ${cleanPhone} via "${targetInstanceName}"`);
-      
-      let speechAudio: { audioBase64: string; mimeType: string } | null = null;
-      try {
-        const tenantOpenAiKey = 
-          params.tenantAiConfig?.openai_api_key ||
-          params.tenantAiConfig?.apiKey ||
-          process.env.OPENAI_API_KEY;
-
-        speechAudio = await generateTextToSpeech({
-          text: replyText,
-          apiKey: tenantOpenAiKey,
-          openaiApiKey: tenantOpenAiKey,
-          tenantConfig: params.tenantAiConfig,
-          voice: "alloy"
-        });
-      } catch (ttsErr: any) {
-        console.warn("[AiAgentService] Aviso ao sintetizar áudio via OpenAI TTS:", ttsErr.message);
-      }
-
-      if (speechAudio?.audioBase64) {
-        // Envia presença "recording" para o cliente ver "Gravando áudio..."
-        evolutionApiService.sendPresence(targetInstanceName, cleanPhone, "recording", 2500).catch(() => {});
-
-        // DISPARO DO BALÃO 1 EM ÁUDIO (PTT nativo de voz via Evolution API)
-        console.log(`[AiAgentService] Disparando Balão 1 em ÁUDIO (PTT) para ${cleanPhone} via "${targetInstanceName}"...`);
-        const audioSendResult = await evolutionApiService.sendWhatsAppAudio(
-          targetInstanceName,
-          cleanPhone,
-          speechAudio.audioBase64,
-          { ptt: true, delay: 1000 }
-        );
-
-        if (audioSendResult.success) {
-          const spokenPreview = prepareTextForSpeech(replyText);
-          const { message: audioMsg } = await chatStore.addMessage(
-            realTenantId,
-            conversationId,
-            "BOT",
-            `🎤 [Áudio]: "${spokenPreview}"`,
-            false,
-            speechAudio.audioBase64,
-            "audio",
-            targetInstanceName,
-            true
-          );
-
-          realtimeHub.broadcastToStore(realTenantId, "chat_message", {
-            conversationId,
-            message: audioMsg
-          });
-
-          // Delay de 1200ms para ordenação visual no WhatsApp
-          await new Promise(resolve => setTimeout(resolve, 1200));
-
-          // DISPARO DO BALÃO 2 EM TEXTO: Opções resumidas, valores e link para compra rápida na loja virtual com cache-buster (?ref=wpp&v=6)
-          let balloon2Text = "";
-          if (hasUrlToSplit && url) {
-            const freshUrl = ensureStoreUrlCacheBuster(url, "6");
-            const cleanBalloonMain = (mainText || "")
-              .replace(/Loja Online\s*\(\s*\)/gi, "")
-              .replace(/\(\s*\)/g, "")
-              .replace(/(?:nossa\s+)?loja\s+online\s*[:\-–—]?\s*$/gim, "")
-              .trim();
-            balloon2Text = (cleanBalloonMain && cleanBalloonMain.length > 0)
-              ? `${cleanBalloonMain}\n\n${freshUrl}`
-              : freshUrl;
-          } else {
-            const hasUrl = /(https?:\/\/[^\s]+)/i.test(finalReplyText);
-            balloon2Text = hasUrl ? ensureStoreUrlCacheBuster(finalReplyText, "6") : finalReplyText;
-          }
-
-          console.log(`[AiAgentService] Disparando Balão 2 em TEXTO (Opções + Link com cache-buster) para ${cleanPhone}...`);
-          await evolutionApiService.sendTextMessage(
-            targetInstanceName,
-            cleanPhone,
-            balloon2Text,
-            { delay: 1000, linkPreview: true }
-          );
-
-          const { message: textMsg } = await chatStore.addMessage(
-            realTenantId,
-            conversationId,
-            "BOT",
-            balloon2Text,
-            false,
-            undefined,
-            undefined,
-            targetInstanceName,
-            true
-          );
-
-          realtimeHub.broadcastToStore(realTenantId, "chat_message", {
-            conversationId,
-            message: textMsg
-          });
-
-          // Atualiza estado e contador da conversa
-          const audioUpdatePayload: any = {
-            bot_interaction_count: nextCount,
-            last_interaction_at: nowIso,
-            last_message_at: nowIso,
-            last_message_content: `🎤 [Áudio]: "${spokenPreview}"`,
-            updated_at: nowIso,
-            ...(params.isHandoff ? {
-              is_bot_active: false,
-              is_human_controlled: true,
-              kanban_stage: "novos_triagem",
-              bot_handoff_reason: params.handoffReason || "CUSTOMER_REQUEST"
-            } : {
-              is_bot_active: true,
-              is_human_controlled: false,
-              kanban_stage: "ia_atendendo"
-            })
-          };
-
-          const sanitized = sanitizeChatConversationPayload(audioUpdatePayload);
-          try {
-            await supabaseAdmin
-              .from("chat_conversations")
-              .update(sanitized)
-              .eq("id", conversationId);
-          } catch (dbErr: any) {
-            console.warn("[AiAgentService] Erro ao atualizar conversa:", dbErr.message);
-          }
-          await chatStore.updateConversationBotStatus(conversationId, audioUpdatePayload);
-
-          console.log(`[AiAgentService] ✅ Resposta Áudio + Balão Texto entregue com sucesso para ${cleanPhone}`);
-          return { success: true };
-        } else {
-          console.warn(`[AiAgentService] Falha no envio do áudio (${audioSendResult.error}). Fazendo fallback para texto...`);
-        }
-      }
-    }
-
+    // RESPOSTA PADRONIZADA 100% EM TEXTO:
+    // O TTS de voz foi desativado. Toda resposta do agente é enviada exclusivamente em texto,
+    // preservando a separação estratégica de balões para o Link Preview e opções de fechamento.
     if (hasUrlToSplit && mainText && mainText.trim().length > 0) {
       console.log(`[AiAgentService] 💬 Fluxo de 2 balões ativado para ${cleanPhone} (Handoff: ${params.isHandoff ? params.handoffReason : 'NÃO'})`);
       
@@ -1679,9 +1544,8 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
     try {
       // Normalização da mensagem recebida: se for transcrição de áudio, limpa o prefixo visual
       let cleanIncoming = (incomingMessage || "").trim();
-      let shouldReplyWithAudio = Boolean(options?.replyWithAudio);
-      if (cleanIncoming.startsWith("🎤") || cleanIncoming.toLowerCase().includes("[áudio]") || cleanIncoming.toLowerCase().includes("[audio]")) {
-        shouldReplyWithAudio = true;
+      const isFromAudio = cleanIncoming.startsWith("🎤") || cleanIncoming.toLowerCase().includes("[áudio]") || cleanIncoming.toLowerCase().includes("[audio]");
+      if (isFromAudio) {
         cleanIncoming = cleanIncoming
           .replace(/^🎤\s*\[Áudio\]:?\s*"?/i, "")
           .replace(/^🎤\s*\[Audio\]:?\s*"?/i, "")
@@ -1692,9 +1556,11 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       }
       if (cleanIncoming.length > 0) {
         incomingMessage = cleanIncoming;
-      } else if (shouldReplyWithAudio) {
+      } else if (isFromAudio) {
         incomingMessage = "Olá, enviei um áudio com uma dúvida sobre medicamentos e produtos.";
       }
+      // Respostas SEMPRE 100% em TEXTO (TTS desativado):
+      const shouldReplyWithAudio = false;
 
       // 1. Obter tenant e validar se o módulo de IA está autorizado (resolvendo o UUID real)
       const tenant = await this.verifyTenantAuthorization(storeId);

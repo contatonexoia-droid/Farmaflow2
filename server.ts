@@ -8863,19 +8863,18 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                 return res.status(200).json({ success: true, handled: 'welcome_message' });
               }
 
-              // h) Mantém presença ativa ("recording" se for áudio ou "composing" se for texto)
+              // h) Mantém presença ativa ("composing" para resposta 100% em texto)
               if (instanceName && cleanPhone) {
-                const presenceType = isAudioMessage ? "recording" : "composing";
-                evolutionApiService.sendPresence(instanceName, cleanPhone, presenceType, 3500).catch(() => {});
+                evolutionApiService.sendPresence(instanceName, cleanPhone, "composing", 3500).catch(() => {});
               }
 
-              // i) Disparo ÚNICO para o Agente de IA com o texto consolidado
+              // i) Disparo ÚNICO para o Agente de IA com o texto consolidado (resposta 100% em TEXTO)
               try {
-                console.log(`[WEBHOOK - IA] 🤖 Despachando turno único consolidado para AiAgentService na conversa ${conversation.id} (${cleanPhone}, replyWithAudio: ${isAudioMessage})...`);
+                console.log(`[WEBHOOK - IA] 🤖 Despachando turno único consolidado para AiAgentService na conversa ${conversation.id} (${cleanPhone}, resposta 100% TEXTO)...`);
                 const aiResult = await aiAgentService.processConversationTurn(storeId, conversation.id, consolidatedText, {
                   instanceName,
                   phoneNumber: cleanPhone,
-                  replyWithAudio: isAudioMessage
+                  replyWithAudio: false
                 });
 
                 return res.status(200).json({
