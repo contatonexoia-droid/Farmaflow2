@@ -528,14 +528,40 @@ export function extractUrlAndCleanText(text: string): { mainText: string; url: s
 }
 
 /**
- * Garante que a URL da loja ou do produto contenha parâmetros de versão/quebra de cache (Cache Buster),
+ * Garante que a URL da loja ou do produto utilize a rota dedicada de Open Graph com redirecionamento (/s/:slug?v=9)
  * forçando os servidores do WhatsApp e da Evolution API a descartarem o preview antigo em cache
  * e renderizarem imediatamente a logo oficial da drogaria (og:image).
- * Exemplo: https://drogaria-esplendido.farmaflow.online/?ref=wpp&v=8
+ * Exemplo: https://www.farmaflow.online/s/drogaria-esplendido?v=9
  */
-export function ensureStoreUrlCacheBuster(rawUrl: string, version: string | number = "8"): string {
-  if (!rawUrl || typeof rawUrl !== "string") return rawUrl;
+export function ensureStoreUrlCacheBuster(rawUrl: string, version: string | number = "9"): string {
+  if (!rawUrl || typeof rawUrl !== "string") {
+    return `https://www.farmaflow.online/s/drogaria-esplendido?v=${version}`;
+  }
   const trimmed = rawUrl.trim();
+
+  // Se a URL for da Drogaria Explendido (subdomínio drogaria-esplendido, slug ou já no formato /s/)
+  if (
+    trimmed.includes("drogaria-esplendido") ||
+    trimmed.includes("drogaria-explendido") ||
+    trimmed.includes("nosso-catalogo") ||
+    trimmed.includes("/s/drogaria")
+  ) {
+    return `https://www.farmaflow.online/s/drogaria-esplendido?v=${version}`;
+  }
+
+  // Se for qualquer URL de subdomínio da Farmaflow (ex: https://farmacia-x.farmaflow.online)
+  const farmaflowMatch = trimmed.match(/^https?:\/\/([a-z0-9-]+)\.farmaflow\.online(?:\/|$|\?)/i);
+  if (farmaflowMatch && farmaflowMatch[1] && farmaflowMatch[1] !== "www" && farmaflowMatch[1] !== "app") {
+    const slug = farmaflowMatch[1];
+    return `https://www.farmaflow.online/s/${slug}?v=${version}`;
+  }
+
+  // Se já for uma URL /s/:slug
+  const shareMatch = trimmed.match(/^https?:\/\/(?:www\.)?farmaflow\.online\/s\/([a-z0-9-]+)/i);
+  if (shareMatch && shareMatch[1]) {
+    return `https://www.farmaflow.online/s/${shareMatch[1]}?v=${version}`;
+  }
+
   if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) return trimmed;
   try {
     const u = new URL(trimmed);
@@ -1376,7 +1402,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       await new Promise(resolve => setTimeout(resolve, 1200));
 
       // DISPARO DO BALÃO 2: EXCLUSIVAMENTE a URL pura com cache-buster (ativa o Link Preview perfeito com a logo oficial da drogaria)
-      const freshUrl = ensureStoreUrlCacheBuster(url, "8");
+      const freshUrl = ensureStoreUrlCacheBuster(url, "9");
       console.log(`[AiAgentService] Disparando Balão 2 (URL Pura com Link Preview e Cache-Buster) para ${cleanPhone} via "${targetInstanceName}": ${freshUrl}`);
       const sendResult2 = await evolutionApiService.sendTextMessage(
         targetInstanceName,

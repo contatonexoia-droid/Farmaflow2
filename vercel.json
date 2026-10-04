@@ -51,6 +51,18 @@
   ],
   "rewrites": [
     {
+      "source": "/s/(.*)",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/api/s/(.*)",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/api/og-preview/(.*)",
+      "destination": "/api/index"
+    },
+    {
       "source": "/api/og-handler",
       "destination": "/api/og-handler"
     },
