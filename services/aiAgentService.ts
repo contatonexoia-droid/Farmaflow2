@@ -106,7 +106,10 @@ Seu objetivo é recepcionar o cliente com agilidade, tirar dúvidas sobre medica
    - Se o cliente optar por pedir pelo WhatsApp, não envie links de carrinho; apresente os valores e acione o balconista humano para concluir a tele-entrega.
 
 9. POSTURA E LIMITES:
-   - Mantenha respostas curtas, gentis e comerciais (1 a 3 parágrafos). Não colete dados de cartão de crédito no chat.`;
+   - Mantenha respostas curtas, gentis e comerciais (1 a 3 parágrafos). Não colete dados de cartão de crédito no chat.
+
+10. MENSAGENS DE ÁUDIO (TRANSCRIÇÃO WHISPER):
+   - NUNCA diga que não consegue ouvir áudios. Os áudios são transcritos pelo Whisper antes de chegarem a você. Se a mensagem contiver o que o cliente falou em áudio, responda diretamente à dúvida sobre os medicamentos.`;
 
 export interface AiChatMessage {
   role: 'user' | 'model' | 'assistant' | 'system';
@@ -1021,6 +1024,13 @@ RECONHECIMENTO DE ESCOLHA DO CLIENTE E TRANSLADO/CONCLUSÃO:
       basePrompt += EQUIVALENCE_RULES;
     }
 
+    const AUDIO_PROMPT_RULE = `\n\nDIRETRIZ OBRIGATÓRIA PARA ÁUDIOS:
+- NUNCA diga que não consegue ouvir áudios. Os áudios são transcritos pelo Whisper antes de chegarem a você. Se a mensagem contiver o que o cliente falou em áudio, responda diretamente à dúvida sobre os medicamentos.`;
+
+    if (!basePrompt.includes("Os áudios são transcritos pelo Whisper")) {
+      basePrompt += AUDIO_PROMPT_RULE;
+    }
+
     // 6. Busca contextual aprofundada de produtos no banco de dados real da drogaria
     let catalogContext = "";
     const choiceCheck = detectCustomerChoiceIntent(incomingMessage, chatHistory);
@@ -1279,27 +1289,31 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
     // Se o cliente enviou mensagem por áudio, converte a resposta em áudio (PTT)
     // e envia o Balão 2 em TEXTO com as opções resumidas, valores e link para compra rápida.
     if (params.replyWithAudio) {
-      console.log(`[AiAgentService] 🎙️ Fluxo de Resposta em ÁUDIO (PTT) ativado para ${cleanPhone} via "${targetInstanceName}"`);
+      console.log(`[AiAgentService] 🎙️ Fluxo de Resposta 100% via OpenAI (Áudio PTT + Balão 2 Texto) ativado para ${cleanPhone} via "${targetInstanceName}"`);
       
       let speechAudio: { audioBase64: string; mimeType: string } | null = null;
       try {
+        const tenantOpenAiKey = 
+          params.tenantAiConfig?.openai_api_key ||
+          params.tenantAiConfig?.apiKey ||
+          process.env.OPENAI_API_KEY;
+
         speechAudio = await generateTextToSpeech({
           text: replyText,
-          apiKey: params.tenantAiConfig?.apiKey,
-          openaiApiKey: params.tenantAiConfig?.openai_api_key,
-          geminiApiKey: params.tenantAiConfig?.gemini_api_key,
-          provider: params.tenantAiConfig?.provider,
+          apiKey: tenantOpenAiKey,
+          openaiApiKey: tenantOpenAiKey,
+          tenantConfig: params.tenantAiConfig,
           voice: "alloy"
         });
       } catch (ttsErr: any) {
-        console.warn("[AiAgentService] Aviso ao sintetizar áudio TTS:", ttsErr.message);
+        console.warn("[AiAgentService] Aviso ao sintetizar áudio via OpenAI TTS:", ttsErr.message);
       }
 
       if (speechAudio?.audioBase64) {
         // Envia presença "recording" para o cliente ver "Gravando áudio..."
         evolutionApiService.sendPresence(targetInstanceName, cleanPhone, "recording", 2500).catch(() => {});
 
-        // DISPARO DO BALÃO 1 EM ÁUDIO (PTT nativo de voz)
+        // DISPARO DO BALÃO 1 EM ÁUDIO (PTT nativo de voz via Evolution API)
         console.log(`[AiAgentService] Disparando Balão 1 em ÁUDIO (PTT) para ${cleanPhone} via "${targetInstanceName}"...`);
         const audioSendResult = await evolutionApiService.sendWhatsAppAudio(
           targetInstanceName,
@@ -1330,89 +1344,42 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
           // Delay de 1200ms para ordenação visual no WhatsApp
           await new Promise(resolve => setTimeout(resolve, 1200));
 
-          // DISPARO DO BALÃO 2 EM TEXTO: Opções resumidas, valores e link para compra rápida na loja virtual
-          if (hasUrlToSplit && mainText && mainText.trim().length > 0) {
-            console.log(`[AiAgentService] Disparando Balão 2 em TEXTO (Opções) para ${cleanPhone}...`);
-            await evolutionApiService.sendTextMessage(
-              targetInstanceName,
-              cleanPhone,
-              mainText,
-              { delay: 1000, linkPreview: false }
-            );
-
-            const { message: textMsg } = await chatStore.addMessage(
-              realTenantId,
-              conversationId,
-              "BOT",
-              mainText,
-              false,
-              undefined,
-              undefined,
-              targetInstanceName,
-              true
-            );
-
-            realtimeHub.broadcastToStore(realTenantId, "chat_message", {
-              conversationId,
-              message: textMsg
-            });
-
-            await new Promise(resolve => setTimeout(resolve, 1200));
-
-            // Balão da URL pura com cache-buster (ativa Link Preview com logo oficial)
-            const freshUrl = ensureStoreUrlCacheBuster(url);
-            console.log(`[AiAgentService] Disparando Balão com Link da Loja para ${cleanPhone}: ${freshUrl}`);
-            await evolutionApiService.sendTextMessage(
-              targetInstanceName,
-              cleanPhone,
-              freshUrl,
-              { delay: 1500, linkPreview: true }
-            );
-
-            const { message: urlMsg } = await chatStore.addMessage(
-              realTenantId,
-              conversationId,
-              "BOT",
-              freshUrl,
-              false,
-              undefined,
-              undefined,
-              targetInstanceName,
-              true
-            );
-
-            realtimeHub.broadcastToStore(realTenantId, "chat_message", {
-              conversationId,
-              message: urlMsg
-            });
+          // DISPARO DO BALÃO 2 EM TEXTO: Opções resumidas, valores e link para compra rápida na loja virtual com cache-buster (?ref=wpp&v=2)
+          let balloon2Text = "";
+          if (hasUrlToSplit && url) {
+            const freshUrl = ensureStoreUrlCacheBuster(url, "2");
+            balloon2Text = (mainText && mainText.trim().length > 0)
+              ? `${mainText}\n\n${freshUrl}`
+              : freshUrl;
           } else {
             const hasUrl = /(https?:\/\/[^\s]+)/i.test(finalReplyText);
-            const payloadText = hasUrl ? ensureStoreUrlCacheBuster(finalReplyText) : finalReplyText;
-            console.log(`[AiAgentService] Disparando Balão 2 em TEXTO para ${cleanPhone}...`);
-            await evolutionApiService.sendTextMessage(
-              targetInstanceName,
-              cleanPhone,
-              payloadText,
-              { delay: 1200, linkPreview: hasUrl }
-            );
-
-            const { message: textMsg } = await chatStore.addMessage(
-              realTenantId,
-              conversationId,
-              "BOT",
-              payloadText,
-              false,
-              undefined,
-              undefined,
-              targetInstanceName,
-              true
-            );
-
-            realtimeHub.broadcastToStore(realTenantId, "chat_message", {
-              conversationId,
-              message: textMsg
-            });
+            balloon2Text = hasUrl ? ensureStoreUrlCacheBuster(finalReplyText, "2") : finalReplyText;
           }
+
+          console.log(`[AiAgentService] Disparando Balão 2 em TEXTO (Opções + Link com cache-buster) para ${cleanPhone}...`);
+          await evolutionApiService.sendTextMessage(
+            targetInstanceName,
+            cleanPhone,
+            balloon2Text,
+            { delay: 1000, linkPreview: true }
+          );
+
+          const { message: textMsg } = await chatStore.addMessage(
+            realTenantId,
+            conversationId,
+            "BOT",
+            balloon2Text,
+            false,
+            undefined,
+            undefined,
+            targetInstanceName,
+            true
+          );
+
+          realtimeHub.broadcastToStore(realTenantId, "chat_message", {
+            conversationId,
+            message: textMsg
+          });
 
           // Atualiza estado e contador da conversa
           const audioUpdatePayload: any = {

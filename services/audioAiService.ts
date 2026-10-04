@@ -1,20 +1,24 @@
-import { GoogleGenAI } from "@google/genai";
+import OpenAI, { toFile } from 'openai';
 
 export interface TranscribeAudioParams {
   audioBase64OrUrl: string;
   mimeType?: string;
   apiKey?: string;
-  provider?: "openai" | "gemini" | string;
   openaiApiKey?: string;
+  tenantConfig?: any;
+  tenant?: any;
+  provider?: string;
   geminiApiKey?: string;
 }
 
 export interface TextToSpeechParams {
   text: string;
   apiKey?: string;
-  provider?: "openai" | "gemini" | string;
-  voice?: string;
   openaiApiKey?: string;
+  voice?: 'alloy' | 'shimmer' | 'echo' | 'fable' | 'onyx' | 'nova' | string;
+  tenantConfig?: any;
+  tenant?: any;
+  provider?: string;
   geminiApiKey?: string;
 }
 
@@ -68,8 +72,52 @@ export function prepareTextForSpeech(text: string): string {
 }
 
 /**
+ * Resolve a chave da OpenAI seguindo a ordem oficial:
+ * 1. Primeiro verificando as configurações do tenant no Supabase (settings.openai_api_key ou openai_api_key da drogaria)
+ * 2. Fallback da variável de ambiente: process.env.OPENAI_API_KEY
+ */
+export function resolveOpenAiApiKey(params?: {
+  apiKey?: string;
+  openaiApiKey?: string;
+  tenantConfig?: any;
+  tenant?: any;
+}): string | undefined {
+  const cfg = params?.tenantConfig || params?.tenant?.ai_agent_config || params?.tenant?.ai_agent_settings || params?.tenant?.ai_config || {};
+  const settings = params?.tenant?.settings || {};
+
+  const key = 
+    params?.openaiApiKey ||
+    settings?.openai_api_key ||
+    params?.tenant?.openai_api_key ||
+    cfg?.openai_api_key ||
+    (params?.apiKey && params.apiKey.startsWith('sk-') ? params.apiKey : undefined) ||
+    (cfg?.apiKey && cfg.apiKey.startsWith('sk-') ? cfg.apiKey : undefined) ||
+    (cfg?.provider === 'openai' ? (cfg.apiKey || cfg.api_key) : undefined) ||
+    params?.apiKey ||
+    process.env.OPENAI_API_KEY;
+
+  return key ? String(key).trim() : undefined;
+}
+
+/**
+ * Inicializa a SDK oficial da OpenAI com a chave da drogaria ou ambiente
+ */
+export function getOpenAIClient(params?: {
+  apiKey?: string;
+  openaiApiKey?: string;
+  tenantConfig?: any;
+  tenant?: any;
+}): OpenAI {
+  const resolvedApiKey = resolveOpenAiApiKey(params);
+  if (!resolvedApiKey) {
+    throw new Error("Chave da OpenAI não configurada (OPENAI_API_KEY).");
+  }
+  return new OpenAI({ apiKey: resolvedApiKey });
+}
+
+/**
  * Transcreve mensagem de áudio (PTT ou arquivo de áudio do WhatsApp)
- * Suporta OpenAI Whisper e Google Gemini multimodal.
+ * Operando 100% via OPENAI WHISPER (STT)
  */
 export async function transcribeAudio(params: TranscribeAudioParams): Promise<string | null> {
   const { audioBase64OrUrl } = params;
@@ -95,95 +143,49 @@ export async function transcribeAudio(params: TranscribeAudioParams): Promise<st
         if (ct) resolvedMime = ct.split(";")[0].trim();
       }
     } catch (e: any) {
-      console.warn("[AudioAiService] Erro ao baixar áudio da URL:", e.message);
+      console.warn("[AUDIO_DEBUG] Erro ao baixar áudio da URL:", e.message);
     }
   }
 
-  base64Data = base64Data.replace(/\s/g, "");
-  if (!base64Data || base64Data.length < 50) {
-    console.warn("[AudioAiService] Buffer de áudio vazio ou muito pequeno para transcrição.");
+  const cleanBase64 = base64Data.replace(/^data:[^;]+;base64,/, '').replace(/\s/g, '');
+  if (!cleanBase64 || cleanBase64.length < 50) {
+    console.warn("[AUDIO_DEBUG] Buffer de áudio vazio ou muito pequeno para transcrição.");
     return null;
   }
 
-  // 2. Determina chaves disponíveis
-  const openAiKey = params.openaiApiKey || (params.apiKey?.startsWith("sk-") ? params.apiKey : undefined) || process.env.OPENAI_API_KEY;
-  const geminiKey = params.geminiApiKey || (!params.apiKey?.startsWith("sk-") ? params.apiKey : undefined) || process.env.GEMINI_API_KEY;
+  console.log(`[AUDIO_DEBUG] Tentando obter base64 da mensagem... tamanho: ${cleanBase64.length} bytes`);
 
-  // 3. Tenta primeiro OpenAI Whisper se a chave OpenAI estiver configurada
-  if (openAiKey) {
-    try {
-      console.log(`[AudioAiService] 🎙️ Enviando áudio (${resolvedMime}, ~${base64Data.length} chars base64) para transcrição via OpenAI Whisper...`);
-      const audioBuffer = Buffer.from(base64Data, "base64");
-      
-      const formData = new FormData();
-      const ext = resolvedMime.includes("mp3") ? "mp3" : resolvedMime.includes("wav") ? "wav" : resolvedMime.includes("m4a") ? "m4a" : "ogg";
-      const blob = new Blob([audioBuffer], { type: resolvedMime });
-      formData.append("file", blob, `audio.${ext}`);
-      formData.append("model", "whisper-1");
-      formData.append("language", "pt");
-
-      const transRes = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${openAiKey.trim()}`
-        },
-        body: formData
-      });
-
-      if (transRes.ok) {
-        const transJson: any = await transRes.json();
-        const transcribedText = (transJson.text || "").trim();
-        if (transcribedText) {
-          console.log(`[AudioAiService] ✅ Transcrição Whisper concluída com sucesso: "${transcribedText}"`);
-          return transcribedText;
-        }
-      } else {
-        const errText = await transRes.text();
-        console.warn(`[AudioAiService] Whisper retornou HTTP ${transRes.status}:`, errText);
-      }
-    } catch (whisperErr: any) {
-      console.warn("[AudioAiService] Falha na transcrição OpenAI Whisper:", whisperErr.message);
+  try {
+    const resolvedApiKey = resolveOpenAiApiKey(params);
+    if (!resolvedApiKey) {
+      console.error("[AUDIO_DEBUG] Nenhuma chave OpenAI encontrada nas configurações do tenant ou em OPENAI_API_KEY.");
+      return null;
     }
+
+    const openai = new OpenAI({ apiKey: resolvedApiKey });
+
+    const audioBuffer = Buffer.from(cleanBase64, 'base64');
+    const ext = resolvedMime.includes("mp3") ? "mp3" : resolvedMime.includes("wav") ? "wav" : resolvedMime.includes("m4a") ? "m4a" : "ogg";
+    const mime = ext === "ogg" ? "audio/ogg" : `audio/${ext}`;
+    const audioFile = await toFile(audioBuffer, `audio.${ext}`, { type: mime });
+
+    const transcriptionResponse = await openai.audio.transcriptions.create({
+      file: audioFile,
+      model: 'whisper-1',
+      language: 'pt',
+    });
+
+    const transcribedText = transcriptionResponse.text?.trim();
+    console.log('[AUDIO_DEBUG] Transcrição Whisper com sucesso:', transcribedText);
+    return transcribedText || null;
+  } catch (err: any) {
+    console.error("[AUDIO_DEBUG] Falha na transcrição OpenAI Whisper:", err?.message || err);
+    return null;
   }
-
-  // 4. Se Whisper falhou ou não tem chave OpenAI, tenta Google Gemini
-  if (geminiKey) {
-    try {
-      console.log(`[AudioAiService] 🎙️ Enviando áudio (${resolvedMime}) para transcrição via Google Gemini...`);
-      const ai = new GoogleGenAI({ apiKey: geminiKey.trim() });
-      const geminiMime = resolvedMime.includes("ogg") ? "audio/ogg" : resolvedMime.includes("mp3") ? "audio/mp3" : resolvedMime.includes("wav") ? "audio/wav" : "audio/ogg";
-
-      const res = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: [
-          {
-            inlineData: {
-              mimeType: geminiMime,
-              data: base64Data
-            }
-          },
-          {
-            text: "Transcreva exatamente a fala do cliente neste áudio em português do Brasil. Retorne APENAS o texto falado, sem comentários, sem pontuações artificiais e sem aspas."
-          }
-        ]
-      });
-
-      const geminiText = (res.text || "").trim();
-      if (geminiText) {
-        console.log(`[AudioAiService] ✅ Transcrição Gemini concluída com sucesso: "${geminiText}"`);
-        return geminiText;
-      }
-    } catch (geminiErr: any) {
-      console.warn("[AudioAiService] Falha na transcrição Gemini:", geminiErr.message);
-    }
-  }
-
-  return null;
 }
 
 /**
- * Converte texto em áudio sintetizado e humanizado (Text-to-Speech)
- * Suporta OpenAI TTS (model: tts-1, voz: alloy/shimmer) e Gemini TTS (gemini-3.8-flash-lite-tts).
+ * Converte a resposta do agente em áudio nativo via OPENAI TTS (modelo: tts-1, voz: alloy/shimmer)
  * Retorna uma Data URI com áudio em base64 pronta para envio no WhatsApp.
  */
 export async function generateTextToSpeech(params: TextToSpeechParams): Promise<{ audioBase64: string; mimeType: string } | null> {
@@ -193,81 +195,34 @@ export async function generateTextToSpeech(params: TextToSpeechParams): Promise<
   const speechText = prepareTextForSpeech(text);
   if (!speechText) return null;
 
-  const openAiKey = params.openaiApiKey || (params.apiKey?.startsWith("sk-") ? params.apiKey : undefined) || process.env.OPENAI_API_KEY;
-  const geminiKey = params.geminiApiKey || (!params.apiKey?.startsWith("sk-") ? params.apiKey : undefined) || process.env.GEMINI_API_KEY;
-
-  // 1. Tenta OpenAI TTS
-  if (openAiKey) {
-    try {
-      console.log(`[AudioAiService] 🔊 Gerando áudio humanizado via OpenAI TTS (voz: ${params.voice || 'alloy'})...`);
-      const ttsRes = await fetch("https://api.openai.com/v1/audio/speech", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${openAiKey.trim()}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          model: "tts-1",
-          input: speechText,
-          voice: params.voice || "alloy",
-          response_format: "mp3"
-        })
-      });
-
-      if (ttsRes.ok) {
-        const arrayBuf = await ttsRes.arrayBuffer();
-        const base64Audio = Buffer.from(arrayBuf).toString("base64");
-        const fullDataUri = `data:audio/mp3;base64,${base64Audio}`;
-        console.log(`[AudioAiService] ✅ OpenAI TTS gerou áudio com sucesso (~${fullDataUri.length} chars Data URI)!`);
-        return {
-          audioBase64: fullDataUri,
-          mimeType: "audio/mp3"
-        };
-      } else {
-        const errText = await ttsRes.text();
-        console.warn(`[AudioAiService] OpenAI TTS retornou HTTP ${ttsRes.status}:`, errText);
-      }
-    } catch (ttsErr: any) {
-      console.warn("[AudioAiService] Falha no OpenAI TTS:", ttsErr.message);
+  try {
+    const resolvedApiKey = resolveOpenAiApiKey(params);
+    if (!resolvedApiKey) {
+      console.error("[AudioAiService] Nenhuma chave OpenAI configurada para o TTS.");
+      return null;
     }
+
+    const openai = new OpenAI({ apiKey: resolvedApiKey });
+    const voiceToUse = (params.voice as any) || "alloy";
+
+    console.log(`[AudioAiService] 🔊 Gerando áudio humanizado via OpenAI TTS (model: tts-1, voz: ${voiceToUse})...`);
+    const mp3Response = await openai.audio.speech.create({
+      model: 'tts-1',
+      voice: voiceToUse,
+      input: speechText,
+    });
+
+    const audioArrayBuffer = await mp3Response.arrayBuffer();
+    const base64Audio = Buffer.from(audioArrayBuffer).toString('base64');
+    const fullDataUri = `data:audio/mp3;base64,${base64Audio}`;
+
+    console.log(`[AudioAiService] ✅ OpenAI TTS gerou áudio com sucesso (~${fullDataUri.length} chars Data URI)!`);
+    return {
+      audioBase64: fullDataUri,
+      mimeType: "audio/mp3"
+    };
+  } catch (err: any) {
+    console.error("[AudioAiService] Falha no OpenAI TTS:", err?.message || err);
+    return null;
   }
-
-  // 2. Tenta Google Gemini TTS como alternativa
-  if (geminiKey) {
-    try {
-      console.log(`[AudioAiService] 🔊 Gerando áudio humanizado via Gemini TTS (gemini-3.8-flash-lite-tts)...`);
-      const ai = new GoogleGenAI({ apiKey: geminiKey.trim() });
-      const response = await ai.models.generateContent({
-        model: "gemini-3.8-flash-lite-tts",
-        contents: [
-          {
-            role: "user",
-            parts: [{ text: speechText }]
-          }
-        ],
-        config: {
-          responseModalities: ["AUDIO"],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: "Kore" }
-            }
-          }
-        }
-      });
-
-      const base64Wav = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (base64Wav) {
-        const fullDataUri = `data:audio/wav;base64,${base64Wav}`;
-        console.log(`[AudioAiService] ✅ Gemini TTS gerou áudio WAV com sucesso (~${fullDataUri.length} chars Data URI)!`);
-        return {
-          audioBase64: fullDataUri,
-          mimeType: "audio/wav"
-        };
-      }
-    } catch (geminiTtsErr: any) {
-      console.warn("[AudioAiService] Falha no Gemini TTS:", geminiTtsErr.message);
-    }
-  }
-
-  return null;
 }

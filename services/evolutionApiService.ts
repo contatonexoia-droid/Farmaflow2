@@ -583,10 +583,40 @@ export class EvolutionApiService {
          message.messageType === "imageMessage" ? "image/jpeg" : 
          message.messageType === "videoMessage" ? "video/mp4" : "image/jpeg");
 
+      const isAudioMsg = 
+        message.messageType === "audioMessage" ||
+        message.messageType === "ptt" ||
+        message.messageType === "audio" ||
+        Boolean(rawMsg.audioMessage) ||
+        String(detectedMime).startsWith("audio/");
+
+      if (isAudioMsg) {
+        console.log('[AUDIO_DEBUG] Tentando obter base64 da mensagem...', message.key?.id || message.id);
+      }
+
+      // Se já veio base64 direto na mensagem
+      const directBase64 = 
+        message.base64 ||
+        rawMsg.audioMessage?.base64 ||
+        rawMsg.imageMessage?.base64 ||
+        rawMsg.documentMessage?.base64 ||
+        message.data?.base64;
+
+      if (directBase64 && typeof directBase64 === "string" && directBase64.length > 50) {
+        if (directBase64.startsWith("data:")) {
+          if (isAudioMsg) console.log('[AUDIO_DEBUG] Base64 obtido com sucesso? Tam:', directBase64.length);
+          return directBase64;
+        }
+        const cleanBase64 = directBase64.replace(/\s/g, '');
+        if (isAudioMsg) console.log('[AUDIO_DEBUG] Base64 obtido com sucesso? Tam:', cleanBase64.length);
+        return `data:${detectedMime};base64,${cleanBase64}`;
+      }
+
       // Formas de payload suportadas pela Evolution API v2
       const payloadsToTry = [
         {
           message: message,
+          convertToMp3: isAudioMsg,
           convertToMp4: false
         },
         {
@@ -594,7 +624,11 @@ export class EvolutionApiService {
             key: message.key || message.data?.key,
             message: message.message || message.data?.message || message
           },
+          convertToMp3: isAudioMsg,
           convertToMp4: false
+        },
+        {
+          message: message
         }
       ];
 
@@ -621,6 +655,9 @@ export class EvolutionApiService {
               const returnedMime = data.mimetype || data.data?.mimetype || detectedMime;
 
               if (rawBase64 && typeof rawBase64 === "string") {
+                if (isAudioMsg) {
+                  console.log('[AUDIO_DEBUG] Base64 obtido com sucesso? Tam:', rawBase64.length);
+                }
                 // Se já for uma Data URI completa
                 if (rawBase64.startsWith("data:")) {
                   return rawBase64;

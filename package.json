@@ -38,6 +38,7 @@
     "modern-screenshot": "^4.6.8",
     "multer": "^2.0.2",
     "node-cron": "^4.2.1",
+    "openai": "^7.27.0",
     "p-limit": "^7.3.0",
     "papaparse": "^5.5.4",
     "pg": "^8.23.0",

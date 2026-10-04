@@ -8301,62 +8301,177 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
           // Se for mensagem de áudio enviada pelo cliente, transcreve via Whisper / Gemini
           if (!fromMe && isAudio && result?.message) {
             try {
-              console.log(`[WEBHOOK - AUDIO] 🎙️ Áudio recebido de ${remoteJid}. Baixando buffer para transcrição...`);
-              let audioData = result.message.media_url || result.message.mediaUrl;
-              if (!audioData) {
+              let audioData: string | null = null;
+              
+              // 1. Verifique primeiro se o base64 do áudio já veio direto no payload
+              const directBase64 = 
+                msg.base64 || 
+                msg.message?.audioMessage?.base64 || 
+                msg.data?.base64 ||
+                msg.data?.message?.audioMessage?.base64 ||
+                (typeof result?.message?.media_url === 'string' && result.message.media_url.length > 50 ? result.message.media_url : null) ||
+                (typeof result?.message?.mediaUrl === 'string' && result.message.mediaUrl.length > 50 ? result.message.mediaUrl : null);
+
+              console.log('[AUDIO_DEBUG] Tentando obter base64 da mensagem...', msg.key?.id || msg.id);
+
+              if (directBase64) {
+                audioData = directBase64;
+                console.log('[AUDIO_DEBUG] Base64 obtido com sucesso? Tam:', audioData?.length);
+              } else {
+                // 2. Se não veio no payload, faça a chamada para a Evolution API com tratamento rigoroso de log e erro
                 audioData = await evolutionApiService.getBase64FromMediaMessage(instanceName, msg);
+                console.log('[AUDIO_DEBUG] Base64 obtido com sucesso? Tam:', audioData?.length);
               }
 
+              let transcribed: string | null = null;
               if (audioData) {
-                const transcribed = await transcribeAudio({
+                const tenantAiCfg = resolvedTenant?.ai_agent_config || resolvedTenant?.ai_agent_settings || resolvedTenant?.ai_config || {};
+                const tenantSettings = (resolvedTenant as any)?.settings || {};
+                const openAiKey = 
+                  tenantAiCfg.openai_api_key ||
+                  tenantSettings.openai_api_key ||
+                  (resolvedTenant as any)?.openai_api_key ||
+                  (tenantAiCfg.apiKey?.startsWith('sk-') ? tenantAiCfg.apiKey : undefined) ||
+                  (tenantAiCfg.provider === 'openai' ? (tenantAiCfg.apiKey || tenantAiCfg.api_key) : undefined) ||
+                  process.env.OPENAI_API_KEY;
+
+                transcribed = await transcribeAudio({
                   audioBase64OrUrl: audioData,
-                  apiKey: resolvedTenant?.ai_agent_config?.apiKey,
-                  openaiApiKey: resolvedTenant?.ai_agent_config?.openai_api_key,
-                  geminiApiKey: resolvedTenant?.ai_agent_config?.gemini_api_key,
-                  provider: resolvedTenant?.ai_agent_config?.provider
+                  mimeType: mimetype || "audio/ogg; codecs=opus",
+                  apiKey: openAiKey,
+                  openaiApiKey: openAiKey,
+                  tenantConfig: tenantAiCfg,
+                  tenant: resolvedTenant
                 });
+              }
 
-                if (transcribed && transcribed.trim().length > 0) {
-                  effectiveText = transcribed.trim();
-                  const audioDisplay = `🎤 [Áudio]: "${effectiveText}"`;
-                  console.log(`[WEBHOOK - AUDIO] ✅ Áudio transcrito com sucesso para ${remoteJid}: "${effectiveText}"`);
+              if (transcribed && transcribed.trim().length > 0) {
+                effectiveText = transcribed.trim();
+                const audioDisplay = `🎤 [Áudio]: "${effectiveText}"`;
+                console.log(`[AUDIO_DEBUG] Transcrição Whisper com sucesso: "${effectiveText}"`);
 
-                  try {
+                try {
+                  await supabaseAdmin
+                    .from("chat_messages")
+                    .update({ content: audioDisplay })
+                    .eq("id", result.message.id);
+
+                  if (result.conversation) {
                     await supabaseAdmin
-                      .from("chat_messages")
-                      .update({ content: audioDisplay })
-                      .eq("id", result.message.id);
+                      .from("chat_conversations")
+                      .update({
+                        last_message_content: audioDisplay,
+                        updated_at: new Date().toISOString()
+                      })
+                      .eq("id", result.conversation.id);
 
-                    if (result.conversation) {
-                      await supabaseAdmin
-                        .from("chat_conversations")
-                        .update({
-                          last_message_content: audioDisplay,
-                          updated_at: new Date().toISOString()
-                        })
-                        .eq("id", result.conversation.id);
-
-                      result.conversation.last_message_content = audioDisplay;
-                    }
-
-                    result.message.content = audioDisplay;
-                  } catch (dbAudioErr: any) {
-                    console.warn("[WEBHOOK - AUDIO] Erro ao atualizar transcrição no banco:", dbAudioErr.message);
+                    result.conversation.last_message_content = audioDisplay;
                   }
 
-                  realtimeHub.broadcastToStore(storeId, "chat_message", {
-                    conversationId: result.conversation.id,
-                    message: { ...result.message, content: audioDisplay },
-                    conversation: result.conversation
-                  });
-                } else {
-                  console.warn(`[WEBHOOK - AUDIO] ⚠️ Transcrição do áudio retornou vazia para ${remoteJid}. Usando texto descritivo de áudio para a IA.`);
-                  effectiveText = "Olá, enviei uma mensagem de áudio com uma dúvida de medicamentos e produtos.";
+                  result.message.content = audioDisplay;
+                } catch (dbAudioErr: any) {
+                  console.warn("[WEBHOOK - AUDIO] Erro ao atualizar transcrição no banco:", dbAudioErr.message);
                 }
+
+                realtimeHub.broadcastToStore(storeId, "chat_message", {
+                  conversationId: result.conversation.id,
+                  message: { ...result.message, content: audioDisplay },
+                  conversation: result.conversation
+                });
+              } else {
+                // 5. SE A TRANSCRIÇÃO FALHAR MESMO ASSIM:
+                // NÃO passe para a IA responder genericamente. Envie uma mensagem direta e amigável
+                console.warn(`[AUDIO_DEBUG] ⚠️ Transcrição do áudio falhou ou retornou vazia para ${remoteJid}. Enviando mensagem amigável direta.`);
+                const audioFailFriendlyMessage = "Desculpe, não consegui entender o seu áudio com clareza. Você poderia digitar sua dúvida ou tentar mandar novamente?";
+                
+                const phone = result?.conversation?.contact?.phone_number || msg.key?.remoteJid?.replace(/@.*$/, '') || remoteJid.replace(/@.*$/, '');
+                const cleanPhone = String(phone || '').replace(/\D/g, '');
+
+                if (cleanPhone && instanceName) {
+                  await evolutionApiService.sendTextMessage(instanceName, cleanPhone, audioFailFriendlyMessage, { delay: 1000 });
+                }
+
+                if (result.conversation) {
+                  const failMsgId = crypto.randomUUID();
+                  const nowIso = new Date().toISOString();
+                  const failBotMsg = {
+                    id: failMsgId,
+                    conversation_id: result.conversation.id,
+                    sender_type: "BOT",
+                    content: audioFailFriendlyMessage,
+                    media_url: null,
+                    media_type: null,
+                    created_at: nowIso
+                  };
+
+                  try {
+                    await supabaseAdmin.from("chat_messages").insert([failBotMsg]);
+                    await supabaseAdmin.from("chat_conversations").update({
+                      last_message_content: audioFailFriendlyMessage,
+                      last_message_at: nowIso,
+                      updated_at: nowIso
+                    }).eq("id", result.conversation.id);
+
+                    realtimeHub.broadcastToStore(storeId, "chat_message", {
+                      conversationId: result.conversation.id,
+                      message: failBotMsg,
+                      conversation: result.conversation
+                    });
+                  } catch (dbFailErr: any) {
+                    console.warn("[WEBHOOK - AUDIO] Erro ao registrar mensagem de erro amigável no banco:", dbFailErr.message);
+                  }
+                }
+
+                if (!res.headersSent) {
+                  return res.status(200).json({ success: true, handled: 'audio_transcription_failed_friendly_replied' });
+                }
+                continue;
               }
             } catch (audioErr: any) {
               console.error("[WEBHOOK - AUDIO] Erro na transcrição de áudio:", audioErr.message);
-              effectiveText = "Olá, enviei uma mensagem de áudio com uma dúvida de medicamentos e produtos.";
+              const audioFailFriendlyMessage = "Desculpe, não consegui entender o seu áudio com clareza. Você poderia digitar sua dúvida ou tentar mandar novamente?";
+              const phone = result?.conversation?.contact?.phone_number || msg.key?.remoteJid?.replace(/@.*$/, '') || remoteJid.replace(/@.*$/, '');
+              const cleanPhone = String(phone || '').replace(/\D/g, '');
+
+              if (cleanPhone && instanceName) {
+                await evolutionApiService.sendTextMessage(instanceName, cleanPhone, audioFailFriendlyMessage, { delay: 1000 });
+              }
+
+              if (result?.conversation) {
+                const failMsgId = crypto.randomUUID();
+                const nowIso = new Date().toISOString();
+                const failBotMsg = {
+                  id: failMsgId,
+                  conversation_id: result.conversation.id,
+                  sender_type: "BOT",
+                  content: audioFailFriendlyMessage,
+                  media_url: null,
+                  media_type: null,
+                  created_at: nowIso
+                };
+
+                try {
+                  await supabaseAdmin.from("chat_messages").insert([failBotMsg]);
+                  await supabaseAdmin.from("chat_conversations").update({
+                    last_message_content: audioFailFriendlyMessage,
+                    last_message_at: nowIso,
+                    updated_at: nowIso
+                  }).eq("id", result.conversation.id);
+
+                  realtimeHub.broadcastToStore(storeId, "chat_message", {
+                    conversationId: result.conversation.id,
+                    message: failBotMsg,
+                    conversation: result.conversation
+                  });
+                } catch (dbFailErr: any) {
+                  console.warn("[WEBHOOK - AUDIO] Erro ao registrar mensagem de erro amigável no banco:", dbFailErr.message);
+                }
+              }
+
+              if (!res.headersSent) {
+                return res.status(200).json({ success: true, handled: 'audio_error_friendly_replied' });
+              }
+              continue;
             }
           }
 
@@ -8576,9 +8691,16 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                 if (!consolidatedText || (consolidatedText.startsWith('[') && consolidatedText.endsWith(']'))) {
                   if (effectiveText && !effectiveText.startsWith('[')) {
                     consolidatedText = effectiveText;
-                  } else if (isAudioMessage) {
-                    consolidatedText = "Olá, enviei uma mensagem de áudio com uma dúvida de medicamentos e produtos.";
                   }
+                }
+
+                if (isAudioMessage && (!consolidatedText || consolidatedText.startsWith('[') || consolidatedText.trim().length === 0)) {
+                  console.warn(`[WEBHOOK DEBOUNCE] ⚠️ Mensagem de áudio consolidada vazia para conversa ${conversation.id}. Enviando resposta amigável.`);
+                  const failText = "Desculpe, não consegui entender o seu áudio com clareza. Você poderia digitar sua dúvida ou tentar mandar novamente?";
+                  if (instanceName && cleanPhone) {
+                    await evolutionApiService.sendTextMessage(instanceName, cleanPhone, failText, { delay: 1000 });
+                  }
+                  return res.status(200).json({ success: true, handled: 'audio_empty_friendly_replied' });
                 }
               } catch (consolErr: any) {
                 console.warn("[WEBHOOK DEBOUNCE] Erro ao consolidar histórico recente:", consolErr.message);
