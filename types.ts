@@ -146,11 +146,22 @@ export interface DeliveryFeeRange {
   fee: number;
 }
 
+export interface DeliveryNeighborhood {
+  id: string;
+  name: string;
+  fee: number;
+  estimated_time?: string;
+  active?: boolean;
+}
+
 export interface DeliverySettingsConfig {
   enabled: boolean;
-  type?: 'fixed' | 'dynamic';
+  type?: 'fixed' | 'dynamic' | 'distance' | 'neighborhood';
+  delivery_fee_type?: 'fixed' | 'distance' | 'neighborhood';
   fee: number;
   ranges?: DeliveryFeeRange[];
+  neighborhoods?: DeliveryNeighborhood[];
+  defaultNeighborhoodFee?: number;
   minOrderForFreeDelivery?: number;
   storePickupEnabled?: boolean;
 }

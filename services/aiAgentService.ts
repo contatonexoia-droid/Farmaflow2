@@ -1082,6 +1082,55 @@ RECONHECIMENTO DE ESCOLHA DO CLIENTE E TRANSLADO/CONCLUSÃO:
       basePrompt += AUDIO_PROMPT_RULE;
     }
 
+    // 5.1 Regras Dinâmicas de Entrega e Taxa por Bairro / KM / Fixa
+    const deliverySettings = tenant?.delivery_settings || tenant?.deliverySettings;
+    if (deliverySettings && deliverySettings.enabled !== false) {
+      const dType = deliverySettings.delivery_fee_type || deliverySettings.type || "fixed";
+      if (dType === "neighborhood") {
+        const activeNeighs = (deliverySettings.neighborhoods || []).filter((n: any) => n.active !== false);
+        const neighsFormatted = activeNeighs.length > 0
+          ? activeNeighs.map((n: any) => `- ${n.name}: R$ ${Number(n.fee).toFixed(2).replace('.', ',')}${n.estimated_time ? ` (Previsão: ${n.estimated_time})` : ''}`).join('\n')
+          : "Nenhum bairro cadastrado com taxa fixa no momento.";
+
+        const fallbackText = (deliverySettings.defaultNeighborhoodFee && Number(deliverySettings.defaultNeighborhoodFee) > 0)
+          ? `Para bairros não cadastrados na lista acima, a taxa padrão de entrega é de R$ ${Number(deliverySettings.defaultNeighborhoodFee).toFixed(2).replace('.', ',')}.`
+          : "Bairros não cadastrados na lista acima não são atendidos pela tele-entrega.";
+
+        const freeOrderText = (deliverySettings.minOrderForFreeDelivery && Number(deliverySettings.minOrderForFreeDelivery) > 0)
+          ? `Frete grátis em pedidos a partir de R$ ${Number(deliverySettings.minOrderForFreeDelivery).toFixed(2).replace('.', ',')}.`
+          : "";
+
+        const neighborhoodDeliveryRule = `\n\nDIRETRIZ OBRIGATÓRIA DE TAXA DE ENTREGA (MODALIDADE POR BAIRRO):
+- A drogaria cobra taxa de entrega calculada por BAIRRO (tele-entrega rápida).
+${freeOrderText}
+- Tabela de bairros atendidos e suas respectivas taxas:
+${neighsFormatted}
+- ${fallbackText}
+- DIRETRIZES OBRIGATÓRIAS AO RESPONDER DÚVIDAS DE FRETE OU ENTREGA:
+  * Se o cliente perguntar o valor da taxa de entrega, se entregamos, ou sobre frete, e ele AINDA NÃO tiver informado o nome do bairro: pergunte com simpatia e brevidade: "Qual é o seu bairro para eu conferir a taxa de entrega?".
+  * Se o cliente já informou (ou informar) o nome do bairro: consulte a tabela de bairros acima e informe com clareza o valor exato cadastrado no banco para o bairro dele (mencionando o tempo estimado caso haja).
+  * Se o bairro informado não constar na tabela: informe a taxa padrão (se houver) ou avise educadamente que não cobrimos essa localidade no momento.
+  * Lembre o cliente de que ele pode fechar o pedido por aqui pelo WhatsApp ou diretamente na loja online: {STORE_LINK}`;
+
+        basePrompt += neighborhoodDeliveryRule;
+      } else if (dType === "dynamic" || dType === "distance") {
+        const freeOrderText = (deliverySettings.minOrderForFreeDelivery && Number(deliverySettings.minOrderForFreeDelivery) > 0)
+          ? `Frete grátis em pedidos a partir de R$ ${Number(deliverySettings.minOrderForFreeDelivery).toFixed(2).replace('.', ',')}.`
+          : "";
+        basePrompt += `\n\nDIRETRIZ DE TAXA DE ENTREGA (POR QUILÔMETRO):
+- A taxa de entrega é calculada com base na distância (km) até o endereço do cliente através da nossa loja virtual.
+${freeOrderText}`;
+      } else {
+        const fixedVal = Number(deliverySettings.fee || 0);
+        const freeOrderText = (deliverySettings.minOrderForFreeDelivery && Number(deliverySettings.minOrderForFreeDelivery) > 0)
+          ? `Frete grátis em pedidos a partir de R$ ${Number(deliverySettings.minOrderForFreeDelivery).toFixed(2).replace('.', ',')}.`
+          : "";
+        basePrompt += `\n\nDIRETRIZ DE TAXA DE ENTREGA (TAXA FIXA):
+- A taxa de tele-entrega é fixa no valor de R$ ${fixedVal.toFixed(2).replace('.', ',')} para toda a cidade atendida.
+${freeOrderText}`;
+      }
+    }
+
     // 6. Busca contextual aprofundada de produtos no banco de dados real da drogaria
     let catalogContext = "";
     const choiceCheck = detectCustomerChoiceIntent(incomingMessage, chatHistory);
@@ -2400,7 +2449,21 @@ ${taskInstruction}`;
         cnpj: freshTenant.cnpj || regData.cnpj || "Cadastrado no sistema",
         link_loja_online: officialLink || storeLink || "https://farmaflow.online",
         horarios_atendimento: freshTenant.horario_funcionamento || regData.horario_funcionamento || "Segunda a Sábado das 07:00h às 22:00h",
-        politica_entrega: "Tele-entrega rápida (delivery) no mesmo dia. Não realizamos retirada física na loja.",
+        politica_entrega: (() => {
+          const dSettings = freshTenant.delivery_settings || freshTenant.deliverySettings;
+          if (dSettings && dSettings.enabled !== false) {
+            const dType = dSettings.delivery_fee_type || dSettings.type || "fixed";
+            if (dType === "neighborhood") {
+              const actNeighs = (dSettings.neighborhoods || []).filter((n: any) => n.active !== false);
+              return `Tele-entrega rápida calculada por BAIRRO. Bairros atendidos: ${actNeighs.map((n: any) => `${n.name} (R$ ${Number(n.fee).toFixed(2)})`).join(', ')}.`;
+            } else if (dType === "fixed") {
+              return `Tele-entrega rápida com taxa fixa de R$ ${Number(dSettings.fee || 0).toFixed(2)}.`;
+            } else {
+              return "Tele-entrega rápida com taxa calculada pela distância em KM até o endereço.";
+            }
+          }
+          return "Tele-entrega rápida (delivery) no mesmo dia. Não realizamos retirada física na loja.";
+        })(),
         endereco: endereco || "Consulte em nossa loja online",
         whatsapp: freshTenant.whatsapp || freshTenant.telefone_contato || regData.telefone_contato || "",
         telefone_contato: freshTenant.telefone_contato || regData.telefone_contato || freshTenant.whatsapp || "",

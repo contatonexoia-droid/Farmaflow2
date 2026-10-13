@@ -35,6 +35,8 @@ import {
   ArrowRight,
   Store,
   FileText,
+  ChevronDown,
+  Clock,
 } from "lucide-react";
 import { toast } from "react-hot-toast";
 
@@ -360,7 +362,43 @@ export const Cart: React.FC<CartProps> = ({
     }
   }, [isPickupEnabled, deliveryMode]);
 
+  const [neighborhoodDropdownOpen, setNeighborhoodDropdownOpen] = useState(false);
+  const neighborhoodDropdownRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        neighborhoodDropdownRef.current &&
+        !neighborhoodDropdownRef.current.contains(event.target as Node)
+      ) {
+        setNeighborhoodDropdownOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
   const inputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+
+  const isNeighborhoodMode = Boolean(
+    tenant?.deliverySettings?.enabled &&
+    (tenant?.deliverySettings?.delivery_fee_type === "neighborhood" ||
+      tenant?.deliverySettings?.type === "neighborhood")
+  );
+
+  const activeNeighborhoods = useMemo(() => {
+    return (tenant?.deliverySettings?.neighborhoods || []).filter(
+      (n: any) => n.active !== false
+    );
+  }, [tenant?.deliverySettings?.neighborhoods]);
+
+  const selectedNeighborhoodData = useMemo(() => {
+    const current = (customer?.neighborhood || "").trim().toLowerCase();
+    if (!current) return null;
+    return activeNeighborhoods.find(
+      (n: any) => n.name.trim().toLowerCase() === current
+    ) || null;
+  }, [activeNeighborhoods, customer.neighborhood]);
 
   const hasControlledItems = items.some((item) => isControlledProduct(item));
 
@@ -681,13 +719,60 @@ export const Cart: React.FC<CartProps> = ({
       return;
     }
 
-    if (!tenant?.deliverySettings?.type || tenant?.deliverySettings?.type === "fixed") {
+    const dType = tenant?.deliverySettings?.delivery_fee_type || tenant?.deliverySettings?.type || "fixed";
+    const isNeighborhoodType = dType === "neighborhood";
+    const isDistanceType = dType === "dynamic" || dType === "distance";
+
+    // 1. Modalidade Taxa por Bairro
+    if (isNeighborhoodType) {
+      const cleanNeighborhood = (getFinalSubmitValue("neighborhood") || "").trim().toLowerCase();
+      if (!cleanNeighborhood) {
+        setDeliveryFee(0);
+        setDeliveryError("");
+        return;
+      }
+
+      const activeNeighborhoods = (tenant?.deliverySettings?.neighborhoods || []).filter(
+        (n: any) => n.active !== false
+      );
+
+      const matched = activeNeighborhoods.find(
+        (n: any) => n.name.trim().toLowerCase() === cleanNeighborhood
+      );
+
+      if (matched) {
+        setDeliveryFee(Number(matched.fee) || 0);
+        setDeliveryError("");
+        return;
+      }
+
+      // Fallback para taxa padrão caso bairro não conste na lista
+      const defaultFee = tenant?.deliverySettings?.defaultNeighborhoodFee;
+      if (defaultFee !== undefined && Number(defaultFee) > 0) {
+        setDeliveryFee(Number(defaultFee));
+        setDeliveryError("");
+        return;
+      }
+
+      if (activeNeighborhoods.length > 0) {
+        setDeliveryFee(0);
+        setDeliveryError("Bairro fora da área de entrega atendida.");
+      } else {
+        setDeliveryFee(tenant?.deliverySettings?.fee || 0);
+        setDeliveryError("");
+      }
+      return;
+    }
+
+    // 2. Modalidade Taxa Fixa
+    if (!isDistanceType) {
       setDeliveryFee(tenant?.deliverySettings?.fee || 0);
       setDeliveryError("");
       return;
     }
 
-    if (tenant?.deliverySettings?.type === "dynamic") {
+    // 3. Modalidade Taxa Dinâmica / Distância por KM (mantida 100% inalterada)
+    if (isDistanceType) {
       const cleanAddress = getFinalSubmitValue("address");
       const cleanNeighborhood = getFinalSubmitValue("neighborhood");
       const cleanCity = getFinalSubmitValue("city");
@@ -757,7 +842,7 @@ export const Cart: React.FC<CartProps> = ({
   const isDeliveryPending = Boolean(
     deliveryMode === "delivery" &&
     tenant?.deliverySettings?.enabled &&
-    tenant?.deliverySettings?.type === "dynamic" &&
+    (tenant?.deliverySettings?.type === "dynamic" || tenant?.deliverySettings?.type === "distance" || tenant?.deliverySettings?.delivery_fee_type === "distance") &&
     isAddressIncomplete &&
     !(tenant?.deliverySettings?.minOrderForFreeDelivery > 0 && subtotal >= tenant.deliverySettings.minOrderForFreeDelivery)
   );
@@ -1839,34 +1924,171 @@ export const Cart: React.FC<CartProps> = ({
                 />
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest px-1">
-                    Bairro{" "}
-                    {errors.neighborhood && (
-                      <span className="text-red-500">*</span>
+                <div className="space-y-2 relative" ref={neighborhoodDropdownRef}>
+                  <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest px-1 flex items-center justify-between">
+                    <span>
+                      Bairro{" "}
+                      {errors.neighborhood && (
+                        <span className="text-red-500">*</span>
+                      )}
+                    </span>
+                    {isNeighborhoodMode && activeNeighborhoods.length > 0 && (
+                      <span className="text-[10px] text-emerald-600 font-bold lowercase">
+                        selecione seu bairro
+                      </span>
                     )}
                   </label>
-                  <input
-                    ref={(el) => {
-                      inputRefs.current["neighborhood"] = el;
-                    }}
-                    type="text"
-                    placeholder="Bairro"
-                    className={getInputClass("neighborhood")}
-                    value={getDisplayValue("neighborhood")}
-                    onFocus={() => {
-                      if (
-                        realCustomerData &&
-                        realCustomerData.neighborhood &&
-                        !editedFields.neighborhood
-                      ) {
-                        handleFieldChange("neighborhood", "");
+
+                  {isNeighborhoodMode && activeNeighborhoods.length > 0 ? (
+                    <div className="relative">
+                      <div className="relative flex items-center">
+                        <input
+                          ref={(el) => {
+                            inputRefs.current["neighborhood"] = el;
+                          }}
+                          type="text"
+                          placeholder="Buscar ou selecionar bairro..."
+                          className={`${getInputClass("neighborhood")} pr-10`}
+                          value={getDisplayValue("neighborhood")}
+                          onFocus={() => {
+                            setNeighborhoodDropdownOpen(true);
+                            if (
+                              realCustomerData &&
+                              realCustomerData.neighborhood &&
+                              !editedFields.neighborhood
+                            ) {
+                              handleFieldChange("neighborhood", "");
+                            }
+                          }}
+                          onChange={(e) => {
+                            handleFieldChange("neighborhood", e.target.value);
+                            setNeighborhoodDropdownOpen(true);
+                          }}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setNeighborhoodDropdownOpen(!neighborhoodDropdownOpen)}
+                          className="absolute right-3 p-1.5 text-gray-400 hover:text-gray-600 focus:outline-none"
+                        >
+                          <ChevronDown
+                            size={18}
+                            className={`transition-transform duration-200 ${
+                              neighborhoodDropdownOpen ? "rotate-180" : ""
+                            }`}
+                          />
+                        </button>
+                      </div>
+
+                      {/* Dropdown com busca / autocomplete dos bairros cadastrados e ativos */}
+                      {neighborhoodDropdownOpen && (
+                        <div className="absolute left-0 right-0 top-full mt-1.5 max-h-60 overflow-y-auto rounded-2xl bg-white border border-gray-100 shadow-2xl p-2 z-50 divide-y divide-gray-50 animate-in fade-in zoom-in-95 duration-150">
+                          {activeNeighborhoods
+                            .filter((n: any) =>
+                              n.name
+                                .toLowerCase()
+                                .includes((getDisplayValue("neighborhood") || "").toLowerCase().trim())
+                            )
+                            .map((n: any) => {
+                              const isSelected =
+                                (getDisplayValue("neighborhood") || "").trim().toLowerCase() ===
+                                n.name.trim().toLowerCase();
+                              return (
+                                <button
+                                  key={n.id}
+                                  type="button"
+                                  onClick={() => {
+                                    handleFieldChange("neighborhood", n.name);
+                                    setNeighborhoodDropdownOpen(false);
+                                  }}
+                                  className={`w-full text-left p-3 rounded-xl flex items-center justify-between transition-colors ${
+                                    isSelected
+                                      ? "bg-emerald-50 text-emerald-900 font-black"
+                                      : "hover:bg-gray-50 text-gray-800 font-bold"
+                                  }`}
+                                >
+                                  <div>
+                                    <div className="text-sm">{n.name}</div>
+                                    {n.estimated_time && (
+                                      <div className="text-[10px] text-gray-400 flex items-center gap-1 mt-0.5">
+                                        <Clock size={11} /> {n.estimated_time}
+                                      </div>
+                                    )}
+                                  </div>
+                                  <span className={`text-xs px-2.5 py-1 rounded-lg font-black ${
+                                    isSelected
+                                      ? "bg-emerald-600 text-white"
+                                      : "bg-emerald-100 text-emerald-800"
+                                  }`}>
+                                    {Number(n.fee) === 0 ? "Grátis" : `R$ ${Number(n.fee).toFixed(2)}`}
+                                  </span>
+                                </button>
+                              );
+                            })}
+
+                          {activeNeighborhoods.filter((n: any) =>
+                            n.name
+                              .toLowerCase()
+                              .includes((getDisplayValue("neighborhood") || "").toLowerCase().trim())
+                          ).length === 0 && (
+                            <div className="p-3 text-center text-xs text-gray-400">
+                              {tenant?.deliverySettings?.defaultNeighborhoodFee &&
+                              Number(tenant.deliverySettings.defaultNeighborhoodFee) > 0 ? (
+                                <div className="space-y-1">
+                                  <p className="font-semibold text-gray-600">
+                                    Bairro não cadastrado na lista.
+                                  </p>
+                                  <p className="text-[11px] text-emerald-700 font-bold">
+                                    Será aplicada a taxa padrão de R${" "}
+                                    {Number(tenant.deliverySettings.defaultNeighborhoodFee).toFixed(2)}.
+                                  </p>
+                                </div>
+                              ) : (
+                                <p className="font-semibold text-red-500">
+                                  Nenhum bairro cadastrado com este nome.
+                                </p>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Exibição informativa da taxa do bairro selecionado */}
+                      {selectedNeighborhoodData && (
+                        <div className="mt-1.5 flex items-center justify-between px-2 text-[11px] text-emerald-700 font-bold">
+                          <span>
+                            Taxa de entrega: {Number(selectedNeighborhoodData.fee) === 0 ? "Grátis" : `R$ ${Number(selectedNeighborhoodData.fee).toFixed(2)}`}
+                          </span>
+                          {selectedNeighborhoodData.estimated_time && (
+                            <span className="flex items-center gap-1 text-gray-500 font-medium">
+                              <Clock size={11} /> Previsão: {selectedNeighborhoodData.estimated_time}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <input
+                      ref={(el) => {
+                        inputRefs.current["neighborhood"] = el;
+                      }}
+                      type="text"
+                      placeholder="Bairro"
+                      className={getInputClass("neighborhood")}
+                      value={getDisplayValue("neighborhood")}
+                      onFocus={() => {
+                        if (
+                          realCustomerData &&
+                          realCustomerData.neighborhood &&
+                          !editedFields.neighborhood
+                        ) {
+                          handleFieldChange("neighborhood", "");
+                        }
+                      }}
+                      onChange={(e) =>
+                        handleFieldChange("neighborhood", e.target.value)
                       }
-                    }}
-                    onChange={(e) =>
-                      handleFieldChange("neighborhood", e.target.value)
-                    }
-                  />
+                    />
+                  )}
                 </div>
                 <div className="space-y-2">
                   <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest px-1">

@@ -5445,18 +5445,8 @@ app.post("/api/checkout/delivery-fee", deliveryFeeLimiter, async (req, res) => {
     const settings = tenant.delivery_settings;
     const addressFromDatabase = tenant.full_address;
     
-    // Resiliência: Se a consulta ao banco não encontrar o endereço da farmácia, o sistema deve retornar um erro claro ('Endereço da loja não configurado')
-    if (!addressFromDatabase) {
-      console.warn("Endereço da loja não configurado no banco de dados.");
-      return res.status(400).json({ 
-        success: false, 
-        message: "Endereço da loja não configurado", 
-        error: "Endereço da loja não configurado" 
-      });
-    }
+    const dType = settings?.delivery_fee_type || settings?.type || 'fixed';
 
-    const storeAddress = addressFromDatabase;
-    
     // Fallback: If no settings or disabled, free delivery
     if (!settings || !settings.enabled) {
       return res.json({ fee: 0, isFreeDelivery: true, distanceKm: 0, success: true });
@@ -5467,13 +5457,74 @@ app.post("/api/checkout/delivery-fee", deliveryFeeLimiter, async (req, res) => {
       return res.json({ fee: 0, isFreeDelivery: true, distanceKm: 0, success: true });
     }
 
+    // Modalidade Taxa por Bairro
+    if (dType === 'neighborhood') {
+      const { neighborhood, customerAddress } = req.body;
+      let targetNeighborhood = (neighborhood || '').trim().toLowerCase();
+
+      if (!targetNeighborhood && customerAddress) {
+        const parts = customerAddress.split('-');
+        if (parts.length > 1) {
+          const sub = parts[1].split(',')[0].trim();
+          if (sub) targetNeighborhood = sub.toLowerCase();
+        }
+      }
+
+      const activeNeighborhoods = (settings.neighborhoods || []).filter((n: any) => n.active !== false);
+      const matched = activeNeighborhoods.find(
+        (n: any) => n.name.trim().toLowerCase() === targetNeighborhood
+      );
+
+      if (matched) {
+        return res.json({
+          fee: Number(matched.fee) || 0,
+          isFreeDelivery: false,
+          distanceKm: 0,
+          success: true,
+          neighborhood: matched.name,
+          estimated_time: matched.estimated_time
+        });
+      }
+
+      if (settings.defaultNeighborhoodFee !== undefined && Number(settings.defaultNeighborhoodFee) > 0) {
+        return res.json({
+          fee: Number(settings.defaultNeighborhoodFee),
+          isFreeDelivery: false,
+          distanceKm: 0,
+          success: true,
+          fallback: true
+        });
+      }
+
+      if (activeNeighborhoods.length > 0) {
+        return res.json({
+          fee: 0,
+          isFreeDelivery: false,
+          distanceKm: 0,
+          success: false,
+          message: "Seu bairro está fora da nossa área de tele-entrega."
+        });
+      }
+
+      return res.json({ fee: settings.fee || 0, isFreeDelivery: false, distanceKm: 0, success: true });
+    }
+
     // Fixed Fee
-    if (!settings.type || settings.type === 'fixed') {
+    if (dType === 'fixed') {
       return res.json({ fee: settings.fee || 0, isFreeDelivery: false, distanceKm: 0, success: true });
     }
 
     // Dynamic Fee - Needs distance calculation
-    if (settings.type === 'dynamic') {
+    if (dType === 'dynamic' || dType === 'distance') {
+      if (!addressFromDatabase) {
+        console.warn("Endereço da loja não configurado no banco de dados.");
+        return res.status(400).json({ 
+          success: false, 
+          message: "Endereço da loja não configurado", 
+          error: "Endereço da loja não configurado" 
+        });
+      }
+      const storeAddress = addressFromDatabase;
       // Security Fallback 1: If store address is missing, fallback to max fee or manual mode
       if (!storeAddress) {
         console.warn("Endereço da loja não configurado.");
@@ -5698,7 +5749,25 @@ app.post("/api/checkout/calculate-delivery", async (req, res) => {
       return res.json({ fee: 0, isFreeDelivery: true, success: true });
     }
 
-    if (!settings.type || settings.type === 'fixed') {
+    const dType = settings.delivery_fee_type || settings.type || 'fixed';
+
+    if (dType === 'neighborhood') {
+      const { neighborhood } = req.body;
+      const targetNeighborhood = (neighborhood || '').trim().toLowerCase();
+      const activeNeighborhoods = (settings.neighborhoods || []).filter((n: any) => n.active !== false);
+      const matched = activeNeighborhoods.find(
+        (n: any) => n.name.trim().toLowerCase() === targetNeighborhood
+      );
+      if (matched) {
+        return res.json({ fee: Number(matched.fee) || 0, isFreeDelivery: false, success: true });
+      }
+      if (settings.defaultNeighborhoodFee !== undefined && Number(settings.defaultNeighborhoodFee) > 0) {
+        return res.json({ fee: Number(settings.defaultNeighborhoodFee), isFreeDelivery: false, success: true });
+      }
+      return res.json({ fee: settings.fee || 0, isFreeDelivery: false, success: true });
+    }
+
+    if (dType === 'fixed') {
       return res.json({ fee: settings.fee || 0, isFreeDelivery: false, success: true });
     }
 
