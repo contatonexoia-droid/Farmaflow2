@@ -155,6 +155,10 @@ const handleNetworkError = (error: any, context: string): string => {
     errorMsg = String(error);
   }
 
+  if (errorMsg.includes("<!doctype") || errorMsg.includes("<html") || errorMsg.includes("Unexpected token '<'")) {
+    errorMsg = "A resposta do servidor retornou página HTML ao invés de dados JSON.";
+  }
+
   console.error(`[Storage Error - ${context}]:`, errorMsg);
   return errorMsg;
 };
@@ -1460,37 +1464,68 @@ export const getPromotionsByTenant = async (
   tenantId: string,
   networkId?: string,
 ): Promise<PromotionRule[]> => {
-  const maxRetries = 3;
-  let delayMs = 1000;
-  
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      const query = networkId ? `?networkId=${encodeURIComponent(networkId)}` : '';
-      const res = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/promos${query}`);
-      if (!res.ok) {
-        if (res.status === 503) {
-          try {
-            const errJson = await res.clone().json();
-            if (errJson?.error === 'offline') {
-              console.warn("[getPromotionsByTenant] Cliente offline. Retornando array vazio de promoções.");
-              return [];
-            }
-          } catch (_) {}
-        }
-        throw new Error(`HTTP error ${res.status}`);
+  if (!tenantId || tenantId === 'undefined' || tenantId === 'null' || !tenantId.trim()) {
+    return [];
+  }
+
+  const cacheKey = `promotions_${tenantId}`;
+  const validNetworkId = (networkId && networkId !== 'undefined' && networkId !== 'null' && networkId !== tenantId) 
+    ? networkId 
+    : undefined;
+
+  // 1. Tenta buscar via endpoint de API dedicado
+  try {
+    const query = validNetworkId ? `?networkId=${encodeURIComponent(validNetworkId)}` : '';
+    const res = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/promos${query}`);
+    
+    if (res.ok) {
+      const text = await res.text();
+      if (!text.trim().startsWith('<')) {
+        try {
+          const data = JSON.parse(text);
+          if (Array.isArray(data)) {
+            const mapped = data.map(mapDbPromotionToApp);
+            await localforage.setItem(cacheKey, mapped).catch(() => {});
+            return mapped;
+          }
+        } catch (_) {}
       }
-      const data = await res.json();
-      return (data || []).map(mapDbPromotionToApp);
-    } catch (e: any) {
-      if (attempt === maxRetries) {
-        handleNetworkError(e, "Promoções");
-        return [];
+    }
+  } catch (apiError: any) {
+    console.warn("[getPromotionsByTenant] API fetch não disponível, tentando fallback direto no banco:", apiError?.message || apiError);
+  }
+
+  // 2. Fallback direto no Supabase Client
+  try {
+    return await retryRequest(async () => {
+      let sbQuery = supabase.from("promotions").select("*");
+      if (validNetworkId) {
+        sbQuery = sbQuery.or(`tenant_id.eq.${tenantId},tenant_id.eq.${validNetworkId}`);
+      } else {
+        sbQuery = sbQuery.eq("tenant_id", tenantId);
       }
-      console.warn(`[getPromotionsByTenant] Retrying promo fetch (attempt ${attempt}/${maxRetries}) due to: ${e?.message || e}`);
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
-      delayMs *= 2;
+      const { data, error } = await sbQuery;
+      if (error) throw error;
+      const mapped = (data || []).map(mapDbPromotionToApp);
+      await localforage.setItem(cacheKey, mapped).catch(() => {});
+      return mapped;
+    });
+  } catch (dbError: any) {
+    if (dbError.message !== "CONFIG_MISSING") {
+      console.warn("[getPromotionsByTenant] Fallback do banco falhou, tentando cache offline:", dbError?.message || dbError);
     }
   }
+
+  // 3. Fallback para cache local (offline)
+  try {
+    const cached = await localforage.getItem<PromotionRule[]>(cacheKey);
+    if (cached && Array.isArray(cached)) {
+      return cached;
+    }
+  } catch (cacheErr) {
+    console.error("Erro ao ler promoções do cache local:", cacheErr);
+  }
+
   return [];
 };
 
@@ -1644,42 +1679,59 @@ export const getCouponsByTenant = async (
   }
   const cacheKey = `coupons_${tenantId}`;
   const validNetworkId = (networkId && networkId !== 'undefined' && networkId !== 'null') ? networkId : undefined;
+  // 1. Tenta buscar via endpoint de API dedicado
   try {
     const query = validNetworkId ? `?networkId=${encodeURIComponent(validNetworkId)}` : '';
     const res = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/vouchers${query}`);
-    if (!res.ok) {
-      if (res.status === 503) {
+    if (res.ok) {
+      const text = await res.text();
+      if (!text.trim().startsWith('<')) {
         try {
-          const errJson = await res.clone().json();
-          if (errJson?.error === 'offline') {
-            console.warn("[getCouponsByTenant] Cliente offline. Retornando array vazio de cupons.");
-            return [];
+          const data = JSON.parse(text);
+          if (Array.isArray(data)) {
+            const mapped = data.map(mapCouponFromDB);
+            await localforage.setItem(cacheKey, mapped).catch(() => {});
+            return mapped;
           }
         } catch (_) {}
       }
-      const errText = await res.text();
-      throw new Error(`Failed to fetch coupons: ${res.status} ${res.statusText} - ${errText}`);
     }
-    const data = await res.json();
-    const mapped = (data || []).map(mapCouponFromDB);
-    
-    // Save to localforage cache
-    await localforage.setItem(cacheKey, mapped).catch(() => {});
-    
-    return mapped;
-  } catch (e: any) {
-    console.warn("[getCouponsByTenant] Falha na rede ou servidor. Tentando recuperar cupons offline do cache local:", e.message || e);
-    try {
-      const cached = await localforage.getItem<CouponRule[]>(cacheKey);
-      if (cached) {
-        console.log("[getCouponsByTenant] Recuperados cupons offline com sucesso.");
-        return cached;
-      }
-    } catch (cacheErr) {
-      console.error("Error reading cached coupons:", cacheErr);
-    }
-    return [];
+  } catch (apiError: any) {
+    console.warn("[getCouponsByTenant] API fetch não disponível, tentando fallback direto no banco:", apiError?.message || apiError);
   }
+
+  // 2. Fallback direto no Supabase Client
+  try {
+    return await retryRequest(async () => {
+      let sbQuery = supabase.from("coupons").select("*");
+      if (validNetworkId) {
+        sbQuery = sbQuery.or(`tenant_id.eq.${tenantId},tenant_id.eq.${validNetworkId}`);
+      } else {
+        sbQuery = sbQuery.eq("tenant_id", tenantId);
+      }
+      const { data, error } = await sbQuery;
+      if (error) throw error;
+      const mapped = (data || []).map(mapCouponFromDB);
+      await localforage.setItem(cacheKey, mapped).catch(() => {});
+      return mapped;
+    });
+  } catch (dbError: any) {
+    if (dbError.message !== "CONFIG_MISSING") {
+      console.warn("[getCouponsByTenant] Fallback do banco falhou, tentando cache offline:", dbError?.message || dbError);
+    }
+  }
+
+  // 3. Fallback para cache local (offline)
+  try {
+    const cached = await localforage.getItem<CouponRule[]>(cacheKey);
+    if (cached && Array.isArray(cached)) {
+      return cached;
+    }
+  } catch (cacheErr) {
+    console.error("Error reading cached coupons:", cacheErr);
+  }
+
+  return [];
 };
 
 export const saveCoupon = async (coupon: CouponRule) => {

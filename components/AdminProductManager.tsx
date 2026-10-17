@@ -5,7 +5,8 @@ import {
   Search, Plus, Edit3, Trash2, X, Save, Image as ImageIcon, 
   Loader2, Sparkles, Wand2, Upload, FileSpreadsheet, Factory, 
   Package, CheckSquare, Square, ListChecks, CheckCircle2, Star, ChevronDown, Filter,
-  RefreshCw, Info, AlertCircle, CheckCircle, ArrowRight, History, FileText, Printer, FileImage, Link as LinkIcon, Store, ShoppingCart, ArrowDown, Minus, Download, Tag, RotateCcw, ImageOff, ScanLine, Layers
+  RefreshCw, Info, AlertCircle, CheckCircle, ArrowRight, History, FileText, Printer, FileImage, Link as LinkIcon, Store, ShoppingCart, ArrowDown, Minus, Download, Tag, RotateCcw, ImageOff, ScanLine, Layers,
+  Barcode
 } from 'lucide-react';
 import { fetchProductDetails, generateAiProductImage } from '../services/gemini';
 import { processAiEnrichmentQueue, AiEnrichmentReport } from '../services/aiProcessor';
@@ -490,6 +491,22 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
   const [isDeletingBulk, setIsDeletingBulk] = useState(false);
   const [overwriteExistingData, setOverwriteExistingData] = useState(false);
   const [importSummary, setImportSummary] = useState<ImportSummary | null>(null);
+
+  // Estados de enriquecimento de fotos por EAN (Supabase Storage)
+  const [isSearchingEanForEdit, setIsSearchingEanForEdit] = useState(false);
+  const [eanEditFeedback, setEanEditFeedback] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
+  const [isBatchSyncModalOpen, setIsBatchSyncModalOpen] = useState(false);
+  const [isBatchSyncingEan, setIsBatchSyncingEan] = useState(false);
+  const [batchSyncProgress, setBatchSyncProgress] = useState<{
+    total: number;
+    processed: number;
+    updated: number;
+    cached: number;
+    failed: number;
+    isDone: boolean;
+    error?: string;
+  } | null>(null);
+  const stopBatchSyncRef = useRef(false);
   
   // Keep a ref to the latest products to avoid stale closures in background queues
   const productsRef = useRef(products);
@@ -1053,6 +1070,276 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
         const image = await generateAiProductImage(editingProduct.name);
         setEditingProduct(prev => ({ ...prev, image }));
     } catch (e: any) { alert(e.message); } finally { setIsGeneratingImage(false); }
+  };
+
+  const handleSearchEanImageForEdit = async () => {
+    if (!editingProduct?.barcode) {
+      setEanEditFeedback({ type: 'error', message: 'Preencha o Código de Barras (EAN) primeiro.' });
+      return;
+    }
+
+    const cleanEan = String(editingProduct.barcode).replace(/\D/g, '');
+    if (cleanEan.length < 8 || cleanEan.length > 14) {
+      setEanEditFeedback({ type: 'error', message: 'O EAN deve ter entre 8 e 14 dígitos numéricos.' });
+      return;
+    }
+
+    setIsSearchingEanForEdit(true);
+    setEanEditFeedback({ type: 'info', message: 'Buscando foto oficial e salvando no Supabase Storage...' });
+
+    try {
+      const response = await fetch('/api/products/search-ean-image', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ean: cleanEan,
+          productName: editingProduct.name,
+          tenantId: tenant.id,
+          productId: editingProduct.id
+        })
+      });
+
+      const data = await response.json();
+
+      if (response.ok && data.success && data.url) {
+        setEditingProduct(prev => prev ? ({ ...prev, image: data.url }) : null);
+        const sourceLabel = data.source === 'supabase_cache' 
+          ? 'Reaproveitada do cache Supabase' 
+          : 'Baixada e salva no Supabase Storage';
+        setEanEditFeedback({
+          type: 'success',
+          message: `Foto encontrada com sucesso! (${sourceLabel})`
+        });
+
+        // Atualiza imediatamente na lista do estado global
+        if (editingProduct.id) {
+          onProductsStateUpdate([{ ...editingProduct, image: data.url }]);
+        }
+      } else {
+        setEanEditFeedback({
+          type: 'error',
+          message: data.error || 'Nenhuma foto encontrada nas bases de código de barras para este EAN.'
+        });
+      }
+    } catch (err: any) {
+      setEanEditFeedback({
+        type: 'error',
+        message: 'Erro na comunicação com o servidor ao consultar foto por EAN.'
+      });
+    } finally {
+      setIsSearchingEanForEdit(false);
+    }
+  };
+
+  const isNoPhotoImage = (img: string | undefined | null) => {
+    if (!img) return true;
+    const s = String(img).trim().toLowerCase();
+    return (
+      s === '' ||
+      s === 'ignore' ||
+      s === 'null' ||
+      s === 'undefined' ||
+      s === 'none' ||
+      s.includes('placeholder') ||
+      s.includes('sem-foto') ||
+      s.includes('sem_foto') ||
+      s.includes('no-image') ||
+      s.includes('no_image') ||
+      s.includes('default') ||
+      s.includes('tarja-vermelha') ||
+      s.includes('generico-tarja')
+    );
+  };
+
+  const handleStartEanBatchSync = async () => {
+    stopBatchSyncRef.current = false;
+
+    // Identifica produtos com EAN válido e sem foto no catálogo carregado
+    const eligibleProducts = products.filter(p => {
+      const cleanEan = String(p.barcode || '').replace(/\D/g, '');
+      const hasValidEan = cleanEan.length >= 8 && cleanEan.length <= 14;
+      return hasValidEan && isNoPhotoImage(p.image);
+    });
+
+    setIsBatchSyncModalOpen(true);
+    setIsBatchSyncingEan(true);
+
+    const CHUNK_SIZE = 25;
+    let totalProcessed = 0;
+    let totalUpdated = 0;
+    let totalCached = 0;
+    let totalFailed = 0;
+
+    // Se temos itens elegíveis na memória local da tabela
+    if (eligibleProducts.length > 0) {
+      setBatchSyncProgress({
+        total: eligibleProducts.length,
+        processed: 0,
+        updated: 0,
+        cached: 0,
+        failed: 0,
+        isDone: false
+      });
+
+      try {
+        for (let i = 0; i < eligibleProducts.length; i += CHUNK_SIZE) {
+          if (stopBatchSyncRef.current) {
+            console.log('[BatchSync] Sincronização interrompida pelo usuário.');
+            break;
+          }
+
+          const currentChunk = eligibleProducts.slice(i, i + CHUNK_SIZE);
+          const chunkIds = currentChunk.map(p => p.id);
+
+          try {
+            const response = await fetch('/api/products/sync-ean-images', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                tenantId: tenant.id,
+                productIds: chunkIds,
+                limit: CHUNK_SIZE,
+                concurrency: 4
+              })
+            });
+
+            if (response.ok) {
+              const data = await response.json();
+              if (data.success && Array.isArray(data.results)) {
+                totalProcessed += currentChunk.length;
+                totalUpdated += (data.updated || 0);
+                totalCached += (data.cached || 0);
+                totalFailed += (data.failed || 0);
+
+                // Notifica App.tsx apenas com os produtos efetivamente enriquecidos com novas imagens
+                const updatedItems: Product[] = [];
+                data.results.forEach((r: any) => {
+                  if (r.success && r.url && r.productId) {
+                    const match = eligibleProducts.find(p => p.id === r.productId);
+                    if (match) {
+                      updatedItems.push({ ...match, image: r.url });
+                    }
+                  }
+                });
+
+                if (updatedItems.length > 0) {
+                  onProductsStateUpdate(updatedItems);
+                }
+
+                setBatchSyncProgress({
+                  total: eligibleProducts.length,
+                  processed: totalProcessed,
+                  updated: totalUpdated,
+                  cached: totalCached,
+                  failed: totalFailed,
+                  isDone: totalProcessed >= eligibleProducts.length
+                });
+              } else {
+                totalProcessed += currentChunk.length;
+                totalFailed += currentChunk.length;
+              }
+            } else {
+              totalProcessed += currentChunk.length;
+              totalFailed += currentChunk.length;
+            }
+          } catch (chunkErr) {
+            console.warn('[BatchSync] Erro no lote:', chunkErr);
+            totalProcessed += currentChunk.length;
+            totalFailed += currentChunk.length;
+          }
+        }
+      } finally {
+        setIsBatchSyncingEan(false);
+        setBatchSyncProgress(prev => prev ? ({ ...prev, isDone: true }) : null);
+      }
+    } else {
+      // Caso a listagem local não possua itens pendentes, sincroniza diretamente do banco de dados
+      setBatchSyncProgress({
+        total: 100,
+        processed: 0,
+        updated: 0,
+        cached: 0,
+        failed: 0,
+        isDone: false
+      });
+
+      try {
+        let hasMore = true;
+        let batchCount = 0;
+        const maxBatches = 8; // Processa até 8 lotes de 25 por clique para resposta rápida
+
+        while (hasMore && batchCount < maxBatches && !stopBatchSyncRef.current) {
+          batchCount++;
+          const response = await fetch('/api/products/sync-ean-images', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              tenantId: tenant.id,
+              limit: CHUNK_SIZE,
+              concurrency: 4
+            })
+          });
+
+          if (response.ok) {
+            const data = await response.json();
+            if (data.success && Array.isArray(data.results) && data.results.length > 0) {
+              totalProcessed += data.processed || data.results.length;
+              totalUpdated += (data.updated || 0);
+              totalCached += (data.cached || 0);
+              totalFailed += (data.failed || 0);
+
+              const updatedItems: Product[] = [];
+              data.results.forEach((r: any) => {
+                if (r.success && r.url && r.productId) {
+                  const match = products.find(p => p.id === r.productId);
+                  if (match) {
+                    updatedItems.push({ ...match, image: r.url });
+                  }
+                }
+              });
+
+              if (updatedItems.length > 0) {
+                onProductsStateUpdate(updatedItems);
+              }
+
+              setBatchSyncProgress({
+                total: totalProcessed + (data.results.length === CHUNK_SIZE ? 25 : 0),
+                processed: totalProcessed,
+                updated: totalUpdated,
+                cached: totalCached,
+                failed: totalFailed,
+                isDone: data.results.length < CHUNK_SIZE
+              });
+
+              if (data.results.length < CHUNK_SIZE) {
+                hasMore = false;
+              }
+            } else {
+              hasMore = false;
+            }
+          } else {
+            hasMore = false;
+          }
+        }
+
+        if (totalProcessed === 0) {
+          setBatchSyncProgress({
+            total: 0,
+            processed: 0,
+            updated: 0,
+            cached: 0,
+            failed: 0,
+            isDone: true,
+            error: 'Todos os produtos com código de barras cadastrado já possuem fotos na loja!'
+          });
+        }
+      } catch (err: any) {
+        setBatchSyncProgress(prev => prev ? ({ ...prev, isDone: true, error: 'Erro ao conectar ao servidor para sincronização.' }) : null);
+      } finally {
+        setIsBatchSyncingEan(false);
+        setBatchSyncProgress(prev => prev ? ({ ...prev, isDone: true }) : null);
+      }
+    }
   };
 
   const getFlyerItems = () => products.filter(p => selectedProducts.has(p.id));
@@ -3057,7 +3344,20 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                             </span>
                         )}
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                        <button 
+                            onClick={handleStartEanBatchSync}
+                            disabled={isBatchSyncingEan}
+                            className="flex items-center gap-2 px-4 py-2.5 bg-indigo-50 border-2 border-indigo-200 text-indigo-700 rounded-xl font-black text-xs uppercase tracking-wide hover:bg-indigo-100 hover:border-indigo-300 transition-all shadow-sm disabled:opacity-50"
+                            title="Buscar fotos por código de barras em lote e salvar definitivamente no Supabase Storage"
+                        >
+                            {isBatchSyncingEan ? (
+                                <Loader2 size={16} className="animate-spin text-indigo-600" />
+                            ) : (
+                                <Barcode size={16} className="text-indigo-600" />
+                            )}
+                            Buscar Fotos por EAN
+                        </button>
                         <button 
                             onClick={handleExportAllProducts}
                             className="flex items-center gap-2 px-4 py-2.5 bg-emerald-50 border-2 border-emerald-200 text-emerald-700 rounded-xl font-black text-xs uppercase tracking-wide hover:bg-emerald-100 hover:border-emerald-300 transition-all shadow-sm"
@@ -3435,9 +3735,32 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                             </div>
                             <div className="space-y-3">
                                 <div className="flex gap-2">
-                                    <button onClick={handleAiImage} disabled={isGeneratingImage || !editingProduct.name} className="flex-1 py-3 bg-purple-50 text-purple-600 rounded-xl font-black text-xs uppercase hover:bg-purple-100 transition-all flex items-center justify-center gap-2">{isGeneratingImage ? <Loader2 className="animate-spin" size={14}/> : <Wand2 size={14}/>} IA Imagem</button>
-                                    <button onClick={() => fileInputRef.current?.click()} className="flex-1 py-3 bg-gray-50 text-gray-600 rounded-xl font-black text-xs uppercase hover:bg-gray-100 transition-all flex items-center justify-center gap-2"><Upload size={14}/> Upload</button>
+                                    <button 
+                                        type="button"
+                                        onClick={handleSearchEanImageForEdit} 
+                                        disabled={isSearchingEanForEdit || !editingProduct.barcode} 
+                                        className="flex-1 py-3 bg-indigo-50 text-indigo-700 rounded-xl font-black text-xs uppercase hover:bg-indigo-100 transition-all flex items-center justify-center gap-2 disabled:opacity-40"
+                                        title="Buscar foto oficial pelo código EAN e salvar no Supabase Storage"
+                                    >
+                                        {isSearchingEanForEdit ? <Loader2 className="animate-spin" size={14}/> : <Barcode size={14}/>} 
+                                        Foto via EAN
+                                    </button>
+                                    <button type="button" onClick={handleAiImage} disabled={isGeneratingImage || !editingProduct.name} className="flex-1 py-3 bg-purple-50 text-purple-600 rounded-xl font-black text-xs uppercase hover:bg-purple-100 transition-all flex items-center justify-center gap-2 disabled:opacity-50">{isGeneratingImage ? <Loader2 className="animate-spin" size={14}/> : <Wand2 size={14}/>} IA Imagem</button>
+                                    <button type="button" onClick={() => fileInputRef.current?.click()} className="flex-1 py-3 bg-gray-50 text-gray-600 rounded-xl font-black text-xs uppercase hover:bg-gray-100 transition-all flex items-center justify-center gap-2"><Upload size={14}/> Upload</button>
                                 </div>
+                                {eanEditFeedback && (
+                                    <div className={`text-xs font-bold p-3 rounded-xl flex items-center gap-2 ${
+                                        eanEditFeedback.type === 'success' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' :
+                                        eanEditFeedback.type === 'error' ? 'bg-red-50 text-red-600 border border-red-200' :
+                                        'bg-indigo-50 text-indigo-700 border border-indigo-200'
+                                    }`}>
+                                        {eanEditFeedback.type === 'success' && <CheckCircle size={14} className="shrink-0" />}
+                                        {eanEditFeedback.type === 'error' && <AlertCircle size={14} className="shrink-0" />}
+                                        {eanEditFeedback.type === 'info' && <Loader2 size={14} className="animate-spin shrink-0" />}
+                                        <span className="flex-1 leading-snug">{eanEditFeedback.message}</span>
+                                        <button type="button" onClick={() => setEanEditFeedback(null)} className="text-gray-400 hover:text-gray-600"><X size={12}/></button>
+                                    </div>
+                                )}
                                 <div className="relative group">
                                     <LinkIcon size={14} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 group-focus-within:text-brand" />
                                     <input type="text" placeholder="Ou cole a URL da Foto aqui..." className="w-full pl-10 pr-4 py-3 bg-gray-50 border-2 border-transparent rounded-xl outline-none focus:bg-white focus:border-brand transition-all text-xs font-bold text-gray-800" value={editingProduct.image?.startsWith('http') ? editingProduct.image : ''} onChange={e => setEditingProduct({...editingProduct, image: e.target.value})} />
@@ -3452,7 +3775,40 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                                 <div className="space-y-1"><InputLabel label="Preço Original / PMC (De:)" /><SmartNumberInput isFloat={true} className="w-full bg-white p-3 rounded-xl font-bold border text-gray-900" value={Number.isNaN(editingProduct.originalPrice) ? '' : (editingProduct.originalPrice ?? '')} onChangeValue={val => setEditingProduct({...editingProduct, originalPrice: val})} /></div>
                                 <div className="space-y-1"><InputLabel label="Preço Promocional (Por:)" /><SmartNumberInput isFloat={true} className="w-full bg-white p-3 rounded-xl font-bold border text-gray-900" value={Number.isNaN(editingProduct.promotionalPrice) ? '' : (editingProduct.promotionalPrice ?? ((editingProduct as any).promotional_price ?? ''))} onChangeValue={val => { const numVal = typeof val === 'number' && !isNaN(val) && val > 0 ? val : null; setEditingProduct({...editingProduct, promotionalPrice: val, promotional_price: numVal}); }} /></div>
                                 <div className="space-y-1"><InputLabel label="Estoque" /><SmartNumberInput className="w-full bg-white p-3 rounded-xl font-bold border text-gray-900" value={Number.isNaN(editingProduct.stock) ? '' : (editingProduct.stock ?? '')} onChangeValue={val => setEditingProduct({...editingProduct, stock: val})} /></div>
-                                <div className="space-y-1 col-span-2"><InputLabel label="Código de Barras (EAN) *" /><input type="text" className="w-full bg-white p-3 rounded-xl font-bold border text-gray-900" value={editingProduct.barcode || ''} onChange={e => { const newEan = e.target.value; setEditingProduct({...editingProduct, barcode: newEan}); }} /></div>
+                                <div className="space-y-1 col-span-2">
+                                    <div className="flex justify-between items-center">
+                                        <InputLabel label="Código de Barras (EAN) *" />
+                                        <button 
+                                            type="button"
+                                            onClick={handleSearchEanImageForEdit}
+                                            disabled={isSearchingEanForEdit || !editingProduct.barcode}
+                                            className="text-[11px] font-black text-indigo-600 hover:text-indigo-800 flex items-center gap-1 uppercase tracking-wider transition-colors disabled:opacity-40"
+                                            title="Buscar foto correspondente a este EAN"
+                                        >
+                                            {isSearchingEanForEdit ? <Loader2 size={12} className="animate-spin" /> : <Barcode size={12} />}
+                                            Buscar Foto pelo EAN
+                                        </button>
+                                    </div>
+                                    <div className="flex gap-2">
+                                        <input 
+                                            type="text" 
+                                            placeholder="Ex: 7896064487825"
+                                            className="flex-1 bg-white p-3 rounded-xl font-bold border text-gray-900" 
+                                            value={editingProduct.barcode || ''} 
+                                            onChange={e => { const newEan = e.target.value; setEditingProduct({...editingProduct, barcode: newEan}); }} 
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={handleSearchEanImageForEdit}
+                                            disabled={isSearchingEanForEdit || !editingProduct.barcode}
+                                            className="px-3.5 py-2 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 rounded-xl font-black text-xs uppercase flex items-center gap-1.5 transition-all border border-indigo-200 disabled:opacity-40 shrink-0"
+                                            title="Buscar foto e salvar no Supabase Storage"
+                                        >
+                                            {isSearchingEanForEdit ? <Loader2 size={14} className="animate-spin" /> : <Barcode size={14} />}
+                                            <span className="hidden sm:inline">Buscar Foto</span>
+                                        </button>
+                                    </div>
+                                </div>
                                 <div className="space-y-1 col-span-2"><InputLabel label="Código Interno (Ref)" /><input type="text" className="w-full bg-white p-3 rounded-xl font-bold border text-gray-900" value={editingProduct.internalCode || ''} onChange={e => setEditingProduct({...editingProduct, internalCode: e.target.value})} /></div>
                             </div>
                         </div>
@@ -4190,6 +4546,149 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                             )}
                         </button>
                     </div>
+                </div>
+            </div>
+        )}
+
+        {/* Modal de Busca e Sincronização de Fotos por EAN em Lote */}
+        {isBatchSyncModalOpen && (
+            <div className="fixed inset-0 z-[160] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+                <div className="bg-white w-full max-w-lg rounded-[2.5rem] p-8 shadow-2xl animate-in zoom-in-95 flex flex-col">
+                    <div className="flex justify-between items-center mb-6">
+                        <div className="flex items-center gap-3">
+                            <div className="w-12 h-12 bg-indigo-100 text-indigo-600 rounded-2xl flex items-center justify-center">
+                                <Barcode size={26} />
+                            </div>
+                            <div>
+                                <h3 className="text-xl font-black text-gray-900 leading-tight">Buscar Fotos por EAN</h3>
+                                <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">Supabase Storage • Bucket products</p>
+                            </div>
+                        </div>
+                        {!isBatchSyncingEan && (
+                            <button 
+                                onClick={() => setIsBatchSyncModalOpen(false)} 
+                                className="p-2 bg-gray-50 rounded-full hover:text-red-500 transition-colors"
+                            >
+                                <X size={24}/>
+                            </button>
+                        )}
+                    </div>
+
+                    {isBatchSyncingEan ? (
+                        <div className="flex flex-col items-center py-6 text-center space-y-6">
+                            <div className="relative">
+                                <div className="w-20 h-20 bg-indigo-50 border-4 border-indigo-200 rounded-full flex items-center justify-center">
+                                    <Loader2 size={36} className="text-indigo-600 animate-spin" />
+                                </div>
+                            </div>
+                            <div className="space-y-2">
+                                <h4 className="text-lg font-black text-gray-900">
+                                    Buscando e salvando fotos no Supabase...
+                                </h4>
+                                <p className="text-xs font-medium text-gray-500 max-w-sm">
+                                    Consultando bases farmacêuticas oficiais (Drogaria São Paulo, Pacheco, Pague Menos, CDN Cosmos, OpenBeautyFacts) e salvando definitivamente no Supabase Storage.
+                                </p>
+                            </div>
+
+                            {/* Barra de Progresso Real */}
+                            <div className="w-full space-y-2">
+                                <div className="flex justify-between items-center text-xs font-black">
+                                    <span className="text-gray-600">
+                                        {batchSyncProgress?.processed || 0} de {batchSyncProgress?.total || 0} itens analisados
+                                    </span>
+                                    <span className="text-indigo-600">
+                                        {batchSyncProgress?.total ? Math.min(100, Math.round(((batchSyncProgress.processed || 0) / batchSyncProgress.total) * 100)) : 0}%
+                                    </span>
+                                </div>
+                                <div className="w-full bg-gray-100 h-3 rounded-full overflow-hidden">
+                                    <div 
+                                        className="bg-indigo-600 h-full rounded-full transition-all duration-300"
+                                        style={{ width: `${batchSyncProgress?.total ? Math.min(100, Math.round(((batchSyncProgress.processed || 0) / batchSyncProgress.total) * 100)) : 5}%` }}
+                                    />
+                                </div>
+                            </div>
+
+                            {/* Contadores em tempo real */}
+                            <div className="flex gap-2 justify-center flex-wrap">
+                                <span className="text-xs font-black text-emerald-700 bg-emerald-50 px-3 py-1.5 rounded-xl border border-emerald-200">
+                                    ✓ {batchSyncProgress?.updated || 0} fotos salvas
+                                </span>
+                                {(batchSyncProgress?.cached || 0) > 0 && (
+                                    <span className="text-xs font-black text-blue-700 bg-blue-50 px-3 py-1.5 rounded-xl border border-blue-200">
+                                        ⚡ {batchSyncProgress?.cached} do cache
+                                    </span>
+                                )}
+                            </div>
+
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    stopBatchSyncRef.current = true;
+                                    setIsBatchSyncingEan(false);
+                                }}
+                                className="px-5 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-black text-xs uppercase tracking-wide transition-all shadow-sm"
+                            >
+                                Pausar Sincronização
+                            </button>
+                        </div>
+                    ) : (
+                        <div className="flex flex-col space-y-6">
+                            {batchSyncProgress?.error && (
+                                <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl text-amber-800 text-xs font-bold flex items-start gap-3">
+                                    <AlertCircle size={18} className="shrink-0 text-amber-600 mt-0.5" />
+                                    <span>{batchSyncProgress.error}</span>
+                                </div>
+                            )}
+
+                            {batchSyncProgress?.isDone && !batchSyncProgress.error && (
+                                <div className="space-y-4">
+                                    <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl text-emerald-800 text-xs font-bold flex items-center gap-3">
+                                        <CheckCircle2 size={20} className="text-emerald-600 shrink-0" />
+                                        <span>Processamento concluído com persistência no Supabase Storage!</span>
+                                    </div>
+
+                                    <div className="grid grid-cols-3 gap-3">
+                                        <div className="p-4 bg-indigo-50 rounded-2xl border border-indigo-100 text-center">
+                                            <span className="text-2xl font-black text-indigo-700 block">
+                                                {batchSyncProgress.updated}
+                                            </span>
+                                            <span className="text-[10px] font-black uppercase text-indigo-900 tracking-wider">
+                                                Fotos Salvas
+                                            </span>
+                                        </div>
+                                        <div className="p-4 bg-blue-50 rounded-2xl border border-blue-100 text-center">
+                                            <span className="text-2xl font-black text-blue-700 block">
+                                                {batchSyncProgress.cached}
+                                            </span>
+                                            <span className="text-[10px] font-black uppercase text-blue-900 tracking-wider">
+                                                Do Cache Global
+                                            </span>
+                                        </div>
+                                        <div className="p-4 bg-gray-50 rounded-2xl border border-gray-100 text-center">
+                                            <span className="text-2xl font-black text-gray-500 block">
+                                                {batchSyncProgress.failed}
+                                            </span>
+                                            <span className="text-[10px] font-black uppercase text-gray-600 tracking-wider">
+                                                Sem Foto
+                                            </span>
+                                        </div>
+                                    </div>
+
+                                    <p className="text-xs font-medium text-gray-500 text-center">
+                                        As fotos encontradas foram baixadas e gravadas permanentemente no bucket <strong className="text-gray-800">products/ean/</strong> do Supabase Storage.
+                                    </p>
+                                </div>
+                            )}
+
+                            <button
+                                type="button"
+                                onClick={() => setIsBatchSyncModalOpen(false)}
+                                className="w-full py-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl font-black text-xs uppercase tracking-wider transition-all shadow-lg shadow-indigo-600/30 flex items-center justify-center gap-2"
+                            >
+                                <CheckCircle size={16} /> Concluir e Ver Produtos
+                            </button>
+                        </div>
+                    )}
                 </div>
             </div>
         )}

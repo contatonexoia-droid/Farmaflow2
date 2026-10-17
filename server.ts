@@ -31,6 +31,7 @@ import { evolutionApiService } from "./services/evolutionApiService.js";
 import { transcribeAudio } from "./services/audioAiService.js";
 import ogHandler, { buildCrawlerHtml, isCrawlerRequest } from "./api/og-handler.js";
 import QRCode from "qrcode";
+import { fetchAndStoreProductImageByEan, syncEanImagesBatch, validateAndCleanEan } from "./services/eanImageService.js";
 
 
 // Permitir conexões com instâncias auto-hospedadas / certificados personalizados da Evolution API
@@ -3341,6 +3342,96 @@ app.get("/api/products/export/:tenantId", checkTenantAccess, handleProductsExpor
 app.get("/api/v1/products/export/:tenantId", checkTenantAccess, handleProductsExport);
 app.get("/api/v1/store/:tenantId/products/export", handleProductsExport);
 app.get("/api/products/export", checkTenantAccess, handleProductsExport);
+
+// ==============================================================================
+// SINCRONIZAÇÃO E ENRIQUECIMENTO DE FOTOS POR CÓDIGO DE BARRAS (EAN)
+// ==============================================================================
+app.post("/api/products/sync-ean-images", async (req, res) => {
+  try {
+    const { productId, ean, tenantId, productIds, limit, concurrency } = req.body || {};
+
+    // 1. Sincronização de um único produto
+    if (productId || ean) {
+      if (!ean) {
+        // Se foi enviado apenas o ID, busca os dados do produto no Supabase
+        const { data: prod, error } = await supabaseAdmin
+          .from("products")
+          .select("id, name, barcode, tenant_id")
+          .eq("id", productId)
+          .maybeSingle();
+
+        if (error || !prod || !prod.barcode) {
+          return res.status(400).json({
+            success: false,
+            error: "Produto não encontrado ou sem código de barras (EAN) cadastrado."
+          });
+        }
+
+        const result = await fetchAndStoreProductImageByEan(
+          supabaseAdmin,
+          prod.barcode,
+          prod.name,
+          prod.tenant_id,
+          prod.id
+        );
+        return res.json(result);
+      }
+
+      // Se forneceu o EAN diretamente
+      const result = await fetchAndStoreProductImageByEan(
+        supabaseAdmin,
+        ean,
+        req.body?.productName,
+        tenantId,
+        productId
+      );
+      return res.json(result);
+    }
+
+    // 2. Processamento em lote
+    const batchSummary = await syncEanImagesBatch(supabaseAdmin, {
+      tenantId,
+      productIds,
+      limit: typeof limit === "number" ? Math.min(limit, 500) : 100,
+      concurrency: typeof concurrency === "number" ? Math.min(concurrency, 5) : 3
+    });
+
+    return res.json({
+      success: true,
+      ...batchSummary
+    });
+  } catch (error: any) {
+    console.error("[API sync-ean-images] Erro inesperado:", error);
+    return res.status(500).json({
+      success: false,
+      error: error?.message || "Erro interno ao sincronizar fotos por EAN."
+    });
+  }
+});
+
+app.post("/api/products/search-ean-image", async (req, res) => {
+  try {
+    const { ean, productName, tenantId, productId } = req.body || {};
+    if (!ean) {
+      return res.status(400).json({ success: false, error: "Parâmetro 'ean' é obrigatório." });
+    }
+
+    const result = await fetchAndStoreProductImageByEan(
+      supabaseAdmin,
+      ean,
+      productName,
+      tenantId,
+      productId
+    );
+    return res.json(result);
+  } catch (error: any) {
+    console.error("[API search-ean-image] Erro inesperado:", error);
+    return res.status(500).json({
+      success: false,
+      error: error?.message || "Erro ao consultar foto do produto por EAN."
+    });
+  }
+});
 
 app.get("/api/v1/products/:id", async (req, res) => {
   try {
@@ -9646,13 +9737,16 @@ app.delete("/api/v1/chat/canned-responses/:id", async (req, res) => {
 
 // These endpoints will be added to server.ts
 
-app.get("/api/v1/tenants/:tenantId/promos", async (req, res) => {
+app.get(["/api/v1/tenants/:tenantId/promos", "/api/tenants/:tenantId/promos", "/api/v1/promos/:tenantId", "/api/promos/:tenantId"], async (req, res) => {
   try {
     const tenantId = req.params.tenantId;
-    const networkId = req.query.networkId;
+    if (!tenantId || tenantId === "undefined" || tenantId === "null") {
+      return res.json([]);
+    }
+    const networkId = req.query.networkId as string | undefined;
     
     let query = supabaseAdmin.from("promotions").select("*");
-    if (networkId) {
+    if (networkId && networkId !== "undefined" && networkId !== "null" && networkId !== tenantId) {
       query = query.or(`tenant_id.eq.${tenantId},tenant_id.eq.${networkId}`);
     } else {
       query = query.eq("tenant_id", tenantId);
@@ -9660,9 +9754,10 @@ app.get("/api/v1/tenants/:tenantId/promos", async (req, res) => {
     
     const { data, error } = await query;
     if (error) throw error;
-    res.json(data);
+    res.json(data || []);
   } catch (e: any) {
-    res.status(500).json({ error: e.message });
+    console.error("[GET promos] Erro ao buscar promoções:", e.message);
+    res.status(500).json({ error: e.message, data: [] });
   }
 });
 
@@ -9740,13 +9835,16 @@ app.delete("/api/v1/tenants/:tenantId/promos/:id", checkTenantAccess, async (req
 });
 
 // Vouchers (Coupons)
-app.get("/api/v1/tenants/:tenantId/vouchers", async (req, res) => {
+app.get(["/api/v1/tenants/:tenantId/vouchers", "/api/tenants/:tenantId/vouchers", "/api/v1/vouchers/:tenantId", "/api/vouchers/:tenantId"], async (req, res) => {
   try {
     const tenantId = req.params.tenantId;
-    const networkId = req.query.networkId;
+    if (!tenantId || tenantId === "undefined" || tenantId === "null") {
+      return res.json([]);
+    }
+    const networkId = req.query.networkId as string | undefined;
     
     let query = supabaseAdmin.from("coupons").select("*");
-    if (networkId) {
+    if (networkId && networkId !== "undefined" && networkId !== "null" && networkId !== tenantId) {
       query = query.or(`tenant_id.eq.${tenantId},tenant_id.eq.${networkId}`);
     } else {
       query = query.eq("tenant_id", tenantId);
@@ -9754,9 +9852,10 @@ app.get("/api/v1/tenants/:tenantId/vouchers", async (req, res) => {
     
     const { data, error } = await query;
     if (error) throw error;
-    res.json(data);
+    res.json(data || []);
   } catch (e: any) {
-    res.status(500).json({ error: e.message });
+    console.error("[GET vouchers] Erro ao buscar cupons:", e.message);
+    res.status(500).json({ error: e.message, data: [] });
   }
 });
 

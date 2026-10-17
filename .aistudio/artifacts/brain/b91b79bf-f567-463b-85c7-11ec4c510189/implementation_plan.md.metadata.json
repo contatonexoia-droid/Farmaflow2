@@ -1,0 +1,6 @@
+{
+  "summary": "Plano de implementação para o serviço de enriquecimento automático de fotos de produtos por código de barras (EAN), persistência definitiva no Supabase Storage (bucket products/ean/{ean}.jpg), endpoint no backend e integração visual no painel administrativo de produtos.",
+  "updatedAt": "2026-10-17T02:31:55.904872885Z",
+  "requestFeedback": true,
+  "userFacing": true
+}
