@@ -3348,11 +3348,11 @@ app.get("/api/products/export", checkTenantAccess, handleProductsExport);
 // ==============================================================================
 app.post("/api/products/sync-ean-images", async (req, res) => {
   try {
-    const { productId, ean, tenantId, productIds, limit, concurrency } = req.body || {};
+    const { productId, ean, tenantId, productIds, limit, concurrency, externalImageUrl } = req.body || {};
 
-    // 1. Sincronização de um único produto
-    if (productId || ean) {
-      if (!ean) {
+    // 1. Sincronização de um único produto ou persistência direta de URL externa
+    if (productId || ean || externalImageUrl) {
+      if (!ean && productId) {
         // Se foi enviado apenas o ID, busca os dados do produto no Supabase
         const { data: prod, error } = await supabaseAdmin
           .from("products")
@@ -3372,7 +3372,8 @@ app.post("/api/products/sync-ean-images", async (req, res) => {
           prod.barcode,
           prod.name,
           prod.tenant_id,
-          prod.id
+          prod.id,
+          externalImageUrl
         );
         return res.json(result);
       }
@@ -3383,7 +3384,8 @@ app.post("/api/products/sync-ean-images", async (req, res) => {
         ean,
         req.body?.productName,
         tenantId,
-        productId
+        productId,
+        externalImageUrl
       );
       return res.json(result);
     }
@@ -3411,7 +3413,7 @@ app.post("/api/products/sync-ean-images", async (req, res) => {
 
 app.post("/api/products/search-ean-image", async (req, res) => {
   try {
-    const { ean, productName, tenantId, productId } = req.body || {};
+    const { ean, productName, tenantId, productId, externalImageUrl } = req.body || {};
     if (!ean) {
       return res.status(400).json({ success: false, error: "Parâmetro 'ean' é obrigatório." });
     }
@@ -3421,7 +3423,8 @@ app.post("/api/products/search-ean-image", async (req, res) => {
       ean,
       productName,
       tenantId,
-      productId
+      productId,
+      externalImageUrl
     );
     return res.json(result);
   } catch (error: any) {
@@ -3429,6 +3432,32 @@ app.post("/api/products/search-ean-image", async (req, res) => {
     return res.status(500).json({
       success: false,
       error: error?.message || "Erro ao consultar foto do produto por EAN."
+    });
+  }
+});
+
+// Endpoint dedicado para persistir fotos encontradas pelo navegador do lojista (IP residencial brasileiro)
+app.post("/api/products/save-external-image", async (req, res) => {
+  try {
+    const { ean, imageUrl, productName, tenantId, productId } = req.body || {};
+    if (!ean || !imageUrl) {
+      return res.status(400).json({ success: false, error: "Parâmetros 'ean' e 'imageUrl' são obrigatórios." });
+    }
+
+    const result = await fetchAndStoreProductImageByEan(
+      supabaseAdmin,
+      ean,
+      productName,
+      tenantId,
+      productId,
+      imageUrl
+    );
+    return res.json(result);
+  } catch (error: any) {
+    console.error("[API save-external-image] Erro inesperado:", error);
+    return res.status(500).json({
+      success: false,
+      error: error?.message || "Erro ao salvar imagem externa no Supabase Storage."
     });
   }
 });

@@ -1101,10 +1101,38 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
 
       const data = await response.json();
 
-      if (response.ok && data.success && data.url) {
-        setEditingProduct(prev => prev ? ({ ...prev, image: data.url }) : null);
-        const sourceLabel = data.source === 'supabase_cache' 
-          ? 'Reaproveitada do cache Supabase' 
+      let finalUrl = (response.ok && data.success && data.url) ? data.url : null;
+      let finalSource = data?.source;
+
+      // 3. FALLBACK DO NAVEGADOR: Se o backend (Vercel/AWS) não encontrou por bloqueio de IP,
+      // consulta diretamente via navegador do lojista (IP residencial no Brasil)
+      if (!finalUrl) {
+        setEanEditFeedback({ type: 'info', message: 'Buscando foto via conexão direta do navegador (Brasil)...' });
+        const clientFound = await searchImageClientSide(cleanEan);
+        if (clientFound) {
+          const saveRes = await fetch('/api/products/save-external-image', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              ean: cleanEan,
+              imageUrl: clientFound,
+              productName: editingProduct.name,
+              tenantId: tenant.id,
+              productId: editingProduct.id
+            })
+          });
+          const saveData = await saveRes.json();
+          if (saveRes.ok && saveData.success && saveData.url) {
+            finalUrl = saveData.url;
+            finalSource = 'client_browser_fallback';
+          }
+        }
+      }
+
+      if (finalUrl) {
+        setEditingProduct(prev => prev ? ({ ...prev, image: finalUrl }) : null);
+        const sourceLabel = finalSource === 'supabase_cache' || finalSource === 'supabase_cross_tenant'
+          ? 'Reaproveitada instantaneamente do Supabase' 
           : 'Baixada e salva no Supabase Storage';
         setEanEditFeedback({
           type: 'success',
@@ -1113,12 +1141,12 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
 
         // Atualiza imediatamente na lista do estado global
         if (editingProduct.id) {
-          onProductsStateUpdate([{ ...editingProduct, image: data.url }]);
+          onProductsStateUpdate([{ ...editingProduct, image: finalUrl }]);
         }
       } else {
         setEanEditFeedback({
           type: 'error',
-          message: data.error || 'Nenhuma foto encontrada nas bases de código de barras para este EAN.'
+          message: data?.error || 'Nenhuma foto encontrada nas bases de código de barras para este EAN.'
         });
       }
     } catch (err: any) {
@@ -1151,6 +1179,57 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
     );
   };
 
+  /**
+   * 3. FALLBACK DE BUSCA PELO NAVEGADOR DO USUÁRIO (IP RESIDENCIAL BRASILEIRO):
+   * Caso o backend na Vercel/AWS sofra bloqueio de IP por WAF ou Cloudflare, o próprio
+   * navegador do lojista (com IP brasileiro) consulta diretamente os catálogos públicos.
+   */
+  const searchImageClientSide = async (ean: string): Promise<string | null> => {
+    const cleanEan = String(ean).replace(/\D/g, '');
+    if (cleanEan.length < 8 || cleanEan.length > 14) return null;
+
+    const endpoints = [
+      `https://www.drogariasaopaulo.com.br/api/catalog_system/pub/products/search?fq=alternateIds_Ean:${cleanEan}`,
+      `https://www.drogariaspacheco.com.br/api/catalog_system/pub/products/search?fq=alternateIds_Ean:${cleanEan}`,
+      `https://www.paguemenos.com.br/api/catalog_system/pub/products/search?fq=alternateIds_Ean:${cleanEan}`,
+      `https://www.drogariaaraujo.com.br/api/catalog_system/pub/products/search?fq=alternateIds_Ean:${cleanEan}`,
+      `https://www.drogariasvenancio.com.br/api/catalog_system/pub/products/search?fq=alternateIds_Ean:${cleanEan}`,
+      `https://www.farmaciasnissei.com.br/api/catalog_system/pub/products/search?fq=alternateIds_Ean:${cleanEan}`,
+      `https://world.openbeautyfacts.org/api/v2/product/${cleanEan}.json`,
+      `https://br.openfoodfacts.org/api/v2/product/${cleanEan}.json`
+    ];
+
+    for (const url of endpoints) {
+      try {
+        const c = new AbortController();
+        const t = setTimeout(() => c.abort(), 3500);
+        const res = await fetch(url, { signal: c.signal });
+        clearTimeout(t);
+        if (res.ok) {
+          const contentType = res.headers.get('content-type') || '';
+          if (contentType.includes('application/json')) {
+            const data = await res.json();
+            // Formato de retorno VTEX (Drogaria SP, Pacheco, Pague Menos, Araujo, Venancio, Nissei)
+            if (Array.isArray(data) && data[0]?.items?.[0]?.images?.[0]?.imageUrl) {
+              const img = data[0].items[0].images[0].imageUrl;
+              if (img && typeof img === 'string' && img.startsWith('http') && !isNoPhotoImage(img)) {
+                return img;
+              }
+            }
+            // Formato OpenBeautyFacts / OpenFoodFacts
+            const obfImg = data?.product?.image_front_url || data?.product?.image_url;
+            if (obfImg && typeof obfImg === 'string' && obfImg.startsWith('http') && !isNoPhotoImage(obfImg)) {
+              return obfImg;
+            }
+          }
+        }
+      } catch (_) {}
+    }
+    return null;
+  };
+
+
+
   const handleStartEanBatchSync = async () => {
     stopBatchSyncRef.current = false;
 
@@ -1164,11 +1243,20 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
     setIsBatchSyncModalOpen(true);
     setIsBatchSyncingEan(true);
 
-    const CHUNK_SIZE = 25;
+    const CHUNK_SIZE = 8;
     let totalProcessed = 0;
     let totalUpdated = 0;
     let totalCached = 0;
     let totalFailed = 0;
+
+    const safeParseJson = async (response: Response) => {
+      const contentType = response.headers.get('content-type') || '';
+      const text = await response.text();
+      if (!response.ok || !contentType.includes('application/json') || text.trim().startsWith('<')) {
+        throw new Error(`Resposta não-JSON recebida (Status ${response.status})`);
+      }
+      return JSON.parse(text);
+    };
 
     // Se temos itens elegíveis na memória local da tabela
     if (eligibleProducts.length > 0) {
@@ -1191,62 +1279,106 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
           const currentChunk = eligibleProducts.slice(i, i + CHUNK_SIZE);
           const chunkIds = currentChunk.map(p => p.id);
 
-          try {
-            const response = await fetch('/api/products/sync-ean-images', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                tenantId: tenant.id,
-                productIds: chunkIds,
-                limit: CHUNK_SIZE,
-                concurrency: 4
-              })
+          let attempt = 0;
+          let successResponse: any = null;
+
+          while (attempt < 2 && !stopBatchSyncRef.current) {
+            attempt++;
+            try {
+              const response = await fetch('/api/products/sync-ean-images', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  tenantId: tenant.id,
+                  productIds: chunkIds,
+                  limit: CHUNK_SIZE,
+                  concurrency: 3
+                })
+              });
+
+              const data = await safeParseJson(response);
+              successResponse = data;
+              break;
+            } catch (netErr) {
+              if (attempt < 2) {
+                // Aguarda 2 segundos antes de tentar novamente (backoff)
+                await new Promise(resolve => setTimeout(resolve, 2000));
+              }
+            }
+          }
+
+          if (successResponse && successResponse.success && Array.isArray(successResponse.results)) {
+            const data = successResponse;
+            totalProcessed += currentChunk.length;
+            totalUpdated += (data.updated || 0);
+            totalCached += (data.cached || 0);
+            totalFailed += (data.failed || 0);
+
+            // Notifica App.tsx com os produtos enriquecidos
+            const updatedItems: Product[] = [];
+            data.results.forEach((r: any) => {
+              if (r.success && r.url && r.productId) {
+                const match = eligibleProducts.find(p => p.id === r.productId);
+                if (match) {
+                  updatedItems.push({ ...match, image: r.url });
+                }
+              }
             });
 
-            if (response.ok) {
-              const data = await response.json();
-              if (data.success && Array.isArray(data.results)) {
-                totalProcessed += currentChunk.length;
-                totalUpdated += (data.updated || 0);
-                totalCached += (data.cached || 0);
-                totalFailed += (data.failed || 0);
+            // 3. FALLBACK DO NAVEGADOR PARA ITENS QUE O SERVIDOR CLOUD NÃO ENCONTROU
+            const failedProducts = currentChunk.filter(p => {
+              const result = data.results.find((r: any) => r.productId === p.id);
+              return !result || !result.success;
+            });
 
-                // Notifica App.tsx apenas com os produtos efetivamente enriquecidos com novas imagens
-                const updatedItems: Product[] = [];
-                data.results.forEach((r: any) => {
-                  if (r.success && r.url && r.productId) {
-                    const match = eligibleProducts.find(p => p.id === r.productId);
-                    if (match) {
-                      updatedItems.push({ ...match, image: r.url });
+            if (failedProducts.length > 0 && !stopBatchSyncRef.current) {
+              for (const failedProd of failedProducts) {
+                if (stopBatchSyncRef.current) break;
+                const cleanEan = String(failedProd.barcode || '').replace(/\D/g, '');
+                const clientUrl = await searchImageClientSide(cleanEan);
+                if (clientUrl) {
+                  try {
+                    const saveRes = await fetch('/api/products/save-external-image', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        ean: cleanEan,
+                        imageUrl: clientUrl,
+                        productName: failedProd.name,
+                        tenantId: tenant.id,
+                        productId: failedProd.id
+                      })
+                    });
+                    const saveData = await safeParseJson(saveRes);
+                    if (saveData.success && saveData.url) {
+                      updatedItems.push({ ...failedProd, image: saveData.url });
+                      totalUpdated++;
+                      totalFailed = Math.max(0, totalFailed - 1);
                     }
-                  }
-                });
-
-                if (updatedItems.length > 0) {
-                  onProductsStateUpdate(updatedItems);
+                  } catch (_) {}
                 }
-
-                setBatchSyncProgress({
-                  total: eligibleProducts.length,
-                  processed: totalProcessed,
-                  updated: totalUpdated,
-                  cached: totalCached,
-                  failed: totalFailed,
-                  isDone: totalProcessed >= eligibleProducts.length
-                });
-              } else {
-                totalProcessed += currentChunk.length;
-                totalFailed += currentChunk.length;
               }
-            } else {
-              totalProcessed += currentChunk.length;
-              totalFailed += currentChunk.length;
             }
-          } catch (chunkErr) {
-            console.warn('[BatchSync] Erro no lote:', chunkErr);
+
+            if (updatedItems.length > 0) {
+              onProductsStateUpdate(updatedItems);
+            }
+
+            setBatchSyncProgress({
+              total: eligibleProducts.length,
+              processed: totalProcessed,
+              updated: totalUpdated,
+              cached: totalCached,
+              failed: totalFailed,
+              isDone: totalProcessed >= eligibleProducts.length
+            });
+          } else {
             totalProcessed += currentChunk.length;
             totalFailed += currentChunk.length;
           }
+
+          // Pequena pausa entre lotes para evitar sobrecarga
+          await new Promise(resolve => setTimeout(resolve, 150));
         }
       } finally {
         setIsBatchSyncingEan(false);

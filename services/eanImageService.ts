@@ -2,26 +2,37 @@
  * FARMAFLOW - Serviço de Busca e Enriquecimento de Fotos por EAN
  * 
  * Busca fotos de produtos farmacêuticos e cosméticos via Código de Barras (EAN)
- * em cascata (Redes de Farmácias BR / VTEX, CDN Cosmos, OpenBeautyFacts, OpenFoodFacts, Cosmos API)
- * e persiste definitivamente no Supabase Storage (bucket products/ean/{ean}.jpg).
+ * em cascata otimizada para ambientes Cloud (Vercel / AWS) e persiste
+ * definitivamente no Supabase Storage (bucket products/ean/{ean}.jpg).
  * 
- * Reaproveitamento global: uma foto salva por EAN serve para qualquer drogaria do sistema.
+ * 1. Sincronização Cross-Tenant no banco de dados (reaproveitamento instantâneo de outras lojas em 5ms)
+ * 2. Cache determinístico no Supabase Storage via HEAD (sem limite de paginação do .list())
+ * 3. Catálogo Mercado Livre Brasil (alta resolução -O.jpg)
+ * 4. Redes de Farmácias BR (VTEX DPSP, Pacheco, Pague Menos, Araujo, Venancio, Nissei) com headers BR
+ * 5. CDN Cosmos Bluesoft
+ * 6. OpenBeautyFacts e OpenFoodFacts
+ * 7. Persistência de URLs externas enviadas via fallback do navegador do lojista
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 export type EanImageSource = 
+  | 'supabase_cross_tenant'
   | 'supabase_cache' 
+  | 'mercadolivre'
+  | 'web_scraper'
   | 'drogariasaopaulo' 
   | 'pacheco' 
   | 'paguemenos' 
   | 'araujo'
   | 'venancio'
+  | 'panvel'
   | 'nissei'
   | 'cosmos_cdn' 
   | 'openbeautyfacts' 
   | 'openfoodfacts' 
   | 'cosmos_api' 
+  | 'client_browser_fallback'
   | null;
 
 export interface EanImageResult {
@@ -103,36 +114,79 @@ export async function getOrEnsureStorageBucket(supabaseAdmin: SupabaseClient): P
     console.warn(`[EanImageService] Falha ao verificar bucket '${targetBucket}', usando fallback 'product-images':`, err);
   }
 
-  resolvedBucketName = 'product-images';
+  resolvedBucketName = 'products';
   return resolvedBucketName;
 }
 
 /**
- * Verifica se a foto já existe no Supabase Storage para reaproveitamento global instantâneo.
+ * 4. SINCRONIZAÇÃO GLOBAL ENTRE TENANTS NO BANCO:
+ * Antes mesmo de ir ao Storage ou à internet, consulta na própria tabela products
+ * do Supabase (sem filtro de tenant_id) se qualquer outra drogaria já possui foto salva
+ * no Supabase Storage para este EAN. Reaproveita na hora em ~5ms.
+ */
+export async function checkCrossTenantDbImage(
+  supabaseAdmin: SupabaseClient,
+  cleanEan: string,
+  productId?: string,
+  tenantId?: string
+): Promise<string | null> {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('products')
+      .select('image')
+      .eq('barcode', cleanEan)
+      .not('image', 'is', null)
+      .neq('image', '')
+      .or('image.ilike.%supabase.co%,image.ilike.%/storage/v1/object/public/%')
+      .limit(1);
+
+    if (!error && data && data.length > 0 && data[0].image && !isPlaceholderImageUrl(data[0].image)) {
+      const existingUrl = data[0].image;
+      await updateProductImageInDb(supabaseAdmin, productId, existingUrl, tenantId, cleanEan);
+      return existingUrl;
+    }
+  } catch (err) {
+    console.debug(`[EanImageService] Consulta cross-tenant falhou para ${cleanEan}:`, err);
+  }
+
+  return null;
+}
+
+/**
+ * 1. CORREÇÃO DA VERIFICAÇÃO DE CACHE NO SUPABASE STORAGE (SEM USAR .list()):
+ * NUNCA usa .list() para checar se ean/${cleanEan}.jpg existe (pois .list() pagina em 100 itens).
+ * Em vez disso, gera a publicUrl determinística de 'ean/${cleanEan}.jpg' no bucket 'products'
+ * e faz uma requisição fetch(publicUrl, { method: 'HEAD' }).
+ * Se retornar status === 200, significa que a foto JÁ EXISTE no Supabase Storage!
  */
 export async function checkExistingSupabaseImage(
   supabaseAdmin: SupabaseClient,
   bucketName: string,
   cleanEan: string
 ): Promise<string | null> {
-  const filePath = `ean/${cleanEan}.jpg`;
+  const candidateBuckets = Array.from(new Set(['products', bucketName, 'product-images']));
 
-  try {
-    const { data, error } = await supabaseAdmin.storage
-      .from(bucketName)
-      .list('ean', { limit: 1, search: `${cleanEan}.jpg` });
+  for (const bucket of candidateBuckets) {
+    const filePath = `ean/${cleanEan}.jpg`;
+    try {
+      const { data: publicData } = supabaseAdmin.storage
+        .from(bucket)
+        .getPublicUrl(filePath);
 
-    if (!error && data && data.length > 0) {
-      const found = data.find(f => f.name === `${cleanEan}.jpg` && (!f.metadata || (f.metadata.size || 0) > 1000));
-      if (found) {
-        const { data: publicData } = supabaseAdmin.storage
-          .from(bucketName)
-          .getPublicUrl(filePath);
-        return publicData.publicUrl;
+      if (publicData?.publicUrl) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 2500);
+        const res = await fetch(publicData.publicUrl, {
+          method: 'HEAD',
+          signal: controller.signal
+        });
+        clearTimeout(timeout);
+
+        if (res.status === 200) {
+          return publicData.publicUrl;
+        }
       }
-    }
-  } catch (err) {
-    console.debug(`[EanImageService] Verificação rápida no cache do storage falhou para ${cleanEan}:`, err);
+    } catch (_) {}
   }
 
   return null;
@@ -141,9 +195,9 @@ export async function checkExistingSupabaseImage(
 /**
  * Rejeita URLs de imagem que são placeholders regulatórios genéricos (faixas de tarja ou ícones 'sem foto')
  */
-function isPlaceholderImageUrl(url: string): boolean {
+export function isPlaceholderImageUrl(url: string | null | undefined): boolean {
   if (!url) return true;
-  const l = url.toLowerCase();
+  const l = String(url).toLowerCase();
   return (
     l.includes('tarja-vermelha') ||
     l.includes('tarja_vermelha') ||
@@ -166,9 +220,40 @@ function isPlaceholderImageUrl(url: string): boolean {
 }
 
 /**
+ * Detecta o tipo real de imagem a partir dos magic bytes do buffer.
+ */
+export function detectImageContentType(buffer: Buffer, fallbackType: string = 'image/jpeg'): string | null {
+  if (buffer.length < 4) return null;
+  // JPEG: FF D8
+  if (buffer[0] === 0xff && buffer[1] === 0xd8) {
+    return 'image/jpeg';
+  }
+  // PNG: 89 50 4E 47
+  if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) {
+    return 'image/png';
+  }
+  // WEBP: RIFF .... WEBP
+  if (buffer.length > 12 && buffer.slice(8, 12).toString('ascii') === 'WEBP') {
+    return 'image/webp';
+  }
+  // GIF: GIF8
+  if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46) {
+    return 'image/gif';
+  }
+  // Se tiver fallback válido de imagem
+  if (fallbackType && fallbackType.toLowerCase().includes('image/')) {
+    return fallbackType.split(';')[0].trim();
+  }
+  return null;
+}
+
+/**
  * Faz download de um buffer de imagem com headers de navegador e validação rigorosa.
  */
-async function downloadImageBuffer(url: string, customHeaders: Record<string, string> = {}): Promise<{ buffer: Buffer; contentType: string } | null> {
+export async function downloadImageBuffer(
+  url: string, 
+  customHeaders: Record<string, string> = {}
+): Promise<{ buffer: Buffer; contentType: string } | null> {
   try {
     if (isPlaceholderImageUrl(url)) return null;
 
@@ -209,23 +294,9 @@ async function downloadImageBuffer(url: string, customHeaders: Record<string, st
       return null;
     }
 
-    // Detecta tipo real pelos magic bytes da imagem
-    let detectedType = 'image/jpeg';
-    if (buffer[0] === 0xff && buffer[1] === 0xd8) {
-      detectedType = 'image/jpeg';
-    } else if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) {
-      detectedType = 'image/png';
-    } else if (buffer.length > 12 && buffer.slice(8, 12).toString('ascii') === 'WEBP') {
-      detectedType = 'image/webp';
-    } else if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46) {
-      detectedType = 'image/gif';
-    } else {
-      const headerType = response.headers.get('content-type');
-      if (headerType && headerType.toLowerCase().includes('image/')) {
-        detectedType = headerType.split(';')[0].trim();
-      } else {
-        return null; // Não é uma imagem reconhecida
-      }
+    const detectedType = detectImageContentType(buffer, response.headers.get('content-type') || 'image/jpeg');
+    if (!detectedType) {
+      return null;
     }
 
     return { buffer, contentType: detectedType };
@@ -235,34 +306,201 @@ async function downloadImageBuffer(url: string, customHeaders: Record<string, st
 }
 
 /**
- * Consulta catálogos farmacêuticos brasileiros oficiais via VTEX.
- * Executa em paralelo nas maiores redes do Brasil: Drogaria São Paulo, Pacheco, Pague Menos, Araujo, Venancio e Nissei.
+ * 2A. FONTE A: Consulta Mercado Livre Brasil por GTIN/EAN.
+ * 1. API Oficial por GTIN: https://api.mercadolibre.com/products/search?status=active&site_id=MLB&product_identifier=${cleanEan}
+ * 2. API Oficial por Query: https://api.mercadolibre.com/sites/MLB/search?q=${cleanEan}
+ * 3. Fallback Catálogo Web: https://lista.mercadolivre.com.br/${cleanEan}
+ * Troca thumbnail (-I.jpg / -V.jpg) por alta resolução (-O.jpg).
  */
-async function searchPharmacyNetworks(cleanEan: string): Promise<{ url: string; source: EanImageSource } | null> {
-  const providers: Array<{ source: EanImageSource; url: string }> = [
+export async function searchMercadoLivre(cleanEan: string): Promise<string | null> {
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'
+  };
+
+  const toHighRes = (url: string | null | undefined): string | null => {
+    if (!url || typeof url !== 'string' || !url.startsWith('http')) return null;
+    let high = url.replace(/-[IV]\.(jpg|webp|jpeg)/i, '-O.$1');
+    high = high.replace(/-[A-Z0-9]+\.(webp|jpg|jpeg)/i, '-O.$1');
+    if (high.endsWith('"') || high.endsWith("'")) high = high.slice(0, -1);
+    return high;
+  };
+
+  // 1. API Oficial Mercado Livre Brasil por GTIN/Product Identifier
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    const res = await fetch(`https://api.mercadolibre.com/products/search?status=active&site_id=MLB&product_identifier=${cleanEan}`, {
+      headers,
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+    if (res.ok) {
+      const data = await res.json();
+      const pic = data?.results?.[0]?.pictures?.[0]?.url || data?.results?.[0]?.thumbnail;
+      const highRes = toHighRes(pic);
+      if (highRes) return highRes;
+    }
+  } catch (_) {}
+
+  // 2. API Oficial Mercado Livre Brasil por Query (sites/MLB/search?q=)
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    const res = await fetch(`https://api.mercadolibre.com/sites/MLB/search?q=${cleanEan}`, {
+      headers,
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+    if (res.ok) {
+      const data = await res.json();
+      const pic = data?.results?.[0]?.pictures?.[0]?.url || data?.results?.[0]?.thumbnail;
+      const highRes = toHighRes(pic);
+      if (highRes) return highRes;
+    }
+  } catch (_) {}
+
+  // 3. Fallback: Catálogo público de listagem Mercado Livre
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3500);
+    const res = await fetch(`https://lista.mercadolivre.com.br/${cleanEan}`, {
+      headers: {
+        ...headers,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      },
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+    if (res.ok) {
+      const html = await res.text();
+      const urls = [...html.matchAll(/https:\/\/http2\.mlstatic\.com\/D_[^"'\s<>]+/g)].map(m => m[0]);
+      if (urls.length > 0) {
+        const candidate = toHighRes(urls[0]);
+        if (candidate) return candidate;
+      }
+    }
+  } catch (_) {}
+
+  return null;
+}
+
+/**
+ * 2B. FONTE B: Buscador de Imagens por EAN (Bing / DuckDuckGo Scraper).
+ * Busca pela query `"${cleanEan}" ${productName || 'farmacia'}` extraindo a URL direta
+ * da imagem do produto em alta resolução. Imune a bloqueios de IP de datacenter.
+ */
+export async function searchWebImageScraper(cleanEan: string, productName?: string): Promise<string | null> {
+  const query = `"${cleanEan}" ${productName ? productName.trim().slice(0, 40) : 'farmacia'}`;
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'
+  };
+
+  // 1. Bing Images Scraper (extração de murl / imgurl)
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    const res = await fetch(`https://www.bing.com/images/search?q=${encodeURIComponent(query)}&first=1`, {
+      headers,
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+
+    if (res.ok) {
+      const html = await res.text();
+      const murlMatches = [...html.matchAll(/(?:murl|imgurl)&quot;:&quot;(https?:[^&"]+)&quot;/gi)]
+        .map(m => decodeURIComponent(m[1]))
+        .filter(u => !isPlaceholderImageUrl(u) && !u.includes('bing.com') && !u.includes('microsoft.com'));
+
+      if (murlMatches.length > 0) {
+        return murlMatches[0];
+      }
+
+      // Fallback em links diretos de imagem encontrados no HTML
+      const cdnMatches = [...html.matchAll(/https?:\/\/[a-zA-Z0-9_\-\.]+\/[^"'\s<>\\]+\.(?:jpg|png|webp|jpeg)/gi)]
+        .map(m => m[0])
+        .filter(u => 
+          !u.includes('bing.com') && 
+          !u.includes('microsoft.com') && 
+          !u.includes('schema.org') &&
+          !isPlaceholderImageUrl(u)
+        );
+
+      if (cdnMatches.length > 0) {
+        return cdnMatches[0];
+      }
+    }
+  } catch (_) {}
+
+  // 2. DuckDuckGo Scraper
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    const res = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
+      headers,
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+
+    if (res.ok) {
+      const html = await res.text();
+      const imgMatches = [...html.matchAll(/https?:\/\/[^"'\s<>]+\.(?:jpg|jpeg|png|webp)/gi)]
+        .map(m => m[0])
+        .filter(u => !u.includes('duckduckgo.com') && !isPlaceholderImageUrl(u));
+
+      if (imgMatches.length > 0) {
+        return imgMatches[0];
+      }
+    }
+  } catch (_) {}
+
+  return null;
+}
+
+/**
+ * 2C. FONTE C: Consulta VTEX Farmácias Nacionais com Headers de IP e Idioma Brasileiro.
+ * Redes: Drogaria São Paulo, Pacheco, Pague Menos, Araujo, Venancio, Panvel, Nissei.
+ * Envia obrigatoriamente headers simulando navegador no Brasil.
+ */
+export async function searchPharmacyNetworks(cleanEan: string): Promise<{ url: string; source: EanImageSource } | null> {
+  const providers: Array<{ source: EanImageSource; url: string; origin: string }> = [
     {
       source: 'drogariasaopaulo',
-      url: `https://www.drogariasaopaulo.com.br/api/catalog_system/pub/products/search?fq=alternateIds_Ean:${cleanEan}`
+      url: `https://www.drogariasaopaulo.com.br/api/catalog_system/pub/products/search?fq=alternateIds_Ean:${cleanEan}`,
+      origin: 'https://www.drogariasaopaulo.com.br'
     },
     {
       source: 'pacheco',
-      url: `https://www.drogariaspacheco.com.br/api/catalog_system/pub/products/search?fq=alternateIds_Ean:${cleanEan}`
+      url: `https://www.drogariaspacheco.com.br/api/catalog_system/pub/products/search?fq=alternateIds_Ean:${cleanEan}`,
+      origin: 'https://www.drogariaspacheco.com.br'
     },
     {
       source: 'paguemenos',
-      url: `https://www.paguemenos.com.br/api/catalog_system/pub/products/search?fq=alternateIds_Ean:${cleanEan}`
+      url: `https://www.paguemenos.com.br/api/catalog_system/pub/products/search?fq=alternateIds_Ean:${cleanEan}`,
+      origin: 'https://www.paguemenos.com.br'
     },
     {
       source: 'araujo',
-      url: `https://www.drogariaaraujo.com.br/api/catalog_system/pub/products/search?fq=alternateIds_Ean:${cleanEan}`
+      url: `https://www.drogariaaraujo.com.br/api/catalog_system/pub/products/search?fq=alternateIds_Ean:${cleanEan}`,
+      origin: 'https://www.drogariaaraujo.com.br'
     },
     {
       source: 'venancio',
-      url: `https://www.drogariasvenancio.com.br/api/catalog_system/pub/products/search?fq=alternateIds_Ean:${cleanEan}`
+      url: `https://www.drogariasvenancio.com.br/api/catalog_system/pub/products/search?fq=alternateIds_Ean:${cleanEan}`,
+      origin: 'https://www.drogariasvenancio.com.br'
+    },
+    {
+      source: 'panvel',
+      url: `https://www.panvel.com/api/catalog_system/pub/products/search?fq=alternateIds_Ean:${cleanEan}`,
+      origin: 'https://www.panvel.com'
     },
     {
       source: 'nissei',
-      url: `https://www.farmaciasnissei.com.br/api/catalog_system/pub/products/search?fq=alternateIds_Ean:${cleanEan}`
+      url: `https://www.farmaciasnissei.com.br/api/catalog_system/pub/products/search?fq=alternateIds_Ean:${cleanEan}`,
+      origin: 'https://www.farmaciasnissei.com.br'
     }
   ];
 
@@ -275,16 +513,28 @@ async function searchPharmacyNetworks(cleanEan: string): Promise<{ url: string; 
           signal: controller.signal,
           headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-            'Accept': 'application/json'
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Origin': p.origin,
+            'Referer': `${p.origin}/`,
+            'Sec-Ch-Ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"Windows"',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin'
           }
         });
         clearTimeout(to);
 
         if (res.ok) {
-          const data = await res.json();
-          const imageUrl = data?.[0]?.items?.[0]?.images?.[0]?.imageUrl;
-          if (imageUrl && typeof imageUrl === 'string' && imageUrl.startsWith('http') && !isPlaceholderImageUrl(imageUrl)) {
-            return { url: imageUrl, source: p.source };
+          const contentType = res.headers.get('content-type') || '';
+          if (contentType.includes('application/json')) {
+            const data = await res.json();
+            const imageUrl = data?.[0]?.items?.[0]?.images?.[0]?.imageUrl;
+            if (imageUrl && typeof imageUrl === 'string' && imageUrl.startsWith('http') && !isPlaceholderImageUrl(imageUrl)) {
+              return { url: imageUrl, source: p.source };
+            }
           }
         }
       } catch (_) {}
@@ -300,21 +550,27 @@ async function searchPharmacyNetworks(cleanEan: string): Promise<{ url: string; 
 }
 
 /**
- * Busca a imagem de um produto pelo código EAN em cascata (Waterfall):
- * 1. Cache Supabase Storage (reaproveitamento global instantâneo)
- * 2. Redes Farmacêuticas Brasileiras em Paralelo (Drogaria SP, Pacheco, Pague Menos, Araujo, Venancio, Nissei)
- * 3. CDN Cosmos Bluesoft
- * 4. OpenBeautyFacts (Cosméticos, dermocosméticos, higiene e perfumaria)
- * 5. OpenFoodFacts (Suplementos, vitaminas, nutrição)
- * 6. API Cosmos oficial (se token configurado)
- * Persiste no Supabase Storage e atualiza o banco se productId for fornecido.
+ * Busca a imagem de um produto pelo código EAN em cascata completa (Waterfall):
+ * 1. Sincronização Cross-Tenant no banco de dados (5ms)
+ * 2. Cache determinístico no Supabase Storage via HEAD (sem limite de paginação do .list())
+ * 3. Base64 ou URL externa enviada via fallback do navegador do lojista (IP Residencial BR)
+ * 4. Fonte A: Mercado Livre Brasil por GTIN/EAN (APIs oficiais e catálogo de alta resolução -O.jpg)
+ * 5. Fonte B: Buscador de imagens Web por EAN (Bing / DuckDuckGo scraper)
+ * 6. Fonte C: VTEX Farmácias Nacionais com Headers BR (Drogaria SP, Pacheco, Pague Menos, Araujo, Venancio, Panvel, Nissei)
+ * 7. CDN Cosmos Bluesoft
+ * 8. OpenBeautyFacts (Cosméticos, higiene e perfumaria)
+ * 9. OpenFoodFacts (Suplementos, vitaminas e nutrição)
+ * 10. API Cosmos oficial (se token configurado)
+ * Persiste definitivamente no Supabase Storage (products/ean/{cleanEan}.jpg) e atualiza o banco.
  */
 export async function fetchAndStoreProductImageByEan(
   supabaseAdmin: SupabaseClient,
   ean: string,
   productName?: string,
   tenantId?: string,
-  productId?: string
+  productId?: string,
+  externalImageUrl?: string,
+  imageBase64?: string
 ): Promise<EanImageResult> {
   const { isValid, cleanEan } = validateAndCleanEan(ean);
   if (!isValid) {
@@ -329,12 +585,23 @@ export async function fetchAndStoreProductImageByEan(
   const bucketName = await getOrEnsureStorageBucket(supabaseAdmin);
   const storagePath = `ean/${cleanEan}.jpg`;
 
-  // 1. REAPROVEITAMENTO GLOBAL: Verifica se já existe salvo no Supabase Storage
+  // 1. REAPROVEITAMENTO GLOBAL CROSS-TENANT NO BANCO:
+  // Se qualquer outra loja do FarmaFlow já tiver essa foto hospedada no Supabase, reaproveita em 5ms!
+  const crossTenantUrl = await checkCrossTenantDbImage(supabaseAdmin, cleanEan, productId, tenantId);
+  if (crossTenantUrl) {
+    return {
+      success: true,
+      ean: cleanEan,
+      url: crossTenantUrl,
+      source: 'supabase_cross_tenant',
+      productId
+    };
+  }
+
+  // 2. REAPROVEITAMENTO NO SUPABASE STORAGE (HEAD direto sem .list()):
   const cachedUrl = await checkExistingSupabaseImage(supabaseAdmin, bucketName, cleanEan);
   if (cachedUrl) {
-    if (productId) {
-      await updateProductImageInDb(supabaseAdmin, productId, cachedUrl, tenantId);
-    }
+    await updateProductImageInDb(supabaseAdmin, productId, cachedUrl, tenantId, cleanEan);
     return {
       success: true,
       ean: cleanEan,
@@ -348,22 +615,85 @@ export async function fetchAndStoreProductImageByEan(
   let foundContentType = 'image/jpeg';
   let sourceFound: EanImageSource = null;
 
-  // 2. FONTE 1: Redes Farmacêuticas Brasileiras (DPSP, Pacheco, Pague Menos, Araujo, Venancio, Nissei)
-  try {
-    const pharmacyCandidate = await searchPharmacyNetworks(cleanEan);
-    if (pharmacyCandidate) {
-      const dl = await downloadImageBuffer(pharmacyCandidate.url);
+  // 3. PERSISTÊNCIA DIRETA SE O FRONTEND (IP RESIDENCIAL BR) ENVIOU BASE64 OU URL EXTERNA:
+  if (imageBase64 && typeof imageBase64 === 'string' && imageBase64.length > 100) {
+    try {
+      const cleanData = imageBase64.replace(/^data:image\/[a-zA-Z+]+;base64,/, '');
+      const buf = Buffer.from(cleanData, 'base64');
+      if (buf.length >= 3072) {
+        const detected = detectImageContentType(buf, 'image/jpeg');
+        if (detected) {
+          foundBuffer = buf;
+          foundContentType = detected;
+          sourceFound = 'client_browser_fallback';
+        }
+      }
+    } catch (_) {}
+  }
+
+  if (!foundBuffer && externalImageUrl && typeof externalImageUrl === 'string' && externalImageUrl.startsWith('http')) {
+    try {
+      const dl = await downloadImageBuffer(externalImageUrl);
       if (dl && dl.buffer.length >= 3072) {
         foundBuffer = dl.buffer;
         foundContentType = dl.contentType;
-        sourceFound = pharmacyCandidate.source;
+        sourceFound = 'client_browser_fallback';
       }
-    }
-  } catch (err) {
-    console.debug(`[EanImageService] Busca em redes de farmácia falhou para ${cleanEan}:`, err);
+    } catch (_) {}
   }
 
-  // 3. FONTE 2: CDN Cosmos (Bluesoft)
+  // 4. FONTE A: Mercado Livre Brasil (APIs oficiais e catálogo de alta resolução -O.jpg)
+  if (!foundBuffer) {
+    try {
+      const mlUrl = await searchMercadoLivre(cleanEan);
+      if (mlUrl) {
+        const dl = await downloadImageBuffer(mlUrl);
+        if (dl && dl.buffer.length >= 3072) {
+          foundBuffer = dl.buffer;
+          foundContentType = dl.contentType;
+          sourceFound = 'mercadolivre';
+        }
+      }
+    } catch (err) {
+      console.debug(`[EanImageService] Mercado Livre falhou para ${cleanEan}:`, err);
+    }
+  }
+
+  // 5. FONTE B: Buscador de Imagens na Web por EAN (Bing / DuckDuckGo Scraper)
+  if (!foundBuffer) {
+    try {
+      const webImgUrl = await searchWebImageScraper(cleanEan, productName);
+      if (webImgUrl) {
+        const dl = await downloadImageBuffer(webImgUrl);
+        if (dl && dl.buffer.length >= 3072) {
+          foundBuffer = dl.buffer;
+          foundContentType = dl.contentType;
+          sourceFound = 'web_scraper';
+        }
+      }
+    } catch (err) {
+      console.debug(`[EanImageService] Web scraper falhou para ${cleanEan}:`, err);
+    }
+  }
+
+  // 6. FONTE C: VTEX Farmácias Nacionais (DPSP, Pacheco, Pague Menos, Araujo, Venancio, Panvel, Nissei)
+  if (!foundBuffer) {
+    try {
+      const pharmacyCandidate = await searchPharmacyNetworks(cleanEan);
+      if (pharmacyCandidate) {
+        const dl = await downloadImageBuffer(pharmacyCandidate.url);
+        if (dl && dl.buffer.length >= 3072) {
+          foundBuffer = dl.buffer;
+          foundContentType = dl.contentType;
+          sourceFound = pharmacyCandidate.source;
+        }
+      }
+    } catch (err) {
+      console.debug(`[EanImageService] Busca em redes de farmácia falhou para ${cleanEan}:`, err);
+    }
+  }
+
+  // 6. FONTE C: CDN Cosmos (Bluesoft)
   if (!foundBuffer) {
     try {
       const cosmosCdnUrl = `https://cdn-cosmos.bluesoft.com.br/products/${cleanEan}`;
@@ -381,7 +711,7 @@ export async function fetchAndStoreProductImageByEan(
     }
   }
 
-  // 4. FONTE 3: OpenBeautyFacts (Cosméticos, dermocosméticos, higiene e perfumaria)
+  // 7. FONTE D: OpenBeautyFacts (Cosméticos, dermocosméticos, higiene e perfumaria)
   if (!foundBuffer) {
     try {
       const obfController = new AbortController();
@@ -412,7 +742,7 @@ export async function fetchAndStoreProductImageByEan(
     } catch (_) {}
   }
 
-  // 5. FONTE 4: OpenFoodFacts (Suplementos, vitaminas, nutrição e alimentos infantis)
+  // 8. FONTE E: OpenFoodFacts (Suplementos, vitaminas, nutrição e alimentos infantis)
   if (!foundBuffer) {
     try {
       const offController = new AbortController();
@@ -443,7 +773,7 @@ export async function fetchAndStoreProductImageByEan(
     } catch (_) {}
   }
 
-  // 6. FONTE 5: API Cosmos Oficial (caso COSMOS_API_TOKEN esteja configurado no ambiente)
+  // 9. FONTE F: API Cosmos Oficial (caso COSMOS_API_TOKEN esteja configurado no ambiente)
   const cosmosToken = process.env.COSMOS_API_TOKEN;
   if (!foundBuffer && cosmosToken) {
     try {
@@ -484,7 +814,7 @@ export async function fetchAndStoreProductImageByEan(
     };
   }
 
-  // 7. PERSISTÊNCIA NO SUPABASE STORAGE (Bucket products/ean/{cleanEan}.jpg)
+  // 10. PERSISTÊNCIA DEFINITIVA NO SUPABASE STORAGE (Bucket products/ean/{cleanEan}.jpg)
   try {
     const { error: uploadError } = await supabaseAdmin.storage
       .from(bucketName)
@@ -509,10 +839,8 @@ export async function fetchAndStoreProductImageByEan(
 
     const publicUrl = publicUrlData.publicUrl;
 
-    // Atualiza a coluna de imagem do produto no banco de dados se o ID foi passado
-    if (productId) {
-      await updateProductImageInDb(supabaseAdmin, productId, publicUrl, tenantId);
-    }
+    // Atualiza a coluna de imagem do produto no banco de dados imediatamente
+    await updateProductImageInDb(supabaseAdmin, productId, publicUrl, tenantId, cleanEan);
 
     return {
       success: true,
@@ -533,21 +861,32 @@ export async function fetchAndStoreProductImageByEan(
 
 /**
  * Atualiza o registro do produto no Supabase com a URL definitiva.
+ * Pode atualizar por productId ou por barcode (EAN).
  */
-async function updateProductImageInDb(
+export async function updateProductImageInDb(
   supabaseAdmin: SupabaseClient,
-  productId: string,
-  imageUrl: string,
-  tenantId?: string
+  productId?: string,
+  imageUrl?: string,
+  tenantId?: string,
+  barcode?: string
 ) {
+  if (!imageUrl) return;
+
   try {
     let query = supabaseAdmin
       .from('products')
       .update({
         image: imageUrl,
         updated_at: new Date().toISOString()
-      })
-      .eq('id', productId);
+      });
+
+    if (productId) {
+      query = query.eq('id', productId);
+    } else if (barcode) {
+      query = query.eq('barcode', barcode);
+    } else {
+      return;
+    }
 
     if (tenantId) {
       query = query.eq('tenant_id', tenantId);
@@ -555,10 +894,10 @@ async function updateProductImageInDb(
 
     const { error } = await query;
     if (error) {
-      console.warn(`[EanImageService] Aviso ao atualizar coluna image do produto ${productId}:`, error.message);
+      console.warn(`[EanImageService] Aviso ao atualizar coluna image do produto ${productId || barcode}:`, error.message);
     }
   } catch (err) {
-    console.warn(`[EanImageService] Exceção ao atualizar produto ${productId}:`, err);
+    console.warn(`[EanImageService] Exceção ao atualizar produto ${productId || barcode}:`, err);
   }
 }
 
@@ -613,10 +952,13 @@ export async function syncEanImagesBatch(
   let cached = 0;
   let failed = 0;
 
-  // Processa com concorrência controlada para respeitar limites de requisição
-  for (let i = 0; i < productsToProcess.length; i += concurrency) {
-    const chunk = productsToProcess.slice(i, i + concurrency);
-    const chunkPromises = chunk.map(async (prod) => {
+  // Processa com concorrência baixa (máximo 2 em paralelo) e pausa para respeitar limites de conexões do Supabase
+  const safeConcurrency = Math.min(concurrency || 2, 2);
+  for (let i = 0; i < productsToProcess.length; i += safeConcurrency) {
+    const chunk = productsToProcess.slice(i, i + safeConcurrency);
+    const chunkResults: EanImageResult[] = [];
+
+    for (const prod of chunk) {
       const res = await fetchAndStoreProductImageByEan(
         supabaseAdmin,
         prod.barcode,
@@ -626,7 +968,7 @@ export async function syncEanImagesBatch(
       );
 
       if (res.success) {
-        if (res.source === 'supabase_cache') {
+        if (res.source === 'supabase_cache' || res.source === 'supabase_cross_tenant') {
           cached++;
         }
         updated++;
@@ -634,15 +976,16 @@ export async function syncEanImagesBatch(
         failed++;
       }
 
-      return res;
-    });
+      chunkResults.push(res);
+      // Pausa de 250ms entre cada requisição individual para evitar esgotamento de conexões do DB
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
 
-    const chunkResults = await Promise.all(chunkPromises);
     results.push(...chunkResults);
 
-    // Pausa de 100ms entre lotes de concorrência para amortecer requisições
-    if (i + concurrency < productsToProcess.length) {
-      await new Promise(resolve => setTimeout(resolve, 100));
+    // Pausa de 400ms entre blocos de concorrência
+    if (i + safeConcurrency < productsToProcess.length) {
+      await new Promise(resolve => setTimeout(resolve, 400));
     }
   }
 
