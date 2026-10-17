@@ -1141,7 +1141,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
 
         // Atualiza imediatamente na lista do estado global
         if (editingProduct.id) {
-          onProductsStateUpdate([{ ...editingProduct, image: finalUrl }]);
+          onProductsStateUpdate([{ ...editingProduct, image: finalUrl } as Product]);
         }
       } else {
         setEanEditFeedback({
@@ -1402,23 +1402,36 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
 
         while (hasMore && batchCount < maxBatches && !stopBatchSyncRef.current) {
           batchCount++;
-          const response = await fetch('/api/products/sync-ean-images', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              tenantId: tenant.id,
-              limit: CHUNK_SIZE,
-              concurrency: 4
-            })
-          });
+          let attempt = 0;
+          let data: any = null;
 
-          if (response.ok) {
-            const data = await response.json();
-            if (data.success && Array.isArray(data.results) && data.results.length > 0) {
-              totalProcessed += data.processed || data.results.length;
-              totalUpdated += (data.updated || 0);
-              totalCached += (data.cached || 0);
-              totalFailed += (data.failed || 0);
+          while (attempt < 2 && !stopBatchSyncRef.current) {
+            attempt++;
+            try {
+              const response = await fetch('/api/products/sync-ean-images', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  tenantId: tenant.id,
+                  limit: CHUNK_SIZE,
+                  concurrency: 2
+                })
+              });
+
+              data = await safeParseJson(response);
+              break;
+            } catch (err) {
+              if (attempt < 2) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+              }
+            }
+          }
+
+          if (data && data.success && Array.isArray(data.results) && data.results.length > 0) {
+            totalProcessed += data.processed || data.results.length;
+            totalUpdated += (data.updated || 0);
+            totalCached += (data.cached || 0);
+            totalFailed += (data.failed || 0);
 
               const updatedItems: Product[] = [];
               data.results.forEach((r: any) => {
@@ -1449,10 +1462,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
             } else {
               hasMore = false;
             }
-          } else {
-            hasMore = false;
           }
-        }
 
         if (totalProcessed === 0) {
           setBatchSyncProgress({

@@ -687,6 +687,11 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
 
           if (list.length > 0) {
             setConversations(list);
+            setSelectedConversation((prev: any) => {
+              if (!prev) return null;
+              const fresh = list.find((c: any) => c.id === prev.id);
+              return fresh ? { ...prev, ...fresh } : prev;
+            });
             try {
               localStorage.setItem(`chat_conversations_${currentTenantId || tenantId}`, JSON.stringify(list));
             } catch (_) {}
@@ -1504,7 +1509,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                     >
                       <span>{selectedConversation.is_bot_active !== false ? '🤖 Bot Ativo' : '👤 Humano'}</span>
                       {selectedConversation.is_bot_active !== false && (
-                        <span className="opacity-75 font-mono">({selectedConversation.bot_interaction_count || 0}/4)</span>
+                        <span className="opacity-75 font-mono">({selectedConversation.bot_interaction_count ?? (selectedConversation as any).bot_turns ?? (selectedConversation as any).turn_count ?? 0}/4)</span>
                       )}
                     </button>
 

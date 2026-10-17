@@ -93,6 +93,143 @@ export function detectHumanHandoffIntent(message: string): { isHumanRequested: b
   return { isHumanRequested: false };
 }
 
+// Cache global de IDs de mensagens enviadas pelo bot FarmaFlow (evita eco de webhook da Evolution API)
+export const botSentMessageIds = new Set<string>();
+
+// Janela de proteção recente de 15 segundos por conversa / telefone
+export const botRecentDispatches = new Map<string, number>();
+
+/**
+ * Registra o ID de mensagens enviadas pelo robô e ativa a janela de proteção contra takeover
+ */
+export function registerBotSentMessage(messageId?: string, conversationId?: string, remoteJidOrPhone?: string): void {
+  if (messageId && typeof messageId === 'string' && messageId.trim().length > 0) {
+    botSentMessageIds.add(messageId.trim());
+    // Limita tamanho do conjunto para não vazar memória
+    if (botSentMessageIds.size > 2000) {
+      const it = botSentMessageIds.values();
+      for (let i = 0; i < 500; i++) {
+        const val = it.next().value;
+        if (val) botSentMessageIds.delete(val);
+      }
+    }
+  }
+
+  const expiry = Date.now() + 15000; // 15 segundos de proteção
+  if (conversationId) {
+    botRecentDispatches.set(conversationId, expiry);
+  }
+  if (remoteJidOrPhone) {
+    const clean = String(remoteJidOrPhone).replace(/\D/g, '');
+    if (clean) botRecentDispatches.set(clean, expiry);
+    botRecentDispatches.set(remoteJidOrPhone, expiry);
+  }
+}
+
+/**
+ * Verifica se uma mensagem recebida com fromMe: true é eco do próprio robô FarmaFlow
+ * para NUNCA desativar o robô indevidamente.
+ */
+export function isBotSentOrEcho(
+  msgId?: string,
+  text?: string,
+  conversationId?: string,
+  remoteJidOrPhone?: string
+): boolean {
+  if (msgId && botSentMessageIds.has(msgId)) {
+    return true;
+  }
+
+  const str = String(text || '').trim();
+
+  // 1. Mensagens contendo URL da loja, link de checkout ou subdomínio FarmaFlow
+  if (
+    str.includes('/s/') ||
+    str.includes('farmaflow.online') ||
+    str.includes('lojawhats.online') ||
+    str.includes('farmaflow') ||
+    str.includes('https://') && str.includes('?v=')
+  ) {
+    return true;
+  }
+
+  // 2. Frases padrão emitidas pelo Agente de IA FarmaFlow
+  if (
+    str.includes('Para conferir mais detalhes ou aproveitar as promoções') ||
+    str.includes('acesse o link abaixo') ||
+    str.includes('Nossa Loja Online') ||
+    str.includes('Nossa Webloja') ||
+    str.includes('Recebemos o seu') && str.includes('conferência e orçamento') ||
+    str.includes('Desculpe, não consegui entender o seu áudio') ||
+    str.includes('Um dos nossos balconistas já vai assumir') ||
+    str.includes('Já anotei a sua preferência') ||
+    str.includes('Perfeito! Já separei para você') ||
+    str.includes('Já encaminhei para a nossa equipe') ||
+    str.includes('estou transferindo o seu atendimento')
+  ) {
+    return true;
+  }
+
+  // 3. Janela de proteção de 15 segundos após envio do bot
+  const now = Date.now();
+  if (conversationId && botRecentDispatches.has(conversationId)) {
+    if ((botRecentDispatches.get(conversationId) || 0) > now) {
+      return true;
+    }
+  }
+
+  if (remoteJidOrPhone) {
+    const clean = String(remoteJidOrPhone).replace(/\D/g, '');
+    if (clean && botRecentDispatches.has(clean) && (botRecentDispatches.get(clean) || 0) > now) {
+      return true;
+    }
+    if (botRecentDispatches.has(remoteJidOrPhone) && (botRecentDispatches.get(remoteJidOrPhone) || 0) > now) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Detecção de confirmação final de endereço e pagamento pelo cliente
+ * (ex: "meu endereço é...", "pode mandar para a rua...", "vou pagar no pix na entrega")
+ */
+export function detectFinalCheckoutIntent(message: string): { isFinalCheckout: boolean; reason?: string } {
+  if (!message || typeof message !== 'string') return { isFinalCheckout: false };
+  const norm = normalizeTextForIntent(message);
+  if (!norm || norm.length < 5) return { isFinalCheckout: false };
+
+  // Padrões de endereço explícito fornecido
+  const addressPatterns = [
+    /\b(meu\s+endereco\s+e|manda\s+(no|na|pro|pra)|entregar\s+(no|na|pro|pra)|pode\s+mandar\s+(pro|pra|para)|pode\s+entregar\s+(pro|pra|para))\b/i,
+    /\b(rua|avenida|av|travessa|alameda|rodovia|bairro|quadra|lote|bloco|apto|apartamento|casa|condominio)\s+[a-z0-9]/i,
+    /\b(cep\s*\d{5})/i
+  ];
+
+  for (const pat of addressPatterns) {
+    if (pat.test(norm)) {
+      return { isFinalCheckout: true, reason: "ADDRESS_PROVIDED" };
+    }
+  }
+
+  // Padrões de confirmação final de pagamento/entrega
+  const paymentConfirmPatterns = [
+    /\b(vou\s+pagar\s+(no|na|com|em)|pago\s+(no|na|com|em))\s+(pix|dinheiro|cartao|debito|credito)/i,
+    /\b(troco\s+para\s+\d+|preciso\s+de\s+troco)/i,
+    /\b(pode\s+mandar\s+fechar|pode\s+finalizar|fecha\s+o\s+pedido\s+ai|manda\s+entregar)\b/i
+  ];
+
+  for (const pat of paymentConfirmPatterns) {
+    if (pat.test(norm)) {
+      return { isFinalCheckout: true, reason: "PAYMENT_CONFIRMATION" };
+    }
+  }
+
+  return { isFinalCheckout: false };
+}
+
+
 /**
  * Reconhecimento refinado de escolha de produto e intenção de compra do cliente
  * (ex: "vou querer a da prati", "vou querer essa da ems de 4,49", "pode ser o número 1", "quero essa", etc.)

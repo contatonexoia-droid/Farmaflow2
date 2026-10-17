@@ -69,7 +69,7 @@ export const KanbanCard: React.FC<KanbanCardProps> = ({
     conversation.status === 'human_takeover' || 
     conversation.status === 'HUMAN';
   const isBotActive = !isHumanControlled && conversation.is_bot_active !== false;
-  const botCount = conversation.bot_interaction_count || 0;
+  const botCount = conversation.bot_interaction_count ?? (conversation as any).bot_turns ?? (conversation as any).ai_interactions ?? (conversation as any).turn_count ?? 0;
 
   // Format relative time
   const formatTime = (isoString?: string) => {

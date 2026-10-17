@@ -815,20 +815,48 @@ export async function fetchAndStoreProductImageByEan(
   }
 
   // 10. PERSISTÊNCIA DEFINITIVA NO SUPABASE STORAGE (Bucket products/ean/{cleanEan}.jpg)
+  // Com retry automático e backoff exponencial contra erro 'Too many connections issued to the database'
   try {
-    const { error: uploadError } = await supabaseAdmin.storage
-      .from(bucketName)
-      .upload(storagePath, foundBuffer, {
-        contentType: foundContentType || 'image/jpeg',
-        upsert: true
-      });
+    let uploadSuccess = false;
+    let lastUploadError: any = null;
+    const maxRetries = 3;
 
-    if (uploadError) {
-      console.error(`[EanImageService] Erro ao fazer upload no Supabase Storage (${bucketName}/${storagePath}):`, uploadError);
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      const { error: uploadError } = await supabaseAdmin.storage
+        .from(bucketName)
+        .upload(storagePath, foundBuffer, {
+          contentType: foundContentType || 'image/jpeg',
+          upsert: true
+        });
+
+      if (!uploadError) {
+        uploadSuccess = true;
+        break;
+      }
+
+      lastUploadError = uploadError;
+      const isConnectionLimit = 
+        uploadError.message?.includes('Too many connections') ||
+        (uploadError as any)?.statusCode === '500' ||
+        (uploadError as any)?.status === 500;
+
+      console.warn(`[EanImageService] Tentativa ${attempt}/${maxRetries} de upload falhou (${bucketName}/${storagePath}):`, uploadError.message);
+
+      if (isConnectionLimit && attempt < maxRetries) {
+        const backoffMs = attempt * 800 + Math.floor(Math.random() * 400);
+        console.info(`[EanImageService] Conexões esgotadas no DB do Storage. Aguardando ${backoffMs}ms para retry...`);
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
+      } else if (attempt < maxRetries) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+
+    if (!uploadSuccess && lastUploadError) {
+      console.error(`[EanImageService] Erro ao fazer upload no Supabase Storage (${bucketName}/${storagePath}) após ${maxRetries} tentativas:`, lastUploadError);
       return {
         success: false,
         ean: cleanEan,
-        error: `Erro ao salvar no Supabase Storage: ${uploadError.message}`,
+        error: `Erro ao salvar no Supabase Storage: ${lastUploadError.message}`,
         productId
       };
     }

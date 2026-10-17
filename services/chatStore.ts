@@ -4,7 +4,7 @@ import path from "path";
 import crypto from "crypto";
 import { inboxStore } from "./inboxStore.js";
 import { evolutionApiService } from "./evolutionApiService.js";
-import { isWeblojaOrderMessage } from "./botHandoffManager.js";
+import { isWeblojaOrderMessage, isBotSentOrEcho, registerBotSentMessage } from "./botHandoffManager.js";
 import { realtimeHub } from "./realtimeHub.js";
 
 function stringToUuid(str: string): string {
@@ -590,6 +590,10 @@ class ChatStore {
       created_at: now
     };
 
+    if (senderType === "BOT") {
+      registerBotSentMessage(msgUuid, conversationId);
+    }
+
     // Evolution API Dispatch (for USER/BOT messages, if not private and not already dispatched)
     if ((senderType === "USER" || senderType === "BOT") && !isPrivate && !skipWhatsAppDispatch) {
       try {
@@ -1113,20 +1117,33 @@ class ChatStore {
     }
 
     // Verifica se a mensagem atual que chegou com fromMe já foi enviada pelo BOT/Sistema
+    // ou se é eco de webhook da Evolution API para os balões de resposta e links da Webloja
     let isBotEcho = false;
     if (fromMe) {
-      try {
-        const { data: existingBotMsg } = await supabaseAdmin
-          .from("chat_messages")
-          .select("id, sender_type")
-          .or(`id.eq.${msgId},content.eq.${JSON.stringify(text)}`)
-          .eq("conversation_id", convId)
-          .maybeSingle();
+      if (isBotSentOrEcho(rawMsgKey, text, convId, phone)) {
+        isBotEcho = true;
+      } else {
+        try {
+          const { data: existingBotMsg } = await supabaseAdmin
+            .from("chat_messages")
+            .select("id, sender_type")
+            .or(`id.eq.${msgId},remote_id.eq.${rawMsgKey}`)
+            .eq("conversation_id", convId)
+            .maybeSingle();
 
-        if (existingBotMsg && (existingBotMsg.sender_type === "BOT" || existingBotMsg.sender_type === "SYSTEM")) {
-          isBotEcho = true;
-        }
-      } catch (_) {}
+          if (existingBotMsg && (existingBotMsg.sender_type === "BOT" || existingBotMsg.sender_type === "SYSTEM")) {
+            isBotEcho = true;
+          }
+        } catch (_) {}
+      }
+
+      if (isBotEcho) {
+        console.log(`[ChatStore] 🤖 Mensagem fromMe identificada como eco de resposta do BOT (não é atendente humano): "${typeof text === 'string' ? text.slice(0, 50) : ''}"`);
+        isHuman = false;
+        isBotActive = true;
+        finalStage = convInfo?.kanban_stage || convInfo?.stage || "ia_atendendo";
+        finalStatus = convInfo?.status || "bot";
+      }
     }
 
     if (fromMe && !isBotEcho && (!convInfo || convInfo.is_bot_active === false || Boolean(convInfo.assigned_user_id))) {
@@ -1227,14 +1244,14 @@ class ChatStore {
           unread_count: newUnreadCount,
           updated_at: now,
           created_at: now,
-          is_bot_active: isWeblojaOrder ? false : !fromMe,
-          is_human_controlled: isWeblojaOrder ? true : fromMe,
-          status: isWeblojaOrder ? "em_separacao" : (fromMe ? "human_takeover" : "bot"),
-          kanban_stage: isWeblojaOrder ? "saiu_entrega" : (fromMe ? "em_atendimento" : "ia_atendendo"),
-          stage: isWeblojaOrder ? "saiu_entrega" : (fromMe ? "em_atendimento" : "ia_atendendo"),
+          is_bot_active: isWeblojaOrder ? false : (fromMe ? isBotEcho : true),
+          is_human_controlled: isWeblojaOrder ? true : (fromMe ? !isBotEcho : false),
+          status: isWeblojaOrder ? "em_separacao" : (fromMe && !isBotEcho ? "human_takeover" : "bot"),
+          kanban_stage: isWeblojaOrder ? "saiu_entrega" : (fromMe && !isBotEcho ? "em_atendimento" : "ia_atendendo"),
+          stage: isWeblojaOrder ? "saiu_entrega" : (fromMe && !isBotEcho ? "em_atendimento" : "ia_atendendo"),
           bot_interaction_count: 0,
-          bot_handoff_reason: isWeblojaOrder ? "WEBLOJA_ORDER_RECEIVED" : (fromMe ? "HUMAN_OPERATOR_MESSAGE" : null),
-          bot_handoff_at: (isWeblojaOrder || fromMe) ? now : null
+          bot_handoff_reason: isWeblojaOrder ? "WEBLOJA_ORDER_RECEIVED" : (fromMe && !isBotEcho ? "HUMAN_OPERATOR_MESSAGE" : null),
+          bot_handoff_at: (isWeblojaOrder || (fromMe && !isBotEcho)) ? now : null
         };
 
         const sanitizedInsert = sanitizeChatConversationPayload(convInsertData);

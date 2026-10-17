@@ -19,7 +19,7 @@ import { calculateDeliveryDistance } from "./lib/maps.js";
 import { dispatcher } from "./services/asyncDispatcher.js";
 import { whatsappHealthManager } from "./services/whatsappHealthManager.js";
 import { realtimeHub } from "./services/realtimeHub.js";
-import { botHandoffManager, isWeblojaOrderMessage } from "./services/botHandoffManager.js";
+import { botHandoffManager, isWeblojaOrderMessage, isBotSentOrEcho, registerBotSentMessage } from "./services/botHandoffManager.js";
 import { continuousUseRefillManager } from "./services/continuousUseRefillManager.js";
 import { csatManager } from "./services/csatManager.js";
 import { contactMergeManager } from "./services/contactMergeManager.js";
@@ -207,7 +207,8 @@ app.use(async (req, res, next) => {
 // ============================================================================
 const handleSharePreviewRoute = async (req: express.Request, res: express.Response) => {
   try {
-    const rawSlug = (req.params.slug || (req.query?.slug as string) || (req.query?.store as string) || '').trim();
+    const paramSlug = Array.isArray(req.params.slug) ? req.params.slug[0] : req.params.slug;
+    const rawSlug = String(paramSlug || req.query?.slug || req.query?.store || '').trim();
     const cleanSlug = (rawSlug || 'drogaria-esplendido')
       .toLowerCase()
       .normalize('NFD')

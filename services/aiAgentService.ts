@@ -8,7 +8,9 @@ import {
   isWeblojaOrderMessage,
   detectCustomerChoiceIntent,
   buildHumanizedHandoffMessage,
-  buildProductHandoffMessage 
+  buildProductHandoffMessage,
+  registerBotSentMessage,
+  detectFinalCheckoutIntent
 } from "./botHandoffManager.js";
 import { realtimeHub } from "./realtimeHub.js";
 import { evolutionApiService } from "./evolutionApiService.js";
@@ -1252,30 +1254,37 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       rawResult = await this.callGemini(apiKey, effectiveConfig.model || 'gemini-2.5-flash', fullSystemInstruction, incomingMessage, chatHistory, storeLink, tenant);
     }
 
-    // 9. Detecção Ativa de Pedido de Atendimento Humano, Balconista ou Escolha de Produto
+    // 9. Detecção Ativa de Pedido de Atendimento Humano ou Confirmação Final de Entrega/Pagamento
     const humanCheck = detectHumanHandoffIntent(incomingMessage);
+    const checkoutCheck = detectFinalCheckoutIntent(incomingMessage);
     const hasTransferTag = /\[(TRANSFERIR_ATENDIMENTO|TRANSFER_TO_HUMAN|HANDOFF_HUMAN|TRANSBORDO)\]/i.test(rawResult.reply);
-    const indicatesTransferInText = /((estou|vou)\s+(transferir|passar|encaminhar)|(um\s+de\s+nossos\s+balconistas|nossa\s+equipe\s+de\s+balconistas|um\s+atendente\s+humano|nossos\s+atendentes)\s+(ir[áa]|vai|ja\s+vai)\s+(te\s+)?(atender|responder))/i.test(rawResult.reply);
 
-    const shouldHandoff = isFinalSessionTurn || rawResult.transferredToHuman === true || humanCheck.isHumanRequested || choiceCheck.isChoice || hasTransferTag || indicatesTransferInText;
-    const handoffReason = choiceCheck.isChoice
-      ? "PURCHASE_INTENT"
-      : (humanCheck.isHumanRequested 
-          ? "HUMAN_REQUESTED" 
-          : (hasTransferTag || indicatesTransferInText 
+    // O bot SÓ deve transferir para humano quando:
+    // 1) Atingir o limite real de interações (isFinalSessionTurn)
+    // 2) O cliente pedir explicitamente para falar com atendente/humano/farmacêutico
+    // 3) O cliente enviar confirmação final de endereço/pagamento
+    // 4) A LLM emitir tag explícita de transferência necessária
+    const shouldHandoff = isFinalSessionTurn || humanCheck.isHumanRequested || checkoutCheck.isFinalCheckout || hasTransferTag;
+    const handoffReason = humanCheck.isHumanRequested 
+      ? "HUMAN_REQUESTED" 
+      : (checkoutCheck.isFinalCheckout 
+          ? "CHECKOUT_FINAL_CONFIRMATION" 
+          : (hasTransferTag 
               ? "HUMAN_REQUESTED" 
-              : (isFinalSessionTurn ? "MAX_INTERACTIONS_REACHED" : "HUMAN_REQUESTED")));
+              : (isFinalSessionTurn ? "MAX_INTERACTIONS_REACHED" : undefined)));
 
     // 10. Limpeza de tags internas e garantia de presença do link da Webloja
     let enforcedReply = rawResult.reply
       .replace(/\[(TRANSFERIR_ATENDIMENTO|TRANSFER_TO_HUMAN|HANDOFF_HUMAN|TRANSBORDO)\]/gi, '')
       .trim();
 
-    // Se o cliente escolheu uma opção, garante a mensagem oficial de conclusão e transbordo acolhedor com link direto do produto
+    // Se o cliente escolheu uma opção, garante a mensagem oficial com link direto do produto sem transbordo prematuro
     if (choiceCheck.isChoice) {
-      enforcedReply = resolvedChoice
-        ? buildProductHandoffMessage(resolvedChoice.productName, resolvedChoice.priceFormatted, resolvedChoice.directProductUrl)
-        : buildHumanizedHandoffMessage(storeLink);
+      if (resolvedChoice) {
+        enforcedReply = `Perfeito! Já separei para você:\n💊 *${resolvedChoice.productName}* - R$ ${resolvedChoice.priceFormatted} 😊\n\n*(Pelo link você fecha em menos de 1 minuto, escolhe a forma de pagamento e seu pedido chega mais rápido!)*\n\nPara conferir mais detalhes ou comprar agora, acesse o link abaixo 👇:\n${resolvedChoice.directProductUrl}`;
+      } else if (!enforcedReply.includes("http")) {
+        enforcedReply = `${enforcedReply}\n\nPara conferir mais detalhes ou aproveitar as promoções, acesse o link abaixo 👇:\n${storeLink}`;
+      }
     } else {
       // Sanitização de múltiplos links por produto em listagens (evita poluição visual)
       enforcedReply = this.sanitizeExcessiveProductLinks(enforcedReply, incomingMessage, storeLink);
@@ -1429,6 +1438,10 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         return { success: false, error: sendResult1.error || "WHATSAPP_DELIVERY_FAILED" };
       }
 
+      // Registra ID do Balão 1 e ativa janela de proteção de 15s contra eco no webhook
+      const b1Id = sendResult1.data?.key?.id || sendResult1.data?.message?.key?.id || sendResult1.data?.id;
+      registerBotSentMessage(b1Id, conversationId, cleanPhone);
+
       // Registra Balão 1 na tabela de mensagens e no chatStore
       const { message: msg1 } = await chatStore.addMessage(
         realTenantId,
@@ -1444,7 +1457,12 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
 
       realtimeHub.broadcastToStore(realTenantId, "chat_message", {
         conversationId,
-        message: msg1
+        message: {
+          ...msg1,
+          sender: "bot",
+          sender_type: "BOT",
+          is_from_bot: true
+        }
       });
 
       // Delay de 1200ms para ordenação visual no WhatsApp
@@ -1466,6 +1484,10 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       if (!sendResult2.success) {
         console.warn(`[AiAgentService] ⚠️ Aviso: Balão 2 (URL) falhou no WhatsApp, mas Balão 1 já foi entregue:`, sendResult2.error);
       } else {
+        // Registra ID do Balão 2 e reforça janela de proteção contra eco
+        const b2Id = sendResult2.data?.key?.id || sendResult2.data?.message?.key?.id || sendResult2.data?.id;
+        registerBotSentMessage(b2Id, conversationId, cleanPhone);
+
         // Registra Balão 2 na tabela de mensagens e no chatStore
         const { message: msg2 } = await chatStore.addMessage(
           realTenantId,
@@ -1481,7 +1503,12 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
 
         realtimeHub.broadcastToStore(realTenantId, "chat_message", {
           conversationId,
-          message: msg2
+          message: {
+            ...msg2,
+            sender: "bot",
+            sender_type: "BOT",
+            is_from_bot: true
+          }
         });
       }
     } else {
@@ -1504,6 +1531,10 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         return { success: false, error: sendResult.error || "WHATSAPP_DELIVERY_FAILED" };
       }
 
+      // Registra ID da mensagem única do bot e ativa janela de proteção
+      const sId = sendResult.data?.key?.id || sendResult.data?.message?.key?.id || sendResult.data?.id;
+      registerBotSentMessage(sId, conversationId, cleanPhone);
+
       // Registra a resposta única
       const { message: singleMsg } = await chatStore.addMessage(
         realTenantId,
@@ -1519,7 +1550,12 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
 
       realtimeHub.broadcastToStore(realTenantId, "chat_message", {
         conversationId,
-        message: singleMsg
+        message: {
+          ...singleMsg,
+          sender: "bot",
+          sender_type: "BOT",
+          is_from_bot: true
+        }
       });
     }
 
@@ -1623,7 +1659,33 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         is_bot_active: true,
         is_human_controlled: false,
         bot_interaction_count: nextCount,
+        bot_turns: nextCount,
+        turn_count: nextCount,
+        ai_interactions: nextCount,
         kanban_stage: "ia_atendendo"
+      });
+
+      realtimeHub.broadcastToStore(realTenantId, "conversation_bot_toggled", {
+        conversationId,
+        is_bot_active: true,
+        is_human_controlled: false,
+        status: "bot",
+        kanban_stage: "ia_atendendo",
+        bot_interaction_count: nextCount,
+        bot_turns: nextCount,
+        turn_count: nextCount
+      });
+
+      realtimeHub.broadcastToStore(realTenantId, "chat_conversation_updated", {
+        conversationId,
+        conversation: {
+          ...botActivePayload,
+          id: conversationId,
+          store_id: realTenantId,
+          bot_turns: nextCount,
+          turn_count: nextCount,
+          ai_interactions: nextCount
+        }
       });
     }
 
@@ -1887,10 +1949,39 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       const nextCount = currentCount + 1;
       const isFinalTurn = nextCount >= maxInteractions;
 
+      // 8.0. Detecção de confirmação final de endereço e pagamento (Checkout Final)
+      const checkoutCheck = detectFinalCheckoutIntent(incomingMessage);
+      if (checkoutCheck.isFinalCheckout) {
+        console.log(`[AiAgentService] 📦 Confirmação de endereço/pagamento detectada ("${incomingMessage}") na conversa ${conversationId}. Transferindo para fechamento operacional.`);
+        const checkoutReply = `Perfeito! Recebi seus dados para entrega e pagamento. 🛵💨\n\nEstou transferindo agora mesmo para um de nossos balconistas conferir e finalizar o envio do seu pedido!\n\n${storeLink}`;
+        const dispatchResult = await this.dispatchBotReplyAndRecord(
+          realTenantId,
+          conversationId,
+          targetInstanceName,
+          cleanPhone,
+          checkoutReply,
+          {
+            isHandoff: true,
+            handoffReason: "CHECKOUT_FINAL_CONFIRMATION",
+            transitionMsg: checkoutReply,
+            currentCount,
+            nextCount,
+            replyWithAudio: shouldReplyWithAudio,
+            tenantAiConfig: dbConfig
+          }
+        );
+        return {
+          handled: true,
+          replyText: checkoutReply,
+          transferredToHuman: true,
+          reason: "CHECKOUT_FINAL_CONFIRMATION"
+        };
+      }
+
       // 8.1. Detecção Especial de Escolha de Produto / Intenção de Compra pelo Cliente
       const choiceCheck = detectCustomerChoiceIntent(incomingMessage, history);
       if (choiceCheck.isChoice) {
-        console.log(`[AiAgentService] 🎯 Escolha do cliente detectada ("${incomingMessage}") na conversa ${conversationId}. Identificando produto selecionado para gerar link direto.`);
+        console.log(`[AiAgentService] 🎯 Escolha do cliente detectada ("${incomingMessage}") na conversa ${conversationId}. Identificando produto selecionado para gerar link direto (Turno ${nextCount}/${maxInteractions}).`);
         const tenantIds = Array.from(
           new Set(
             [
@@ -1910,20 +2001,26 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
           storeLink
         );
 
-        const humanizedReply = resolvedChoice
-          ? buildProductHandoffMessage(resolvedChoice.productName, resolvedChoice.priceFormatted, resolvedChoice.directProductUrl)
-          : buildHumanizedHandoffMessage(storeLink);
+        const choiceReplyText = resolvedChoice
+          ? `Perfeito! Já separei para você:\n💊 *${resolvedChoice.productName}* - R$ ${resolvedChoice.priceFormatted} 😊\n\n*(Pelo link você fecha em menos de 1 minuto, escolhe a forma de pagamento e seu pedido chega mais rápido!)*\n\nPara conferir mais detalhes ou comprar agora, acesse o link abaixo 👇:\n${resolvedChoice.directProductUrl}`
+          : `Perfeito! Já consultei as opções disponíveis para você. 😊\n\nPara conferir mais detalhes, valores e promoções em nossa loja online, acesse o link abaixo 👇:\n${storeLink}`;
+
+        const isHandoffTurn = isFinalTurn;
+        const handoffReason = isFinalTurn ? "MAX_INTERACTIONS_REACHED" : undefined;
+        const finalReplyWithHandoff = isFinalTurn
+          ? `${choiceReplyText}\n\n${transitionMsg}`
+          : choiceReplyText;
 
         const dispatchResult = await this.dispatchBotReplyAndRecord(
           realTenantId,
           conversationId,
           targetInstanceName,
           cleanPhone,
-          humanizedReply,
+          finalReplyWithHandoff,
           {
-            isHandoff: true,
-            handoffReason: "PURCHASE_INTENT",
-            transitionMsg: humanizedReply,
+            isHandoff: isHandoffTurn,
+            handoffReason,
+            transitionMsg,
             currentCount,
             nextCount,
             replyWithAudio: shouldReplyWithAudio,
@@ -1932,14 +2029,14 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         );
 
         if (!dispatchResult.success) {
-          return { handled: false, transferredToHuman: true, reason: dispatchResult.error };
+          return { handled: false, transferredToHuman: isHandoffTurn, reason: dispatchResult.error };
         }
 
         return {
           handled: true,
-          replyText: humanizedReply,
-          transferredToHuman: true,
-          reason: "PURCHASE_INTENT"
+          replyText: finalReplyWithHandoff,
+          transferredToHuman: isHandoffTurn,
+          reason: handoffReason
         };
       }
 
