@@ -1431,34 +1431,76 @@ export const Cart: React.FC<CartProps> = ({
                       Ref: {item.internalCode}
                     </p>
 
-                    {/* Bloco de Promoção de Volume / Incentivo CDC */}
+                    {/* Bloco de Promoção de Volume / Incentivo CDC / Upsell */}
                     {volumeInfo ? (
                       <div className="my-2">
                         {isVolumePending ? (
-                          <div className="bg-amber-50/90 border border-amber-200/80 rounded-2xl p-2.5 sm:p-3">
-                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                              <div className="min-w-0 flex-1">
-                                <span className="bg-amber-500 text-white text-[9px] font-black uppercase px-2 py-0.5 rounded-md inline-block mb-1">
-                                  {volumeInfo.badgeText}
-                                </span>
-                                <p className="text-xs font-bold text-amber-950 leading-tight">
-                                  Falta <span className="font-black text-amber-800">{volumeInfo.minQty - item.quantity}</span> {volumeInfo.minQty - item.quantity === 1 ? "unidade" : "unidades"} para ativar o preço especial de <span className="font-black text-amber-800">R$ {volumeInfo.unitRatePrice.toFixed(2).replace('.', ',')} cada</span>
-                                </p>
-                                <p className="text-[10px] text-amber-700 font-semibold mt-0.5">
-                                  Comprando {volumeInfo.minQty} un, pague apenas R$ {volumeInfo.totalComboPrice.toFixed(2).replace('.', ',')}
-                                </p>
+                          (() => {
+                            const isBuyXPayY = (item.promo_type === 'buy_x_pay_y' || item.promotionType === 'BUY_X_PAY_Y' || volumeInfo.badgeText.includes('PAGUE'));
+                            const missingForFree = volumeInfo.minQty - (item.quantity % volumeInfo.minQty);
+                            const isOneLeftForFree = isBuyXPayY && missingForFree === 1;
+
+                            if (isOneLeftForFree) {
+                              return (
+                                <div className="bg-gradient-to-r from-emerald-50 via-teal-50 to-green-50 border-2 border-emerald-300 rounded-2xl p-3 shadow-sm animate-pulse">
+                                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                                    <div className="min-w-0 flex-1">
+                                      <div className="flex items-center gap-1.5 mb-1">
+                                        <span className="bg-emerald-600 text-white text-[9px] font-black uppercase px-2 py-0.5 rounded-md">
+                                          {volumeInfo.badgeText}
+                                        </span>
+                                        <span className="text-[9px] font-black text-emerald-800 uppercase tracking-wider bg-white px-2 py-0.5 rounded-md border border-emerald-200">
+                                          1 UNIDADE GRÁTIS!
+                                        </span>
+                                      </div>
+                                      <p className="text-xs font-black text-emerald-950 leading-snug">
+                                        🎁 Adicione +1 unidade GRÁTIS na promoção {volumeInfo.badgeText.replace(/^[^\w]*/, '')}!
+                                      </p>
+                                      <p className="text-[10px] text-emerald-700 font-semibold mt-0.5">
+                                        Comprando {item.quantity + 1} unidades, a próxima sai inteiramente sem custo.
+                                      </p>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() => updateQuantity(item.id, 1)}
+                                      disabled={item.stock <= item.quantity}
+                                      className="bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white text-xs font-black px-3.5 py-2 rounded-xl shrink-0 transition-all shadow-md flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
+                                      title="Adicionar 1 unidade grátis"
+                                    >
+                                      🎁 Adicionar +1 GRÁTIS
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            }
+
+                            return (
+                              <div className="bg-amber-50/90 border border-amber-200/80 rounded-2xl p-2.5 sm:p-3">
+                                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                                  <div className="min-w-0 flex-1">
+                                    <span className="bg-amber-500 text-white text-[9px] font-black uppercase px-2 py-0.5 rounded-md inline-block mb-1">
+                                      {volumeInfo.badgeText}
+                                    </span>
+                                    <p className="text-xs font-bold text-amber-950 leading-tight">
+                                      Falta <span className="font-black text-amber-800">{volumeInfo.minQty - item.quantity}</span> {volumeInfo.minQty - item.quantity === 1 ? "unidade" : "unidades"} para ativar o preço especial de <span className="font-black text-amber-800">R$ {volumeInfo.unitRatePrice.toFixed(2).replace('.', ',')} cada</span>
+                                    </p>
+                                    <p className="text-[10px] text-amber-700 font-semibold mt-0.5">
+                                      Comprando {volumeInfo.minQty} un, pague apenas R$ {volumeInfo.totalComboPrice.toFixed(2).replace('.', ',')}
+                                    </p>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => updateQuantity(item.id, volumeInfo.minQty - item.quantity)}
+                                    disabled={item.stock < volumeInfo.minQty}
+                                    className="self-start sm:self-center bg-amber-600 hover:bg-amber-700 active:scale-95 text-white text-[11px] font-black px-3 py-1.5 rounded-xl shrink-0 transition-all shadow-sm cursor-pointer whitespace-nowrap"
+                                    title={`Completar para ${volumeInfo.minQty} unidades`}
+                                  >
+                                    + Ativar Kit ({volumeInfo.minQty} un)
+                                  </button>
+                                </div>
                               </div>
-                              <button
-                                type="button"
-                                onClick={() => updateQuantity(item.id, volumeInfo.minQty - item.quantity)}
-                                disabled={item.stock < volumeInfo.minQty}
-                                className="self-start sm:self-center bg-amber-600 hover:bg-amber-700 active:scale-95 text-white text-[11px] font-black px-3 py-1.5 rounded-xl shrink-0 transition-all shadow-sm cursor-pointer whitespace-nowrap"
-                                title={`Completar para ${volumeInfo.minQty} unidades`}
-                              >
-                                + Ativar Kit ({volumeInfo.minQty} un)
-                              </button>
-                            </div>
-                          </div>
+                            );
+                          })()
                         ) : (
                           <div className="bg-emerald-50/90 border border-emerald-200/80 rounded-2xl p-2.5 sm:p-3">
                             <div className="flex items-center justify-between gap-2">
@@ -1467,7 +1509,7 @@ export const Cart: React.FC<CartProps> = ({
                                   {volumeInfo.badgeText} ATIVADO!
                                 </span>
                                 <p className="text-xs font-bold text-emerald-900 leading-tight">
-                                  Desconto de volume: <span className="font-black text-emerald-700">- R$ {itemDiscount.toFixed(2).replace('.', ',')}</span>
+                                  Economia na promoção: <span className="font-black text-emerald-700">- R$ {itemDiscount.toFixed(2).replace('.', ',')}</span>
                                 </p>
                                 <p className="text-[10px] text-emerald-700 font-semibold mt-0.5">
                                   Valor unitário rateado: R$ {(itemTotal / item.quantity).toFixed(2).replace('.', ',')} cada
@@ -1477,6 +1519,30 @@ export const Cart: React.FC<CartProps> = ({
                                 {item.quantity} un no combo
                               </span>
                             </div>
+                            {(() => {
+                              const isBuyXPayY = (item.promo_type === 'buy_x_pay_y' || item.promotionType === 'BUY_X_PAY_Y' || volumeInfo.badgeText.includes('PAGUE'));
+                              const missingForFree = volumeInfo.minQty - (item.quantity % volumeInfo.minQty);
+                              const isOneLeftForFree = isBuyXPayY && missingForFree === 1;
+                              if (isOneLeftForFree) {
+                                return (
+                                  <div className="mt-2.5 pt-2 border-t border-emerald-200/70 flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-white/70 p-2 rounded-xl">
+                                    <p className="text-xs font-black text-emerald-950 leading-snug">
+                                      🎁 Adicione +1 unidade GRÁTIS na promoção {volumeInfo.badgeText.replace(/^[^\w]*/, '')}!
+                                    </p>
+                                    <button
+                                      type="button"
+                                      onClick={() => updateQuantity(item.id, 1)}
+                                      disabled={item.stock <= item.quantity}
+                                      className="bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white text-[11px] font-black px-3 py-1.5 rounded-xl shrink-0 transition-all shadow-sm flex items-center justify-center gap-1 cursor-pointer whitespace-nowrap"
+                                      title="Adicionar 1 unidade grátis"
+                                    >
+                                      🎁 Adicionar +1 GRÁTIS
+                                    </button>
+                                  </div>
+                                );
+                              }
+                              return null;
+                            })()}
                           </div>
                         )}
                       </div>

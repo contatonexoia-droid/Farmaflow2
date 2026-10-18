@@ -33,9 +33,13 @@ async function run() {
         console.log('\n🔨 Compilando Agente Softpharma (Windows x64)...');
         execSync('npx pkg src/entry-softpharma.js -t node18-win-x64 -o build/farmaflow-softpharma.exe', { cwd: agentDir, stdio: 'inherit' });
 
+        // Step 4: Compile InovaFarma
+        console.log('\n🔨 Compilando Agente InovaFarma (Windows x64)...');
+        execSync('npx pkg src/entry-inovafarma.js -t node18-win-x64 -o build/farmaflow-inovafarma.exe', { cwd: agentDir, stdio: 'inherit' });
+
         console.log('\n🤐 Compactando os executáveis para ZIP...');
 
-        // Step 4: Zip Siagold
+        // Step 5: Zip Siagold
         const siagoldExe = path.join(buildDir, 'farmaflow-siagold.exe');
         const siagoldZip = path.join(installersDir, 'farmaflow-siagold.zip');
         const zipSiagold = new AdmZip();
@@ -43,13 +47,21 @@ async function run() {
         zipSiagold.writeZip(siagoldZip);
         console.log(`✅ Gerado: ${path.basename(siagoldZip)}`);
 
-        // Step 5: Zip Softpharma
+        // Step 6: Zip Softpharma
         const softpharmaExe = path.join(buildDir, 'farmaflow-softpharma.exe');
         const softpharmaZip = path.join(installersDir, 'farmaflow-softpharma.zip');
         const zipSoftpharma = new AdmZip();
         zipSoftpharma.addLocalFile(softpharmaExe);
         zipSoftpharma.writeZip(softpharmaZip);
         console.log(`✅ Gerado: ${path.basename(softpharmaZip)}`);
+
+        // Step 7: Zip InovaFarma
+        const inovafarmaExe = path.join(buildDir, 'farmaflow-inovafarma.exe');
+        const inovafarmaZip = path.join(installersDir, 'farmaflow-inovafarma.zip');
+        const zipInovafarma = new AdmZip();
+        zipInovafarma.addLocalFile(inovafarmaExe);
+        zipInovafarma.writeZip(inovafarmaZip);
+        console.log(`✅ Gerado: ${path.basename(inovafarmaZip)}`);
 
         console.log('\n🎉 Sincronização e compilação do Agente Desktop concluída com sucesso!');
     } catch (error) {

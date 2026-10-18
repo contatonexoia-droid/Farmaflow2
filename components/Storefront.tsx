@@ -632,12 +632,17 @@ const ProductCardComponent = ({
     let promoDescription = "";
 
     // 1. Desconto direto no item avulso (remarcação simples DE / POR do produto)
+    const effectiveDirectPromo = (product.promotional_price !== undefined && product.promotional_price !== null)
+      ? Number(product.promotional_price)
+      : (product.promotionalPrice ? Number(product.promotionalPrice) : null);
+
     if (
-      product.promotionalPrice &&
-      product.promotionalPrice > 0 &&
-      product.promotionalPrice < product.price
+      effectiveDirectPromo &&
+      effectiveDirectPromo > 0 &&
+      effectiveDirectPromo < product.price &&
+      (product.promo_type === 'simple' || product.promotionType === 'DISCOUNT' || !product.promo_type || product.promo_type === 'none')
     ) {
-      unitPrice = product.promotionalPrice;
+      unitPrice = effectiveDirectPromo;
       directOriginalPrice = product.price;
       hasDirectDiscount = true;
     } else if (product.originalPrice && product.originalPrice > product.price) {
@@ -796,11 +801,11 @@ const ProductCardComponent = ({
                   </span>
                 )}
                 {Boolean(volumePromo) ? (
-                  <span className="bg-red-600 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1 animate-pulse">
-                    <Layers size={10} strokeWidth={4} /> {volumePromo.badgeText}
+                  <span className="bg-gradient-to-r from-amber-500 via-orange-600 to-red-600 text-white px-2.5 py-1 rounded-xl text-[8px] md:text-[10px] font-black uppercase tracking-wider shadow-xl flex items-center gap-1 animate-pulse border border-white/20">
+                    {volumePromo.badgeText}
                   </span>
                 ) : Boolean(activePromo) ? (
-                  <span className="bg-red-600 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1 animate-pulse">
+                  <span className="bg-gradient-to-r from-red-600 to-rose-600 text-white px-2.5 py-1 rounded-xl text-[8px] md:text-[10px] font-black uppercase tracking-wider shadow-xl flex items-center gap-1 animate-pulse border border-white/20">
                     <Tag size={10} strokeWidth={4} />
                     {activePromo.type === "VARIABLE_COMBO"
                       ? `COMBO POR R$ ${Number(activePromo.comboPrice ?? activePromo.payY ?? 0).toFixed(2).replace(".", ",")}`
@@ -810,8 +815,12 @@ const ProductCardComponent = ({
                         : activePromo.name}
                   </span>
                 ) : Boolean(hasDirectDiscount) ? (
-                  <span className="bg-red-500 text-white px-2 py-0.5 rounded-lg text-[7px] md:text-[9px] font-black uppercase tracking-widest shadow-lg flex items-center gap-1 animate-pulse">
-                    <Percent size={10} strokeWidth={4} /> Oferta
+                  <span className="bg-gradient-to-r from-red-500 to-orange-500 text-white px-2.5 py-1 rounded-xl text-[8px] md:text-[10px] font-black uppercase tracking-wider shadow-xl flex items-center gap-1 animate-pulse border border-white/20">
+                    <Percent size={10} strokeWidth={4} /> {
+                      (product.promotional_price || product.promotionalPrice) && (Number(directOriginalPrice) > Number(unitPrice))
+                        ? `DE R$ ${Number(directOriginalPrice).toFixed(2).replace('.', ',')} POR R$ ${Number(unitPrice).toFixed(2).replace('.', ',')}`
+                        : 'Oferta'
+                    }
                   </span>
                 ) : null}
               </div>

@@ -6285,11 +6285,13 @@ app.get(["/installers/:filename", "/public/installers/:filename"], (req, res) =>
 
 app.get("/api/v1/agent/download/:erpType", (req, res) => {
   try {
-    const { erpType } = req.params;
+    const rawType = String(req.params.erpType || "").toLowerCase().trim();
     let fileName = "farmaflow-agent.zip";
-    if (erpType === "siagold") {
+    if (rawType === "inovafarma" || rawType.includes("inova")) {
+      fileName = "farmaflow-inovafarma.zip";
+    } else if (rawType === "siagold") {
       fileName = "farmaflow-siagold.zip";
-    } else if (erpType === "softpharma") {
+    } else if (rawType === "softpharma") {
       fileName = "farmaflow-softpharma.zip";
     }
 
@@ -6299,6 +6301,12 @@ app.get("/api/v1/agent/download/:erpType", (req, res) => {
       res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
       return res.sendFile(filePath);
     } else {
+      const fallbackPath = path.join(process.cwd(), "public", "installers", "farmaflow-agent.zip");
+      if (fs.existsSync(fallbackPath)) {
+        res.setHeader("Content-Type", "application/zip");
+        res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+        return res.sendFile(fallbackPath);
+      }
       return res.redirect(302, `/installers/${fileName}`);
     }
   } catch (err: any) {
@@ -6571,16 +6579,34 @@ const validateTokenHandler = async (req: express.Request, res: express.Response)
       
     await touchAgentHeartbeat(tokenData.tenant_id, mId, token);
 
-    const erpType = tenant?.erp_type || 'siagold';
-    console.log(`[DESKTOP AGENT] Token validado com sucesso para tenant: ${tokenData.tenant_id} (${tenant?.name || 'Farmácia'})`);
+    const erpType = (tenant?.erp_type || 'siagold').toLowerCase().trim();
+    console.log(`[DESKTOP AGENT] Token validado com sucesso para tenant: ${tokenData.tenant_id} (${tenant?.name || 'Farmácia'}, ERP: ${erpType})`);
+
+    let defaultDatabase = "SIAGOLD";
+    let defaultPort = 1433;
+    let defaultServer = "localhost";
+    let defaultUser = "sa";
+
+    if (erpType === "inovafarma" || erpType.includes("inova")) {
+      defaultDatabase = "INOVAFARMA";
+      defaultPort = 1433;
+      defaultServer = "localhost";
+      defaultUser = "sa";
+    } else if (erpType === "softpharma") {
+      defaultDatabase = "SOFTPHARMA";
+      defaultPort = 5432;
+      defaultServer = "localhost";
+      defaultUser = "postgres";
+    }
 
     res.json({
-      erpType: erpType.toLowerCase(),
+      erpType: erpType,
       dbConfig: {
-        user: "sa", // Placeholder
+        user: defaultUser,
         password: "sua_senha_aqui",
-        server: "localhost",
-        database: "SIAGOLD",
+        server: defaultServer,
+        port: defaultPort,
+        database: defaultDatabase,
         branchCode: "1",
         viewName: 'VW_INTEGRACAO_FARMAFLOW'
       },
@@ -6875,8 +6901,98 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
        let originalPrice = Number(getValFromProduct(p, ['original_price', 'originalPrice', 'preco_original', 'preco_de', 'preco_tabela', 'preco_cadastro', 'preco_antigo', 'valor_original']));
        if (isNaN(originalPrice) || originalPrice < 0) originalPrice = 0;
 
-       let rawPromoPrice = Number(getValFromProduct(p, ['promotional_price', 'promotionalPrice', 'preco_promocional', 'preco_promo', 'promocional', 'valor_promocional', 'preco_por']));
-       const promotionalPrice = !isNaN(rawPromoPrice) && rawPromoPrice > 0 ? rawPromoPrice : null;
+       // Normalização e extração de colunas de promoção do ERP (com retrocompatibilidade total)
+       const rawStartDate = getValFromProduct(p, [
+         'promo_start_date', 'promo_data_inicio', 'data_inicio_promo', 'dt_inicio_promo', 'inicio_promo', 'data_inicio', 'promo_start'
+       ]);
+       const rawEndDate = getValFromProduct(p, [
+         'promo_end_date', 'promo_data_fim', 'data_fim_promo', 'dt_fim_promo', 'fim_promo', 'data_fim', 'promo_end'
+       ]);
+
+       let isPromoValid = true;
+       const now = new Date();
+       if (rawStartDate) {
+         const sDate = new Date(rawStartDate);
+         if (!isNaN(sDate.getTime()) && now < sDate) isPromoValid = false;
+       }
+       if (rawEndDate) {
+         let eDate = new Date(rawEndDate);
+         if (typeof rawEndDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(rawEndDate.trim())) {
+           eDate = new Date(`${rawEndDate.trim()}T23:59:59.999Z`);
+         }
+         if (!isNaN(eDate.getTime()) && now > eDate) isPromoValid = false;
+       }
+
+       let rawPromoPrice = Number(getValFromProduct(p, [
+         'promotional_price', 'promotionalPrice', 'promo_price', 'preco_promocional', 'preco_promo', 'promocional', 'valor_promocional', 'preco_oferta', 'vl_promo', 'preco_por'
+       ]));
+       const promoPrice = (!isNaN(rawPromoPrice) && rawPromoPrice > 0 && isPromoValid) ? rawPromoPrice : null;
+
+       const rawBuyQty = Number(getValFromProduct(p, [
+         'promo_buy_qty', 'promo_qtd_minima', 'qtd_leve', 'leve_x', 'qtd_minima', 'qtd_min', 'buy_x', 'buyX', 'promoBuyQty'
+       ]));
+       const buyQty = (!isNaN(rawBuyQty) && rawBuyQty > 0 && isPromoValid) ? Math.floor(rawBuyQty) : null;
+
+       const rawPayQty = Number(getValFromProduct(p, [
+         'promo_pay_qty', 'promo_qtd_paga', 'qtd_pague', 'pague_y', 'pay_y', 'payY', 'promoPayQty'
+       ]));
+       const payQty = (!isNaN(rawPayQty) && rawPayQty > 0 && isPromoValid) ? Math.floor(rawPayQty) : null;
+
+       const rawProgPrice = Number(getValFromProduct(p, [
+         'promo_progressive_price', 'preco_atacado', 'preco_progressivo', 'valor_atacado', 'vl_atacado', 'promoProgressivePrice'
+       ]));
+       const progPrice = (!isNaN(rawProgPrice) && rawProgPrice > 0 && isPromoValid) ? rawProgPrice : null;
+
+       const rawPromoType = getValFromProduct(p, [
+         'promo_type', 'tipo_regra_promo', 'tipo_promo', 'regra_promo', 'tipo_promocao', 'promotionType', 'promoType'
+       ]);
+
+       let promoType: 'none' | 'simple' | 'buy_x_pay_y' | 'progressive' = 'none';
+       if (rawPromoType && isPromoValid) {
+         const s = String(rawPromoType).toLowerCase().trim();
+         if (s.includes('leve') || s.includes('buy_x') || s.includes('kit') || s === 'buy_x_pay_y') {
+           promoType = 'buy_x_pay_y';
+         } else if (s.includes('progress') || s.includes('atacado') || s === 'progressive' || s.includes('qtd')) {
+           promoType = 'progressive';
+         } else if (s.includes('simple') || s.includes('simples') || s.includes('desconto') || s.includes('de_por') || s === 'discount') {
+           promoType = 'simple';
+         }
+       }
+
+       if (promoType === 'none' && isPromoValid) {
+         if (buyQty && payQty && buyQty > payQty) {
+           promoType = 'buy_x_pay_y';
+         } else if (progPrice && buyQty && buyQty > 1) {
+           promoType = 'progressive';
+         } else if (promoPrice && price > 0 && promoPrice < price) {
+           promoType = 'simple';
+         }
+       }
+
+       let dbPromotionType = 'NONE';
+       let dbBuyX: number | null = null;
+       let dbPayY: number | null = null;
+       let dbDiscountThreshold: number | null = null;
+       let dbDiscountPercentage: number | null = null;
+       let finalPromotionalPrice: number | null = null;
+
+       if (promoType === 'buy_x_pay_y' && buyQty && payQty && buyQty > payQty) {
+         dbPromotionType = 'BUY_X_PAY_Y';
+         dbBuyX = buyQty;
+         dbPayY = payQty;
+       } else if (promoType === 'progressive' && buyQty && progPrice) {
+         dbPromotionType = 'DISCOUNT_ON_QTY';
+         dbDiscountThreshold = buyQty;
+         finalPromotionalPrice = progPrice;
+         if (price > 0 && progPrice < price) {
+           dbDiscountPercentage = Number((((price - progPrice) / price) * 100).toFixed(2));
+         }
+       } else if (promoType === 'simple' && promoPrice && price > 0 && promoPrice < price) {
+         dbPromotionType = 'DISCOUNT';
+         finalPromotionalPrice = promoPrice;
+       }
+
+       const promotionalPrice = finalPromotionalPrice;
 
        const rawName = getValFromProduct(p, [
          'name', 'nome', 'descricao', 'descricao_produto', 'nome_produto', 'produto',
@@ -6904,6 +7020,11 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
          manufacturer: rawManufacturer
        });
 
+       const rawImage = getValFromProduct(p, [
+         'image', 'imagem', 'foto', 'url_imagem', 'url_foto', 'imagem_url', 'img'
+       ]);
+       const image = (rawImage !== undefined && rawImage !== null && String(rawImage).trim().length > 0) ? String(rawImage).trim() : null;
+
        uniquePayloadMap.set(ean, {
           tenant_id: tenantId,
           barcode: ean,
@@ -6912,6 +7033,18 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
           price,
           original_price: originalPrice,
           promotional_price: promotionalPrice,
+          promo_type: promoType,
+          promo_buy_qty: buyQty,
+          promo_pay_qty: payQty,
+          promo_progressive_price: progPrice,
+          promo_start_date: rawStartDate ? String(rawStartDate) : null,
+          promo_end_date: rawEndDate ? String(rawEndDate) : null,
+          promotion_type: dbPromotionType,
+          buy_x: dbBuyX,
+          pay_y: dbPayY,
+          discount_qty_threshold: dbDiscountThreshold,
+          discount_qty_percentage: dbDiscountPercentage,
+          image: image,
           name: name,
           category: classified.subcategory,
           department: classified.department,
@@ -6957,6 +7090,34 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
          });
       }
 
+      // Regra de Ouro: Se produto novo vier sem foto mas tiver barcode, busca se já existe foto para aquele barcode em outra loja no Supabase
+      const newBarcodesNeedingImage = chunk
+        .filter(item => !existingMap.has(item.barcode) && (!item.image || String(item.image).trim().length === 0))
+        .map(item => item.barcode);
+
+      const crossStoreImageMap = new Map<string, string>();
+      if (newBarcodesNeedingImage.length > 0) {
+        try {
+          const { data: siblingProducts } = await supabaseAdmin
+            .from('products')
+            .select('barcode, image')
+            .in('barcode', newBarcodesNeedingImage)
+            .not('image', 'is', null)
+            .neq('image', '')
+            .limit(newBarcodesNeedingImage.length * 2);
+
+          if (siblingProducts && siblingProducts.length > 0) {
+            siblingProducts.forEach((sp: any) => {
+              if (sp.barcode && sp.image && !crossStoreImageMap.has(sp.barcode)) {
+                crossStoreImageMap.set(sp.barcode, sp.image);
+              }
+            });
+          }
+        } catch (siblingImgErr: any) {
+          console.warn("[Integration] Aviso ao buscar foto de barcode em outra drogaria:", siblingImgErr?.message);
+        }
+      }
+
       const newProductsPayload: any[] = [];
       const existingProductsPayload: any[] = [];
 
@@ -6965,15 +7126,42 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
             const existing = existingMap.get(item.barcode);
             let finalPrice = item.price;
             let finalOriginalPrice = item.original_price;
-            let finalPromotionalPrice = item.promotional_price !== null && item.promotional_price !== undefined ? item.promotional_price : existing.promotional_price;
+            let finalPromotionalPrice = item.promotional_price;
+            let finalPromotionType = item.promotion_type;
+            let finalBuyX = item.buy_x;
+            let finalPayY = item.pay_y;
+            let finalDiscountThreshold = item.discount_qty_threshold;
+            let finalDiscountPercentage = item.discount_qty_percentage;
+            let finalPromoType = item.promo_type;
+            let finalPromoBuyQty = item.promo_buy_qty;
+            let finalPromoPayQty = item.promo_pay_qty;
+            let finalPromoProgressivePrice = item.promo_progressive_price;
+            let finalPromoStartDate = item.promo_start_date;
+            let finalPromoEndDate = item.promo_end_date;
             
-            // Se o ignore_erp_prices estiver ativo, preserva os preços salvos no banco de dados
+            // Se o ignore_erp_prices estiver ativo, preserva os preços e regras promocionais salvos no painel
             if (ignoreErpPrices) {
                finalPrice = existing.price;
                finalOriginalPrice = existing.original_price;
                finalPromotionalPrice = existing.promotional_price;
+               finalPromotionType = existing.promotion_type;
+               finalBuyX = existing.buy_x;
+               finalPayY = existing.pay_y;
+               finalDiscountThreshold = existing.discount_qty_threshold;
+               finalDiscountPercentage = existing.discount_qty_percentage;
+               finalPromoType = existing.promo_type;
+               finalPromoBuyQty = existing.promo_buy_qty;
+               finalPromoPayQty = existing.promo_pay_qty;
+               finalPromoProgressivePrice = existing.promo_progressive_price;
+               finalPromoStartDate = existing.promo_start_date;
+               finalPromoEndDate = existing.promo_end_date;
             }
             
+            // Regra de Ouro: NUNCA sobrescreva uma imagem já existente no banco se o ERP enviar vazio ou nulo!
+            const finalImage = (item.image && typeof item.image === 'string' && item.image.trim().length > 0)
+              ? item.image.trim()
+              : existing.image;
+
             // Se a categoria existente for vazia ou genérica ('OUTROS', 'DIVERSOS', 'Geral', etc.), atualiza para a classificação oficial
             const isGenericCategory = !existing.category || 
               ['outros', 'diversos', 'geral', 'sem categoria', 'nao cadastrado', 'não cadastrado', 'padrao', 'padrão'].includes(String(existing.category).trim().toLowerCase());
@@ -6990,11 +7178,30 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
                stock: item.stock,
                price: finalPrice,
                original_price: finalOriginalPrice,
-               promotional_price: finalPromotionalPrice
+               promotional_price: finalPromotionalPrice,
+               promo_type: finalPromoType,
+               promo_buy_qty: finalPromoBuyQty,
+               promo_pay_qty: finalPromoPayQty,
+               promo_progressive_price: finalPromoProgressivePrice,
+               promo_start_date: finalPromoStartDate,
+               promo_end_date: finalPromoEndDate,
+               promotion_type: finalPromotionType,
+               buy_x: finalBuyX,
+               pay_y: finalPayY,
+               discount_qty_threshold: finalDiscountThreshold,
+               discount_qty_percentage: finalDiscountPercentage,
+               image: finalImage
             });
          } else {
-            // Novo produto: inserção completa incluindo o 'name'
-            newProductsPayload.push(item);
+            // Novo produto: se não veio foto do ERP, aproveita foto do barcode encontrada em outra farmácia do sistema
+            const finalImage = (item.image && typeof item.image === 'string' && item.image.trim().length > 0)
+              ? item.image.trim()
+              : (crossStoreImageMap.get(item.barcode) || null);
+
+            newProductsPayload.push({
+              ...item,
+              image: finalImage
+            });
          }
       });
 

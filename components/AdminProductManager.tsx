@@ -1004,6 +1004,16 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
           isFeatured: Boolean(editingProduct.isFeatured),
           requires_prescription: Boolean(editingProduct.requires_prescription),
           promotionType: (editingProduct.promotionType as any) || 'NONE',
+          promo_type: editingProduct.promo_type || (
+            editingProduct.promotionType === 'BUY_X_PAY_Y' ? 'buy_x_pay_y' :
+            editingProduct.promotionType === 'DISCOUNT_ON_QTY' ? 'progressive' :
+            editingProduct.promotionType === 'DISCOUNT' ? 'simple' : 'none'
+          ),
+          promo_buy_qty: editingProduct.promo_buy_qty ? Number(editingProduct.promo_buy_qty) : (Number(editingProduct.buyX || editingProduct.discountQtyThreshold) || null),
+          promo_pay_qty: editingProduct.promo_pay_qty ? Number(editingProduct.promo_pay_qty) : (Number(editingProduct.payY) || null),
+          promo_progressive_price: editingProduct.promo_progressive_price ? Number(editingProduct.promo_progressive_price) : null,
+          promo_start_date: editingProduct.promo_start_date || null,
+          promo_end_date: editingProduct.promo_end_date || null,
           buyX: Number(editingProduct.buyX) || 0,
           payY: Number(editingProduct.payY) || 0,
           discountQtyThreshold: Number(editingProduct.discountQtyThreshold) || 0,
@@ -4022,36 +4032,210 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                                 <div className="space-y-1"><InputLabel label="Agrupador (Slug)" /><input type="text" className="w-full bg-white p-3 rounded-xl font-bold border text-gray-900" value={editingProduct.groupingSlug || ''} onChange={e => setEditingProduct({...editingProduct, groupingSlug: e.target.value})} placeholder="ex: fralda-huggies" /></div>
                                 <div className="space-y-1"><InputLabel label="Atributo (Opção)" /><input type="text" className="w-full bg-white p-3 rounded-xl font-bold border text-gray-900" value={editingProduct.variantAttribute || ''} onChange={e => setEditingProduct({...editingProduct, variantAttribute: e.target.value})} placeholder="ex: Tamanho M, Morango" /></div>
                             </div>
-                            <div className="bg-orange-50 p-4 rounded-2xl border border-orange-100 space-y-4">
-                                <h4 className="text-[10px] font-black uppercase text-orange-400">Promoção</h4>
-                                <div className="flex flex-wrap gap-4">
-                                    <label className="flex items-center gap-2">
-                                        <input type="radio" checked={editingProduct.promotionType === 'NONE' || !editingProduct.promotionType} onChange={() => setEditingProduct({...editingProduct, promotionType: 'NONE'})}/> 
-                                        <span className="text-xs font-bold text-gray-900">Nenhuma</span>
+                            <div className="bg-orange-50/80 p-5 rounded-2xl border border-orange-200 space-y-4">
+                                <div className="flex items-center justify-between">
+                                    <h4 className="text-[11px] font-black uppercase text-orange-600 tracking-wider flex items-center gap-1.5">
+                                        <Tag size={14} /> Promoções Avançadas
+                                    </h4>
+                                    <span className="text-[10px] font-bold text-orange-500 uppercase">Sincronizado c/ ERP</span>
+                                </div>
+                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                                    <label className={`flex items-center justify-center gap-1.5 p-2.5 rounded-xl border font-bold text-xs cursor-pointer transition-all ${
+                                        (!editingProduct.promo_type || editingProduct.promo_type === 'none') && (!editingProduct.promotionType || editingProduct.promotionType === 'NONE')
+                                            ? 'bg-orange-600 text-white border-orange-600 shadow-sm'
+                                            : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
+                                    }`}>
+                                        <input type="radio" className="hidden" checked={(!editingProduct.promo_type || editingProduct.promo_type === 'none') && (!editingProduct.promotionType || editingProduct.promotionType === 'NONE')} onChange={() => setEditingProduct({
+                                            ...editingProduct, 
+                                            promo_type: 'none', 
+                                            promotionType: 'NONE',
+                                            promotional_price: null,
+                                            promotionalPrice: undefined,
+                                            promo_buy_qty: null,
+                                            promo_pay_qty: null,
+                                            promo_progressive_price: null,
+                                            buyX: 0,
+                                            payY: 0,
+                                            discountQtyThreshold: 0,
+                                            discountQtyPercentage: 0
+                                        })}/> 
+                                        <span>Nenhuma</span>
                                     </label>
-                                    <label className="flex items-center gap-2">
-                                        <input type="radio" checked={editingProduct.promotionType === 'DISCOUNT'} onChange={() => setEditingProduct({...editingProduct, promotionType: 'DISCOUNT'})}/> 
-                                        <span className="text-xs font-bold text-gray-900">Desconto</span>
+                                    <label className={`flex items-center justify-center gap-1.5 p-2.5 rounded-xl border font-bold text-xs cursor-pointer transition-all ${
+                                        editingProduct.promo_type === 'simple' || editingProduct.promotionType === 'DISCOUNT'
+                                            ? 'bg-orange-600 text-white border-orange-600 shadow-sm'
+                                            : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
+                                    }`}>
+                                        <input type="radio" className="hidden" checked={editingProduct.promo_type === 'simple' || editingProduct.promotionType === 'DISCOUNT'} onChange={() => setEditingProduct({
+                                            ...editingProduct, 
+                                            promo_type: 'simple', 
+                                            promotionType: 'DISCOUNT'
+                                        })}/> 
+                                        <span>Desconto De/Por</span>
                                     </label>
-                                    <label className="flex items-center gap-2">
-                                        <input type="radio" checked={editingProduct.promotionType === 'BUY_X_PAY_Y'} onChange={() => setEditingProduct({...editingProduct, promotionType: 'BUY_X_PAY_Y'})}/> 
-                                        <span className="text-xs font-bold text-gray-900">Kit</span>
+                                    <label className={`flex items-center justify-center gap-1.5 p-2.5 rounded-xl border font-bold text-xs cursor-pointer transition-all ${
+                                        editingProduct.promo_type === 'buy_x_pay_y' || editingProduct.promotionType === 'BUY_X_PAY_Y'
+                                            ? 'bg-orange-600 text-white border-orange-600 shadow-sm'
+                                            : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
+                                    }`}>
+                                        <input type="radio" className="hidden" checked={editingProduct.promo_type === 'buy_x_pay_y' || editingProduct.promotionType === 'BUY_X_PAY_Y'} onChange={() => setEditingProduct({
+                                            ...editingProduct, 
+                                            promo_type: 'buy_x_pay_y', 
+                                            promotionType: 'BUY_X_PAY_Y',
+                                            promo_buy_qty: editingProduct.promo_buy_qty || editingProduct.buyX || 3,
+                                            promo_pay_qty: editingProduct.promo_pay_qty || editingProduct.payY || 2,
+                                            buyX: editingProduct.buyX || 3,
+                                            payY: editingProduct.payY || 2
+                                        })}/> 
+                                        <span>Leve X Pague Y</span>
                                     </label>
-                                    <label className="flex items-center gap-2">
-                                        <input type="radio" checked={editingProduct.promotionType === 'DISCOUNT_ON_QTY'} onChange={() => setEditingProduct({...editingProduct, promotionType: 'DISCOUNT_ON_QTY'})}/> 
-                                        <span className="text-xs font-bold text-gray-900">Desconto na Qtd</span>
+                                    <label className={`flex items-center justify-center gap-1.5 p-2.5 rounded-xl border font-bold text-xs cursor-pointer transition-all ${
+                                        editingProduct.promo_type === 'progressive' || editingProduct.promotionType === 'DISCOUNT_ON_QTY'
+                                            ? 'bg-orange-600 text-white border-orange-600 shadow-sm'
+                                            : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
+                                    }`}>
+                                        <input type="radio" className="hidden" checked={editingProduct.promo_type === 'progressive' || editingProduct.promotionType === 'DISCOUNT_ON_QTY'} onChange={() => setEditingProduct({
+                                            ...editingProduct, 
+                                            promo_type: 'progressive', 
+                                            promotionType: 'DISCOUNT_ON_QTY',
+                                            promo_buy_qty: editingProduct.promo_buy_qty || editingProduct.discountQtyThreshold || 3,
+                                            discountQtyThreshold: editingProduct.discountQtyThreshold || 3
+                                        })}/> 
+                                        <span>Progressivo</span>
                                     </label>
                                 </div>
-                                {editingProduct.promotionType === 'BUY_X_PAY_Y' && (
-                                    <div className="flex gap-2">
-                                        <SmartNumberInput placeholder="Leve" className="w-full p-2 rounded-xl border text-center font-bold text-gray-900" value={Number.isNaN(editingProduct.buyX) ? '' : (editingProduct.buyX ?? '')} onChangeValue={val => setEditingProduct({...editingProduct, buyX: val})}/> 
-                                        <SmartNumberInput placeholder="Pague" className="w-full p-2 rounded-xl border text-center font-bold text-gray-900" value={Number.isNaN(editingProduct.payY) ? '' : (editingProduct.payY ?? '')} onChangeValue={val => setEditingProduct({...editingProduct, payY: val})}/>
+
+                                {(editingProduct.promo_type === 'simple' || editingProduct.promotionType === 'DISCOUNT') && (
+                                    <div className="space-y-3 bg-white p-4 rounded-xl border border-orange-100">
+                                        <div className="grid grid-cols-2 gap-3">
+                                            <div>
+                                                <label className="text-[10px] font-black uppercase text-gray-500 mb-1 block">Preço Promocional (Por R$)</label>
+                                                <SmartNumberInput 
+                                                    placeholder="0,00" 
+                                                    isFloat={true} 
+                                                    className="w-full p-2.5 rounded-xl border text-center font-black text-emerald-600 text-base" 
+                                                    value={editingProduct.promotional_price ?? editingProduct.promotionalPrice ?? ''} 
+                                                    onChangeValue={val => setEditingProduct({
+                                                        ...editingProduct, 
+                                                        promotional_price: val, 
+                                                        promotionalPrice: val
+                                                    })}
+                                                />
+                                            </div>
+                                            <div>
+                                                <label className="text-[10px] font-black uppercase text-gray-500 mb-1 block">Preço De (Original R$)</label>
+                                                <div className="w-full p-2.5 rounded-xl bg-gray-50 border text-center font-bold text-gray-500 text-base">
+                                                    R$ {Number(editingProduct.price || 0).toFixed(2).replace('.', ',')}
+                                                </div>
+                                            </div>
+                                        </div>
+                                        {Number(editingProduct.promotional_price || editingProduct.promotionalPrice || 0) > 0 && Number(editingProduct.price || 0) > Number(editingProduct.promotional_price || editingProduct.promotionalPrice || 0) && (
+                                            <p className="text-xs font-bold text-emerald-600 bg-emerald-50 p-2 rounded-lg text-center">
+                                                Economia de R$ {(Number(editingProduct.price) - Number(editingProduct.promotional_price || editingProduct.promotionalPrice)).toFixed(2).replace('.', ',')} (-{(((Number(editingProduct.price) - Number(editingProduct.promotional_price || editingProduct.promotionalPrice)) / Number(editingProduct.price)) * 100).toFixed(0)}%)
+                                            </p>
+                                        )}
                                     </div>
                                 )}
-                                {editingProduct.promotionType === 'DISCOUNT_ON_QTY' && (
-                                    <div className="flex gap-2">
-                                        <SmartNumberInput placeholder="A cada (Qtd)" className="w-full p-2 rounded-xl border text-center font-bold text-gray-900" value={Number.isNaN(editingProduct.discountQtyThreshold) ? '' : (editingProduct.discountQtyThreshold ?? '')} onChangeValue={val => setEditingProduct({...editingProduct, discountQtyThreshold: val})}/> 
-                                        <SmartNumberInput placeholder="% Desconto na Unidade" isFloat={true} className="w-full p-2 rounded-xl border text-center font-bold text-gray-900" value={Number.isNaN(editingProduct.discountQtyPercentage) ? '' : (editingProduct.discountQtyPercentage ?? '')} onChangeValue={val => setEditingProduct({...editingProduct, discountQtyPercentage: val})}/>
+
+                                {(editingProduct.promo_type === 'buy_x_pay_y' || editingProduct.promotionType === 'BUY_X_PAY_Y') && (
+                                    <div className="space-y-3 bg-white p-4 rounded-xl border border-orange-100">
+                                        <div className="grid grid-cols-2 gap-3">
+                                            <div>
+                                                <label className="text-[10px] font-black uppercase text-gray-500 mb-1 block">Leve (Qtd Mínima)</label>
+                                                <SmartNumberInput 
+                                                    placeholder="Ex: 3" 
+                                                    className="w-full p-2.5 rounded-xl border text-center font-black text-gray-900 text-base" 
+                                                    value={editingProduct.promo_buy_qty ?? editingProduct.buyX ?? ''} 
+                                                    onChangeValue={val => setEditingProduct({
+                                                        ...editingProduct, 
+                                                        promo_buy_qty: val, 
+                                                        buyX: val
+                                                    })}
+                                                />
+                                            </div>
+                                            <div>
+                                                <label className="text-[10px] font-black uppercase text-gray-500 mb-1 block">Pague (Qtd Cobrada)</label>
+                                                <SmartNumberInput 
+                                                    placeholder="Ex: 2" 
+                                                    className="w-full p-2.5 rounded-xl border text-center font-black text-gray-900 text-base" 
+                                                    value={editingProduct.promo_pay_qty ?? editingProduct.payY ?? ''} 
+                                                    onChangeValue={val => setEditingProduct({
+                                                        ...editingProduct, 
+                                                        promo_pay_qty: val, 
+                                                        payY: val
+                                                    })}
+                                                />
+                                            </div>
+                                        </div>
+                                        {Number(editingProduct.promo_buy_qty || editingProduct.buyX || 0) > Number(editingProduct.promo_pay_qty || editingProduct.payY || 0) && (
+                                            <p className="text-xs font-bold text-amber-800 bg-amber-50 p-2.5 rounded-lg text-center leading-relaxed">
+                                                🔥 <strong>LEVE {editingProduct.promo_buy_qty || editingProduct.buyX} PAGUE {editingProduct.promo_pay_qty || editingProduct.payY}</strong>: O cliente leva {editingProduct.promo_buy_qty || editingProduct.buyX} e paga apenas {editingProduct.promo_pay_qty || editingProduct.payY} (Total R$ {((Number(editingProduct.price || 0) * Number(editingProduct.promo_pay_qty || editingProduct.payY || 1))).toFixed(2).replace('.', ',')}, cada sai a R$ {(((Number(editingProduct.price || 0) * Number(editingProduct.promo_pay_qty || editingProduct.payY || 1))) / Number(editingProduct.promo_buy_qty || editingProduct.buyX || 1)).toFixed(2).replace('.', ',')})
+                                            </p>
+                                        )}
+                                    </div>
+                                )}
+
+                                {(editingProduct.promo_type === 'progressive' || editingProduct.promotionType === 'DISCOUNT_ON_QTY') && (
+                                    <div className="space-y-3 bg-white p-4 rounded-xl border border-orange-100">
+                                        <div className="grid grid-cols-2 gap-3">
+                                            <div>
+                                                <label className="text-[10px] font-black uppercase text-gray-500 mb-1 block">A partir de (Qtd)</label>
+                                                <SmartNumberInput 
+                                                    placeholder="Ex: 3" 
+                                                    className="w-full p-2.5 rounded-xl border text-center font-black text-gray-900 text-base" 
+                                                    value={editingProduct.promo_buy_qty ?? editingProduct.discountQtyThreshold ?? ''} 
+                                                    onChangeValue={val => setEditingProduct({
+                                                        ...editingProduct, 
+                                                        promo_buy_qty: val, 
+                                                        discountQtyThreshold: val
+                                                    })}
+                                                />
+                                            </div>
+                                            <div>
+                                                <label className="text-[10px] font-black uppercase text-gray-500 mb-1 block">Preço Promocional (R$ cada)</label>
+                                                <SmartNumberInput 
+                                                    placeholder="0,00" 
+                                                    isFloat={true} 
+                                                    className="w-full p-2.5 rounded-xl border text-center font-black text-emerald-600 text-base" 
+                                                    value={editingProduct.promo_progressive_price ?? ''} 
+                                                    onChangeValue={val => setEditingProduct({
+                                                        ...editingProduct, 
+                                                        promo_progressive_price: val,
+                                                        discountQtyPercentage: (Number(editingProduct.price) > 0 && Number(val) > 0 && Number(val) < Number(editingProduct.price))
+                                                            ? Math.round(((Number(editingProduct.price) - Number(val)) / Number(editingProduct.price)) * 100)
+                                                            : 0
+                                                    })}
+                                                />
+                                            </div>
+                                        </div>
+                                        {Number(editingProduct.promo_progressive_price || 0) > 0 && (
+                                            <p className="text-xs font-bold text-blue-800 bg-blue-50 p-2.5 rounded-lg text-center leading-relaxed">
+                                                ⚡ <strong>DESCONTO PROGRESSIVO</strong>: A partir de {editingProduct.promo_buy_qty || editingProduct.discountQtyThreshold || 2} unidades, pague apenas R$ {Number(editingProduct.promo_progressive_price).toFixed(2).replace('.', ',')} cada (Normal: R$ {Number(editingProduct.price || 0).toFixed(2).replace('.', ',')})
+                                            </p>
+                                        )}
+                                    </div>
+                                )}
+
+                                {((editingProduct.promo_type && editingProduct.promo_type !== 'none') || (editingProduct.promotionType && editingProduct.promotionType !== 'NONE')) && (
+                                    <div className="grid grid-cols-2 gap-3 pt-1 border-t border-orange-200/60">
+                                        <div>
+                                            <label className="text-[10px] font-black uppercase text-gray-500 mb-1 block">Início Vigência (Opcional)</label>
+                                            <input 
+                                                type="date" 
+                                                className="w-full p-2 bg-white rounded-xl border text-xs font-bold text-gray-800" 
+                                                value={editingProduct.promo_start_date ? String(editingProduct.promo_start_date).split('T')[0] : ''} 
+                                                onChange={e => setEditingProduct({...editingProduct, promo_start_date: e.target.value || null})}
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-[10px] font-black uppercase text-gray-500 mb-1 block">Fim Vigência (Opcional)</label>
+                                            <input 
+                                                type="date" 
+                                                className="w-full p-2 bg-white rounded-xl border text-xs font-bold text-gray-800" 
+                                                value={editingProduct.promo_end_date ? String(editingProduct.promo_end_date).split('T')[0] : ''} 
+                                                onChange={e => setEditingProduct({...editingProduct, promo_end_date: e.target.value || null})}
+                                            />
+                                        </div>
                                     </div>
                                 )}
                             </div>

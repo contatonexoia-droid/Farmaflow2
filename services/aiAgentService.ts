@@ -404,6 +404,61 @@ export function formatMedicineLabel(product: any): string {
 }
 
 /**
+ * Extrai e formata a etiqueta de promoção ativa do produto para o Agente de IA destacar no WhatsApp
+ */
+export function getProductPromotionTag(product: any): string {
+  if (!product) return "";
+
+  // Validação de vigência de datas
+  if (product.promo_start_date || product.promo_end_date) {
+    const now = new Date();
+    if (product.promo_start_date) {
+      const sDate = new Date(product.promo_start_date);
+      if (!isNaN(sDate.getTime()) && now < sDate) return "";
+    }
+    if (product.promo_end_date) {
+      let eDate = new Date(product.promo_end_date);
+      if (typeof product.promo_end_date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(product.promo_end_date.trim())) {
+        eDate = new Date(`${product.promo_end_date.trim()}T23:59:59.999Z`);
+      }
+      if (!isNaN(eDate.getTime()) && now > eDate) return "";
+    }
+  }
+
+  const pType = product.promo_type || (
+    product.promotion_type === "BUY_X_PAY_Y" ? "buy_x_pay_y" :
+    product.promotion_type === "DISCOUNT_ON_QTY" ? "progressive" :
+    product.promotion_type === "DISCOUNT" ? "simple" :
+    (product.promotional_price && Number(product.promotional_price) > 0 && Number(product.promotional_price) < Number(product.price)) ? "simple" : "none"
+  );
+
+  const buyQty = Number(product.promo_buy_qty || product.buy_x || product.discount_qty_threshold || 0);
+  const payQty = Number(product.promo_pay_qty || product.pay_y || 0);
+  const progPrice = Number(product.promo_progressive_price || (pType === "progressive" ? product.promotional_price : 0) || 0);
+  const promoPrice = Number(product.promotional_price || 0);
+  const regularPrice = Number(product.price) || 0;
+
+  if (pType === "buy_x_pay_y" && buyQty > 0 && payQty > 0 && buyQty > payQty) {
+    return ` [OFERTA: Leve ${buyQty} Pague ${payQty}]`;
+  }
+
+  if (pType === "progressive" && buyQty > 0) {
+    if (progPrice > 0) {
+      return ` [OFERTA: A partir de ${buyQty} un por R$ ${progPrice.toFixed(2).replace('.', ',')} cada]`;
+    } else if (product.discount_qty_percentage) {
+      return ` [OFERTA: A partir de ${buyQty} un com ${product.discount_qty_percentage}% OFF]`;
+    }
+    return ` [OFERTA: Desconto Progressivo a partir de ${buyQty} un]`;
+  }
+
+  if (pType === "simple" && promoPrice > 0 && promoPrice < regularPrice) {
+    return ` [OFERTA: De R$ ${regularPrice.toFixed(2).replace('.', ',')} Por R$ ${promoPrice.toFixed(2).replace('.', ',')}]`;
+  }
+
+  return "";
+}
+
+/**
  * Validação rigorosa de equivalência e compatibilidade de dosagem em memória.
  * Impede que dosagens de 1g sejam misturadas quando o cliente pediu 500mg, e vice-versa.
  */
@@ -1189,10 +1244,12 @@ ${chosenMsg}
               const statusEstoque = p.stock > 0 ? `Disponível (${p.stock} un)` : 'Temporariamente Esgotado';
               const tarja = p.requires_prescription ? 'Exige Receita Médica' : 'Venda Livre';
               const label = formatMedicineLabel(p);
-              return `${idx + 1}. ${label} [Cadastro: ${p.name}] - R$ ${preco} [Estoque: ${statusEstoque} | ${tarja}] (Link: ${linkProd})`;
+              const promoTag = getProductPromotionTag(p);
+              return `${idx + 1}. ${label} [Cadastro: ${p.name}] - R$ ${preco}${promoTag} [Estoque: ${statusEstoque} | ${tarja}] (Link: ${linkProd})`;
             }).join("\n") +
             `\n\nDIRETRIZ ESTRITA DE CONCISÃO E RESPOSTA:
 - Respostas no WhatsApp devem ser CURTAS, humanizadas e sem enrolação. NUNCA dê explicações técnicas desnecessárias como '(solução, mas não em gotas)'.
+- PROMOÇÕES E OFERTAS: Quando houver produto com promoção ativa indicada por [OFERTA: ...], DESTAQUE a promoção com entusiasmo na mensagem do WhatsApp (ex: '🔥 Oferta especial: Leve 3 Pague 2!' ou '⚡ A partir de 3 unidades sai mais barato!').
 - Apresente NO MÁXIMO 2 A 3 OPÇÕES mais econômicas, numeradas (1️⃣, 2️⃣, 3️⃣) com Marca/Apresentação e R$ Preço, destacando a primeira com ⭐ Mais econômica.
 - Finalize com uma pergunta curta convidando à ação (ex: 'Qual dessas você prefere levar? Posso separar para você ou enviar o link da loja!').
 - NUNCA envie links individuais por produto ao listar opções. Insira apenas UM ÚNICO link geral da loja no rodapé (${storeLink}).
@@ -2284,13 +2341,15 @@ ${taskInstruction}`;
       return `name.ilike.%${term}%,active_principle.ilike.%${term}%`;
     };
 
+    const productSelectFields = "id, name, price, stock, presentation, category, active_principle, requires_prescription, promotional_price, promo_type, promo_buy_qty, promo_pay_qty, promo_progressive_price, promo_start_date, promo_end_date, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage";
+
     // =========================================================================
     // PRIORIDADE 1: SE O CLIENTE ESPECIFICOU DOSAGEM (ex: "500mg" ou "1g")
     // =========================================================================
     if (detectedDosage && mainTerms.length > 0) {
       let qExact = supabaseAdmin
         .from("products")
-        .select("id, name, price, stock, presentation, category, active_principle, requires_prescription")
+        .select(productSelectFields)
         .in("tenant_id", tenantIds)
         .gt("stock", 0)
         .order("price", { ascending: true });
@@ -2359,7 +2418,7 @@ ${taskInstruction}`;
     if (mainTerms.length > 0) {
       let qGeneral = supabaseAdmin
         .from("products")
-        .select("id, name, price, stock, presentation, category, active_principle, requires_prescription")
+        .select(productSelectFields)
         .in("tenant_id", tenantIds)
         .gt("stock", 0)
         .order("price", { ascending: true });
@@ -2379,7 +2438,7 @@ ${taskInstruction}`;
       if (candidates.length === 0 && formSqlFilter) {
         let qBroad = supabaseAdmin
           .from("products")
-          .select("id, name, price, stock, presentation, category, active_principle, requires_prescription")
+          .select(productSelectFields)
           .in("tenant_id", tenantIds)
           .gt("stock", 0)
           .order("price", { ascending: true });
@@ -2454,7 +2513,7 @@ ${taskInstruction}`;
       const tokenOr = rawTokens.slice(0, 3).map(t => buildTermOrClause(t)).join(",");
       let qFallback = supabaseAdmin
         .from("products")
-        .select("id, name, price, stock, presentation, category, active_principle, requires_prescription")
+        .select(productSelectFields)
         .in("tenant_id", tenantIds)
         .gt("stock", 0)
         .or(tokenOr)
@@ -2611,19 +2670,24 @@ ${taskInstruction}`;
 
         const effectiveStoreLink = storeLink || (tenant?.custom_domain ? `https://${tenant.custom_domain}` : `https://${tenant?.slug || tenant?.id || 'loja'}.farmaflow.online`);
 
-        const items = (prods || []).map((p: any) => ({
-          id: p.id,
-          nome: p.name,
-          nome_formatado: formatMedicineLabel(p),
-          apresentacao: p.presentation || "",
-          preco: Number(p.price) || 0,
-          preco_formatado: `R$ ${(Number(p.price) || 0).toFixed(2)}`,
-          estoque: Number(p.stock) || 0,
-          disponivel: (Number(p.stock) || 0) > 0,
-          principio_ativo: p.active_principle || "",
-          exige_receita: Boolean(p.requires_prescription),
-          link_produto: `${effectiveStoreLink}?produto=${p.id}`
-        }));
+        const items = (prods || []).map((p: any) => {
+          const promoTag = getProductPromotionTag(p);
+          return {
+            id: p.id,
+            nome: p.name,
+            nome_formatado: `${formatMedicineLabel(p)}${promoTag}`,
+            promocao_ativa: promoTag ? promoTag.trim() : null,
+            apresentacao: p.presentation || "",
+            preco: Number(p.price) || 0,
+            preco_formatado: `R$ ${(Number(p.price) || 0).toFixed(2)}`,
+            preco_promocional: p.promotional_price ? Number(p.promotional_price) : null,
+            estoque: Number(p.stock) || 0,
+            disponivel: (Number(p.stock) || 0) > 0,
+            principio_ativo: p.active_principle || "",
+            exige_receita: Boolean(p.requires_prescription),
+            link_produto: `${effectiveStoreLink}?produto=${p.id}`
+          };
+        });
 
         return {
           total: items.length,
@@ -2634,7 +2698,8 @@ ${taskInstruction}`;
             "1. 'DIPIRONA MONO' (Monoidratada) e 'DIPIRONA SODICA' são rigorosamente o mesmo medicamento (Dipirona).",
             "2. Maxalgina, Dipimed, Novalgina e Nevraldor são nomes comerciais de Dipirona. Frascos de 10ml e 20ml com 'GTS' ou 'SOL' SÃO gotas! NUNCA diga que são '(solução, mas não em gotas)'.",
             "3. Se o cliente pediu gotas e houver produtos com GTS ou SOL (10ml, 20ml) na lista, ELE ESTÁ DISPONÍVEL! Diga imediatamente que temos em gotas e NUNCA ofereça comprimidos.",
-            "4. CONCISÃO E DIRETO AO PONTO: Responda de forma CURTA e humanizada no WhatsApp (apresente no MÁXIMO 2 a 3 opções numeradas com 1️⃣, 2️⃣, 3️⃣, destacando a primeira com ⭐ Mais econômica e faça uma pergunta objetiva no final)."
+            "4. CONCISÃO E DIRETO AO PONTO: Responda de forma CURTA e humanizada no WhatsApp (apresente no MÁXIMO 2 a 3 opções numeradas com 1️⃣, 2️⃣, 3️⃣, destacando a primeira com ⭐ Mais econômica e faça uma pergunta objetiva no final).",
+            "5. PROMOÇÕES ATIVAS: Se o produto tiver promoção ativa (ex: 'Leve 3 Pague 2' ou desconto progressivo), DESTAQUE esta promoção na mensagem para encantar o cliente."
           ]
         };
       } catch (e: any) {

@@ -23,11 +23,13 @@ export const ActivationTokenManager: React.FC = () => {
   const selectedTenantData = tenants.find(t => t.id === selectedTenant);
   const selectedErpType = (selectedTenantData?.erp_type || selectedTenantData?.erpType || '').toLowerCase();
   
-  const INSTALLER_LINK = selectedErpType === 'siagold' 
-    ? `${window.location.origin}/installers/farmaflow-siagold.zip`
-    : selectedErpType === 'softpharma'
-      ? `${window.location.origin}/installers/farmaflow-softpharma.zip`
-      : `${window.location.origin}/installers/farmaflow-agent.zip`;
+  const INSTALLER_LINK = (selectedErpType === 'inovafarma' || selectedErpType.includes('inova'))
+    ? `${window.location.origin}/installers/farmaflow-inovafarma.zip`
+    : selectedErpType === 'siagold' 
+      ? `${window.location.origin}/installers/farmaflow-siagold.zip`
+      : selectedErpType === 'softpharma'
+        ? `${window.location.origin}/installers/farmaflow-softpharma.zip`
+        : `${window.location.origin}/installers/farmaflow-agent.zip`;
 
   useEffect(() => {
     fetchTenants();
@@ -178,13 +180,17 @@ Qualquer dúvida, estou à disposição!`;
               <div className="flex items-center gap-1.5">
                 <span className="text-xs font-bold text-gray-500 uppercase">ERP:</span>
                 <span className={`text-xs font-black px-2 py-0.5 rounded-md ${
-                  tenants.find(t => t.id === selectedTenant)?.erp_type?.toLowerCase() === 'siagold' || tenants.find(t => t.id === selectedTenant)?.erpType?.toLowerCase() === 'siagold'
-                    ? 'bg-blue-100 text-blue-700' 
-                    : tenants.find(t => t.id === selectedTenant)?.erp_type?.toLowerCase() === 'softpharma' || tenants.find(t => t.id === selectedTenant)?.erpType?.toLowerCase() === 'softpharma'
-                      ? 'bg-purple-100 text-purple-700'
-                      : 'bg-gray-100 text-gray-600'
+                  tenants.find(t => t.id === selectedTenant)?.erp_type?.toLowerCase() === 'inovafarma' || tenants.find(t => t.id === selectedTenant)?.erpType?.toLowerCase() === 'inovafarma'
+                    ? 'bg-emerald-100 text-emerald-800'
+                    : tenants.find(t => t.id === selectedTenant)?.erp_type?.toLowerCase() === 'siagold' || tenants.find(t => t.id === selectedTenant)?.erpType?.toLowerCase() === 'siagold'
+                      ? 'bg-blue-100 text-blue-700' 
+                      : tenants.find(t => t.id === selectedTenant)?.erp_type?.toLowerCase() === 'softpharma' || tenants.find(t => t.id === selectedTenant)?.erpType?.toLowerCase() === 'softpharma'
+                        ? 'bg-purple-100 text-purple-700'
+                        : 'bg-gray-100 text-gray-600'
                 }`}>
-                  {tenants.find(t => t.id === selectedTenant)?.erp_type || tenants.find(t => t.id === selectedTenant)?.erpType || 'Desconhecido'}
+                  {tenants.find(t => t.id === selectedTenant)?.erp_type?.toLowerCase() === 'inovafarma' || tenants.find(t => t.id === selectedTenant)?.erpType?.toLowerCase() === 'inovafarma'
+                    ? 'InovaFarma (SQL Server)'
+                    : (tenants.find(t => t.id === selectedTenant)?.erp_type || tenants.find(t => t.id === selectedTenant)?.erpType || 'Padrão')}
                 </span>
               </div>
             )}

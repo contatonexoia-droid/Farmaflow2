@@ -27,6 +27,18 @@ export interface Product {
   contraindications?: string;
   isAiEnriched?: boolean;
   promotionType?: "NONE" | "DISCOUNT" | "BUY_X_PAY_Y" | "DISCOUNT_ON_QTY";
+  promo_type?: 'none' | 'simple' | 'buy_x_pay_y' | 'progressive' | null;
+  promo_buy_qty?: number | null;
+  promo_pay_qty?: number | null;
+  promo_progressive_price?: number | null;
+  promo_start_date?: string | null;
+  promo_end_date?: string | null;
+  promoType?: 'none' | 'simple' | 'buy_x_pay_y' | 'progressive' | null;
+  promoBuyQty?: number | null;
+  promoPayQty?: number | null;
+  promoProgressivePrice?: number | null;
+  promoStartDate?: string | null;
+  promoEndDate?: string | null;
   buyX?: number;
   payY?: number;
   discountQtyThreshold?: number;
@@ -919,6 +931,60 @@ export const calculateItemPromotionDetails = (
     };
   }
 
+  // Suporte a Promoções Avançadas do ERP e Diretas do Produto
+  const pType = item.promo_type || (
+    item.promotionType === "BUY_X_PAY_Y" ? "buy_x_pay_y" :
+    item.promotionType === "DISCOUNT_ON_QTY" ? "progressive" :
+    item.promotionType === "DISCOUNT" ? "simple" :
+    (item.promotional_price && Number(item.promotional_price) > 0 && Number(item.promotional_price) < Number(item.price)) ? "simple" : "none"
+  );
+
+  const buyQty = Number(item.promo_buy_qty || item.buyX || item.discountQtyThreshold || 0);
+  const payQty = Number(item.promo_pay_qty || item.payY || 0);
+  const progPrice = Number(item.promo_progressive_price || (item.promotionType === "DISCOUNT_ON_QTY" ? item.promotional_price : 0) || 0);
+  const unitPrice = Number(item.price) || 0;
+  const qty = item.quantity;
+
+  if (pType === "buy_x_pay_y" && buyQty > 0 && payQty > 0 && buyQty > payQty) {
+    const sets = Math.floor(qty / buyQty);
+    const remainder = qty % buyQty;
+    const payableUnits = (sets * payQty) + remainder;
+    const finalTotal = payableUnits * unitPrice;
+    return {
+      promotionId: "erp_buy_x_pay_y",
+      promotionName: `Leve ${buyQty} Pague ${payQty}`,
+      discount: Math.max(0, baseTotal - finalTotal),
+    };
+  }
+
+  if (pType === "progressive" && buyQty > 0) {
+    if (qty >= buyQty) {
+      const effectiveProgPrice = progPrice > 0
+        ? progPrice
+        : (item.discountQtyPercentage && unitPrice > 0 ? Number((unitPrice * (1 - item.discountQtyPercentage / 100)).toFixed(2)) : unitPrice);
+      const finalTotal = effectiveProgPrice * qty;
+      return {
+        promotionId: "erp_progressive",
+        promotionName: `A partir de ${buyQty} un por R$ ${effectiveProgPrice.toFixed(2).replace('.', ',')}`,
+        discount: Math.max(0, baseTotal - finalTotal),
+      };
+    }
+    return {
+      promotionId: "erp_progressive_pending",
+      promotionName: `A partir de ${buyQty} un com Desconto`,
+      discount: 0,
+    };
+  }
+
+  if (pType === "simple" && item.promotional_price && Number(item.promotional_price) > 0 && Number(item.promotional_price) < unitPrice) {
+    const finalTotal = Number(item.promotional_price) * qty;
+    return {
+      promotionId: "erp_simple",
+      promotionName: `Desconto Promocional`,
+      discount: Math.max(0, baseTotal - finalTotal),
+    };
+  }
+
   // Legacy fallback
   let legacyDiscountedTotal = baseTotal;
   if (
@@ -1010,7 +1076,7 @@ export const getProductVolumePromotionInfo = (
       const payY = applicableRule.payY;
       const totalComboPrice = Number((regularPrice * payY).toFixed(2));
       const unitRatePrice = Number((totalComboPrice / buyX).toFixed(2));
-      const badgeText = `LEVE ${buyX}, PAGUE ${payY}`;
+      const badgeText = `🔥 LEVE ${buyX} PAGUE ${payY}`;
       return {
         isVolumePromo: true,
         minQty: buyX,
@@ -1066,7 +1132,7 @@ export const getProductVolumePromotionInfo = (
       if (first && first.qty > 1) {
         const unitRatePrice = Number((regularPrice * (1 - first.discountPercentage / 100)).toFixed(2));
         const totalComboPrice = Number((unitRatePrice * first.qty).toFixed(2));
-        const badgeText = `A PARTIR DE ${first.qty} UN: -${first.discountPercentage}%`;
+        const badgeText = `⚡ ${first.qty}+ un por R$ ${unitRatePrice.toFixed(2).replace('.', ',')} cada`;
         return {
           isVolumePromo: true,
           minQty: first.qty,
@@ -1082,13 +1148,21 @@ export const getProductVolumePromotionInfo = (
     }
   }
 
-  // Fallback para campos direct no product (legados)
-  if (product.promotionType === "BUY_X_PAY_Y" && product.buyX && product.payY && product.buyX > 1) {
-    const buyX = product.buyX;
-    const payY = product.payY;
+  // Suporte a campos de promoção avançada do ERP / Produto
+  const pType = product.promo_type || (
+    product.promotionType === "BUY_X_PAY_Y" ? "buy_x_pay_y" :
+    product.promotionType === "DISCOUNT_ON_QTY" ? "progressive" :
+    "none"
+  );
+
+  const buyX = Number(product.promo_buy_qty || product.buyX || product.discountQtyThreshold || 0);
+  const payY = Number(product.promo_pay_qty || product.payY || 0);
+  const progPrice = Number(product.promo_progressive_price || (product.promotionType === "DISCOUNT_ON_QTY" ? product.promotional_price : 0) || 0);
+
+  if (pType === "buy_x_pay_y" && buyX > 1 && payY > 0 && buyX > payY) {
     const totalComboPrice = Number((regularPrice * payY).toFixed(2));
     const unitRatePrice = Number((totalComboPrice / buyX).toFixed(2));
-    const badgeText = `LEVE ${buyX}, PAGUE ${payY}`;
+    const badgeText = `🔥 LEVE ${buyX} PAGUE ${payY}`;
     return {
       isVolumePromo: true,
       minQty: buyX,
@@ -1102,22 +1176,22 @@ export const getProductVolumePromotionInfo = (
     };
   }
 
-  if (product.promotionType === "DISCOUNT_ON_QTY" && product.discountQtyThreshold && product.discountQtyPercentage && product.discountQtyThreshold > 1) {
-    const qty = product.discountQtyThreshold;
-    const pct = product.discountQtyPercentage;
-    const unitRatePrice = Number((regularPrice * (1 - pct / 100)).toFixed(2));
-    const totalComboPrice = Number((unitRatePrice * qty).toFixed(2));
-    const badgeText = `LEVE ${qty} OU MAIS (-${pct}%)`;
+  if (pType === "progressive" && buyX > 1) {
+    const effectiveProgPrice = progPrice > 0
+      ? progPrice
+      : (product.discountQtyPercentage ? Number((regularPrice * (1 - product.discountQtyPercentage / 100)).toFixed(2)) : regularPrice);
+    const totalComboPrice = Number((effectiveProgPrice * buyX).toFixed(2));
+    const badgeText = `⚡ ${buyX}+ un por R$ ${effectiveProgPrice.toFixed(2).replace('.', ',')} cada`;
     return {
       isVolumePromo: true,
-      minQty: qty,
+      minQty: buyX,
       totalComboPrice,
-      unitRatePrice,
+      unitRatePrice: effectiveProgPrice,
       badgeText,
-      promoTitle: `Desconto por Quantidade`,
-      auxText: `A partir de ${qty} un: R$ ${unitRatePrice.toFixed(2).replace('.', ',')} cada`,
-      modalDetailText: `Compre ${qty} ou mais e ganhe ${pct}% de desconto (sai a R$ ${unitRatePrice.toFixed(2).replace('.', ',')} cada)`,
-      quickAddLabel: `Adicionar ${qty} unidades com desconto`
+      promoTitle: `Desconto Progressivo`,
+      auxText: `A partir de ${buyX} un: R$ ${effectiveProgPrice.toFixed(2).replace('.', ',')} cada`,
+      modalDetailText: `Compre ${buyX} ou mais e pague apenas R$ ${effectiveProgPrice.toFixed(2).replace('.', ',')} em cada`,
+      quickAddLabel: `Adicionar ${buyX} unidades com desconto`
     };
   }
 

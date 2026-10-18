@@ -1227,6 +1227,7 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
                       <label className="text-[11px] font-black uppercase text-gray-800 ml-2">Tipo de ERP</label>
                       <select className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black" value={editData.erpType || ''} onChange={e => setEditData({...editData, erpType: e.target.value})}>
                         <option value="">Selecione o tipo de ERP</option>
+                        <option value="inovafarma">InovaFarma (SQL Server)</option>
                         <option value="siagold">Siagold</option>
                         <option value="softpharma">Softpharma</option>
                         <option value="outros">Outros</option>

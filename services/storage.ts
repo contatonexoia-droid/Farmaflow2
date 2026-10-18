@@ -662,6 +662,22 @@ export const mapDbProductToApp = (p: any): Product => ({
   contraindications: p.contraindications || "",
   isAiEnriched: p.is_ai_enriched === true || p.isaienriched === true,
   promotionType: p.promotion_type || p.promotiontype || "NONE",
+  promo_type: p.promo_type || (
+    p.promotion_type === 'BUY_X_PAY_Y' ? 'buy_x_pay_y' :
+    p.promotion_type === 'DISCOUNT_ON_QTY' ? 'progressive' :
+    p.promotion_type === 'DISCOUNT' ? 'simple' :
+    (p.promotional_price && Number(p.promotional_price) > 0 && Number(p.promotional_price) < Number(p.price)) ? 'simple' : 'none'
+  ),
+  promo_buy_qty: p.promo_buy_qty ?? (Number(p.buy_x || p.discount_qty_threshold) || null),
+  promo_pay_qty: p.promo_pay_qty ?? (Number(p.pay_y) || null),
+  promo_progressive_price: p.promo_progressive_price ?? (
+    p.promotion_type === 'DISCOUNT_ON_QTY' && p.promotional_price ? Number(p.promotional_price) :
+    (p.promotion_type === 'DISCOUNT_ON_QTY' && p.discount_qty_percentage && Number(p.price) > 0)
+      ? Number((Number(p.price) * (1 - Number(p.discount_qty_percentage) / 100)).toFixed(2))
+      : null
+  ),
+  promo_start_date: p.promo_start_date || p.promo_data_inicio || null,
+  promo_end_date: p.promo_end_date || p.promo_data_fim || null,
   originalPrice: Number(p.original_price || p.originalprice) || 0,
   promotionalPrice:
     p.promotional_price !== null && p.promotional_price !== undefined && !isNaN(Number(p.promotional_price)) && Number(p.promotional_price) > 0
