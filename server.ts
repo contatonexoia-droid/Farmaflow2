@@ -876,6 +876,7 @@ app.get("/api/v1/store/:tenantId/init", async (req, res) => {
         .from("products")
         .select("id, tenant_id, internal_code, barcode, name, active_principle, drug_type, manufacturer, presentation, price, original_price, promotional_price, stock, category, grouping_slug, variant_attribute, image, is_featured, requires_prescription, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage, video_uri, description, indications, usage, side_effects, contraindications, is_ai_enriched")
         .eq("tenant_id", tenantId)
+        .gt("price", 0)
         .order("is_featured", { ascending: false })
         .limit(50),
       supabase
@@ -2403,10 +2404,11 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
         });
 
         if (!rpcError && Array.isArray(rpcData)) {
+          const validRpcData = rpcData.filter((p: any) => Number(p.price) > 0 && Number(p.stock ?? 1) > 0);
           res.setHeader("Cache-Control", "public, s-maxage=60, stale-while-revalidate=300");
           return res.json({
-            data: rpcData,
-            total: rpcData.length >= limit ? -1 : rpcData.length + from,
+            data: validRpcData,
+            total: validRpcData.length >= limit ? -1 : validRpcData.length + from,
             page,
             limit,
             source: "postgres_rpc"
@@ -2423,7 +2425,8 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
     let query = supabase
       .from("products")
       .select("id, tenant_id, internal_code, barcode, name, active_principle, drug_type, manufacturer, presentation, price, original_price, promotional_price, stock, category, grouping_slug, variant_attribute, image, is_featured, requires_prescription, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage, video_uri, description, indications, usage, side_effects, contraindications, is_ai_enriched", { count: "exact" })
-      .eq("tenant_id", tenantId);
+      .eq("tenant_id", tenantId)
+      .gt("price", 0);
 
     if (category && category !== "Todos") {
       query = query.ilike("category", `%${category}%`);
@@ -3099,9 +3102,19 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
   }
 });
 
-app.get("/api/v1/tenants/:tenantId/products", async (req, res) => {
+app.get(["/api/v1/tenants/:tenantId/products", "/api/products", "/api/store/:slug/products"], async (req, res) => {
   try {
-    const tenantId = req.params.tenantId;
+    let tenantId = req.params.tenantId || (req.query.tenantId as string);
+    const slug = req.params.slug || (req.query.slug as string);
+    if (!tenantId && slug) {
+      const { data: t } = await supabase.from("tenants").select("id").or(`slug.eq.${slug},id.eq.${slug}`).maybeSingle();
+      if (t) tenantId = t.id;
+    }
+    if (!tenantId) {
+      return res.status(400).json({ error: "tenantId ou slug é obrigatório" });
+    }
+
+    const isAdmin = req.query.admin === "true" || req.query.include_zero_price === "true" || req.headers["x-admin-request"] === "true";
 
     let allData: any[] = [];
     let from = 0;
@@ -3109,10 +3122,17 @@ app.get("/api/v1/tenants/:tenantId/products", async (req, res) => {
     let hasMore = true;
 
     while (hasMore) {
-      const { data, error } = await supabase
+      let q = supabase
         .from("products")
         .select("id, tenant_id, internal_code, barcode, name, active_principle, drug_type, manufacturer, presentation, price, original_price, promotional_price, stock, category, grouping_slug, variant_attribute, image, is_featured, requires_prescription, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage, video_uri, description, indications, usage, side_effects, contraindications, is_ai_enriched")
-        .eq("tenant_id", tenantId)
+        .eq("tenant_id", tenantId);
+
+      // Regra estrita: Na vitrine pública para o cliente final, NUNCA trafegar produtos com preço 0.00
+      if (!isAdmin) {
+        q = q.gt("price", 0);
+      }
+
+      const { data, error } = await q
         .order("id", { ascending: true })
         .range(from, from + step - 1);
 
@@ -3133,6 +3153,9 @@ app.get("/api/v1/tenants/:tenantId/products", async (req, res) => {
     const uniqueMap = new Map();
     for (const item of allData) {
       if (item && item.id) {
+        if (!isAdmin && (Number(item.price) <= 0 || isNaN(Number(item.price)))) {
+          continue;
+        }
         uniqueMap.set(item.id, item);
       }
     }
@@ -3146,6 +3169,36 @@ app.get("/api/v1/tenants/:tenantId/products", async (req, res) => {
     res.json({ data: uniqueProducts, total: uniqueProducts.length });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// Rota de Vitrine Pública por Slug (/api/store/:slug)
+app.get(["/api/store/:slug", "/api/v1/store/:slug"], async (req, res) => {
+  try {
+    const slug = req.params.slug;
+    const { data: tenant, error: tErr } = await supabase
+      .from("tenants")
+      .select("*")
+      .or(`slug.eq.${slug},id.eq.${slug}`)
+      .maybeSingle();
+
+    if (tErr || !tenant) {
+      return res.status(404).json({ error: "Loja não encontrada" });
+    }
+
+    const { data: products } = await supabase
+      .from("products")
+      .select("id, tenant_id, internal_code, barcode, name, active_principle, drug_type, manufacturer, presentation, price, original_price, promotional_price, stock, category, grouping_slug, variant_attribute, image, is_featured, requires_prescription, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage, video_uri, description, indications, usage, side_effects, contraindications, is_ai_enriched")
+      .eq("tenant_id", tenant.id)
+      .gt("price", 0)
+      .order("is_featured", { ascending: false });
+
+    return res.json({
+      tenant,
+      products: products || []
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -7031,6 +7084,7 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
           internal_code: internalCode || null,
           stock,
           price,
+          is_featured: (Number(price) <= 0 || isNaN(Number(price))) ? false : undefined,
           original_price: originalPrice,
           promotional_price: promotionalPrice,
           promo_type: promoType,
@@ -7170,6 +7224,7 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
             const finalDepartment = (!existing.department || isGenericCategory) ? item.department : existing.department;
 
             // Regra de Ouro: atualizações de produtos existentes alteram apenas campos específicos, mas completamos a linha com os dados já existentes para evitar que o upsert do PostgREST limpe as colunas não informadas (sobrescrevendo com NULL)
+            const isZeroPrice = Number(finalPrice) <= 0 || isNaN(Number(finalPrice));
             existingProductsPayload.push({
                ...existing, // Mantém todos os campos existentes (nome, categoria, imagem, princípio ativo, etc.)
                category: finalCategory,
@@ -7177,6 +7232,7 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
                internal_code: item.internal_code || existing.internal_code,
                stock: item.stock,
                price: finalPrice,
+               is_featured: isZeroPrice ? false : existing.is_featured,
                original_price: finalOriginalPrice,
                promotional_price: finalPromotionalPrice,
                promo_type: finalPromoType,
@@ -7198,8 +7254,10 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
               ? item.image.trim()
               : (crossStoreImageMap.get(item.barcode) || null);
 
+            const isNewZeroPrice = Number(item.price) <= 0 || isNaN(Number(item.price));
             newProductsPayload.push({
               ...item,
+              is_featured: isNewZeroPrice ? false : Boolean(item.is_featured),
               image: finalImage
             });
          }

@@ -1264,3 +1264,24 @@ export interface ChatConversation {
   created_at: string;
   updated_at?: string;
 }
+
+/**
+ * Validação única e estrita para produtos visíveis na Vitrine Pública e Catálogo do Cliente
+ */
+export const isValidStoreProduct = (p: Product | null | undefined): boolean => {
+  if (!p || !p.id) return false;
+  const price = Number(p.price);
+  const stock = Number(p.stock ?? 1);
+  return !isNaN(price) && price > 0 && !isNaN(stock) && stock > 0;
+};
+
+/**
+ * Verifica se o produto tem imagem válida (preenchida, não nula e sem imgur.com/placeholders quebrados)
+ */
+export const hasValidProductImage = (p: Product | null | undefined): boolean => {
+  if (!p || !p.image) return false;
+  const img = String(p.image).trim().toLowerCase();
+  if (!img || img === "ignore" || img === "pendente_curadoria") return false;
+  if (img.includes("imgur.com")) return false;
+  return true;
+};

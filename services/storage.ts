@@ -739,21 +739,24 @@ export const getProductsByTenant = async (
   onUpdate?: (products: Product[]) => void,
   forceFetch: boolean = false,
   abortSignal?: AbortSignal,
+  isAdmin: boolean = false,
 ): Promise<Product[]> => {
   try {
-    const cacheKey = `products_${tenantId}`;
+    const cacheKey = `products_${tenantId}${isAdmin ? "_admin" : ""}`;
 
     const fetchFromDb = async () => {
       try {
         // CORREÇÃO CRÍTICA: Bypassa o cache de borda (Edge CDN) do Vercel usando um parâmetro de timestamp (?t=...)
         // para garantir que as atualizações de preços de planilhas importadas apareçam imediatamente.
-        const response = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/products`, {
+        const url = `/api/v1/tenants/${encodeURIComponent(tenantId)}/products${isAdmin ? "?admin=true" : ""}`;
+        const response = await fetch(url, {
           signal: abortSignal,
         });
         if (!response.ok) throw new Error("API Fetch failed");
         const json = await response.json();
         if (json.data) {
-          const mapped = deduplicateProducts(json.data.map(mapDbProductToApp));
+          const rawMapped = json.data.map(mapDbProductToApp);
+          const mapped = deduplicateProducts(!isAdmin ? rawMapped.filter((p: any) => Number(p.price) > 0) : rawMapped);
           await localforage.setItem(cacheKey, mapped);
           return mapped;
         }
@@ -773,9 +776,13 @@ export const getProductsByTenant = async (
         let query = supabase
           .from("products")
           .select("id, tenant_id, internal_code, barcode, name, active_principle, drug_type, manufacturer, presentation, price, original_price, promotional_price, stock, category, grouping_slug, variant_attribute, image, is_featured, requires_prescription, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage, video_uri, description, indications, usage, side_effects, contraindications, is_ai_enriched")
-          .eq("tenant_id", tenantId)
-          .order("id", { ascending: true })
-          .range(from, from + step - 1);
+          .eq("tenant_id", tenantId);
+
+        if (!isAdmin) {
+          query = query.gt("price", 0);
+        }
+
+        query = query.order("id", { ascending: true }).range(from, from + step - 1);
         if (abortSignal) {
           query = query.abortSignal(abortSignal);
         }

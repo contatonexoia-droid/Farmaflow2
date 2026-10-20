@@ -20,6 +20,8 @@ import {
   checkProductMatchesRule,
   CartItem,
   getProductVolumePromotionInfo,
+  isValidStoreProduct,
+  hasValidProductImage,
 } from "../types";
 import {
   Search,
@@ -1502,6 +1504,11 @@ export const Storefront: React.FC<StorefrontProps> = ({
   const searchCache = useRef<Record<string, Product[]>>({});
   const sentinelRef = useRef<HTMLDivElement>(null);
 
+  // Filtro obrigatório e estrito em todas as listagens da Vitrine Pública (preço > 0 e estoque > 0)
+  const validStoreProducts = useMemo(() => {
+    return (products || []).filter(isValidStoreProduct);
+  }, [products]);
+
   useEffect(() => {
     if (tenant?.networkId && tenant.networkId !== tenant.id) {
       getProductsByTenant(tenant.networkId, setMatrizProducts).catch(console.error);
@@ -2125,18 +2132,18 @@ export const Storefront: React.FC<StorefrontProps> = ({
       }
     }, 800);
     return () => clearTimeout(timer);
-  }, [products.length, activePromotions.length]);
+  }, [validStoreProducts.length, activePromotions.length]);
 
   // Cache category -> department to avoid repetitive heavy taxonomy evaluations
   const categoryDeptMap = useMemo(() => {
     const map = new Map<string, string>();
-    for (const p of products) {
+    for (const p of validStoreProducts) {
       if (p.category && !map.has(p.category)) {
         map.set(p.category, getDepartmentForCategory(p.category, tenant.departments));
       }
     }
     return map;
-  }, [products, tenant.departments]);
+  }, [validStoreProducts, tenant.departments]);
 
   const getFastDept = useCallback(
     (cat: string) => {
@@ -2151,8 +2158,8 @@ export const Storefront: React.FC<StorefrontProps> = ({
   // Index products by department for O(1) instant filtering
   const productsByDept = useMemo(() => {
     const map = new Map<string, Product[]>();
-    for (const p of products) {
-      if (!p || typeof p.price !== "number" || p.price <= 0) continue;
+    for (const p of validStoreProducts) {
+      if (!isValidStoreProduct(p)) continue;
       const dept = getFastDept(p.category);
       let list = map.get(dept);
       if (!list) {
@@ -2162,17 +2169,17 @@ export const Storefront: React.FC<StorefrontProps> = ({
       list.push(p);
     }
     return map;
-  }, [products, getFastDept]);
+  }, [validStoreProducts, getFastDept]);
 
   const deptsWithPromos = useMemo(() => {
     const set = new Set<string>();
-    for (const p of products) {
+    for (const p of validStoreProducts) {
       if (p.promotionType && p.promotionType !== "NONE") {
         set.add(getFastDept(p.category));
       }
     }
     return set;
-  }, [products, getFastDept]);
+  }, [validStoreProducts, getFastDept]);
 
   const departments = useMemo(() => {
     const sortedDepts = Array.from(productsByDept.keys()).sort((a, b) => {
@@ -2188,7 +2195,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
 
   const allCategoriesByDept = useMemo(() => {
     const map = new Map<string, string[]>();
-    for (const p of products) {
+    for (const p of validStoreProducts) {
       if (!p.category) continue;
       const d = getFastDept(p.category);
       if (!map.has(d)) {
@@ -2204,7 +2211,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
       sortedMap.set(dept, cats.sort());
     });
     return sortedMap;
-  }, [products, getFastDept]);
+  }, [validStoreProducts, getFastDept]);
 
   const subCategories = useMemo(() => {
     if (selectedDepartment === "Todos") return [];
@@ -2253,14 +2260,14 @@ export const Storefront: React.FC<StorefrontProps> = ({
   const comboVariableProducts = useMemo<Product[]>(() => {
     if (!selectedPromotion || !selectedPromoLookup) return [];
     const list: Product[] = [];
-    for (let i = 0; i < products.length; i++) {
-      const p = products[i];
-      if (p && typeof p.price === "number" && p.price > 0 && selectedPromoLookup.matches(p)) {
+    for (let i = 0; i < validStoreProducts.length; i++) {
+      const p = validStoreProducts[i];
+      if (p && isValidStoreProduct(p) && selectedPromoLookup.matches(p)) {
         list.push(p);
       }
     }
     return list;
-  }, [selectedPromotion, selectedPromoLookup, products]);
+  }, [selectedPromotion, selectedPromoLookup, validStoreProducts]);
 
   const isProductInRule = useCallback((rule: PromotionRule | CouponRule, p: Product) => {
     if (!rule || !p) return false;
@@ -2278,7 +2285,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
     const term = normalizeStr(debouncedSearchTerm);
     if (!term || term.trim().length === 0) return null;
     
-    const strongMatches = products.filter(p => p.id && normalizeStr(p.name).includes(term));
+    const strongMatches = validStoreProducts.filter(p => p.id && isValidStoreProduct(p) && normalizeStr(p.name).includes(term));
     
     if (strongMatches.length > 0) {
       const hasInStock = strongMatches.some(p => p.stock > 0);
@@ -2297,7 +2304,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
       }
     }
     return null;
-  }, [debouncedSearchTerm, products]);
+  }, [debouncedSearchTerm, validStoreProducts]);
 
   const filteredProducts = useMemo<Product[]>(() => {
     const term = normalizeStr(debouncedSearchTerm);
@@ -2321,13 +2328,11 @@ export const Storefront: React.FC<StorefrontProps> = ({
       // O(1) Recuperação direta do índice departamental
       sourceList = productsByDept.get(selectedDepartment) || [];
     } else {
-      sourceList = products;
+      sourceList = validStoreProducts;
     }
 
-    // Strict rule: Never show products with zero, negative or missing prices
-    if (!selectedPromotion) {
-      sourceList = sourceList.filter(p => typeof p.price === 'number' && p.price > 0);
-    }
+    // Strict rule: Never show products with zero, negative or missing prices or zero stock in public store
+    sourceList = sourceList.filter(isValidStoreProduct);
 
     const getPromoPriority = (p: Product) => {
       if (p.promotionType && p.promotionType !== "NONE") {
@@ -2800,6 +2805,14 @@ export const Storefront: React.FC<StorefrontProps> = ({
       if (aInStock && !bInStock) return -1;
       if (!aInStock && bInStock) return 1;
 
+      // Ordenação inteligente na aba "Todos": primeiro itens com imagem válida (preenchida e sem imgur.com)
+      if (selectedDepartment === "Todos" && !debouncedSearchTerm.trim()) {
+        const aValidImg = hasValidProductImage(a);
+        const bValidImg = hasValidProductImage(b);
+        if (aValidImg && !bValidImg) return -1;
+        if (!aValidImg && bValidImg) return 1;
+      }
+
       // Use precalculated priority score (O(1) lookup, incredibly fast)
       const priorityA = a._priority ?? 1;
       const priorityB = b._priority ?? 1;
@@ -2882,7 +2895,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
   }, [filteredProducts.length, BATCH_PAGE_SIZE]);
 
   const crossSellSuggestions = useMemo(() => {
-    if (products.length === 0) return [];
+    if (!validStoreProducts || validStoreProducts.length === 0) return [];
 
     const termNorm = normalizeStr(debouncedSearchTerm);
     let targetCategories: string[] = [];
@@ -2908,9 +2921,9 @@ export const Storefront: React.FC<StorefrontProps> = ({
     const currentResultIds = new Set(filteredProducts.map((p) => p.id));
     const targetCatsNorm = targetCategories.map((c) => normalizeStr(c));
 
-    const list = products
+    const list = validStoreProducts
       .filter((p) => {
-        if (!p.id) return false;
+        if (!isValidStoreProduct(p)) return false;
         const prodCatNorm = normalizeStr(p.category);
         const prodNameNorm = normalizeStr(p.name);
 
@@ -2923,14 +2936,19 @@ export const Storefront: React.FC<StorefrontProps> = ({
 
         return (
           (isTarget || isMandatory) &&
-          !currentResultIds.has(p.id) &&
-          p.stock > 0
+          !currentResultIds.has(p.id)
         );
       })
       .sort((a, b) => {
+        // Ordenação inteligente: primeiro itens com imagem válida (preenchida e sem imgur.com), depois os demais
+        const aValidImg = hasValidProductImage(a);
+        const bValidImg = hasValidProductImage(b);
+        if (aValidImg && !bValidImg) return -1;
+        if (!aValidImg && bValidImg) return 1;
+
         if (a.isFeatured && !b.isFeatured) return -1;
         if (!a.isFeatured && b.isFeatured) return 1;
-        return Math.random() - 0.5;
+        return a.name.localeCompare(b.name);
       });
 
     const uniqueMap = new Map<string, Product>();
@@ -2941,7 +2959,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
     }
     return Array.from(uniqueMap.values()).slice(0, 15);
   }, [
-    products,
+    validStoreProducts,
     debouncedSearchTerm,
     selectedCategory,
     filteredProducts,
@@ -2971,11 +2989,19 @@ export const Storefront: React.FC<StorefrontProps> = ({
     const dedupe = (list: Product[]) => {
       const map = new Map<string, Product>();
       for (const item of list) {
-        if (item && item.id && !map.has(item.id)) {
+        if (isValidStoreProduct(item) && !map.has(item.id)) {
           map.set(item.id, item);
         }
       }
-      return Array.from(map.values()).slice(0, 8);
+      return Array.from(map.values())
+        .sort((a, b) => {
+          const aValidImg = hasValidProductImage(a);
+          const bValidImg = hasValidProductImage(b);
+          if (aValidImg && !bValidImg) return -1;
+          if (!aValidImg && bValidImg) return 1;
+          return a.name.localeCompare(b.name);
+        })
+        .slice(0, 8);
     };
 
     const isDiaSeguinte = 
@@ -3001,7 +3027,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
       term.includes("antiácido");
 
     if (isDiaSeguinte) {
-      return dedupe(products
+      return dedupe(validStoreProducts
         .filter((p) => {
           const pName = normalizeStr(p.name);
           const pActive = normalizeStr(p.activePrinciple || "");
@@ -3026,7 +3052,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
     }
 
     if (isEstomago) {
-      return dedupe(products
+      return dedupe(validStoreProducts
         .filter((p) => {
           const pName = normalizeStr(p.name);
           const pActive = normalizeStr(p.activePrinciple || "");
@@ -3091,7 +3117,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
       })
       .map(singularize);
 
-    return dedupe(products
+    return dedupe(validStoreProducts
       .filter((p) => {
         const pName = normalizeStr(p.name);
         const pActive = normalizeStr(p.activePrinciple || "");
@@ -3132,6 +3158,12 @@ export const Storefront: React.FC<StorefrontProps> = ({
         if (aStarts && !bStarts) return -1;
         if (!aStarts && bStarts) return 1;
 
+        // Imagem válida primeiro
+        const aValidImg = hasValidProductImage(a);
+        const bValidImg = hasValidProductImage(b);
+        if (aValidImg && !bValidImg) return -1;
+        if (!aValidImg && bValidImg) return 1;
+
         // Helper para verificar promoção
         const checkPromo = (p: Product) => {
           if (p.promotionType && p.promotionType !== "NONE") return true;
@@ -3165,7 +3197,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
         if (!a.isFeatured && b.isFeatured) return 1;
         return 0;
       }));
-  }, [debouncedSearchTerm, products, activePromotions]);
+  }, [debouncedSearchTerm, validStoreProducts, activePromotions]);
 
   const handleAddToCartWrapper = useCallback((product: Product) => {
     onAddToCart(product, false, false);
@@ -3849,7 +3881,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
             onCategorySelect={(cat) => selectCategory(cat)}
             tenant={tenant}
             promotions={activePromotions}
-            products={products}
+            products={validStoreProducts}
             onSelectPromotion={(promoId) => selectPromotion(promoId)}
             isProductInRule={isProductInRule}
           />

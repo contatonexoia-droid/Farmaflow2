@@ -758,6 +758,8 @@ export async function resolveCustomerChosenProduct(
         .from("products")
         .select("id, name, price, stock, presentation, manufacturer, grouping_slug")
         .in("tenant_id", effectiveTenantIds)
+        .gt("price", 0)
+        .gt("stock", 0)
         .or(`name.ilike.%${searchWord}%,manufacturer.ilike.%${searchWord}%`)
         .order("stock", { ascending: false })
         .limit(25);
@@ -1234,9 +1236,9 @@ ${chosenMsg}
           incomingMessage,
           4
         );
-
-        if (matchedProducts && matchedProducts.length > 0) {
-          const displayProducts = matchedProducts.slice(0, 3);
+        const validMatched = (matchedProducts || []).filter((p: any) => Number(p.price) > 0 && Number(p.stock ?? 1) > 0);
+        if (validMatched.length > 0) {
+          const displayProducts = validMatched.slice(0, 3);
           catalogContext = "\n\n[CATÁLOGO EM TEMPO REAL - PRODUTOS ENCONTRADOS NO BANCO DE DADOS DA DROGARIA]:\n" +
             displayProducts.map((p, idx) => {
               const preco = (Number(p.price) || 0).toFixed(2);
@@ -2351,6 +2353,7 @@ ${taskInstruction}`;
         .from("products")
         .select(productSelectFields)
         .in("tenant_id", tenantIds)
+        .gt("price", 0)
         .gt("stock", 0)
         .order("price", { ascending: true });
 
@@ -2420,6 +2423,7 @@ ${taskInstruction}`;
         .from("products")
         .select(productSelectFields)
         .in("tenant_id", tenantIds)
+        .gt("price", 0)
         .gt("stock", 0)
         .order("price", { ascending: true });
 
@@ -2440,6 +2444,7 @@ ${taskInstruction}`;
           .from("products")
           .select(productSelectFields)
           .in("tenant_id", tenantIds)
+          .gt("price", 0)
           .gt("stock", 0)
           .order("price", { ascending: true });
         for (const term of mainTerms) {
@@ -2515,6 +2520,7 @@ ${taskInstruction}`;
         .from("products")
         .select(productSelectFields)
         .in("tenant_id", tenantIds)
+        .gt("price", 0)
         .gt("stock", 0)
         .or(tokenOr)
         .order("price", { ascending: true });
@@ -2670,7 +2676,9 @@ ${taskInstruction}`;
 
         const effectiveStoreLink = storeLink || (tenant?.custom_domain ? `https://${tenant.custom_domain}` : `https://${tenant?.slug || tenant?.id || 'loja'}.farmaflow.online`);
 
-        const items = (prods || []).map((p: any) => {
+        const items = (prods || [])
+          .filter((p: any) => Number(p.price) > 0 && Number(p.stock ?? 1) > 0)
+          .map((p: any) => {
           const promoTag = getProductPromotionTag(p);
           return {
             id: p.id,

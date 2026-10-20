@@ -30,6 +30,8 @@ import {
   getVariableCombosForProduct,
   VariableComboRequirement,
   getProductVolumePromotionInfo,
+  isValidStoreProduct,
+  hasValidProductImage,
 } from "./types";
 
 import { Navbar } from "./components/Navbar";
@@ -1699,7 +1701,7 @@ const App: React.FC = () => {
     );
 
     const otherProducts = products.filter(
-      (p) => p.id !== selectedProduct.id && p.stock > 0,
+      (p) => p.id !== selectedProduct.id && isValidStoreProduct(p),
     );
 
     const salesCounts: Record<string, number> = {};
@@ -1747,6 +1749,10 @@ const App: React.FC = () => {
           return { ...p, suggestionBadge: "Mesma Fórmula", matchScore };
         })
         .sort((a, b) => {
+          const aValidImg = hasValidProductImage(a);
+          const bValidImg = hasValidProductImage(b);
+          if (aValidImg && !bValidImg) return -1;
+          if (!aValidImg && bValidImg) return 1;
           if (b.matchScore !== a.matchScore) return b.matchScore - a.matchScore;
           return a.price - b.price;
         });
@@ -1906,6 +1912,10 @@ const App: React.FC = () => {
         .filter(Boolean);
 
       samePrinciple = (possibleSuggestions as any[]).sort((a, b) => {
+        const aValidImg = hasValidProductImage(a);
+        const bValidImg = hasValidProductImage(b);
+        if (aValidImg && !bValidImg) return -1;
+        if (!aValidImg && bValidImg) return 1;
         if (b.matchScore !== a.matchScore) return b.matchScore - a.matchScore;
         return a.price - b.price;
       });
@@ -2230,11 +2240,17 @@ const App: React.FC = () => {
     const dedupeById = (list: any[]) => {
       const map = new Map<string, any>();
       for (const item of list) {
-        if (item && item.id && !map.has(item.id)) {
+        if (item && item.id && isValidStoreProduct(item) && !map.has(item.id)) {
           map.set(item.id, item);
         }
       }
-      return Array.from(map.values());
+      return Array.from(map.values()).sort((a, b) => {
+        const aValidImg = hasValidProductImage(a);
+        const bValidImg = hasValidProductImage(b);
+        if (aValidImg && !bValidImg) return -1;
+        if (!aValidImg && bValidImg) return 1;
+        return 0;
+      });
     };
 
     return {
@@ -3202,6 +3218,7 @@ const App: React.FC = () => {
     showGlobalToast: boolean = true,
     quantityToAdd: number = 1,
   ) => {
+    if (!isValidStoreProduct(product)) return alert("Produto indisponível no momento.");
     if (product.stock <= 0) return alert("Produto esgotado!");
     const qty = Math.max(1, quantityToAdd);
     setCart((prev) => {
