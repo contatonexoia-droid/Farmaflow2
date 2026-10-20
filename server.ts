@@ -40,7 +40,7 @@ if (typeof process !== "undefined" && !process.env.NODE_TLS_REJECT_UNAUTHORIZED)
 }
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 // Supabase Client for Server-side operations
 const SUPABASE_URL =
@@ -10577,7 +10577,7 @@ async function startServer() {
       appType: "spa",
     });
     app.use(vite.middlewares);
-  } else {
+  } else if (!process.env.VERCEL) {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath, {
       maxAge: '1d',
@@ -10596,7 +10596,12 @@ async function startServer() {
         }
       }
     }));
-    app.get("*all", (req, res) => {
+
+    // SPA Fallback: qualquer rota GET que não comece com /api/ ou /s/ entrega o dist/index.html
+    app.get("*all", (req, res, next) => {
+      if (req.path.startsWith("/api/") || req.path.startsWith("/s/")) {
+        return next();
+      }
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.setHeader('Pragma', 'no-cache');
       res.setHeader('Expires', '0');
@@ -10604,8 +10609,9 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+  const listenPort = Number(process.env.PORT) || 3000;
+  app.listen(listenPort, "0.0.0.0", () => {
+    console.log(`Server running on http://0.0.0.0:${listenPort}`);
   });
 }
 
@@ -10614,3 +10620,4 @@ export default app;
 if (!process.env.VERCEL) {
   startServer();
 }
+
