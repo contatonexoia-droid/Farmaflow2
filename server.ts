@@ -19,7 +19,7 @@ import { calculateDeliveryDistance } from "./lib/maps.js";
 import { dispatcher } from "./services/asyncDispatcher.js";
 import { whatsappHealthManager } from "./services/whatsappHealthManager.js";
 import { realtimeHub } from "./services/realtimeHub.js";
-import { botHandoffManager, isWeblojaOrderMessage, isBotSentOrEcho, registerBotSentMessage, botSentMessageIds } from "./services/botHandoffManager.js";
+import { botHandoffManager, isWeblojaOrderMessage, isBotSentOrEcho, registerBotSentMessage, botSentMessageIds, detectHumanHandoffIntent, detectAiOutputHandoffIntent } from "./services/botHandoffManager.js";
 import { continuousUseRefillManager } from "./services/continuousUseRefillManager.js";
 import { csatManager } from "./services/csatManager.js";
 import { contactMergeManager } from "./services/contactMergeManager.js";
@@ -2431,14 +2431,17 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
 
         if (!rpcError && Array.isArray(rpcData)) {
           const validRpcData = rpcData.filter((p: any) => Number(p.price) > 0 && Number(p.stock ?? 1) > 0);
-          res.setHeader("Cache-Control", "public, s-maxage=60, stale-while-revalidate=300");
-          return res.json({
-            data: validRpcData,
-            total: validRpcData.length >= limit ? -1 : validRpcData.length + from,
-            page,
-            limit,
-            source: "postgres_rpc"
-          });
+          if (validRpcData.length > 0) {
+            res.setHeader("Cache-Control", "public, s-maxage=60, stale-while-revalidate=300");
+            return res.json({
+              data: validRpcData,
+              total: validRpcData.length >= limit ? -1 : validRpcData.length + from,
+              page,
+              limit,
+              source: "postgres_rpc"
+            });
+          }
+          console.log(`[Search Fallback] RPC search_products_v2 retornou 0 itens para "${searchTermToUse}". Acionando busca inteligente com abreviações de ERP...`);
         } else {
           console.warn("RPC search_products_v2 failed or not found, falling back to server intelligent search:", rpcError);
         }
@@ -8561,6 +8564,20 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
       console.warn("[WelcomeMessage] Aviso ao consultar last_welcome_sent_at:", e.message);
     }
 
+    // Se a conversa já estiver em atendimento humano ou se a mensagem pedir balconista/atendente, NÃO enviar boas-vindas da IA!
+    if (
+      conversation?.is_bot_active === false ||
+      conversation?.is_human_controlled === true ||
+      conversation?.kanban_stage === "em_atendimento" ||
+      conversation?.stage === "em_atendimento" ||
+      conversation?.status === "human" ||
+      conversation?.status === "human_takeover" ||
+      (incomingText && detectHumanHandoffIntent(incomingText).isHumanRequested)
+    ) {
+      console.log(`[WelcomeMessage] Conversa ${conversation?.id} em atendimento humano ou pedido de balconista detectado. Omitindo boas-vindas.`);
+      return false;
+    }
+
     // Se a mensagem recebida for um resumo de pedido da Webloja, não envia boas-vindas para não sobrepor o pedido
     if (incomingText && isWeblojaOrderMessage(incomingText).isOrder) {
       console.log(`[WelcomeMessage] Mensagem identificada como pedido da Loja Online FarmaFlow. Omitindo mensagem de boas-vindas para a conversa ${conversation.id}.`);
@@ -9334,16 +9351,21 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                 console.warn("[WEBHOOK] Aviso ao processar CSAT:", csatErr.message);
               }
 
-              // 4. Verificação de elegibilidade para atendimento pela IA
+              // 4. Verificação de elegibilidade para atendimento pela IA (Silêncio Absoluto Pós-Transferência)
+              const convStatusLower = String(conversation.status || "").toLowerCase();
+              const convStageLower = String(conversation.kanban_stage || conversation.stage || "").toLowerCase();
               const isHumanControlled = 
                 isWeblojaOrder ||
                 conversation.is_human_controlled === true ||
                 conversation.is_bot_active === false ||
+                (conversation as any).ai_enabled === false ||
                 Boolean(conversation.assigned_user_id) ||
-                conversation.kanban_stage === "em_atendimento";
+                convStatusLower === "human" ||
+                convStatusLower === "human_takeover" ||
+                convStageLower === "em_atendimento";
 
               if (isHumanControlled) {
-                console.log(`[WEBHOOK - IA] Conversa ${conversation.id} não despachada para IA: intervenção humana ativa (is_bot_active: ${conversation.is_bot_active}, is_human_controlled: ${conversation.is_human_controlled}, stage: ${conversation.kanban_stage})`);
+                console.log(`[WEBHOOK - IA] 🔇 Silêncio Absoluto Pós-Transferência: Conversa ${conversation.id} está em atendimento humano (is_bot_active: ${conversation.is_bot_active}, is_human_controlled: ${conversation.is_human_controlled}, status: ${conversation.status}, stage: ${conversation.kanban_stage}). Ignorando IA.`);
                 if (!res.headersSent) {
                   return res.status(200).json({ success: true, handled: 'human_controlled' });
                 }
@@ -9380,44 +9402,54 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                 });
               }
 
-              // c) Aguarda janela de tolerância de digitação (20 segundos)
-              console.log(`[WEBHOOK DEBOUNCE] ⏳ Janela de 20s iniciada para msg ${currentMessage?.id} na conversa ${conversation.id}...`);
-              await new Promise(resolve => setTimeout(resolve, 20000));
+              // Se o cliente pediu para falar com balconista/atendente, fazemos o transbordo em 1.5s sem esperar 20s!
+              const immediateHandoffAsked = detectHumanHandoffIntent(String(effectiveText || text || "")).isHumanRequested;
+              const debounceWaitMs = immediateHandoffAsked ? 1500 : 20000;
+
+              // c) Aguarda janela de tolerância de digitação (1.5s para pedido de balconista ou 20s normal)
+              console.log(`[WEBHOOK DEBOUNCE] ⏳ Janela de ${debounceWaitMs / 1000}s iniciada para msg ${currentMessage?.id} na conversa ${conversation.id}...`);
+              await new Promise(resolve => setTimeout(resolve, debounceWaitMs));
 
               // d) Verificação de Última Mensagem no Supabase (Evita disparos concorrentes no Serverless)
-              try {
-                const { data: latestMsg } = await supabaseAdmin
-                  .from('chat_messages')
-                  .select('id, created_at')
-                  .eq('conversation_id', conversation.id)
-                  .in('sender_type', ['CUSTOMER', 'CLIENT'])
-                  .order('created_at', { ascending: false })
-                  .limit(1)
-                  .maybeSingle();
+              if (!immediateHandoffAsked) {
+                try {
+                  const { data: latestMsg } = await supabaseAdmin
+                    .from('chat_messages')
+                    .select('id, created_at')
+                    .eq('conversation_id', conversation.id)
+                    .in('sender_type', ['CUSTOMER', 'CLIENT'])
+                    .order('created_at', { ascending: false })
+                    .limit(1)
+                    .maybeSingle();
 
-                if (latestMsg && currentMessage && latestMsg.id !== currentMessage.id) {
-                  console.log(`[WEBHOOK DEBOUNCE] ⏩ Mensagem mais recente detectada (${latestMsg.id} vs atual ${currentMessage.id}). Descartando execução desta requisição para consolidar na mais recente.`);
-                  return res.status(200).json({ handled: 'debounced_by_newer_message', latestMessageId: latestMsg.id });
+                  if (latestMsg && currentMessage && latestMsg.id !== currentMessage.id) {
+                    console.log(`[WEBHOOK DEBOUNCE] ⏩ Mensagem mais recente detectada (${latestMsg.id} vs atual ${currentMessage.id}). Descartando execução desta requisição para consolidar na mais recente.`);
+                    return res.status(200).json({ handled: 'debounced_by_newer_message', latestMessageId: latestMsg.id });
+                  }
+                } catch (checkErr: any) {
+                  console.warn("[WEBHOOK DEBOUNCE] Erro ao consultar última mensagem:", checkErr.message);
                 }
-              } catch (checkErr: any) {
-                console.warn("[WEBHOOK DEBOUNCE] Erro ao consultar última mensagem:", checkErr.message);
               }
 
-              // e) Verifica se durante os 20s um operador humano assumiu o chat
+              // e) Verifica se durante a espera um operador humano assumiu o chat ou já houve transbordo
               try {
                 const { data: recheckedConv } = await supabaseAdmin
                   .from('chat_conversations')
-                  .select('is_bot_active, is_human_controlled, assigned_user_id, kanban_stage')
+                  .select('is_bot_active, is_human_controlled, assigned_user_id, kanban_stage, stage, status')
                   .eq('id', conversation.id)
                   .maybeSingle();
 
                 if (recheckedConv) {
+                  const rs = String(recheckedConv.status || '').toLowerCase();
+                  const rk = String(recheckedConv.kanban_stage || recheckedConv.stage || '').toLowerCase();
                   const nowHuman = recheckedConv.is_human_controlled === true ||
                     recheckedConv.is_bot_active === false ||
                     Boolean(recheckedConv.assigned_user_id) ||
-                    recheckedConv.kanban_stage === 'em_atendimento';
+                    rs === 'human' ||
+                    rs === 'human_takeover' ||
+                    rk === 'em_atendimento';
                   if (nowHuman) {
-                    console.log(`[WEBHOOK DEBOUNCE] 👤 Conversa ${conversation.id} foi assumida por operador humano durante a espera de 20s. Abortando IA.`);
+                    console.log(`[WEBHOOK DEBOUNCE] 👤 Conversa ${conversation.id} já está em atendimento humano após espera. Abortando IA.`);
                     return res.status(200).json({ handled: 'human_takeover_during_debounce' });
                   }
                 }
@@ -9494,12 +9526,14 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
 
               console.log(`[WEBHOOK DEBOUNCE] 💬 Mensagem unificada para envio à IA na conversa ${conversation.id} (replyWithAudio: ${isAudioMessage}):\n"${consolidatedText}"`);
 
-              // g) Disparo Único da Mensagem de Boas-Vindas (se elegível hoje)
+              // g) Disparo Único da Mensagem de Boas-Vindas (se elegível hoje e NÃO for pedido de balconista)
               let welcomeSent = false;
-              try {
-                welcomeSent = await handleDailyWelcomeMessage(storeId, conversation, instanceName, consolidatedText);
-              } catch (welcomeErr: any) {
-                console.error('[WEBHOOK] Exceção ao processar boas-vindas diárias:', welcomeErr.message);
+              if (!detectHumanHandoffIntent(consolidatedText).isHumanRequested) {
+                try {
+                  welcomeSent = await handleDailyWelcomeMessage(storeId, conversation, instanceName, consolidatedText);
+                } catch (welcomeErr: any) {
+                  console.error('[WEBHOOK] Exceção ao processar boas-vindas diárias:', welcomeErr.message);
+                }
               }
 
               if (welcomeSent) {
@@ -9534,29 +9568,74 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
             } else {
               // BLINDAGEM ANTI-ECO (mensagens com fromMe === true)
               const msgKeyId = msg.key?.id || msg.id;
-              const isEcho = (msgKeyId && botSentMessageIds.has(msgKeyId)) || isBotSentOrEcho(msgKeyId, effectiveText || text, conversation?.id, remoteJid);
+              const echoText = String(effectiveText || text || "");
+              const isEcho = (msgKeyId && botSentMessageIds.has(msgKeyId)) || isBotSentOrEcho(msgKeyId, echoText, conversation?.id, remoteJid);
               if (isEcho) {
-                console.log(`[WEBHOOK BLINDAGEM ANTI-ECO] 🤖 Mensagem fromMe identificada como eco do bot (${msgKeyId}). Garantindo que a IA permaneça ATIVA na conversa ${conversation?.id}.`);
-                if (conversation) {
-                  conversation.is_bot_active = true;
-                  conversation.is_human_controlled = false;
-                  conversation.status = "bot";
-                  conversation.kanban_stage = "ia_atendendo";
-                  conversation.stage = "ia_atendendo";
+                // Verifica se o eco é da própria mensagem de transferência para humano ou se a conversa já foi transferida para humano!
+                const isHandoffEcho = detectAiOutputHandoffIntent(echoText).isHandoffOutput;
+                let isAlreadyHumanInDb =
+                  isHandoffEcho ||
+                  conversation?.is_bot_active === false ||
+                  conversation?.is_human_controlled === true ||
+                  conversation?.kanban_stage === "em_atendimento" ||
+                  conversation?.stage === "em_atendimento" ||
+                  conversation?.status === "human" ||
+                  conversation?.status === "human_takeover";
 
+                if (!isAlreadyHumanInDb && conversation?.id) {
                   try {
-                    await supabaseAdmin
+                    const { data: dbConvCheck } = await supabaseAdmin
                       .from("chat_conversations")
-                      .update({
-                        is_bot_active: true,
-                        is_human_controlled: false,
-                        status: "bot",
-                        kanban_stage: "ia_atendendo",
-                        stage: "ia_atendendo",
-                        updated_at: new Date().toISOString()
-                      })
-                      .eq("id", conversation.id);
+                      .select("is_bot_active, is_human_controlled, kanban_stage, stage, status")
+                      .eq("id", conversation.id)
+                      .maybeSingle();
+                    if (
+                      dbConvCheck &&
+                      (dbConvCheck.is_bot_active === false ||
+                        dbConvCheck.is_human_controlled === true ||
+                        dbConvCheck.kanban_stage === "em_atendimento" ||
+                        dbConvCheck.stage === "em_atendimento" ||
+                        dbConvCheck.status === "human" ||
+                        dbConvCheck.status === "human_takeover")
+                    ) {
+                      isAlreadyHumanInDb = true;
+                    }
                   } catch (_) {}
+                }
+
+                if (isAlreadyHumanInDb) {
+                  console.log(`[WEBHOOK BLINDAGEM ANTI-ECO] 🤝 Eco de mensagem de transbordo/humano detectado (${msgKeyId}). Preservando conversa ${conversation?.id} em 'em_atendimento' (is_bot_active: false).`);
+                  if (conversation) {
+                    conversation.is_bot_active = false;
+                    conversation.ai_enabled = false;
+                    conversation.is_human_controlled = true;
+                    conversation.status = "human";
+                    conversation.kanban_stage = "em_atendimento";
+                    conversation.stage = "em_atendimento";
+                  }
+                } else {
+                  console.log(`[WEBHOOK BLINDAGEM ANTI-ECO] 🤖 Mensagem fromMe identificada como eco normal do bot (${msgKeyId}). Garantindo que a IA permaneça ATIVA na conversa ${conversation?.id}.`);
+                  if (conversation) {
+                    conversation.is_bot_active = true;
+                    conversation.is_human_controlled = false;
+                    conversation.status = "bot";
+                    conversation.kanban_stage = "ia_atendendo";
+                    conversation.stage = "ia_atendendo";
+
+                    try {
+                      await supabaseAdmin
+                        .from("chat_conversations")
+                        .update({
+                          is_bot_active: true,
+                          is_human_controlled: false,
+                          status: "bot",
+                          kanban_stage: "ia_atendendo",
+                          stage: "ia_atendendo",
+                          updated_at: new Date().toISOString()
+                        })
+                        .eq("id", conversation.id);
+                    } catch (_) {}
+                  }
                 }
                 if (!res.headersSent) {
                   return res.status(200).json({ success: true, handled: 'bot_echo_ignored' });

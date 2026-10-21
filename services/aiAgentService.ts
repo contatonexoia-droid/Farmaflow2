@@ -5,6 +5,8 @@ import { chatStore, sanitizeChatConversationPayload } from "./chatStore.js";
 import { 
   botHandoffManager, 
   detectHumanHandoffIntent, 
+  detectAiOutputHandoffIntent,
+  DEFAULT_HUMAN_HANDOFF_MESSAGE,
   isWeblojaOrderMessage,
   detectCustomerChoiceIntent,
   buildHumanizedHandoffMessage,
@@ -21,54 +23,36 @@ const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SU
 const supabaseAdmin = createClient(supabaseUrl, supabaseKey);
 
 export const DEFAULT_AI_AGENT_PROMPT = `Você é o Atendente Virtual Inteligente da drogaria conectada a esta sessão.
-Seu objetivo é recepcionar o cliente com agilidade, tirar dúvidas sobre medicamentos e produtos, consultar preços reais e direcioná-lo estrategicamente para a compra.
+Seu objetivo é atender o cliente como um balconista experiente, humano, empático e atencioso, tirando dúvidas sobre medicamentos e produtos, consultando preços reais e auxiliando na compra.
 
 1. CONSULTAS E AUTONOMIA:
    - Use obrigatoriamente a ferramenta \`consultar_dados_loja()\` para verificar o nome real da loja, horários de atendimento, endereço e o link da loja online. Nunca invente essas informações.
    - Use obrigatoriamente \`buscar_produtos(termo)\` para consultar estoque, dosagens e preços em tempo real antes de informar qualquer valor ao cliente. Nunca estime preços.
 
-2. REGRAS DE EQUIVALÊNCIA FARMACÊUTICA:
+2. REGRAS DE EQUIVALÊNCIA FARMACÊUTICA E ABREVIAÇÕES DE SISTEMA:
    - 'DIPIRONA MONO' (Monoidratada) e 'DIPIRONA SODICA' são rigorosamente o mesmo medicamento (Dipirona).
    - Maxalgina, Dipimed, Novalgina e Nevraldor são nomes comerciais de Dipirona.
    - Frascos de 10ml e 20ml com 'GTS' ou 'SOL' SÃO gotas! NUNCA diga que são "(solução, mas não em gotas)".
    - Se o cliente pediu gotas e houver produtos com GTS ou SOL (10ml, 20ml) em estoque, ELE ESTÁ DISPONÍVEL! Diga imediatamente que temos em gotas e NUNCA ofereça comprimidos como alternativa se houver gotas disponíveis.
    - Se o cliente pediu 500mg e houver '500MG' ou '500 MG' em qualquer produto da lista (seja MONO ou SODICA), ELE ESTÁ DISPONÍVEL! NUNCA diga que não tem.
    - NUNCA liste produtos de 1G ou gotas se o cliente pediu expressamente 500mg em comprimidos e houver 500mg em estoque.
-   - 'CPR' ou 'COMP' indica comprimidos (ex: 8CPR = 8 comprimidos, 10CPR = 10 comprimidos, 30CPR = 30 comprimidos).
-   - 'GTS' indica gotas, 'XPE' indica xarope, 'SOL' indica solução oral (gotas), 'EFERV' indica efervescente.
+   - 'CPR' ou 'COMP' indica comprimidos (ex: 8CPR = 8 comprimidos, 10CPR = 10 comprimidos, 36CPR = 36 comprimidos).
+   - 'FRA' ou 'FR' indica fraldas, 'GTS' indica gotas, 'XPE' indica xarope, 'SOL' indica solução oral (gotas), 'CR DENT' indica creme dental, 'ABS' indica absorvente, 'DESOD' indica desodorante, 'POM' indica pomada, 'SAB' indica sabonete.
    - Siglas finais indicam o laboratório fabricante: EMS, PRATI ou PRTD (Prati-Donaduzzi), NEOQ ou NQ (Neo Química), GERM ou GERMED (Germed), MDLY (Medley), CIMED (Cimed), EURO (Eurofarma), ACHÉ (Aché), SANOFI (Sanofi).
 
-3. CONCISÃO E DIRETO AO PONTO (REGRAS OBRIGATÓRIAS DE RESPOSTA):
-   - Respostas no WhatsApp devem ser CURTAS, humanizadas e sem enrolação.
-   - NUNCA dê explicações técnicas desnecessárias como "(solução, mas não em gotas)" ou justificativas longas.
+3. LINGUAGEM HUMANA, NATURAL E EMPÁTICA (POSTURA DE BALCONISTA EXPERIENTE):
+   - Respostas no WhatsApp devem ser CURTAS, naturais, acolhedoras e sem enrolação.
+   - CONTEXTO CONTÍNUO: Mantenha sempre o fio da meada das últimas mensagens da conversa. NUNCA cumprimente como se estivesse começando do zero se você já acabou de falar com o cliente.
+   - QUANDO O CLIENTE DISSER "NÃO ACHEI NA LOJA O MEDICAMENTO X" (ou que não encontrou no site/catálogo):
+     * NUNCA mande o cliente voltar para a loja procurar sozinho!
+     * Explique com simpatia que às vezes no sistema o nome aparece abreviado (ex: *DORFLEX 36CPR* - R$ 23,99), confirme que temos em estoque e já pergunte de forma natural:
+       "Temos sim! É que às vezes lá no sistema o nome fica abreviado como *DORFLEX 300+35+50MG 36CPR* (R$ 23,99). Quer que eu já deixe uma caixa separada pra você por aqui mesmo ou vai precisar de mais alguma coisa?"
+   - PROIBIÇÃO DE FRASES ROBÓTICAS REPETITIVAS:
+     * Evite repetir em todas as mensagens a frase robótica "Se precisar de mais alguma coisa, é só avisar! 😊" ou "Estou à disposição!". Converse de forma fluida e humana.
    - Quando o produto solicitado estiver disponível:
-     * Diga imediatamente que temos disponível ("Temos sim!"). NUNCA diga que não tem se o item constar na lista de produtos.
+     * Diga imediatamente que temos disponível ("Temos sim!").
      * Apresente NO MÁXIMO 2 A 3 OPÇÕES (as mais econômicas e relevantes) com laboratório/marca, apresentação/tamanho e preço, destacando a primeira com ⭐ Mais econômica.
-     * Finalize com uma pergunta curta convidando à ação.
-   
-   ESTRUTURA DE RESPOSTA (MÁXIMO 2 A 3 OPÇÕES):
-   - Se o cliente pedir dipirona em gotas e tivermos em estoque:
-     Exemplo ideal de resposta curta:
-     "Temos dipirona em gotas sim! 😊
-
-     1️⃣ Germed 20ml (500mg/ml) - R$ 7,49 ⭐ Mais econômica
-     2️⃣ Germed 10ml (500mg/ml) - R$ 9,14
-     3️⃣ Medley 10ml (500mg/ml) - R$ 14,55
-
-     Qual dessas opções você prefere levar? Posso separar para você!"
-
-   - Se o cliente pedir comprimidos (ex: dipirona 500mg ou 1g):
-     Exemplo ideal de resposta curta:
-     "Temos dipirona disponível nas seguintes opções:
-
-     1️⃣ EMS (10 comprimidos) - R$ 4,49 ⭐ Mais econômica
-     2️⃣ Prati-Donaduzzi (10 comprimidos) - R$ 4,49
-     3️⃣ Medley (10 comprimidos) - R$ 5,49
-
-     Qual dessas opções você prefere?"
-
-   - Se o cliente pediu uma dosagem ou formato que realmente NÃO temos em estoque:
-     * Diga educadamente e de forma curta que o formato específico não está disponível no momento e ofereça a alternativa mais próxima.
+     * Finalize com uma pergunta natural de balcão (ex: "Qual dessas você prefere que eu separe pra você?").
 
 4. RECONHECIMENTO DE ESCOLHA DO CLIENTE E LINK DIRETO DO PRODUTO:
    - Se o cliente responder escolhendo uma opção (ex: "vou querer a [marca]", "vou querer essa", "pode ser o número 1", "adiciona a de 4,49", "vou levar", "prefiro a ems"):
@@ -84,35 +68,24 @@ Seu objetivo é recepcionar o cliente com agilidade, tirar dúvidas sobre medica
        {link_direto_do_produto}"
      * Continue atendendo o cliente normalmente. Não acione transbordo para humano a menos que o cliente peça expressamente.
 
-5. CANAL PREFERENCIAL (CATÁLOGO ONLINE):
-   - Apresente a loja online como a forma mais prática e vantajosa para ver fotos, cupons, opções de genéricos/similares com desconto e calcular o frete automaticamente.
+5. TRANSBORDO PARA BALCONISTA HUMANO:
+   - Se o cliente pedir para falar com o balconista, atendente, farmacêutico, gerente ou pessoa humana:
+     * Responda APENAS: "Claro! Já chamei um dos nossos balconistas aqui para continuar o seu atendimento, só um instante! 😊 [TRANSFERIR_ATENDIMENTO]"
+     * NUNCA anexe o link da loja junto com uma mensagem de transferência para o balconista.
 
-6. PEDIDO DIRETO PELO WHATSAPP (VONTADE DO CLIENTE):
-   - Se o cliente informar que prefere fechar pelo WhatsApp ou mandar a lista de compras no chat:
-     1. Não insista excessivamente para que ele use o site.
-     2. Apresente os preços dos produtos consultados e tire as dúvidas do cliente.
-     3. Auxilie o cliente na conferência dos itens e valores. Se o cliente solicitar expressamente falar com um atendente ou finalizar com um atendente humano, acione [TRANSFERIR_ATENDIMENTO].
+6. DIRETRIZES DE LINKS E FORMATAÇÃO VISUAL (PADRÃO WHATSAPP):
+   - NUNCA pergunte "posso enviar o link da loja?", "quer o link da loja?" ou "posso te mandar o link?". O sistema da farmácia gerencia o envio do link automaticamente.
+   - NUNCA escreva âncoras falsas de texto sem URL como "👉 Clique aqui para comprar", "👉 Confira aqui na loja", "[Confira aqui na loja]" ou "[Link da loja]".
+   - FORMATAÇÃO DE NEGRITO: Use EXCLUSIVAMENTE o padrão WhatsApp de 1 único asterisco colado na palavra (ex: *Dorflex 36 Comprimidos*, *FRA BABYSEC G 26UN*). NUNCA utilize negrito duplo Markdown (**texto**), pois ele exibe asteriscos soltos na tela do cliente.
+   - Nunca polua o chat com múltiplos links na mesma mensagem.
 
 7. POLÍTICA DE ENTREGA E RECEITUÁRIO:
-   - A drogaria opera com foco exclusivo em tele-entrega (delivery). Não ofereça retirada em loja física.
-   - Para medicamentos controlados, antibióticos ou tarja preta, avise que a receita médica (foto legível no chat ou anexo no carrinho) deve ser conferida pelo farmacêutico antes da entrega.
+   - A drogaria opera com foco em tele-entrega rápida (delivery).
+   - Para medicamentos controlados, antibióticos ou tarja preta, avise que a receita médica deve ser conferida pelo farmacêutico.
 
-8. DIRETRIZES DE LINKS E FORMATAÇÃO VISUAL (PADRÃO WHATSAPP):
-   - NUNCA pergunte "posso enviar o link da loja?", "quer o link da loja?" ou "posso te mandar o link?". O sistema da farmácia gerencia o envio do link e do catálogo automaticamente.
-   - NUNCA escreva textos como "[Confira aqui na loja]", "[Link da loja]" ou colchetes sem URL real.
-   - FORMATAÇÃO DE NEGRITO: Use EXCLUSIVAMENTE o padrão WhatsApp de 1 único asterisco colado na palavra (ex: *Dorflex 36 Comprimidos*, *FRA BABYSEC G 26UN*). NUNCA utilize negrito duplo Markdown (**texto**), pois ele exibe asteriscos feios na tela do cliente.
-   - Formate SEMPRE a URL da loja online em uma linha isolada, com uma linha em branco antes e uma linha em branco depois (ex: '\n\nhttps://...farmaflow.online\n\n'), sem emojis ou símbolos grudados na mesma linha da URL, para que o WhatsApp gere perfeitamente o card com a logo da drogaria e a visualização completa do link (Link Preview).
-   - Nunca polua o chat com múltiplos links na mesma mensagem.
-   - Em buscas e listagens de preços, apresente apenas 'Nome - Preço' e inclua apenas o link geral da loja no final da mensagem em linha própria isolada.
-   - Envie o link direto de um produto específico SOMENTE se o cliente solicitar a compra daquele item em particular.
-   - Se o cliente optar por pedir pelo WhatsApp, não envie links de carrinho; apresente os valores, tire as dúvidas normalmente e auxilie o cliente. Apenas transfira se o cliente solicitar expressamente um atendente humano.
-
-9. POSTURA E LIMITES:
-   - Mantenha respostas curtas, gentis e comerciais (1 a 3 parágrafos). Não colete dados de cartão de crédito no chat.
-
-10. MENSAGENS DE ÁUDIO (TRANSCRIÇÃO AUTOMÁTICA):
+8. MENSAGENS DE ÁUDIO (TRANSCRIÇÃO AUTOMÁTICA):
    - NUNCA diga que não consegue ouvir áudios. Os áudios dos clientes são automaticamente transcritos pelo sistema antes de chegarem a você.
-   - Responda SEMPRE em TEXTO, de forma concisa, educada e direta (1 a 3 parágrafos), apresentando as opções com valores e o link da loja virtual para fechamento.`;
+   - Responda SEMPRE em TEXTO, de forma concisa, educada e natural.`;
 
 export interface AiChatMessage {
   role: 'user' | 'model' | 'assistant' | 'system';
@@ -540,18 +513,17 @@ export function formatToWhatsAppMarkdown(text: string): string {
 
   let res = text;
 
-  // 1. Converte negrito e itálico combinados (***texto***) para negrito WhatsApp (*texto*)
-  res = res.replace(/\*\*\*\s*([^*]+?)\s*\*\*\*/g, "*$1*");
+  // 1. Converte negrito Markdown duplo ou triplo (**texto** / ***texto***) para negrito WhatsApp (*texto*) sem espaços internos
+  res = res.replace(/\*{2,3}[ \t]*([^*\n]+?)[ \t]*\*{2,3}/g, (_match, inner) => `*${String(inner).trim()}*`);
 
-  // 2. Converte negrito Markdown duplo (**texto**) para negrito WhatsApp (*texto*)
-  res = res.replace(/\*\*\s*([^*]+?)\s*\*\*/g, "*$1*");
+  // 2. Garante que qualquer negrito simples (* texto *) não tenha espaços internos colados no asterisco,
+  // consumindo cada par (abertura + fechamento) atomicamente para nunca afetar o texto entre dois negritos
+  res = res.replace(/(^|[\s([{"'])\*[ \t]*([^*\n]+?)[ \t]*\*(?=$|[\s.,;:!?)}\]'"])/gm, (_match, prefix, inner) => {
+    return `${prefix}*${String(inner).trim()}*`;
+  });
 
-  // 3. Garante que qualquer negrito simples (* texto *) não tenha espaços internos colados no asterisco
-  res = res.replace(/\*([ \t]+)([^*]+?)\*/g, "*$2*");
-  res = res.replace(/\*([^*]+?)([ \t]+)\*/g, "*$1*");
-
-  // 4. Remove asteriscos duplos residuais
-  res = res.replace(/\*\*/g, "*");
+  // 3. Remove asteriscos duplos residuais
+  res = res.replace(/\*{2,}/g, "*");
 
   return res;
 }
@@ -688,13 +660,17 @@ export const PHARMA_EXPANSIONS: Record<string, string[]> = {
  * Balão 1: Texto de atendimento/orientação (sem o link)
  * Balão 2: EXCLUSIVAMENTE a URL pura (para que a Evolution API e o WhatsApp gerem o Link Preview perfeito com a logo da farmácia)
  */
-export function extractUrlAndCleanText(text: string): { mainText: string; url: string | null } {
+export function extractUrlAndCleanText(text: string, options?: { isHandoff?: boolean }): { mainText: string; url: string | null } {
   if (!text || typeof text !== "string") return { mainText: "", url: null };
 
   const cleanOrphans = (str: string): string => {
     let res = str
       .replace(/(?:em\s+nossa\s+|nossa\s+)?loja\s+online\s*[:\-–—]?\s*\(\s*\)/gi, "")
       .replace(/Loja Online\s*\(\s*\)/gi, "")
+      // Remove âncoras falsas de texto sem URL (ex: "👉 Clique aqui para comprar", "👉 **Clique aqui para comprar**", "👉 Confira aqui na loja")
+      .replace(/^[ \t]*(?:👉|🔗|🛒|🛍️)?[ \t]*\*{0,2}[ \t]*(?:Clique aqui para comprar|Confira aqui na loja|Clique aqui|Acesse aqui|Compre aqui|Veja na loja)[ \t]*\*{0,2}[ \t]*$/gim, "")
+      .replace(/(?:👉|🔗|🛒|🛍️)[ \t]*\*{0,2}[ \t]*(?:Clique aqui para comprar|Confira aqui na loja|Clique aqui|Acesse aqui|Compre aqui)[ \t]*\*{0,2}/gi, "")
+      .replace(/Voc[eê] pode conferir e finalizar a compra diretamente na nossa loja online pelo link abaixo\s*:?/gi, "")
       .replace(/\(\s*\)/g, "")
       .replace(/^\s*(?:👉|🔗|🛒|🛍️|🌐)\s*$/gm, "")
       .replace(/[\t ]{2,}/g, " ")
@@ -702,31 +678,21 @@ export function extractUrlAndCleanText(text: string): { mainText: string; url: s
       .replace(/[\t ]+$/gm, "")
       .trim();
 
-    // Limpeza de frases indevidas de balconista/transbordo que possam ter sido concatenadas
-    res = res
-      .replace(/Encaminhei sua d[uú]vida[^\n]*/gi, "")
-      .replace(/Um dos nossos balconistas[^\n]*/gi, "")
-      .replace(/J[aá] notifiquei nossa equipe[^\n]*/gi, "")
-      .replace(/Já encaminhei para a nossa equipe[^\n]*/gi, "")
-      .replace(/Estou transferindo o seu atendimento[^\n]*/gi, "")
-      .replace(/💬\s*\*?\*?Prefere continuar (por|aqui pelo)\s*WhatsApp\??\*?\*?[^\n]*/gi, "")
-      .replace(/[\t ]{2,}/g, " ")
-      .replace(/\n{3,}/g, "\n\n")
-      .trim();
-
-    // Se o texto terminou com chamada para o link ou loja (ex: "Para conferir mais detalhes ou aproveitar as promoções, acesse...")
-    if (/Para conferir mais detalhes ou aproveitar as promoções/i.test(res)) {
-      res = res.replace(
-        /Para conferir mais detalhes ou aproveitar as promoções[^\n]*$/i,
-        "Para conferir mais detalhes ou aproveitar as promoções, acesse o link abaixo 👇:"
-      );
-    } else {
-      // Remove rótulo de loja online órfão no final
-      res = res
-        .replace(/(?:em\s+nossa\s+|na\s+nossa\s+|nossa\s+)?loja\s+online\s*[:\-–—]?\s*$/gim, "")
-        .trim();
-      // Se a frase terminou com "acesse", "confira", etc., direciona elegantemente para o link abaixo
-      res = res.replace(/(?:acesse|confira|veja)\s*[:\-–—]?\s*$/i, "acesse o link abaixo 👇:");
+    if (!options?.isHandoff) {
+      // Se o texto terminou com chamada para o link ou loja (ex: "Para conferir mais detalhes ou aproveitar as promoções, acesse...")
+      if (/Para conferir mais detalhes ou aproveitar as promoções/i.test(res)) {
+        res = res.replace(
+          /Para conferir mais detalhes ou aproveitar as promoções[^\n]*$/i,
+          "Para conferir mais detalhes ou aproveitar as promoções, acesse o link abaixo 👇:"
+        );
+      } else {
+        // Remove rótulo de loja online órfão no final
+        res = res
+          .replace(/(?:em\s+nossa\s+|na\s+nossa\s+|nossa\s+)?loja\s+online\s*[:\-–—]?\s*$/gim, "")
+          .trim();
+        // Se a frase terminou com "acesse", "confira", etc., direciona elegantemente para o link abaixo
+        res = res.replace(/(?:acesse|confira|veja)\s*[:\-–—]?\s*$/i, "acesse o link abaixo 👇:");
+      }
     }
 
     return res.trim();
@@ -1247,32 +1213,36 @@ export class AiAgentService {
 - 'GTS' indica gotas, 'XPE' indica xarope, 'SOL' indica solução oral (gotas), 'EFERV' indica efervescente.
 - Siglas finais indicam o laboratório fabricante: EMS, PRATI ou PRTD (Prati-Donaduzzi), NEOQ ou NQ (Neo Química), GERM ou GERMED (Germed), MDLY (Medley), CIMED (Cimed), EURO (Eurofarma), ACHÉ (Aché), SANOFI (Sanofi).
 
-CONCISÃO E DIRETO AO PONTO (REGRAS OBRIGATÓRIAS DE RESPOSTA):
-- Respostas no WhatsApp devem ser CURTAS, humanizadas e sem enrolação.
-- NUNCA dê explicações técnicas desnecessárias como "(solução, mas não em gotas)" ou justificativas longas.
+CONCISÃO, LINGUAGEM NATURAL E EMPATIA DE BALCÃO (REGRAS OBRIGATÓRIAS DE RESPOSTA):
+- Respostas no WhatsApp devem ser CURTAS, humanizadas e sem enrolação, como um balconista experiente e atencioso.
+- CONTEXTO CONTÍNUO: Mantenha sempre o contexto das últimas 15 mensagens da conversa. NUNCA aja como se não tivesse acabado de conversar com o cliente.
+- Se o cliente disser "Não achei na loja o medicamento X" (ou que não encontrou no site), NUNCA mande ele voltar para a loja procurar sozinho! Explique com simpatia que às vezes no sistema o nome está abreviado (ex: *DORFLEX 36CPR* - R$ 23,99), confirme que tem em estoque e já pergunte de forma natural: "Quer que eu já deixe uma caixa separada pra você por aqui mesmo ou vai precisar de mais alguma coisa?".
+- NUNCA repita em todas as mensagens a frase robótica "Se precisar de mais alguma coisa, é só avisar! 😊".
+- NUNCA pergunte "posso enviar o link da loja?" e NUNCA escreva âncoras falsas sem URL como "👉 Clique aqui para comprar" ou "👉 Confira aqui na loja".
+- Use EXCLUSIVAMENTE negrito padrão do WhatsApp com 1 asterisco colado na palavra (*texto*), NUNCA use **texto**.
 - Quando o produto solicitado estiver disponível:
   * Diga imediatamente que temos disponível ("Temos sim!"). NUNCA diga que não tem se o item constar na lista de produtos.
   * Apresente NO MÁXIMO 2 A 3 OPÇÕES (as mais econômicas e relevantes) com laboratório/marca, apresentação/tamanho e preço, destacando a primeira com ⭐ Mais econômica.
-  * Finalize com uma pergunta curta convidando à ação.
+  * Finalize com uma pergunta curta e natural (ex: "Qual dessas você prefere que eu já deixe separada pra você?").
 
 ESTRUTURA DE RESPOSTA (MÁXIMO 2 A 3 OPÇÕES):
 - Se o cliente pedir dipirona em gotas e tivermos em estoque:
   Exemplo ideal de resposta curta:
   "Temos dipirona em gotas sim! 😊
 
-  1️⃣ Germed 20ml (500mg/ml) - R$ 7,49 ⭐ Mais econômica
-  2️⃣ Germed 10ml (500mg/ml) - R$ 9,14
-  3️⃣ Medley 10ml (500mg/ml) - R$ 14,55
+  1️⃣ *Germed 20ml (500mg/ml)* - R$ 7,49 ⭐ Mais econômica
+  2️⃣ *Germed 10ml (500mg/ml)* - R$ 9,14
+  3️⃣ *Medley 10ml (500mg/ml)* - R$ 14,55
 
-  Qual dessas você prefere levar? Posso separar para você ou enviar o link da loja!"
+  Qual dessas você prefere que eu separe pra você?"
 
 - Se o cliente pedir comprimidos (ex: dipirona 500mg ou 1g):
   Exemplo ideal de resposta curta:
   "Temos dipirona disponível nas seguintes opções:
 
-  1️⃣ EMS (10 comprimidos) - R$ 4,49 ⭐ Mais econômica
-  2️⃣ Prati-Donaduzzi (10 comprimidos) - R$ 4,49
-  3️⃣ Medley (10 comprimidos) - R$ 5,49
+  1️⃣ *EMS (10 comprimidos)* - R$ 4,49 ⭐ Mais econômica
+  2️⃣ *Prati-Donaduzzi (10 comprimidos)* - R$ 4,49
+  3️⃣ *Medley (10 comprimidos)* - R$ 5,49
 
   Qual dessas opções você prefere?"
 
@@ -1283,15 +1253,7 @@ RECONHECIMENTO DE ESCOLHA DO CLIENTE:
 - Se o cliente responder escolhendo uma opção (ex: "vou querer a [marca]", "vou querer essa da ems", "pode ser o número 1", "adiciona a de 4,49", "vou levar a medley", "quero essa", "prefiro a ems"):
   * NUNCA repita a lista de produtos ou alternativas.
   * NÃO apresente novas opções de medicamentos.
-  * Envie a confirmação personalizada com o link da loja:
-    "Perfeito! Já anotei a sua preferência. 😊
-
-    🛒 *Dica para agilizar:* Você pode concluir seu pedido agora mesmo pela nossa loja online:
-
-    Para conferir mais detalhes ou comprar agora, acesse o link abaixo 👇:
-    {STORE_LINK}
-
-    *(É muito mais rápido, prático e 100% seguro!)*"
+  * Confirme de forma acolhedora que já anotou/separou a preferência.
   * Continue atendendo o cliente normalmente. NÃO transfira para atendente humano nem diga que um balconista vai assumir a menos que o cliente solicite expressamente.`;
 
     if (basePrompt.includes("REGRAS DE EQUIVALÊNCIA FARMACÊUTICA")) {
@@ -1416,25 +1378,25 @@ ${chosenMsg}
               const promoTag = getProductPromotionTag(p);
               return `${idx + 1}. ${label} [Cadastro: ${p.name}] - R$ ${preco}${promoTag} [Estoque: ${statusEstoque} | ${tarja}] (Link: ${linkProd})`;
             }).join("\n") +
-            `\n\nDIRETRIZ ESTRITA DE CONCISÃO E RESPOSTA:
-- Respostas no WhatsApp devem ser CURTAS, humanizadas e sem enrolação. NUNCA dê explicações técnicas desnecessárias como '(solução, mas não em gotas)'.
-- PROMOÇÕES E OFERTAS: Quando houver produto com promoção ativa indicada por [OFERTA: ...], DESTAQUE a promoção com entusiasmo na mensagem do WhatsApp (ex: '🔥 Oferta especial: Leve 3 Pague 2!' ou '⚡ A partir de 3 unidades sai mais barato!').
-- Apresente NO MÁXIMO 2 A 3 OPÇÕES mais econômicas, numeradas (1️⃣, 2️⃣, 3️⃣) com Marca/Apresentação e R$ Preço, destacando a primeira com ⭐ Mais econômica.
-- Finalize com uma pergunta curta convidando à ação (ex: 'Qual dessas você prefere levar? Posso separar para você ou enviar o link da loja!').
-- NUNCA envie links individuais por produto ao listar opções. Insira apenas UM ÚNICO link geral da loja no rodapé (${storeLink}).
+            `\n\nDIRETRIZ ESTRITA DE CONCISÃO E TOM DE BALCONISTA HUMANO:
+- Respostas no WhatsApp devem ser CURTAS, naturais, empáticas e sem enrolação.
+- Se o cliente disse que "não achou na loja" (ex: "Não achei na loja o medicamento X"), NÃO mande ele voltar para a loja procurar sozinho! Explique com simpatia que às vezes no sistema o nome está abreviado (ex: *${displayProducts[0]?.name || 'PRODUTO'}* - R$ ${(Number(displayProducts[0]?.price) || 0).toFixed(2).replace('.', ',')}), confirme que temos em estoque e já pergunte de forma natural: "Quer que eu já deixe uma caixa separada pra você por aqui mesmo ou vai precisar de mais alguma coisa?".
+- NUNCA pergunte "posso enviar o link da loja?" e NUNCA escreva textos sem URL como "👉 Clique aqui para comprar" ou "👉 Confira aqui na loja".
+- NUNCA repita em todas as mensagens a frase robótica "Se precisar de mais alguma coisa, é só avisar! 😊".
+- PROMOÇÕES E OFERTAS: Quando houver produto com promoção ativa indicada por [OFERTA: ...], DESTAQUE a promoção com entusiasmo na mensagem do WhatsApp.
+- Apresente NO MÁXIMO 2 A 3 OPÇÕES mais econômicas, numeradas (1️⃣, 2️⃣, 3️⃣) com Marca/Apresentação em negrito simples do WhatsApp (*Nome*) e R$ Preço, destacando a primeira com ⭐ Mais econômica.
 - Se o cliente pediu gotas, frascos com 'GTS' ou 'SOL' (10ml, 20ml) como Maxalgina, Germed, Medley SÃO gotas! NUNCA ofereça comprimidos se houver gotas disponíveis.`;
         } else if (searchTerms.length > 0) {
           catalogContext = `\n\n[CATÁLOGO EM TEMPO REAL]:
 Nenhum produto com esses termos exatos foi localizado em estoque no banco de dados local.
-- Link de Busca na Webloja para enviar ao cliente: ${storeLink}?busca=${encodeURIComponent(primarySearchTerm)}
-- REGRA CRÍTICA: NÃO invente preços (como R$ 12,99 ou qualquer outro valor). Diga que não localizou o preço no momento, convide o cliente a consultar a Webloja pelo link acima ou a conversar com o atendente de plantão.`;
+- REGRA CRÍTICA: NÃO invente preços. Diga com simpatia que não localizou esse item específico no sistema agora e pergunte se ele quer que chame o balconista para verificar na prateleira.`;
         } else {
           catalogContext = `\n\n[CATÁLOGO EM TEMPO REAL]:
-Nenhum produto específico identificado na mensagem. Link geral da Webloja: ${storeLink}`;
+Nenhum produto específico identificado na mensagem.`;
         }
       } catch (catErr) {
         console.warn("[AiAgentService] Falha ao consultar contexto de produtos:", catErr);
-        catalogContext = `\n\nLink da Webloja: ${storeLink}`;
+        catalogContext = "";
       }
     }
 
@@ -1443,16 +1405,31 @@ Nenhum produto específico identificado na mensagem. Link geral da Webloja: ${st
     const currentInteraction = options?.sessionTurn ?? 1;
     const isFinalSessionTurn = currentInteraction >= maxInteractions;
 
+    // 7.1. Dupla Garantia (1a - Input): Se o cliente pediu para falar com balconista/atendente/humano/pessoa/farmacêutico/gerente,
+    // nem precisa arriscar alucinação: retorna imediatamente a mensagem acolhedora de transferência sem link!
+    const earlyHumanCheck = detectHumanHandoffIntent(incomingMessage);
+    if (earlyHumanCheck.isHumanRequested) {
+      return {
+        reply: DEFAULT_HUMAN_HANDOFF_MESSAGE,
+        provider: effectiveConfig.provider || 'gemini',
+        model: effectiveConfig.model || 'rule-based-handoff',
+        storeLinkUsed: storeLink,
+        interactionCount: currentInteraction,
+        maxInteractions,
+        transferredToHuman: true,
+        handoffReason: "HUMAN_REQUESTED"
+      };
+    }
+
     let finalTurnDirective = "";
     if (isFinalSessionTurn) {
       finalTurnDirective = `\n\n[DIRETRIZ CRÍTICA DE ÚLTIMA INTERAÇÃO DA SESSÃO]:
 Esta é a última resposta permitida nesta sessão antes do transbordo para o atendente humano.
 1. Responda a dúvida do cliente de forma conclusiva, amigável e direta.
-2. OBRIGATÓRIAMENTE recomende a compra na Webloja através do link: ${storeLink}
-3. Informe que um balconista humano da farmácia dará continuidade ao atendimento logo em seguida caso ele precise de algo a mais.`;
+2. Informe que já chamou um dos nossos balconistas para continuar o atendimento logo em seguida.`;
     }
 
-    const fullSystemInstruction = `${basePrompt}${catalogContext}${finalTurnDirective}\n\nLembre-se: Link da Webloja: ${storeLink}`;
+    const fullSystemInstruction = `${basePrompt}${catalogContext}${finalTurnDirective}`;
 
     const provider = effectiveConfig.provider || 'gemini';
     const apiKey = (
@@ -1480,46 +1457,64 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       rawResult = await this.callGemini(apiKey, effectiveConfig.model || 'gemini-2.5-flash', fullSystemInstruction, incomingMessage, chatHistory, storeLink, tenant);
     }
 
-    // 9. Detecção Ativa de Pedido de Atendimento Humano ou Confirmação Final de Entrega/Pagamento
+    // 9. DUPLA GARANTIA INFALÍVEL DE TRANSFERÊNCIA (1a Input + 1b Output Safety Net + Limite de Turnos + Checkout)
     const humanCheck = detectHumanHandoffIntent(incomingMessage);
     const checkoutCheck = detectFinalCheckoutIntent(incomingMessage);
+    const outputSafetyCheck = detectAiOutputHandoffIntent(rawResult.reply);
 
-    // O bot SÓ deve transferir para humano quando:
-    // a) Atingir o limite real de interações da sessão (isFinalSessionTurn, ex: 4/4 turnos)
-    // b) O cliente pedir explicitamente para falar com atendente/humano/farmacêutico (humanCheck.isHumanRequested)
-    // c) Confirmação final de checkout / endereço / pagamento (checkoutCheck.isFinalCheckout)
-    const shouldHandoff = isFinalSessionTurn || humanCheck.isHumanRequested || checkoutCheck.isFinalCheckout;
-    const handoffReason = humanCheck.isHumanRequested 
-      ? "HUMAN_REQUESTED" 
-      : (checkoutCheck.isFinalCheckout 
-          ? "CHECKOUT_FINAL_CONFIRMATION" 
-          : (isFinalSessionTurn ? "MAX_INTERACTIONS_REACHED" : undefined));
+    const shouldHandoff =
+      isFinalSessionTurn ||
+      humanCheck.isHumanRequested ||
+      checkoutCheck.isFinalCheckout ||
+      outputSafetyCheck.isHandoffOutput;
 
-    // 10. Limpeza de tags internas e garantia de presença do link da Webloja
+    const handoffReason = humanCheck.isHumanRequested
+      ? "HUMAN_REQUESTED"
+      : outputSafetyCheck.isHandoffOutput
+        ? "AI_OUTPUT_SAFETY_NET"
+        : checkoutCheck.isFinalCheckout
+          ? "CHECKOUT_FINAL_CONFIRMATION"
+          : isFinalSessionTurn
+            ? "MAX_INTERACTIONS_REACHED"
+            : undefined;
+
+    // 10. Limpeza de tags internas, âncoras falsas sem URL e frases robóticas repetitivas
     let enforcedReply = rawResult.reply
       .replace(/\[(TRANSFERIR_ATENDIMENTO|TRANSFER_TO_HUMAN|HANDOFF_HUMAN|TRANSBORDO)\]/gi, '')
-      .replace(/\[(?:Confira aqui na loja|Link da loja|Veja na loja|Acesse aqui|Clique aqui|Loja online)\](?:\([^)]*\))?/gi, '')
+      .replace(/\[(?:Confira aqui na loja|Link da loja|Veja na loja|Acesse aqui|Clique aqui|Clique aqui para comprar|Loja online)\](?:\([^)]*\))?/gi, '')
       .replace(/\[[^\]]+\]\(\s*\)/gi, '')
+      .replace(/^[ \t]*(?:👉|🔗|🛒|🛍️)?[ \t]*\*?(?:Clique aqui para comprar|Confira aqui na loja|Clique aqui|Acesse aqui|Compre aqui|Veja na loja)\*?[ \t]*$/gim, '')
+      .replace(/(?:👉|🔗|🛒|🛍️)[ \t]*\*?(?:Clique aqui para comprar|Confira aqui na loja|Clique aqui|Acesse aqui|Compre aqui)\*?/gi, '')
+      .replace(/Voc[eê] pode conferir e finalizar a compra diretamente na nossa loja online pelo link abaixo\s*:?/gi, '')
+      .replace(/Se precisar de mais alguma coisa,\s*[eé]\s*s[oó]\s*(?:me\s+)?avisar!?\s*(?:😊)?/gi, '')
       .replace(/Posso separar para você ou enviar o link da loja!/gi, 'Posso separar para você!')
       .replace(/posso (?:separar para você ou )?enviar o link da loja\??/gi, 'Posso separar para você!')
       .replace(/(?:quer|deseja) que eu (?:te )?envie o link(?: da loja)?\??/gi, 'Posso separar para você!')
+      .replace(/\n{3,}/g, '\n\n')
       .trim();
 
-    // Se NÃO for transbordo (turnos 1, 2, 3 normais), limpa rigorosamente qualquer frase residual de balconista ou transbordo
-    if (!shouldHandoff) {
-      enforcedReply = enforcedReply
-        .replace(/Encaminhei sua d[uú]vida[^\n]*/gi, '')
-        .replace(/Um dos nossos balconistas[^\n]*/gi, '')
-        .replace(/J[aá] notifiquei nossa equipe[^\n]*/gi, '')
-        .replace(/Já encaminhei para a nossa equipe[^\n]*/gi, '')
-        .replace(/Estou transferindo o seu atendimento[^\n]*/gi, '')
-        .replace(/💬\s*\*?\*?Prefere continuar (por|aqui pelo)\s*WhatsApp\??\*?\*?[^\n]*/gi, '')
-        .replace(/\n{3,}/g, '\n\n')
-        .trim();
-    }
+    // REGRA 2: Quando ocorrer transferência para o balconista (shouldHandoff === true por pedido do cliente ou output da IA),
+    // envie APENAS uma mensagem curta, completa e acolhedora e NUNCA anexe o link da loja nem o card de preview!
+    if (shouldHandoff) {
+      if (humanCheck.isHumanRequested || outputSafetyCheck.isHandoffOutput) {
+        enforcedReply = DEFAULT_HUMAN_HANDOFF_MESSAGE;
+      } else {
+        // Remove qualquer URL da loja em mensagens de transferência final
+        enforcedReply = enforcedReply
+          .replace(/Para conferir mais detalhes[^\n]*$/gim, '')
+          .replace(/acesse o link abaixo[^\n]*$/gim, '')
+          .replace(/🛍️\s*\*?Nossa (?:Loja Online|Webloja):?\*?\s*https?:\/\/[^\s]+/gi, '')
+          .replace(/https?:\/\/[^\s]+/gi, '')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim();
 
-    // Se o cliente escolheu uma opção, garante a mensagem oficial com link direto do produto sem transbordo prematuro
-    if (choiceCheck.isChoice) {
+        if (!enforcedReply.includes("balconista") && !enforcedReply.includes("atendente")) {
+          enforcedReply = enforcedReply
+            ? `${enforcedReply}\n\n${DEFAULT_HUMAN_HANDOFF_MESSAGE}`
+            : DEFAULT_HUMAN_HANDOFF_MESSAGE;
+        }
+      }
+    } else if (choiceCheck.isChoice) {
       if (resolvedChoice) {
         enforcedReply = `Perfeito! Já separei para você:\n💊 *${resolvedChoice.productName}* - R$ ${resolvedChoice.priceFormatted} 😊\n\n*(Pelo link você fecha em menos de 1 minuto, escolhe a forma de pagamento e seu pedido chega mais rápido!)*\n\nPara conferir mais detalhes ou comprar agora, acesse o link abaixo 👇:\n${resolvedChoice.directProductUrl}`;
       } else if (!enforcedReply.includes("http")) {
@@ -1532,16 +1527,6 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       if (!enforcedReply.includes("http") && !enforcedReply.includes(".online") && !enforcedReply.includes(".com")) {
         enforcedReply = `${enforcedReply}\n\nPara conferir mais detalhes ou aproveitar as promoções, acesse o link abaixo 👇:\n${storeLink}`;
       }
-    }
-
-    // 11. Se for transbordo legítimo (ex: limite de turnos atingido), anexa mensagem de transição humana caso não tenha
-    const rawTransition = (effectiveConfig.transitionToHumanMessage || "");
-    const cleanTransition = (rawTransition && !rawTransition.includes("Encaminhei sua dúvida") && !rawTransition.includes("balconistas humanos já vai te atender"))
-      ? rawTransition
-      : "Perfeito! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.";
-
-    if (shouldHandoff && isFinalSessionTurn && !choiceCheck.isChoice && !enforcedReply.includes("balconista") && !enforcedReply.includes("atendente humano")) {
-      enforcedReply = `${enforcedReply}\n\n${cleanTransition}`;
     }
 
     // 12. Formatação obrigatória no padrão nativo do WhatsApp (*texto* colado sem espaços internos)
@@ -1611,19 +1596,23 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       userAskedLink?: boolean;
     }
   ): Promise<{ success: boolean; error?: string }> {
-    // 1. Validação Estrita de Envio: Garantir que a conversa NÃO esteja sob controle humano
+    // 1. Validação Estrita de Envio: Garantir que a conversa NÃO esteja sob controle humano (exceto quando este próprio disparo é a mensagem final de transferência)
     const currentConv = await chatStore.getConversationById(conversationId);
-    if (currentConv) {
-      const isStageIa = currentConv.kanban_stage === "ia_atendendo" || currentConv.stage === "ia_atendendo";
+    if (currentConv && !params.isHandoff) {
+      const s = String(currentConv.status || "").toLowerCase();
+      const k = String(currentConv.kanban_stage || currentConv.stage || "").toLowerCase();
       const hasAssignedOperator = Boolean(currentConv.assigned_user_id) || Boolean((currentConv as any).assigned_to);
-      const isHuman = !isStageIa && (
+      const isHuman =
         currentConv.is_human_controlled === true ||
         currentConv.is_bot_active === false ||
-        hasAssignedOperator
-      );
+        (currentConv as any).ai_enabled === false ||
+        s === "human" ||
+        s === "human_takeover" ||
+        k === "em_atendimento" ||
+        hasAssignedOperator;
 
-      if (isHuman || hasAssignedOperator) {
-        console.log(`[AiAgentService] Envio abortado para conversa ${conversationId}: conversa assumida por operador humano.`);
+      if (isHuman) {
+        console.log(`[AiAgentService] Envio abortado para conversa ${conversationId}: conversa já está sob atendimento humano.`);
         return { success: false, error: "HUMAN_OPERATOR_ACTIVE" };
       }
     }
@@ -1634,21 +1623,86 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       return { success: false, error: err };
     }
 
+    // Se for transferência para balconista (isHandoff === true), NUNCA anexar link da loja nem card de preview!
+    let sanitizedReplyText = replyText;
+    if (params.isHandoff) {
+      sanitizedReplyText = sanitizedReplyText
+        .replace(/Para conferir mais detalhes[^\n]*/gi, "")
+        .replace(/acesse o link abaixo[^\n]*/gi, "")
+        .replace(/🛍️\s*\*?Nossa (?:Webloja|Loja Online):?\*?\s*https?:\/\/[^\s]+/gi, "")
+        .replace(/https?:\/\/[^\s]+/gi, "")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+      if (!sanitizedReplyText) {
+        sanitizedReplyText = params.transitionMsg || DEFAULT_HUMAN_HANDOFF_MESSAGE;
+      }
+    }
+
     // CONTROLE DE TAXA DO BALÃO DE LINK COM PREVIEW (/s/:slug):
     // Envia o balão com preview na 1ª vez que exibir produtos na conversa ou quando o cliente pedir o link/catálogo,
     // mas NÃO reenvia o mesmo card gigante com a logo em todas as mensagens consecutivas (trava de 10 minutos).
-    const isLinkExplicit = Boolean(params.userAskedLink) || isLinkExplicitlyRequested(params.incomingMessage || "");
-    const linkSentRecently = wasStoreLinkSentRecently(conversationId, cleanPhone, 10 * 60 * 1000);
-    const shouldSendLinkPreviewBalloon = isLinkExplicit || !linkSentRecently;
+    // E NUNCA envia em mensagens de transferência (params.isHandoff)!
+    const isLinkExplicit = !params.isHandoff && (Boolean(params.userAskedLink) || isLinkExplicitlyRequested(params.incomingMessage || ""));
+    let linkSentRecently = wasStoreLinkSentRecently(conversationId, cleanPhone, 10 * 60 * 1000);
+    if (!linkSentRecently && !params.isHandoff && !isLinkExplicit) {
+      try {
+        const tenMinAgoIso = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+        const { data: recentBotLinks } = await supabaseAdmin
+          .from("chat_messages")
+          .select("id, content, created_at")
+          .eq("conversation_id", conversationId)
+          .eq("sender_type", "BOT")
+          .gte("created_at", tenMinAgoIso)
+          .ilike("content", "%http%")
+          .limit(3);
+        if (recentBotLinks && recentBotLinks.length > 0) {
+          // Se o bot já enviou algum link de produto/loja nos últimos 10 minutos (exceto apenas boas-vindas sem turno de IA), ativa a trava
+          const hasRecentAiLink = recentBotLinks.some((m: any) =>
+            String(m.content || "").includes("?v=9") ||
+            String(m.content || "").includes("?produto=") ||
+            params.currentCount >= 1
+          );
+          if (hasRecentAiLink) {
+            linkSentRecently = true;
+            recordStoreLinkSent(conversationId, cleanPhone);
+          }
+        }
+      } catch (_) {}
+    }
+    const shouldSendLinkPreviewBalloon = !params.isHandoff && (isLinkExplicit || !linkSentRecently);
 
     // 1. Verificar se a mensagem contém link para separação estratégica em 2 balões:
     // Balão 1: Texto explicativo/atendimento (sem URL)
     // Balão 2: EXCLUSIVAMENTE a URL pura (para que a Evolution API e o WhatsApp gerem o Link Preview perfeito com a logo da farmácia)
-    const { mainText, url } = extractUrlAndCleanText(replyText);
-    const hasUrlToSplit = Boolean(url && url.startsWith("http"));
-    const finalReplyText = isolateUrlsInText(replyText);
+    const { mainText, url } = extractUrlAndCleanText(sanitizedReplyText, { isHandoff: params.isHandoff });
+    const hasUrlToSplit = !params.isHandoff && Boolean(url && url.startsWith("http"));
+    const finalReplyText = isolateUrlsInText(sanitizedReplyText);
     const nowIso = new Date().toISOString();
     const nextCount = params.nextCount;
+
+    // Se for handoff, já grava imediatamente no banco ANTES mesmo do envio terminar para blindar contra condições de corrida
+    if (params.isHandoff) {
+      const handoffReason = params.handoffReason || "HUMAN_REQUESTED";
+      const immediateHandoffPayload: any = {
+        bot_interaction_count: nextCount,
+        is_bot_active: false,
+        ai_enabled: false,
+        is_human_controlled: true,
+        kanban_stage: "em_atendimento",
+        stage: "em_atendimento",
+        status: "human",
+        bot_handoff_reason: handoffReason,
+        bot_handoff_at: nowIso,
+        updated_at: nowIso
+      };
+      try {
+        await supabaseAdmin
+          .from("chat_conversations")
+          .update(sanitizeChatConversationPayload(immediateHandoffPayload))
+          .eq("id", conversationId);
+        await chatStore.updateConversationBotStatus(conversationId, immediateHandoffPayload);
+      } catch (_) {}
+    }
 
     // FLUXO DE 2 BALÕES OU BALÃO ÚNICO COM TRAVA DE 10 MINUTOS
     if (hasUrlToSplit && mainText && mainText.trim().length > 0) {
@@ -1946,9 +2000,11 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       const handoffPayload: any = {
         bot_interaction_count: nextCount,
         is_bot_active: false,
+        ai_enabled: false,
         is_human_controlled: true,
         kanban_stage: "em_atendimento",
-        status: "human_takeover",
+        stage: "em_atendimento",
+        status: "human",
         bot_handoff_reason: handoffReason,
         bot_handoff_at: nowIso,
         last_message_at: nowIso,
@@ -1970,7 +2026,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         conversationId,
         realTenantId,
         handoffReason,
-        params.transitionMsg
+        params.transitionMsg || DEFAULT_HUMAN_HANDOFF_MESSAGE
       );
 
       await chatStore.updateConversationBotStatus(conversationId, handoffPayload);
@@ -1978,28 +2034,34 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       realtimeHub.broadcastToStore(realTenantId, "conversation_bot_toggled", {
         conversationId,
         is_bot_active: false,
+        ai_enabled: false,
         is_human_controlled: true,
-        status: "human_takeover",
+        status: "human",
         kanban_stage: "em_atendimento",
+        stage: "em_atendimento",
         bot_interaction_count: nextCount
       });
 
       realtimeHub.broadcastToStore(realTenantId, "conversation_status_changed", {
         conversationId,
-        status: "human_takeover",
+        status: "human",
         is_bot_active: false,
+        ai_enabled: false,
         is_human_controlled: true,
         bot_interaction_count: nextCount,
         bot_handoff_reason: handoffReason,
         bot_handoff_at: nowIso,
-        kanban_stage: "em_atendimento"
+        kanban_stage: "em_atendimento",
+        stage: "em_atendimento"
       });
 
       realtimeHub.broadcastToStore(realTenantId, "conversation_stage_changed", {
         conversationId,
-        stage: "HUMAN",
-        status: "human_takeover",
+        stage: "em_atendimento",
+        kanban_stage: "em_atendimento",
+        status: "human",
         is_bot_active: false,
+        ai_enabled: false,
         is_human_controlled: true,
         updated_at: nowIso
       });
@@ -2128,21 +2190,24 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         return { handled: true, transferredToHuman: true, reason: "WEBLOJA_ORDER_RECEIVED" };
       }
 
-      // 2. Obter conversa atual para inspecionar estado do bot
+      // 2. Obter conversa atual para inspecionar estado do bot (Silêncio Absoluto Pós-Transferência)
       const conv = await chatStore.getConversationById(conversationId);
       if (conv) {
-        const isStageIa = conv.kanban_stage === "ia_atendendo" || conv.stage === "ia_atendendo";
+        const s = String(conv.status || "").toLowerCase();
+        const k = String(conv.kanban_stage || conv.stage || "").toLowerCase();
         const hasAssignedOperator = Boolean(conv.assigned_user_id) || Boolean((conv as any).assigned_to);
 
-        const isHumanControlled = 
-          !isStageIa && (
-            conv.is_human_controlled === true ||
-            conv.is_bot_active === false ||
-            hasAssignedOperator
-          );
+        const isHumanControlled =
+          conv.is_human_controlled === true ||
+          conv.is_bot_active === false ||
+          (conv as any).ai_enabled === false ||
+          s === "human" ||
+          s === "human_takeover" ||
+          k === "em_atendimento" ||
+          hasAssignedOperator;
 
-        if (isHumanControlled || hasAssignedOperator) {
-          console.log(`[AiAgentService] IA pausada para a conversa ${conversationId}: Atendimento humano ativo (is_human_controlled: ${conv.is_human_controlled}, is_bot_active: ${conv.is_bot_active}, assigned_user_id: ${conv.assigned_user_id}).`);
+        if (isHumanControlled) {
+          console.log(`[AiAgentService] 🔇 Silêncio pós-transferência ativo para a conversa ${conversationId}: Atendimento humano em andamento (is_human_controlled: ${conv.is_human_controlled}, is_bot_active: ${conv.is_bot_active}, status: ${conv.status}, stage: ${conv.kanban_stage}).`);
           return { handled: false, transferredToHuman: true, reason: "ALREADY_HUMAN_ASSIGNED" };
         }
       }
@@ -2181,25 +2246,10 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       let currentCount = conv?.bot_interaction_count || 0;
       const maxInteractions = Number(dbConfig.maxInteractionsPerSession) || 4;
 
-      // Detecção de nova sessão:
-      // Se a conversa estiver com contador >= limite mas a mensagem atual for uma saudação ("boa noite", "bom dia", etc.)
-      // ou se o estágio for 'ia_atendendo' com contador estourado, reinicia a contagem para 0
-      const isGreeting = /^(boa\s+noite|bom\s+dia|boa\s+tarde|ol[aá]|oi|oii|oiii|hello|hey)\b/i.test(incomingMessage.trim());
-      if (currentCount >= maxInteractions && (isGreeting || conv?.kanban_stage === "ia_atendendo" || !conv?.is_human_controlled)) {
-        console.log(`[AiAgentService] 🔄 Reiniciando contador de interações da IA para 0 (Nova sessão iniciada para ${conversationId})`);
-        currentCount = 0;
-        try {
-          await supabaseAdmin
-            .from("chat_conversations")
-            .update({ bot_interaction_count: 0 })
-            .eq("id", conversationId);
-        } catch (_) {}
-      }
-
       const rawTransitionMsg = dbConfig.transitionToHumanMessage || "";
-      const transitionMsg = (rawTransitionMsg && !rawTransitionMsg.includes("Encaminhei sua dúvida") && !rawTransitionMsg.includes("balconistas humanos já vai te atender"))
-        ? rawTransitionMsg.replace(/\{store_url\}|\{STORE_URL\}|\{storeLink\}|\{STORE_LINK\}/g, storeLink)
-        : "Perfeito! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.";
+      const transitionMsg = (rawTransitionMsg && !rawTransitionMsg.includes("Encaminhei sua dúvida") && !rawTransitionMsg.includes("balconistas humanos já vai te atender") && !rawTransitionMsg.includes("{store"))
+        ? rawTransitionMsg.replace(/https?:\/\/[^\s]+/gi, "").trim()
+        : DEFAULT_HUMAN_HANDOFF_MESSAGE;
 
       // 4. Tratamento especial EXCLUSIVO para documentos e imagens de receitas médicas (PDFs, fotos)
       // NUNCA acionar para áudio de voz!
@@ -2211,7 +2261,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       if (isDocumentAttachment || isImageAttachment || isOtherMedia) {
         console.log(`[AiAgentService] Anexo de documento/imagem detectado (${incomingMessage}) para conversa ${conversationId}. Registrando e acionando transbordo para conferência humana.`);
         const attachmentType = isDocumentAttachment ? "documento/receita" : "arquivo";
-        const replyText = `Olá! Recebemos o seu ${attachmentType} com sucesso. 📄\n\nJá encaminhei para a nossa equipe de atendimento para conferência e orçamento. Um de nossos balconistas humanos irá responder em instantes!\n\n🛍️ *Nossa Loja Online:* ${storeLink}`;
+        const replyText = `Olá! Recebemos o seu ${attachmentType} com sucesso. 📄\n\nJá chamei um dos nossos balconistas aqui para conferir e continuar o seu atendimento, só um instante! 😊`;
 
         const dispatchResult = await this.dispatchBotReplyAndRecord(
           realTenantId,
@@ -2222,7 +2272,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
           {
             isHandoff: true,
             handoffReason: isDocumentAttachment ? "DOCUMENT_RECEIVED" : "MEDIA_RECEIVED",
-            transitionMsg,
+            transitionMsg: replyText,
             currentCount,
             nextCount: currentCount + 1,
             replyWithAudio: false,
@@ -2242,7 +2292,8 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         };
       }
 
-      // 5. Verificar Termos Sensíveis de Transbordo Imediato (ex: receita, falar com humano)
+      // 5. DUPLA GARANTIA (1ª Camada - Input): Gatilho imediato na mensagem do cliente
+      const inputHandoffCheck = detectHumanHandoffIntent(incomingMessage);
       const handoffCheck = await botHandoffManager.processMessageState(
         conversationId,
         realTenantId,
@@ -2250,9 +2301,11 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         conv?.status || "BOT"
       );
 
-      if (handoffCheck.isBotActive === false) {
-        const transMessage = `${handoffCheck.message || transitionMsg}\n\n🛍️ *Nossa Webloja:* ${storeLink}`;
-        
+      if (inputHandoffCheck.isHumanRequested || handoffCheck.isBotActive === false) {
+        const handoffReason = handoffCheck.handoffReason || inputHandoffCheck.reason || "HUMAN_REQUESTED";
+        // Envia APENAS uma mensagem curta, completa e acolhedora, NUNCA anexando link da loja nem card de preview!
+        const transMessage = DEFAULT_HUMAN_HANDOFF_MESSAGE;
+
         const dispatchResult = await this.dispatchBotReplyAndRecord(
           realTenantId,
           conversationId,
@@ -2261,8 +2314,8 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
           transMessage,
           {
             isHandoff: true,
-            handoffReason: handoffCheck.handoffReason || "KEYWORD_TRIGGER",
-            transitionMsg,
+            handoffReason,
+            transitionMsg: transMessage,
             currentCount,
             nextCount: currentCount + 1
           }
@@ -2276,7 +2329,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
           handled: true,
           replyText: transMessage,
           transferredToHuman: true,
-          reason: handoffCheck.handoffReason || "KEYWORD_TRIGGER"
+          reason: handoffReason
         };
       }
 
@@ -2285,7 +2338,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         const abuseCheck = detectAbuseOrPromptInjection(incomingMessage);
         if (abuseCheck.isSuspicious) {
           console.warn(`[AiAgentService] Abuso/Injection bloqueado para conversa ${conversationId}:`, abuseCheck.reason);
-          const safeReply = `Olá! Para garantir a sua segurança e o melhor suporte sobre nossos produtos e medicamentos, você pode consultar nosso catálogo completo e valores em nossa Loja Online:\n👉 ${storeLink}\n\n${transitionMsg}`;
+          const safeReply = DEFAULT_HUMAN_HANDOFF_MESSAGE;
 
           const dispatchResult = await this.dispatchBotReplyAndRecord(
             realTenantId,
@@ -2296,7 +2349,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
             {
               isHandoff: true,
               handoffReason: "SECURITY_INJECTION_DETECTED",
-              transitionMsg,
+              transitionMsg: safeReply,
               currentCount,
               nextCount: currentCount + 1
             }
@@ -2326,18 +2379,31 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         };
       }
 
-      // 8. Carregar histórico recente da conversa para contexto
+      // 8. Carregar histórico recente da conversa (últimas 15 mensagens) sem duplicar a mensagem atual
       let history = options?.chatHistory || [];
       if (!history || history.length === 0) {
         try {
           const rawMsgs = await chatStore.getMessages(conversationId);
           if (rawMsgs && rawMsgs.length > 0) {
-            history = rawMsgs.slice(-15).map((m: any) => ({
+            let filteredMsgs = [...rawMsgs];
+            // Se a última mensagem gravada no banco já for exatamente a incomingMessage atual do cliente, remove do histórico para não duplicar no prompt
+            const lastMsg = filteredMsgs[filteredMsgs.length - 1];
+            if (
+              lastMsg &&
+              (lastMsg.sender_type === "CUSTOMER" || lastMsg.sender === "CUSTOMER" || lastMsg.senderType === "CUSTOMER") &&
+              String(lastMsg.content || "").trim() === String(incomingMessage || "").trim()
+            ) {
+              filteredMsgs.pop();
+            }
+
+            history = filteredMsgs.slice(-15).map((m: any) => ({
               role: (m.sender_type === "CUSTOMER" || m.sender === "CUSTOMER" || m.senderType === "CUSTOMER") ? "user" : "assistant",
               content: m.content || ""
             }));
           }
         } catch (_) {}
+      } else {
+        history = history.slice(-15);
       }
 
       const nextCount = currentCount + 1;
@@ -2347,8 +2413,8 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       const checkoutCheck = detectFinalCheckoutIntent(incomingMessage);
       if (checkoutCheck.isFinalCheckout) {
         console.log(`[AiAgentService] 📦 Confirmação de endereço/pagamento detectada ("${incomingMessage}") na conversa ${conversationId}. Transferindo para fechamento operacional.`);
-        const checkoutReply = `Perfeito! Recebi seus dados para entrega e pagamento. 🛵💨\n\nEstou transferindo agora mesmo para um de nossos balconistas conferir e finalizar o envio do seu pedido!\n\n${storeLink}`;
-        const dispatchResult = await this.dispatchBotReplyAndRecord(
+        const checkoutReply = `Perfeito! Recebi seus dados para entrega e pagamento. 🛵💨\n\nJá chamei um dos nossos balconistas aqui para conferir e finalizar o envio do seu pedido, só um instante! 😊`;
+        await this.dispatchBotReplyAndRecord(
           realTenantId,
           conversationId,
           targetInstanceName,
@@ -2396,13 +2462,13 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         );
 
         const choiceReplyText = resolvedChoice
-          ? `Perfeito! Já separei para você:\n💊 *${resolvedChoice.productName}* - R$ ${resolvedChoice.priceFormatted} 😊\n\n*(Pelo link você fecha em menos de 1 minuto, escolhe a forma de pagamento e seu pedido chega mais rápido!)*\n\nPara conferir mais detalhes ou comprar agora, acesse o link abaixo 👇:\n${resolvedChoice.directProductUrl}`
-          : `Perfeito! Já consultei as opções disponíveis para você. 😊\n\nPara conferir mais detalhes, valores e promoções em nossa loja online, acesse o link abaixo 👇:\n${storeLink}`;
+          ? `Perfeito! Já deixei separado para você:\n💊 *${resolvedChoice.productName}* - R$ ${resolvedChoice.priceFormatted} 😊\n\nPara fechar rapidinho pelo site ou se preferir concluir por aqui mesmo, o link direto é este abaixo 👇:\n${resolvedChoice.directProductUrl}`
+          : `Perfeito! Já separei a sua opção aqui no sistema. 😊\n\nQuer que eu já encaminhe para entrega por aqui mesmo ou vai precisar de mais alguma coisa?`;
 
         const isHandoffTurn = isFinalTurn;
         const handoffReason = isFinalTurn ? "MAX_INTERACTIONS_REACHED" : undefined;
         const finalReplyWithHandoff = isFinalTurn
-          ? `${choiceReplyText}\n\n${transitionMsg}`
+          ? DEFAULT_HUMAN_HANDOFF_MESSAGE
           : choiceReplyText;
 
         const dispatchResult = await this.dispatchBotReplyAndRecord(
@@ -2435,7 +2501,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         };
       }
 
-      // 9. Gerar resposta com a LLM passando o turno exato da sessão
+      // 9. Gerar resposta com a LLM passando o turno exato da sessão e histórico de 15 mensagens
       const aiResult = await this.generateReply(
         realTenantId,
         incomingMessage,
@@ -2446,18 +2512,47 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
 
       let finalReply = aiResult.reply;
 
-      // 10. A frase de balconista e a mudança para Humano SÓ devem ocorrer quando:
-      // a) Atingir o limite máximo de turnos da IA (isFinalTurn, ex: 4/4 interações); OU
-      // b) O cliente pedir explicitamente para falar com atendente/humano/farmacêutico (handoffCheck.isHumanRequested)
-      const shouldHandoff = isFinalTurn || checkoutCheck.isFinalCheckout;
+      // 10. DUPLA GARANTIA (2ª Camada - Output Safety Net):
+      // Se a resposta gerada pela IA contiver frases de transferência ("transfiro a conversa", "transferir", "vou te conectar",
+      // "balconista humano", "continuar o atendimento", "chamei um dos nossos balconistas"), força IMEDIATAMENTE shouldHandoff = true!
+      const outputHandoffCheck = detectAiOutputHandoffIntent(finalReply);
+      const shouldHandoff =
+        isFinalTurn ||
+        checkoutCheck.isFinalCheckout ||
+        inputHandoffCheck.isHumanRequested ||
+        handoffCheck.isBotActive === false ||
+        outputHandoffCheck.isHandoffOutput;
 
       if (shouldHandoff) {
-        const resolvedReason = isFinalTurn
-          ? "MAX_INTERACTIONS_REACHED"
-          : (checkoutCheck.isFinalCheckout ? "CHECKOUT_FINAL_CONFIRMATION" : "HUMAN_REQUESTED");
+        const resolvedReason = inputHandoffCheck.isHumanRequested
+          ? (inputHandoffCheck.reason || "HUMAN_REQUESTED")
+          : outputHandoffCheck.isHandoffOutput
+            ? (outputHandoffCheck.reason || "AI_OUTPUT_HANDOFF_TRIGGER")
+            : isFinalTurn
+              ? "MAX_INTERACTIONS_REACHED"
+              : (checkoutCheck.isFinalCheckout ? "CHECKOUT_FINAL_CONFIRMATION" : "HUMAN_REQUESTED");
 
-        if (isFinalTurn && !finalReply.includes("balconista") && !finalReply.includes("atendente humano")) {
-          finalReply = `${finalReply}\n\n${transitionMsg}`;
+        console.log(`[AiAgentService] 🤝 Transbordo humano acionado (shouldHandoff=true, motivo=${resolvedReason}) para conversa ${conversationId}.`);
+
+        // Se a transferência veio de pedido do cliente ou da própria resposta da IA, garante uma mensagem curta, completa e acolhedora SEM link da loja!
+        let handoffReplyText = finalReply
+          .replace(/\[(TRANSFERIR_ATENDIMENTO|TRANSFER_TO_HUMAN|HANDOFF_HUMAN|TRANSBORDO)\]/gi, "")
+          .replace(/Para conferir mais detalhes[^\n]*/gi, "")
+          .replace(/acesse o link abaixo[^\n]*/gi, "")
+          .replace(/https?:\/\/[^\s]+/gi, "")
+          .replace(/\n{3,}/g, "\n\n")
+          .trim();
+
+        if (
+          inputHandoffCheck.isHumanRequested ||
+          outputHandoffCheck.isHandoffOutput ||
+          !handoffReplyText ||
+          handoffReplyText.endsWith(",") ||
+          handoffReplyText.endsWith(" e")
+        ) {
+          handoffReplyText = DEFAULT_HUMAN_HANDOFF_MESSAGE;
+        } else if (isFinalTurn && !/balconista|atendente/i.test(handoffReplyText)) {
+          handoffReplyText = `${handoffReplyText}\n\n${DEFAULT_HUMAN_HANDOFF_MESSAGE}`;
         }
 
         const dispatchResult = await this.dispatchBotReplyAndRecord(
@@ -2465,11 +2560,11 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
           conversationId,
           targetInstanceName,
           cleanPhone,
-          finalReply,
+          handoffReplyText,
           {
             isHandoff: true,
             handoffReason: resolvedReason,
-            transitionMsg,
+            transitionMsg: DEFAULT_HUMAN_HANDOFF_MESSAGE,
             currentCount,
             nextCount,
             replyWithAudio: shouldReplyWithAudio,
@@ -2484,22 +2579,17 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
 
         return {
           handled: true,
-          replyText: finalReply,
+          replyText: handoffReplyText,
           transferredToHuman: true,
           reason: resolvedReason
         };
       }
 
-      // 11. Interação normal do bot (Turnos 1, 2 e 3):
-      // A IA responde normalmente, consulta produtos e ajuda o cliente SEM dizer frase de balconista e SEM mudar para Humano!
-      // Se a IA enviar o link da loja durante a conversa, ela continua 100% ATIVA (ai_enabled = true, coluna da IA).
+      // 11. Interação normal do bot (quando shouldHandoff === false):
+      // Remove apenas tags técnicas e âncoras falsas sem URL
       finalReply = finalReply
         .replace(/\[(TRANSFERIR_ATENDIMENTO|TRANSFER_TO_HUMAN|HANDOFF_HUMAN|TRANSBORDO)\]/gi, '')
-        .replace(/Encaminhei sua d[uú]vida[^\n]*/gi, '')
-        .replace(/Um dos nossos balconistas[^\n]*/gi, '')
-        .replace(/J[aá] notifiquei nossa equipe[^\n]*/gi, '')
-        .replace(/Já encaminhei para a nossa equipe[^\n]*/gi, '')
-        .replace(/Estou transferindo o seu atendimento[^\n]*/gi, '')
+        .replace(/👉\s*\*{0,2}\s*(?:Clique aqui para comprar|Confira aqui na loja|Acesse aqui|Compre aqui)\s*\*{0,2}(?!\s*https?:\/\/)/gi, '')
         .replace(/💬\s*\*?\*?Prefere continuar (por|aqui pelo)\s*WhatsApp\??\*?\*?[^\n]*/gi, '')
         .replace(/\n{3,}/g, '\n\n')
         .trim();
@@ -3133,8 +3223,8 @@ ${taskInstruction}`;
       // Normalizar histórico para formato Gemini
       const contents: any[] = [];
 
-      // Adicionar mensagens anteriores
-      for (const msg of chatHistory.slice(-10)) {
+      // Adicionar últimas 15 mensagens anteriores para manter contexto contínuo
+      for (const msg of chatHistory.slice(-15)) {
         const role = (msg.role === 'user') ? 'user' : 'model';
         contents.push({
           role,
@@ -3283,7 +3373,7 @@ ${taskInstruction}`;
         { role: 'system', content: systemInstruction }
       ];
 
-      for (const msg of chatHistory.slice(-10)) {
+      for (const msg of chatHistory.slice(-15)) {
         const role = (msg.role === 'user') ? 'user' : 'assistant';
         messages.push({ role, content: msg.content });
       }
@@ -3405,7 +3495,8 @@ ${taskInstruction}`;
       const rawReply = assistantMsg?.content || "Desculpe, não foi possível obter resposta.";
       const cleanedReply = rawReply
         .replace(/\[(https?:\/\/[^\s\]]+)\]\(\1\)/gi, '$1')
-        .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/gi, '$1 ($2)');
+        .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/gi, '$1 ($2)')
+        .replace(/👉\s*\*{0,2}\s*(?:Clique aqui para comprar|Confira aqui na loja|Acesse aqui|Compre aqui)\s*\*{0,2}(?!\s*https?:\/\/)/gi, '');
 
       return {
         reply: cleanedReply.trim(),

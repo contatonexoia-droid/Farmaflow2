@@ -31,8 +31,11 @@ export function normalizeTextForIntent(text: string): string {
     .trim();
 }
 
+export const DEFAULT_HUMAN_HANDOFF_MESSAGE =
+  "Claro! Já chamei um dos nossos balconistas aqui para continuar o seu atendimento, só um instante! 😊";
+
 /**
- * Detector de alta sensibilidade para pedidos de Atendimento Humano, Balconista, Farmacêutico ou Atendente
+ * Detector de alta sensibilidade para pedidos de Atendimento Humano, Balconista, Farmacêutico, Gerente ou Atendente (Gatilho Input 1a)
  */
 export function detectHumanHandoffIntent(message: string): { isHumanRequested: boolean; reason?: string } {
   if (!message || typeof message !== 'string') return { isHumanRequested: false };
@@ -41,9 +44,18 @@ export function detectHumanHandoffIntent(message: string): { isHumanRequested: b
 
   if (!normalized) return { isHumanRequested: false };
 
-  // 1. Mensagens diretas e termos exatos
+  // 1a. Gatilho Imediato na Mensagem do Cliente (Input):
+  // Qualquer variação de pedido de atendimento humano ("balconista", "atendente", "humano", "pessoa", "farmacêutico", "farmaceutico", "falar com alguém", "falar com alguem", "gerente")
+  const immediateHumanKeywords = /\b(balconista|balconistas|atendente|atendentes|humano|humana|pessoa|farmaceutico|farmaceutica|gerente|balcao)\b/i;
+  const immediateHumanPhrases = /\b(falar\s+com\s+alguem|conversar\s+com\s+alguem|chamar\s+alguem|tem\s+alguem\s+ai|passa\s+pra\s+alguem|quero\s+alguem)\b/i;
+
+  if (immediateHumanKeywords.test(normalized) || immediateHumanPhrases.test(normalized)) {
+    return { isHumanRequested: true, reason: "IMMEDIATE_HUMAN_KEYWORD" };
+  }
+
+  // 1b. Mensagens diretas e termos exatos adicionais
   const directWords = [
-    "atendente", "balconista", "humano", "humana", "pessoa", "farmaceutico", "farmaceutica",
+    "atendente", "balconista", "humano", "humana", "pessoa", "farmaceutico", "farmaceutica", "gerente",
     "atendente humano", "pessoa real", "balcao", "atendente por favor", "balconista por favor",
     "falar com atendente", "falar com balconista", "falar com humano", "falar com pessoa",
     "falar com farmaceutico", "chamar atendente", "chamar balconista", "chamar humano",
@@ -53,7 +65,8 @@ export function detectHumanHandoffIntent(message: string): { isHumanRequested: b
     "transferir para atendente", "transferir para balconista", "transferir para humano",
     "me transfere", "me passa", "0", "falar com atendente humano", "quero falar com atendente",
     "quero falar com o balconista", "quero falar com um atendente", "quero falar com balconista",
-    "atendimento humano", "suporte humano", "falar com atendente", "falar com atendentes",
+    "queria falar com o balconista", "queria falar com um balconista", "e o balconista",
+    "atendimento humano", "suporte humano", "falar com atendentes", "falar com alguem",
     "falar com balconistas", "atendentes", "balconistas", "gente", "pessoa de verdade"
   ];
 
@@ -63,14 +76,14 @@ export function detectHumanHandoffIntent(message: string): { isHumanRequested: b
 
   // 2. Expressões Regulares de Intenção de Transferência / Balconista / Atendente Humano
   const handoffPatterns = [
-    // Verbos de ação + atendente/balconista/humano/farmacêutico
-    /\b(falar|conversar|dialogar|passar|passa|transfere|transferir|chamar|chama|conectar|mandar|encaminhar|colocar|atender|atende)\s+(com\s+|pro\s+|pra\s+|para\s+)?(um|uma|o|a|os|as\s+)?(atendente|balconista|farmaceutico|farmaceutica|humano|humana|pessoa|operador|operadora|vendedor|vendedora|balcao|equipe|alguem|gente)\b/i,
+    // Verbos de ação + atendente/balconista/humano/farmacêutico/gerente
+    /\b(falar|conversar|dialogar|passar|passa|transfere|transferir|chamar|chama|conectar|mandar|encaminhar|colocar|atender|atende)\s+(?:com\s+|pro\s+|pra\s+|para\s+)?(?:(?:um|uma|o|a|os|as)\s+)?(atendente|balconista|farmaceutico|farmaceutica|gerente|humano|humana|pessoa|operador|operadora|vendedor|vendedora|balcao|equipe|alguem|gente)\b/i,
     
-    // Quero / Preciso / Gostaria de + atendente/balconista/humano
-    /\b(quero|queria|preciso|precisava|gostaria\s+de|desejo|favor)\s+(falar\s+com\s+|conversar\s+com\s+|atendimento\s+com\s+|ser\s+atendido\s+por\s+)?(um|uma|o|a|os|as\s+)?(atendente|balconista|farmaceutico|farmaceutica|humano|humana|pessoa|operador|operadora|vendedor|vendedora|balcao|alguem)\b/i,
+    // Quero / Queria / Preciso / Gostaria de + atendente/balconista/humano
+    /\b(quero|queria|preciso|precisava|gostaria\s+de|desejo|favor)\s+(?:falar\s+com\s+|conversar\s+com\s+|atendimento\s+com\s+|ser\s+atendido\s+por\s+)?(?:(?:um|uma|o|a|os|as)\s+)?(atendente|balconista|farmaceutico|farmaceutica|gerente|humano|humana|pessoa|operador|operadora|vendedor|vendedora|balcao|alguem)\b/i,
     
     // Pergunta de disponibilidade de humano / atendente
-    /\b(tem|teria|existe|possui)\s+(algum|alguma|um|uma\s+)?(atendente|balconista|humano|pessoa|farmaceutico|alguem)\s+(ai|online|disponivel|pra\s+falar|atendendo)?\b/i,
+    /\b(tem|teria|existe|possui|cade|e\s+o|e\s+a)\s+(?:(?:algum|alguma|um|uma|o|a)\s+)?(atendente|balconista|humano|pessoa|farmaceutico|gerente|alguem)\b/i,
     
     // Rejeição ao bot / robô
     /\b(nao\s+quero|chega\s+de|sai|odeio|para\s+de)\s+(robo|bot|ia|inteligencia\s+artificial|maquina|sistema\s+automatico)\b/i,
@@ -91,6 +104,39 @@ export function detectHumanHandoffIntent(message: string): { isHumanRequested: b
   }
 
   return { isHumanRequested: false };
+}
+
+/**
+ * 1b. Gatilho na Resposta da IA (Output Safety Net):
+ * Se a resposta gerada pela LLM contiver frases de transferência para balconista/atendente,
+ * força IMEDIATAMENTE shouldHandoff = true.
+ */
+export function detectAiOutputHandoffIntent(aiReply: string): { isHandoffOutput: boolean; reason?: string } {
+  if (!aiReply || typeof aiReply !== "string") return { isHandoffOutput: false };
+
+  if (/\[(TRANSFERIR_ATENDIMENTO|TRANSFER_TO_HUMAN|HANDOFF_HUMAN|TRANSBORDO)\]/i.test(aiReply)) {
+    return { isHandoffOutput: true, reason: "AI_TAG_HANDOFF" };
+  }
+
+  const norm = normalizeTextForIntent(aiReply);
+  if (!norm) return { isHandoffOutput: false };
+
+  const outputHandoffPatterns = [
+    /\b(transfiro\s+a\s+conversa|transferindo\s+a\s+conversa|transferindo\s+o\s+seu\s+atendimento|transferindo\s+seu\s+atendimento|vou\s+transferir|estou\s+transferindo)\b/i,
+    /\b(enquanto\s+eu\s+transfiro|aguarde\s+um\s+momento\s+enquanto\s+eu\s+transfiro|transferir\s+voce|transferir\s+o\s+atendimento)\b/i,
+    /\b(vou\s+te\s+conectar|te\s+conectar\s+com|conectar\s+voce\s+com|conectando\s+voce)\b/i,
+    /\b(balconista\s+humano|atendente\s+humano|um\s+dos\s+nossos\s+balconistas|um\s+de\s+nossos\s+balconistas|nossa\s+equipe\s+de\s+balconistas|chamei\s+um\s+dos\s+nossos\s+balconistas)\b/i,
+    /\b(continuar\s+o\s+atendimento|continuar\s+o\s+seu\s+atendimento|continuar\s+seu\s+atendimento|dar\s+continuidade\s+ao\s+seu\s+atendimento|assumir\s+o\s+atendimento|assumira\s+o\s+atendimento)\b/i,
+    /\b(ja\s+notifiquei\s+nossa\s+equipe|ja\s+encaminhei\s+para\s+a\s+nossa\s+equipe|um\s+atendente\s+ja\s+vai\s+te\s+responder|um\s+balconista\s+ja\s+vai\s+te\s+atender)\b/i
+  ];
+
+  for (const pat of outputHandoffPatterns) {
+    if (pat.test(norm)) {
+      return { isHandoffOutput: true, reason: "AI_OUTPUT_SAFETY_NET" };
+    }
+  }
+
+  return { isHandoffOutput: false };
 }
 
 // Cache global de IDs de mensagens enviadas pelo bot FarmaFlow (evita eco de webhook da Evolution API)
@@ -467,7 +513,7 @@ export class BotHandoffManager {
         conversationId,
         storeId,
         "HUMAN_REQUESTED",
-        "Com certeza! Já estou transferindo o seu atendimento para a nossa equipe de balconistas. Um momento que um atendente humano já vai te responder por aqui! 👨‍⚕️"
+        DEFAULT_HUMAN_HANDOFF_MESSAGE
       );
     }
 
@@ -486,16 +532,18 @@ export class BotHandoffManager {
     const nowIso = new Date().toISOString();
     const assignedOperator = await this.allocateNextOnlineOperator(storeId);
 
-    const defaultTransitionMsg = customMessage || "Encaminhei sua solicitação para a nossa equipe. Um de nossos atendentes humanos já vai te atender por aqui!";
+    const defaultTransitionMsg = customMessage || DEFAULT_HUMAN_HANDOFF_MESSAGE;
 
     if (assignedOperator) {
       // Atribuído diretamente a um operador ativo
       const handoffData: any = {
         assigned_user_id: assignedOperator.id,
-        status: "human_takeover",
+        status: "human",
         kanban_stage: "em_atendimento",
+        stage: "em_atendimento",
         is_human_controlled: true,
         is_bot_active: false,
+        ai_enabled: false,
         bot_handoff_reason: reason,
         bot_handoff_at: nowIso,
         updated_at: nowIso
@@ -515,10 +563,12 @@ export class BotHandoffManager {
 
       realtimeHub.broadcastToStore(storeId, "conversation_status_changed", {
         conversationId,
-        status: "human_takeover",
+        status: "human",
         kanban_stage: "em_atendimento",
+        stage: "em_atendimento",
         is_human_controlled: true,
         is_bot_active: false,
+        ai_enabled: false,
         assigned_user_id: assignedOperator.id,
         bot_handoff_reason: reason
       });
@@ -534,10 +584,12 @@ export class BotHandoffManager {
       // Nenhum operador disponível no momento: marcar como pendente/unassigned na fila
       const handoffData: any = {
         assigned_user_id: null,
-        status: "human_takeover",
+        status: "human",
         kanban_stage: "em_atendimento",
+        stage: "em_atendimento",
         is_human_controlled: true,
         is_bot_active: false,
+        ai_enabled: false,
         bot_handoff_reason: reason,
         bot_handoff_at: nowIso,
         updated_at: nowIso
@@ -557,10 +609,12 @@ export class BotHandoffManager {
 
       realtimeHub.broadcastToStore(storeId, "conversation_status_changed", {
         conversationId,
-        status: "human_takeover",
+        status: "human",
         kanban_stage: "em_atendimento",
+        stage: "em_atendimento",
         is_human_controlled: true,
         is_bot_active: false,
+        ai_enabled: false,
         assigned_user_id: null,
         bot_handoff_reason: reason
       });
