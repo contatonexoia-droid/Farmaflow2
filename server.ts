@@ -26,7 +26,7 @@ import { contactMergeManager } from "./services/contactMergeManager.js";
 import { inboxStore } from "./services/inboxStore.js";
 import { chatStore } from "./services/chatStore.js";
 import { teamStore } from "./services/teamStore.js";
-import { aiAgentService, DEFAULT_AI_AGENT_PROMPT, isolateUrlsInText, extractUrlAndCleanText, ensureStoreUrlCacheBuster } from "./services/aiAgentService.js";
+import { aiAgentService, DEFAULT_AI_AGENT_PROMPT, isolateUrlsInText, extractUrlAndCleanText, ensureStoreUrlCacheBuster, formatToWhatsAppMarkdown, cleanSearchInterjections, PHARMA_EXPANSIONS } from "./services/aiAgentService.js";
 import { evolutionApiService } from "./services/evolutionApiService.js";
 import { transcribeAudio } from "./services/audioAiService.js";
 import ogHandler, { buildCrawlerHtml, isCrawlerRequest } from "./api/og-handler.js";
@@ -2290,15 +2290,40 @@ app.post("/api/v1/store/:tenantId/mercadopago/preference", async (req, res) => {
 });
 
 const ENDPOINT_PHARMA_SYNONYMS: Record<string, string[]> = {
-  absorvente: ["absorvente", "abs"],
-  abs: ["absorvente", "abs"],
-  gotas: ["gotas", "gts"],
-  gts: ["gotas", "gts"],
-  comprimido: ["comprimido", "cp", "cpl", "cpr"],
-  comprimidos: ["comprimido", "cp", "cpl", "cpr"],
-  cp: ["comprimido", "cp", "cpl", "cpr"],
-  cpl: ["comprimido", "cp", "cpl", "cpr"],
-  cpr: ["comprimido", "cp", "cpl", "cpr"],
+  fralda: ["fralda", "fraldas", "fra", "fr"],
+  fraldas: ["fralda", "fraldas", "fra", "fr"],
+  fra: ["fralda", "fraldas", "fra", "fr"],
+  fr: ["fralda", "fraldas", "fra", "fr"],
+  absorvente: ["absorvente", "absorventes", "abs"],
+  absorventes: ["absorvente", "absorventes", "abs"],
+  abs: ["absorvente", "absorventes", "abs"],
+  gotas: ["gotas", "gts", "gota", "sol", "solucao"],
+  gts: ["gotas", "gts", "gota", "sol", "solucao"],
+  sol: ["sol", "solucao", "gotas", "gts"],
+  solucao: ["sol", "solucao", "gotas", "gts"],
+  comprimido: ["comprimido", "comprimidos", "cp", "cpl", "cpr", "comp"],
+  comprimidos: ["comprimido", "comprimidos", "cp", "cpl", "cpr", "comp"],
+  comp: ["comprimido", "comprimidos", "cp", "cpl", "cpr", "comp"],
+  cp: ["comprimido", "comprimidos", "cp", "cpl", "cpr", "comp"],
+  cpl: ["comprimido", "comprimidos", "cp", "cpl", "cpr", "comp"],
+  cpr: ["comprimido", "comprimidos", "cp", "cpl", "cpr", "comp"],
+  creme: ["creme", "cr"],
+  cr: ["creme", "cr"],
+  dent: ["dent", "dental", "cr dent", "gel dent"],
+  dental: ["dent", "dental", "cr dent", "gel dent"],
+  pomada: ["pomada", "pomadas", "pom"],
+  pomadas: ["pomada", "pomadas", "pom"],
+  pom: ["pomada", "pomadas", "pom"],
+  xarope: ["xarope", "xaropes", "xpe"],
+  xaropes: ["xarope", "xaropes", "xpe"],
+  xpe: ["xarope", "xaropes", "xpe"],
+  desodorante: ["desodorante", "desodorantes", "desod", "aero"],
+  desodorantes: ["desodorante", "desodorantes", "desod", "aero"],
+  desod: ["desodorante", "desodorantes", "desod", "aero"],
+  aero: ["desodorante", "desodorantes", "desod", "aero"],
+  sabonete: ["sabonete", "sabonetes", "sab"],
+  sabonetes: ["sabonete", "sabonetes", "sab"],
+  sab: ["sabonete", "sabonetes", "sab"],
   capsula: ["capsula", "cap"],
   capsulas: ["capsula", "cap"],
   cap: ["capsula", "cap"],
@@ -2307,10 +2332,11 @@ const ENDPOINT_PHARMA_SYNONYMS: Record<string, string[]> = {
   mg: ["miligrama", "mg"],
   paracetamol: ["paracetamol", "tylenol"],
   tylenol: ["paracetamol", "tylenol"],
-  dipirona: ["dipirona", "novalgina"],
-  novalgina: ["dipirona", "novalgina"],
-  ibuprofeno: ["ibuprofeno", "alivium"],
+  dipirona: ["dipirona", "novalgina", "maxalgina", "dipimed"],
+  novalgina: ["dipirona", "novalgina", "maxalgina"],
+  ibuprofeno: ["ibuprofeno", "alivium", "advil"],
   alivium: ["ibuprofeno", "alivium"],
+  dorflex: ["dorflex", "dorilax", "miosan"],
   shampoo: ["shampoo", "sh", "xampu", "champu", "shamp", "shampo", "xamp", "xampo"],
   sh: ["shampoo", "sh", "xampu", "champu", "shamp", "shampo", "xamp", "xampo"],
   xampu: ["shampoo", "sh", "xampu", "champu", "shamp", "shampo", "xamp", "xampo"],
@@ -8607,13 +8633,14 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
 
     // Extrair e remover qualquer URL do corpo da mensagem de boas-vindas
     const { mainText: cleanWelcomeText } = extractUrlAndCleanText(customText);
-    let welcomeGreeting = cleanWelcomeText.trim() || `Olá! Sou o assistente virtual da ${storeName}. Em que posso te ajudar hoje?`;
+    let welcomeGreeting = formatToWhatsAppMarkdown(cleanWelcomeText.trim() || `Olá! Sou o assistente virtual da ${storeName}. Em que posso te ajudar hoje?`);
 
     // Incluir horário de funcionamento se configurado e ainda não citado no texto
     const operatingHours = tenant.horario_funcionamento || tenant.smart_banners?._regulatoryData?.horario_funcionamento;
     if (operatingHours && !welcomeGreeting.toLowerCase().includes("horário") && !welcomeGreeting.toLowerCase().includes("horario")) {
       welcomeGreeting += `\n\n🕒 *Horário de Funcionamento:* ${operatingHours}`;
     }
+    welcomeGreeting = formatToWhatsAppMarkdown(welcomeGreeting);
 
     console.log(`[WelcomeMessage] Iniciando fluxo de boas-vindas em 2 balões para ${cleanPhone} via instância "${targetInstanceName}" (Loja: "${storeName}")...`);
 

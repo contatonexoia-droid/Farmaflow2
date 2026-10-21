@@ -55,7 +55,7 @@ Seu objetivo é recepcionar o cliente com agilidade, tirar dúvidas sobre medica
      2️⃣ Germed 10ml (500mg/ml) - R$ 9,14
      3️⃣ Medley 10ml (500mg/ml) - R$ 14,55
 
-     Qual dessas você prefere levar? Posso separar para você ou enviar o link da loja!"
+     Qual dessas opções você prefere levar? Posso separar para você!"
 
    - Se o cliente pedir comprimidos (ex: dipirona 500mg ou 1g):
      Exemplo ideal de resposta curta:
@@ -97,7 +97,10 @@ Seu objetivo é recepcionar o cliente com agilidade, tirar dúvidas sobre medica
    - A drogaria opera com foco exclusivo em tele-entrega (delivery). Não ofereça retirada em loja física.
    - Para medicamentos controlados, antibióticos ou tarja preta, avise que a receita médica (foto legível no chat ou anexo no carrinho) deve ser conferida pelo farmacêutico antes da entrega.
 
-8. DIRETRIZES DE LINKS E FORMATAÇÃO VISUAL:
+8. DIRETRIZES DE LINKS E FORMATAÇÃO VISUAL (PADRÃO WHATSAPP):
+   - NUNCA pergunte "posso enviar o link da loja?", "quer o link da loja?" ou "posso te mandar o link?". O sistema da farmácia gerencia o envio do link e do catálogo automaticamente.
+   - NUNCA escreva textos como "[Confira aqui na loja]", "[Link da loja]" ou colchetes sem URL real.
+   - FORMATAÇÃO DE NEGRITO: Use EXCLUSIVAMENTE o padrão WhatsApp de 1 único asterisco colado na palavra (ex: *Dorflex 36 Comprimidos*, *FRA BABYSEC G 26UN*). NUNCA utilize negrito duplo Markdown (**texto**), pois ele exibe asteriscos feios na tela do cliente.
    - Formate SEMPRE a URL da loja online em uma linha isolada, com uma linha em branco antes e uma linha em branco depois (ex: '\n\nhttps://...farmaflow.online\n\n'), sem emojis ou símbolos grudados na mesma linha da URL, para que o WhatsApp gere perfeitamente o card com a logo da drogaria e a visualização completa do link (Link Preview).
    - Nunca polua o chat com múltiplos links na mesma mensagem.
    - Em buscas e listagens de preços, apresente apenas 'Nome - Preço' e inclua apenas o link geral da loja no final da mensagem em linha própria isolada.
@@ -525,6 +528,160 @@ export function isolateUrlsInText(text: string): string {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
+
+/**
+ * Converte formatação Markdown padrão para a sintaxe nativa do WhatsApp:
+ * - Converte `**texto**` ou `***texto***` para `*texto*`
+ * - Garante que os asteriscos fiquem colados na palavra sem espaços internos (ex: `* texto *` vira `*texto*`)
+ * - Remove asteriscos duplos residuais que possam poluir a mensagem
+ */
+export function formatToWhatsAppMarkdown(text: string): string {
+  if (!text || typeof text !== "string") return "";
+
+  let res = text;
+
+  // 1. Converte negrito e itálico combinados (***texto***) para negrito WhatsApp (*texto*)
+  res = res.replace(/\*\*\*\s*([^*]+?)\s*\*\*\*/g, "*$1*");
+
+  // 2. Converte negrito Markdown duplo (**texto**) para negrito WhatsApp (*texto*)
+  res = res.replace(/\*\*\s*([^*]+?)\s*\*\*/g, "*$1*");
+
+  // 3. Garante que qualquer negrito simples (* texto *) não tenha espaços internos colados no asterisco
+  res = res.replace(/\*([ \t]+)([^*]+?)\*/g, "*$2*");
+  res = res.replace(/\*([^*]+?)([ \t]+)\*/g, "*$1*");
+
+  // 4. Remove asteriscos duplos residuais
+  res = res.replace(/\*\*/g, "*");
+
+  return res;
+}
+
+/**
+ * Detecta se o cliente pediu expressamente o link, catálogo ou site da loja no chat
+ */
+export function isLinkExplicitlyRequested(message: string): boolean {
+  if (!message || typeof message !== "string") return false;
+  return /(?:manda|mande|envia|envie|passa|passe|cade|cadê|qual|onde)\s+(?:o\s+|o\s+nosso\s+)?(?:link|site|catalogo|catálogo|loja|link da loja)|(?:link|site|catalogo|catálogo)\s+da\s+loja|tem\s+(?:site|link|catálogo|catalogo)|quero\s+(?:o\s+)?link/i.test(message);
+}
+
+// Controle de taxa para o envio do balão com Link Preview da loja (/s/:slug):
+// Evita flood do card com a logo da farmácia em mensagens consecutivas (trava de 10 minutos)
+const conversationLastStoreLinkSent = new Map<string, number>();
+
+export function recordStoreLinkSent(conversationId: string, phone?: string | null): void {
+  const now = Date.now();
+  if (conversationId) conversationLastStoreLinkSent.set(conversationId, now);
+  if (phone) {
+    const clean = phone.replace(/\D/g, "");
+    if (clean) conversationLastStoreLinkSent.set(clean, now);
+  }
+}
+
+export function wasStoreLinkSentRecently(conversationId: string, phone?: string | null, windowMs: number = 10 * 60 * 1000): boolean {
+  const now = Date.now();
+  const cTime = conversationId ? conversationLastStoreLinkSent.get(conversationId) : undefined;
+  if (cTime && now - cTime < windowMs) return true;
+  if (phone) {
+    const clean = phone.replace(/\D/g, "");
+    const pTime = clean ? conversationLastStoreLinkSent.get(clean) : undefined;
+    if (pTime && now - pTime < windowMs) return true;
+  }
+  return false;
+}
+
+/**
+ * Remove interjeições e conversas da query de busca antes de consultar o estoque:
+ * ("ah", "show", "bom dia", "boa noite", "tem", "quero", "qual", "preço", "valor", "de", "da", "do", "ai", "aí", etc.)
+ */
+export function cleanSearchInterjections(rawQuery: string): { cleaned: string; terms: string[] } {
+  if (!rawQuery || typeof rawQuery !== "string") return { cleaned: "", terms: [] };
+
+  let text = rawQuery
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // remove acentos
+    .trim();
+
+  // Remove saudações e frases completas comuns
+  text = text
+    .replace(/\b(bom dia|boa tarde|boa noite|por favor|por gentileza|obrigado|obrigada|valeu|show de bola)\b/gi, " ")
+    .replace(/\b(tem ai|tem aí|voces tem|voce tem|vc tem|vcs tem)\b/gi, " ");
+
+  // Palavras conversacionais e interjeições para ignorar na busca
+  const INTERJECTIONS = new Set([
+    "ah", "show", "tem", "temos", "ter", "tinha", "quero", "queria", "gostaria",
+    "preciso", "qual", "quais", "preco", "precos", "valor", "valores", "quanto",
+    "custa", "de", "da", "do", "dos", "das", "em", "na", "no", "nas", "nos",
+    "ai", "aqui", "pra", "para", "com", "sem", "ola", "oi", "opa", "e",
+    "voce", "voces", "vc", "vcs", "blz", "beleza", "favor", "dia", "tarde", "noite",
+    "bom", "boa", "por", "favor", "uma", "um", "uns", "umas", "esse", "essa", "esses", "essas"
+  ]);
+
+  // Remove caracteres especiais exceto letras, números e hífens
+  const tokens = text
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+
+  const meaningfulTerms = tokens.filter(t => !INTERJECTIONS.has(t) && t.length >= 2);
+
+  // Se o filtro removeu tudo (ex: usuário só digitou "tem"), preserva tokens com mais de 2 letras
+  const finalTerms = meaningfulTerms.length > 0
+    ? meaningfulTerms
+    : tokens.filter(t => t.length >= 2);
+
+  return {
+    cleaned: finalTerms.join(" "),
+    terms: finalTerms
+  };
+}
+
+/**
+ * Dicionário farmacêutico de expansão e abreviações de ERPs de farmácia:
+ * Mapeia termos comuns e suas abreviações frequentes em cadastros de produtos
+ */
+export const PHARMA_EXPANSIONS: Record<string, string[]> = {
+  fralda: ["fralda", "fraldas", "fra", "fr"],
+  fraldas: ["fralda", "fraldas", "fra", "fr"],
+  fra: ["fralda", "fraldas", "fra", "fr"],
+  fr: ["fralda", "fraldas", "fra", "fr"],
+  comprimido: ["comprimido", "comprimidos", "cpr", "comp", "cp", "cpl"],
+  comprimidos: ["comprimido", "comprimidos", "cpr", "comp", "cp", "cpl"],
+  comp: ["comprimido", "comprimidos", "cpr", "comp", "cp", "cpl"],
+  cpr: ["comprimido", "comprimidos", "cpr", "comp", "cp", "cpl"],
+  cp: ["comprimido", "comprimidos", "cpr", "comp", "cp", "cpl"],
+  "creme dental": ["cr dent", "gel dent", "creme dental", "pasta de dente", "pasta dental", "dent"],
+  "pasta de dente": ["cr dent", "gel dent", "creme dental", "pasta de dente", "pasta dental", "dent"],
+  "pasta dental": ["cr dent", "gel dent", "creme dental", "pasta de dente", "pasta dental", "dent"],
+  creme: ["creme", "cr"],
+  dental: ["dent", "dental"],
+  dent: ["dent", "dental"],
+  absorvente: ["absorvente", "absorventes", "abs"],
+  absorventes: ["absorvente", "absorventes", "abs"],
+  abs: ["absorvente", "absorventes", "abs"],
+  pomada: ["pomada", "pomadas", "pom"],
+  pomadas: ["pomada", "pomadas", "pom"],
+  pom: ["pomada", "pomadas", "pom"],
+  xarope: ["xarope", "xaropes", "xpe"],
+  xaropes: ["xarope", "xaropes", "xpe"],
+  xpe: ["xarope", "xaropes", "xpe"],
+  desodorante: ["desodorante", "desodorantes", "desod", "aero", "aerossol", "roll on", "rollon"],
+  desodorantes: ["desodorante", "desodorantes", "desod", "aero", "aerossol", "roll on", "rollon"],
+  desod: ["desodorante", "desodorantes", "desod", "aero", "aerossol"],
+  aero: ["desodorante", "desodorantes", "desod", "aero", "aerossol"],
+  sabonete: ["sabonete", "sabonetes", "sab"],
+  sabonetes: ["sabonete", "sabonetes", "sab"],
+  sab: ["sabonete", "sabonetes", "sab"],
+  gotas: ["gotas", "gota", "gts", "sol", "solucao"],
+  gota: ["gotas", "gota", "gts", "sol", "solucao"],
+  gts: ["gotas", "gota", "gts", "sol", "solucao"],
+  solucao: ["solucao", "sol", "gotas", "gts"],
+  sol: ["solucao", "sol", "gotas", "gts"],
+  dipirona: ["dipirona", "novalgina", "maxalgina", "dipimed", "nevraldor"],
+  paracetamol: ["paracetamol", "tylenol"],
+  ibuprofeno: ["ibuprofeno", "alivium", "advil"],
+  dorflex: ["dorflex", "dorilax", "miosan", "orfenadrina"]
+};
 
 /**
  * Separa o texto explicativo da URL para permitir o envio em 2 balões separados no WhatsApp:
@@ -1341,6 +1498,11 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
     // 10. Limpeza de tags internas e garantia de presença do link da Webloja
     let enforcedReply = rawResult.reply
       .replace(/\[(TRANSFERIR_ATENDIMENTO|TRANSFER_TO_HUMAN|HANDOFF_HUMAN|TRANSBORDO)\]/gi, '')
+      .replace(/\[(?:Confira aqui na loja|Link da loja|Veja na loja|Acesse aqui|Clique aqui|Loja online)\](?:\([^)]*\))?/gi, '')
+      .replace(/\[[^\]]+\]\(\s*\)/gi, '')
+      .replace(/Posso separar para você ou enviar o link da loja!/gi, 'Posso separar para você!')
+      .replace(/posso (?:separar para você ou )?enviar o link da loja\??/gi, 'Posso separar para você!')
+      .replace(/(?:quer|deseja) que eu (?:te )?envie o link(?: da loja)?\??/gi, 'Posso separar para você!')
       .trim();
 
     // Se NÃO for transbordo (turnos 1, 2, 3 normais), limpa rigorosamente qualquer frase residual de balconista ou transbordo
@@ -1381,6 +1543,9 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
     if (shouldHandoff && isFinalSessionTurn && !choiceCheck.isChoice && !enforcedReply.includes("balconista") && !enforcedReply.includes("atendente humano")) {
       enforcedReply = `${enforcedReply}\n\n${cleanTransition}`;
     }
+
+    // 12. Formatação obrigatória no padrão nativo do WhatsApp (*texto* colado sem espaços internos)
+    enforcedReply = formatToWhatsAppMarkdown(enforcedReply);
 
     return {
       ...rawResult,
@@ -1442,6 +1607,8 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       nextCount: number;
       replyWithAudio?: boolean;
       tenantAiConfig?: any;
+      incomingMessage?: string;
+      userAskedLink?: boolean;
     }
   ): Promise<{ success: boolean; error?: string }> {
     // 1. Validação Estrita de Envio: Garantir que a conversa NÃO esteja sob controle humano
@@ -1467,6 +1634,13 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       return { success: false, error: err };
     }
 
+    // CONTROLE DE TAXA DO BALÃO DE LINK COM PREVIEW (/s/:slug):
+    // Envia o balão com preview na 1ª vez que exibir produtos na conversa ou quando o cliente pedir o link/catálogo,
+    // mas NÃO reenvia o mesmo card gigante com a logo em todas as mensagens consecutivas (trava de 10 minutos).
+    const isLinkExplicit = Boolean(params.userAskedLink) || isLinkExplicitlyRequested(params.incomingMessage || "");
+    const linkSentRecently = wasStoreLinkSentRecently(conversationId, cleanPhone, 10 * 60 * 1000);
+    const shouldSendLinkPreviewBalloon = isLinkExplicit || !linkSentRecently;
+
     // 1. Verificar se a mensagem contém link para separação estratégica em 2 balões:
     // Balão 1: Texto explicativo/atendimento (sem URL)
     // Balão 2: EXCLUSIVAMENTE a URL pura (para que a Evolution API e o WhatsApp gerem o Link Preview perfeito com a logo da farmácia)
@@ -1476,128 +1650,73 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
     const nowIso = new Date().toISOString();
     const nextCount = params.nextCount;
 
-    // RESPOSTA PADRONIZADA 100% EM TEXTO:
-    // O TTS de voz foi desativado. Toda resposta do agente é enviada exclusivamente em texto,
-    // preservando a separação estratégica de balões para o Link Preview e opções de fechamento.
+    // FLUXO DE 2 BALÕES OU BALÃO ÚNICO COM TRAVA DE 10 MINUTOS
     if (hasUrlToSplit && mainText && mainText.trim().length > 0) {
-      console.log(`[AiAgentService] 💬 Fluxo de 2 balões ativado para ${cleanPhone} (Handoff: ${params.isHandoff ? params.handoffReason : 'NÃO'})`);
-      
-      // DISPARO DO BALÃO 1: Texto Principal (sem o link e sem rótulo órfão)
-      let cleanedBalloon1 = (mainText || "")
-        .replace(/Loja Online\s*\(\s*\)/gi, "")
-        .replace(/\(\s*\)/g, "")
-        .trim();
+      if (shouldSendLinkPreviewBalloon) {
+        console.log(`[AiAgentService] 💬 Fluxo de 2 balões ativado para ${cleanPhone} (Link explícito: ${isLinkExplicit ? 'SIM' : 'NÃO'}, Recente: ${linkSentRecently ? 'SIM' : 'NÃO'})`);
 
-      if (/Para conferir mais detalhes ou aproveitar as promoções/i.test(cleanedBalloon1)) {
-        cleanedBalloon1 = cleanedBalloon1.replace(
-          /Para conferir mais detalhes ou aproveitar as promoções[^\n]*$/i,
-          "Para conferir mais detalhes ou aproveitar as promoções, acesse o link abaixo 👇:"
-        );
-      } else if (/(?:acesse|confira|veja)(?:\s+(?:em\s+nossa|na\s+nossa|nossa|no|na|o)?\s*(?:loja\s+online|loja|catálogo|site))?\s*[:\-–—]?\s*$/i.test(cleanedBalloon1)) {
-        cleanedBalloon1 = cleanedBalloon1.replace(
-          /(?:acesse|confira|veja)(?:\s+(?:em\s+nossa|na\s+nossa|nossa|no|na|o)?\s*(?:loja\s+online|loja|catálogo|site))?\s*[:\-–—]?\s*$/i,
-          "acesse o link abaixo 👇:"
-        );
-      } else {
-        cleanedBalloon1 = cleanedBalloon1
-          .replace(/(?:nossa\s+)?loja\s+online\s*[:\-–—]?\s*$/gim, "")
+        // DISPARO DO BALÃO 1: Texto Principal (sem o link e sem rótulo órfão)
+        let cleanedBalloon1 = (mainText || "")
+          .replace(/Loja Online\s*\(\s*\)/gi, "")
+          .replace(/\(\s*\)/g, "")
           .trim();
-      }
 
-      console.log(`[AiAgentService] Disparando Balão 1 (Texto Principal) para ${cleanPhone} via "${targetInstanceName}"...`);
-      const sendResult1 = await evolutionApiService.sendTextMessage(
-        targetInstanceName,
-        cleanPhone,
-        cleanedBalloon1,
-        {
-          delay: 1000,
-          linkPreview: false
+        if (/Para conferir mais detalhes ou aproveitar as promoções/i.test(cleanedBalloon1)) {
+          cleanedBalloon1 = cleanedBalloon1.replace(
+            /Para conferir mais detalhes ou aproveitar as promoções[^\n]*$/i,
+            "Para conferir mais detalhes ou aproveitar as promoções, acesse o link abaixo 👇:"
+          );
+        } else if (/(?:acesse|confira|veja)(?:\s+(?:em\s+nossa|na\s+nossa|nossa|no|na|o)?\s*(?:loja\s+online|loja|catálogo|site))?\s*[:\-–—]?\s*$/i.test(cleanedBalloon1)) {
+          cleanedBalloon1 = cleanedBalloon1.replace(
+            /(?:acesse|confira|veja)(?:\s+(?:em\s+nossa|na\s+nossa|nossa|no|na|o)?\s*(?:loja\s+online|loja|catálogo|site))?\s*[:\-–—]?\s*$/i,
+            "acesse o link abaixo 👇:"
+          );
+        } else {
+          cleanedBalloon1 = cleanedBalloon1
+            .replace(/(?:nossa\s+)?loja\s+online\s*[:\-–—]?\s*$/gim, "")
+            .trim();
         }
-      );
 
-      if (!sendResult1.success) {
-        console.error(`[AiAgentService] ❌ Falha no envio do Balão 1 para o WhatsApp do cliente (${cleanPhone}):`, sendResult1.error);
-        return { success: false, error: sendResult1.error || "WHATSAPP_DELIVERY_FAILED" };
-      }
+        // Aplica formatação de negrito nativa do WhatsApp
+        cleanedBalloon1 = formatToWhatsAppMarkdown(cleanedBalloon1);
 
-      // Extrai e registra TODOS os IDs possíveis retornados pela Evolution API contra eco no webhook
-      const b1Candidates = [
-        sendResult1.data?.key?.id,
-        sendResult1.data?.message?.key?.id,
-        sendResult1.data?.messages?.[0]?.key?.id,
-        sendResult1.data?.id,
-        sendResult1.data?.messageId,
-        (sendResult1 as any).key?.id,
-        (sendResult1 as any).id
-      ].filter(Boolean);
-      for (const id of b1Candidates) {
-        botSentMessageIds.add(String(id).trim());
-        registerBotSentMessage(String(id).trim(), conversationId, cleanPhone);
-      }
+        console.log(`[AiAgentService] Disparando Balão 1 (Texto Principal) para ${cleanPhone} via "${targetInstanceName}"...`);
+        const sendResult1 = await evolutionApiService.sendTextMessage(
+          targetInstanceName,
+          cleanPhone,
+          cleanedBalloon1,
+          {
+            delay: 1000,
+            linkPreview: false
+          }
+        );
 
-      // Registra Balão 1 na tabela de mensagens e no chatStore
-      const { message: msg1 } = await chatStore.addMessage(
-        realTenantId,
-        conversationId,
-        "BOT",
-        cleanedBalloon1,
-        false,
-        undefined,
-        undefined,
-        targetInstanceName,
-        true
-      );
-
-      realtimeHub.broadcastToStore(realTenantId, "chat_message", {
-        conversationId,
-        message: {
-          ...msg1,
-          sender: "bot",
-          sender_type: "BOT",
-          is_from_bot: true
+        if (!sendResult1.success) {
+          console.error(`[AiAgentService] ❌ Falha no envio do Balão 1 para o WhatsApp do cliente (${cleanPhone}):`, sendResult1.error);
+          return { success: false, error: sendResult1.error || "WHATSAPP_DELIVERY_FAILED" };
         }
-      });
 
-      // Delay de 1200ms para ordenação visual no WhatsApp
-      await new Promise(resolve => setTimeout(resolve, 1200));
-
-      // DISPARO DO BALÃO 2: EXCLUSIVAMENTE a URL pura com cache-buster (ativa o Link Preview perfeito com a logo oficial da drogaria)
-      const freshUrl = ensureStoreUrlCacheBuster(url, "9");
-      console.log(`[AiAgentService] Disparando Balão 2 (URL Pura com Link Preview e Cache-Buster) para ${cleanPhone} via "${targetInstanceName}": ${freshUrl}`);
-      const sendResult2 = await evolutionApiService.sendTextMessage(
-        targetInstanceName,
-        cleanPhone,
-        freshUrl,
-        {
-          delay: 1500,
-          linkPreview: true
-        }
-      );
-
-      if (!sendResult2.success) {
-        console.warn(`[AiAgentService] ⚠️ Aviso: Balão 2 (URL) falhou no WhatsApp, mas Balão 1 já foi entregue:`, sendResult2.error);
-      } else {
-        // Registra TODOS os IDs possíveis do Balão 2 contra eco
-        const b2Candidates = [
-          sendResult2.data?.key?.id,
-          sendResult2.data?.message?.key?.id,
-          sendResult2.data?.messages?.[0]?.key?.id,
-          sendResult2.data?.id,
-          sendResult2.data?.messageId,
-          (sendResult2 as any).key?.id,
-          (sendResult2 as any).id
+        // Extrai e registra TODOS os IDs possíveis retornados pela Evolution API contra eco no webhook
+        const b1Candidates = [
+          sendResult1.data?.key?.id,
+          sendResult1.data?.message?.key?.id,
+          sendResult1.data?.messages?.[0]?.key?.id,
+          sendResult1.data?.id,
+          sendResult1.data?.messageId,
+          (sendResult1 as any).key?.id,
+          (sendResult1 as any).id
         ].filter(Boolean);
-        for (const id of b2Candidates) {
+        for (const id of b1Candidates) {
           botSentMessageIds.add(String(id).trim());
           registerBotSentMessage(String(id).trim(), conversationId, cleanPhone);
         }
 
-        // Registra Balão 2 na tabela de mensagens e no chatStore
-        const { message: msg2 } = await chatStore.addMessage(
+        // Registra Balão 1 na tabela de mensagens e no chatStore
+        const { message: msg1 } = await chatStore.addMessage(
           realTenantId,
           conversationId,
           "BOT",
-          freshUrl,
+          cleanedBalloon1,
           false,
           undefined,
           undefined,
@@ -1608,7 +1727,134 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         realtimeHub.broadcastToStore(realTenantId, "chat_message", {
           conversationId,
           message: {
-            ...msg2,
+            ...msg1,
+            sender: "bot",
+            sender_type: "BOT",
+            is_from_bot: true
+          }
+        });
+
+        // Delay de 1200ms para ordenação visual no WhatsApp
+        await new Promise(resolve => setTimeout(resolve, 1200));
+
+        // DISPARO DO BALÃO 2: EXCLUSIVAMENTE a URL pura com cache-buster (ativa o Link Preview perfeito com a logo oficial da drogaria)
+        const freshUrl = ensureStoreUrlCacheBuster(url, "9");
+        console.log(`[AiAgentService] Disparando Balão 2 (URL Pura com Link Preview e Cache-Buster) para ${cleanPhone} via "${targetInstanceName}": ${freshUrl}`);
+        const sendResult2 = await evolutionApiService.sendTextMessage(
+          targetInstanceName,
+          cleanPhone,
+          freshUrl,
+          {
+            delay: 1500,
+            linkPreview: true
+          }
+        );
+
+        // Registra carimbo de envio do link com preview para ativar trava anti-flood de 10 minutos
+        recordStoreLinkSent(conversationId, cleanPhone);
+
+        if (!sendResult2.success) {
+          console.warn(`[AiAgentService] ⚠️ Aviso: Balão 2 (URL) falhou no WhatsApp, mas Balão 1 já foi entregue:`, sendResult2.error);
+        } else {
+          // Registra TODOS os IDs possíveis do Balão 2 contra eco
+          const b2Candidates = [
+            sendResult2.data?.key?.id,
+            sendResult2.data?.message?.key?.id,
+            sendResult2.data?.messages?.[0]?.key?.id,
+            sendResult2.data?.id,
+            sendResult2.data?.messageId,
+            (sendResult2 as any).key?.id,
+            (sendResult2 as any).id
+          ].filter(Boolean);
+          for (const id of b2Candidates) {
+            botSentMessageIds.add(String(id).trim());
+            registerBotSentMessage(String(id).trim(), conversationId, cleanPhone);
+          }
+
+          // Registra Balão 2 na tabela de mensagens e no chatStore
+          const { message: msg2 } = await chatStore.addMessage(
+            realTenantId,
+            conversationId,
+            "BOT",
+            freshUrl,
+            false,
+            undefined,
+            undefined,
+            targetInstanceName,
+            true
+          );
+
+          realtimeHub.broadcastToStore(realTenantId, "chat_message", {
+            conversationId,
+            message: {
+              ...msg2,
+              sender: "bot",
+              sender_type: "BOT",
+              is_from_bot: true
+            }
+          });
+        }
+      } else {
+        // TRAVA ANTI-FLOOD ATIVA: O link já foi enviado nos últimos 10 minutos e o cliente não pediu o link.
+        // Envia apenas 1 balão limpo, sem o card gigante repetitivo com a logo e sem prometer "acesse o link abaixo".
+        console.log(`[AiAgentService] 🛡️ Trava de 10 min ativa para ${cleanPhone}: enviando apenas texto limpo sem repetir balão de link com preview.`);
+        let cleanedSingleText = (mainText || "")
+          .replace(/Para conferir mais detalhes ou aproveitar as promoções, acesse o link abaixo 👇:?/gi, "")
+          .replace(/Para conferir mais detalhes ou comprar agora, acesse o link abaixo 👇:?/gi, "")
+          .replace(/acesse o link abaixo 👇:?/gi, "")
+          .replace(/Loja Online\s*\(\s*\)/gi, "")
+          .replace(/\(\s*\)/g, "")
+          .replace(/[\t ]{2,}/g, " ")
+          .replace(/\n{3,}/g, "\n\n")
+          .trim();
+
+        cleanedSingleText = formatToWhatsAppMarkdown(cleanedSingleText);
+
+        const sendResultSingle = await evolutionApiService.sendTextMessage(
+          targetInstanceName,
+          cleanPhone,
+          cleanedSingleText,
+          {
+            delay: 1000,
+            linkPreview: false
+          }
+        );
+
+        if (!sendResultSingle.success) {
+          console.error(`[AiAgentService] ❌ Falha no envio da resposta única para ${cleanPhone}:`, sendResultSingle.error);
+          return { success: false, error: sendResultSingle.error || "WHATSAPP_DELIVERY_FAILED" };
+        }
+
+        const sCandidates = [
+          sendResultSingle.data?.key?.id,
+          sendResultSingle.data?.message?.key?.id,
+          sendResultSingle.data?.messages?.[0]?.key?.id,
+          sendResultSingle.data?.id,
+          sendResultSingle.data?.messageId,
+          (sendResultSingle as any).key?.id,
+          (sendResultSingle as any).id
+        ].filter(Boolean);
+        for (const id of sCandidates) {
+          botSentMessageIds.add(String(id).trim());
+          registerBotSentMessage(String(id).trim(), conversationId, cleanPhone);
+        }
+
+        const { message: singleMsg } = await chatStore.addMessage(
+          realTenantId,
+          conversationId,
+          "BOT",
+          cleanedSingleText,
+          false,
+          undefined,
+          undefined,
+          targetInstanceName,
+          true
+        );
+
+        realtimeHub.broadcastToStore(realTenantId, "chat_message", {
+          conversationId,
+          message: {
+            ...singleMsg,
             sender: "bot",
             sender_type: "BOT",
             is_from_bot: true
@@ -1618,7 +1864,24 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
     } else {
       // Disparo único (mensagem pura ou URL única)
       const hasUrl = /(https?:\/\/[^\s]+)/i.test(finalReplyText);
-      const payloadText = hasUrl ? ensureStoreUrlCacheBuster(finalReplyText) : finalReplyText;
+      let payloadText = finalReplyText;
+
+      if (hasUrl && !shouldSendLinkPreviewBalloon) {
+        // Remove link duplicado para não floodar
+        payloadText = payloadText
+          .replace(/Para conferir mais detalhes ou aproveitar as promoções, acesse o link abaixo 👇:?\s*(?:https?:\/\/[^\s]+)?/gi, "")
+          .replace(/acesse o link abaixo 👇:?\s*(?:https?:\/\/[^\s]+)?/gi, "")
+          .replace(/https?:\/\/[^\s]+farmaflow\.online[^\s]*/gi, "")
+          .replace(/[\t ]{2,}/g, " ")
+          .replace(/\n{3,}/g, "\n\n")
+          .trim();
+      } else if (hasUrl) {
+        payloadText = ensureStoreUrlCacheBuster(payloadText);
+        recordStoreLinkSent(conversationId, cleanPhone);
+      }
+
+      payloadText = formatToWhatsAppMarkdown(payloadText);
+
       console.log(`[AiAgentService] Disparando resposta única do BOT para ${cleanPhone} via instância "${targetInstanceName}" (Handoff: ${params.isHandoff ? params.handoffReason : 'NÃO'})...`);
       const sendResult = await evolutionApiService.sendTextMessage(
         targetInstanceName,
@@ -1626,7 +1889,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         payloadText,
         {
           delay: 1200,
-          linkPreview: hasUrl
+          linkPreview: hasUrl && shouldSendLinkPreviewBalloon
         }
       );
 
@@ -2155,7 +2418,8 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
             currentCount,
             nextCount,
             replyWithAudio: shouldReplyWithAudio,
-            tenantAiConfig: dbConfig
+            tenantAiConfig: dbConfig,
+            incomingMessage
           }
         );
 
@@ -2209,7 +2473,8 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
             currentCount,
             nextCount,
             replyWithAudio: shouldReplyWithAudio,
-            tenantAiConfig: dbConfig
+            tenantAiConfig: dbConfig,
+            incomingMessage
           }
         );
 
@@ -2250,7 +2515,8 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
           currentCount,
           nextCount,
           replyWithAudio: shouldReplyWithAudio,
-          tenantAiConfig: dbConfig
+          tenantAiConfig: dbConfig,
+          incomingMessage
         }
       );
 
@@ -2381,6 +2647,15 @@ ${taskInstruction}`;
    * - Ordenação pelo MENOR PREÇO (custo-benefício)
    * - Retorno de 4 a 6 opções
    */
+  /**
+   * Busca inteligente de produtos no Supabase com suporte a:
+   * - Decomposição em princípio ativo e dosagem
+   * - Dicionário de abreviações farmacêuticas e ERPs (FRA, COMP, CR DENT, ABS, DESOD, XPE, SOL, POM, SAB)
+   * - Busca Multi-Coluna (name, category, description, active_principle)
+   * - Fallback progressivo por termos específicos (ex: babysec) e reordenação por relevância em name + category
+   * - Filtro estrito de preço positivo (> 0) e estoque ativo (> 0)
+   * - Ordenação pelo menor preço / melhor relevância
+   */
   public async searchProductsInDb(
     tenantIds: string[],
     searchTerm: string,
@@ -2390,58 +2665,149 @@ ${taskInstruction}`;
       return [];
     }
 
+    // 1. Limpeza de interjeições conversacionais e normalização
+    const { cleaned: cleanedTerm, terms: searchWords } = cleanSearchInterjections(searchTerm);
+    const termToUse = cleanedTerm || searchTerm;
+
     const { detectedDosage, isDrops, isSyrup, isTablets } =
       extractDosageAndPresentation(searchTerm);
 
-    const normalized = searchTerm
+    const normalized = termToUse
       .toLowerCase()
       .normalize("NFD")
       .replace(/[\u0300-\u036f]/g, "")
       .replace(/[^a-z0-9\s]/g, " ")
       .trim();
 
-    const STOP_SEARCH_WORDS = new Set([
-      "de", "do", "da", "dos", "das", "em", "para", "com", "sem", "por", "favor",
-      "tem", "têm", "ter", "qual", "quais", "preco", "precos", "valor", "valores",
-      "quanto", "custa", "opcao", "opcoes", "remedio", "remedios", "medicamento",
-      "medicamentos", "generico", "genericos", "similar", "similares", "caixa",
-      "cartela", "comprimido", "comprimidos", "cpr", "comp", "cp", "un", "unidades",
-      "gotas", "gota", "gotinha", "gotinhas", "liquida", "liquido", "solucao", "sol", "gts",
-      "xarope", "xaropes", "xpe", "pilula", "pilulas", "cps", "capsula", "capsulas",
-      "ola", "oi", "bom", "dia", "boa", "tarde", "noite", "voces", "vc", "vcs"
+    // Palavras genéricas da farmácia para identificar especificidade
+    const GENERIC_PHARMA_WORDS = new Set([
+      "remedio", "remedios", "medicamento", "medicamentos", "generico", "genericos",
+      "similar", "similares", "fralda", "fraldas", "fra", "fr", "comprimido", "comprimidos",
+      "cpr", "comp", "cp", "cpl", "gotas", "gota", "gts", "sol", "solucao", "xarope",
+      "xaropes", "xpe", "pomada", "pomadas", "pom", "creme", "cr", "dental", "dent",
+      "absorvente", "absorventes", "abs", "desodorante", "desodorantes", "desod", "aero",
+      "sabonete", "sabonetes", "sab", "capsula", "capsulas", "pilula", "pilulas",
+      "caixa", "cartela", "un", "unidades", "mg", "g", "ml"
     ]);
 
-    const tokens = normalized.split(/\s+/).filter(t => t.length >= 2);
-    const mainTerms = tokens.filter(t => 
-      !STOP_SEARCH_WORDS.has(t) && 
-      t !== "1" && t !== "g" && t !== "mg" && t !== "ml" && 
-      t !== "500" && t !== "1000" && t !== "750" && t !== "250" &&
-      t !== "500mg" && t !== "1g" && t !== "1000mg" && t !== "750mg"
-    );
-
-    let formSqlFilter: string | null = null;
-    if (isDrops) {
-      formSqlFilter = "name.ilike.%gts%,name.ilike.%gota%,name.ilike.%sol oral%,name.ilike.%sol%,presentation.ilike.%gts%,presentation.ilike.%gota%,presentation.ilike.%sol%";
-    } else if (isTablets) {
-      formSqlFilter = "name.ilike.%cpr%,name.ilike.%comp%,name.ilike.%cps%,presentation.ilike.%comprimido%,presentation.ilike.%cpr%";
-    } else if (isSyrup) {
-      formSqlFilter = "name.ilike.%xpe%,name.ilike.%xarope%,presentation.ilike.%xarope%";
+    // Extrai tokens relevantes (com 2+ caracteres)
+    let rawTokens = normalized.split(/\s+/).filter(t => t.length >= 2);
+    if (rawTokens.length === 0 && searchWords.length > 0) {
+      rawTokens = searchWords;
     }
 
-    const buildTermOrClause = (term: string) => {
-      if (term === "dipirona") {
-        return "name.ilike.%dipirona%,active_principle.ilike.%dipirona%,name.ilike.%maxalgina%,name.ilike.%novalgina%";
+    // Detecta frases compostas como "creme dental" ou "pasta de dente"
+    const hasCremeDental = normalized.includes("creme dental") || normalized.includes("pasta de dente") || normalized.includes("pasta dental");
+
+    // Identifica termos específicos/marcas (ex: "babysec", "dorflex", "pampers", "neosaldina")
+    const specificTerms = rawTokens.filter(t => !GENERIC_PHARMA_WORDS.has(t));
+    const genericTerms = rawTokens.filter(t => GENERIC_PHARMA_WORDS.has(t));
+
+    // Ordena colocando termos específicos/marcas primeiro
+    const orderedTokens = [...specificTerms, ...genericTerms];
+    const uniqueTokens = Array.from(new Set(orderedTokens));
+
+    // Construtor de cláusula OR multi-coluna para um termo e suas expansões de ERP
+    const buildMultiColumnClauseForTerm = (t: string): string => {
+      const norm = t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+      const expansions = new Set<string>([norm]);
+
+      // Aplica expansões de ERP cadastradas
+      const expList = PHARMA_EXPANSIONS[norm];
+      if (expList) {
+        expList.forEach(e => expansions.add(e.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim()));
       }
-      return `name.ilike.%${term}%,active_principle.ilike.%${term}%`;
+
+      // Trata plural simples (ex: "fraldas" -> "fralda", "pomadas" -> "pomada")
+      if (norm.endsWith("s") && norm.length > 3) {
+        const sing = norm.slice(0, -1);
+        expansions.add(sing);
+        if (PHARMA_EXPANSIONS[sing]) {
+          PHARMA_EXPANSIONS[sing].forEach(e => expansions.add(e.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim()));
+        }
+      }
+
+      if (hasCremeDental && (norm === "creme" || norm === "dental" || norm === "pasta" || norm === "dente")) {
+        expansions.add("cr dent");
+        expansions.add("gel dent");
+        expansions.add("dent");
+      }
+
+      const clauses: string[] = [];
+      for (const exp of expansions) {
+        if (!exp) continue;
+        clauses.push(`name.ilike.%${exp}%`);
+        clauses.push(`category.ilike.%${exp}%`);
+        clauses.push(`description.ilike.%${exp}%`);
+        clauses.push(`active_principle.ilike.%${exp}%`);
+      }
+      return clauses.join(",");
     };
 
-    const productSelectFields = "id, name, price, stock, presentation, category, active_principle, requires_prescription, promotional_price, promo_type, promo_buy_qty, promo_pay_qty, promo_progressive_price, promo_start_date, promo_end_date, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage";
+    const productSelectFields = "id, name, price, stock, presentation, category, active_principle, description, requires_prescription, promotional_price, promo_type, promo_buy_qty, promo_pay_qty, promo_progressive_price, promo_start_date, promo_end_date, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage";
+
+    // Função de pontuação e ranking em memória com base em match em name, category, description e active_principle
+    const scoreProductMatch = (product: any, allQueryTokens: string[]): number => {
+      if (!product) return 0;
+      let score = 0;
+      const pName = (product.name || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      const pCat = (product.category || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      const pDesc = (product.description || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      const pAct = (product.active_principle || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      const pPres = (product.presentation || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+      let matchedTokensCount = 0;
+
+      for (const tok of allQueryTokens) {
+        const normTok = tok.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        const expansions = new Set<string>([normTok]);
+        if (PHARMA_EXPANSIONS[normTok]) {
+          PHARMA_EXPANSIONS[normTok].forEach(e => expansions.add(e.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")));
+        }
+        if (normTok.endsWith("s") && normTok.length > 3) {
+          expansions.add(normTok.slice(0, -1));
+        }
+
+        const matchInName = Array.from(expansions).some(e => pName.includes(e));
+        const matchInCat = Array.from(expansions).some(e => pCat.includes(e));
+        const matchInAct = Array.from(expansions).some(e => pAct.includes(e));
+        const matchInDesc = Array.from(expansions).some(e => pDesc.includes(e));
+        const matchInPres = Array.from(expansions).some(e => pPres.includes(e));
+
+        if (matchInName) score += 10;
+        if (matchInCat) score += 6; // Fralda bate com categoria "Fraldas"!
+        if (matchInAct) score += 8;
+        if (matchInPres) score += 4;
+        if (matchInDesc) score += 2;
+
+        if (matchInName || matchInCat || matchInAct || matchInPres) {
+          matchedTokensCount++;
+        }
+
+        // Bônus se termo específico de marca bater no nome
+        if (specificTerms.includes(normTok) && matchInName) {
+          score += 15;
+        }
+      }
+
+      // Bônus proporcional se bateu com todos os termos da frase do cliente
+      if (allQueryTokens.length > 1 && matchedTokensCount === allQueryTokens.length) {
+        score += 25;
+      }
+
+      // Bônus de apresentação solicitada (gotas, comprimidos, xarope)
+      if (isDrops && isProductDrops(product)) score += 12;
+      if (isTablets && isProductTablets(product)) score += 10;
+      if (isSyrup && isProductSyrup(product)) score += 12;
+
+      return score;
+    };
 
     // =========================================================================
-    // PRIORIDADE 1: SE O CLIENTE ESPECIFICOU DOSAGEM (ex: "500mg" ou "1g")
+    // 1º PASSO: BUSCA ONDE TODOS OS TERMOS BATAM NO name OU category OU description OU active_principle
     // =========================================================================
-    if (detectedDosage && mainTerms.length > 0) {
-      let qExact = supabaseAdmin
+    if (uniqueTokens.length > 0) {
+      let qStep1 = supabaseAdmin
         .from("products")
         .select(productSelectFields)
         .in("tenant_id", tenantIds)
@@ -2449,38 +2815,46 @@ ${taskInstruction}`;
         .gt("stock", 0)
         .order("price", { ascending: true });
 
-      for (const term of mainTerms) {
-        qExact = qExact.or(buildTermOrClause(term));
+      // Aplica as cláusulas multi-coluna para cada termo
+      for (const tok of uniqueTokens.slice(0, 4)) {
+        const clause = buildMultiColumnClauseForTerm(tok);
+        if (clause) {
+          qStep1 = qStep1.or(clause);
+        }
       }
 
-      if (formSqlFilter) {
-        qExact = qExact.or(formSqlFilter);
+      if (detectedDosage) {
+        if (detectedDosage === "500mg" || detectedDosage === "0.5g" || detectedDosage === "0,5g") {
+          qStep1 = qStep1.ilike("name", "%500%mg%");
+        } else if (detectedDosage === "1g" || detectedDosage === "1000mg") {
+          qStep1 = qStep1.or("name.ilike.%1%g%,name.ilike.%1000%mg%");
+        } else if (detectedDosage === "750mg") {
+          qStep1 = qStep1.ilike("name", "%750%mg%");
+        }
       }
 
-      // Aplica filtro SQL de dosagem diretamente
-      if (detectedDosage === "500mg" || detectedDosage === "0.5g" || detectedDosage === "0,5g") {
-        qExact = qExact.ilike("name", "%500%mg%");
-      } else if (detectedDosage === "1g" || detectedDosage === "1000mg") {
-        qExact = qExact.or("name.ilike.%1%g%,name.ilike.%1000%mg%");
-      } else if (detectedDosage === "750mg") {
-        qExact = qExact.ilike("name", "%750%mg%");
-      } else if (detectedDosage.endsWith("mg")) {
-        const num = detectedDosage.replace("mg", "");
-        qExact = qExact.ilike("name", `%${num}%mg%`);
-      } else if (detectedDosage.endsWith("g")) {
-        const num = detectedDosage.replace("g", "");
-        qExact = qExact.ilike("name", `%${num}%g%`);
-      }
+      try {
+        const { data: step1Data, error: step1Err } = await qStep1.limit(limit * 4);
+        if (!step1Err && step1Data && step1Data.length > 0) {
+          // Pontua e reordena por relevância e custo-benefício
+          const scored = step1Data
+            .map(p => ({ product: p, score: scoreProductMatch(p, uniqueTokens) }))
+            .filter(item => item.score > 0)
+            .sort((a, b) => b.score - a.score || Number(a.product.price) - Number(b.product.price));
 
-      const { data: exactProducts } = await qExact.limit(limit * 3);
-      const matchingDosage = (exactProducts || []).filter(p => productMatchesDosage(p, detectedDosage));
+          let finalProds = scored.map(item => item.product);
 
-      if (matchingDosage.length > 0) {
-        if (isDrops) {
-          const dropsOnly = matchingDosage.filter(isProductDrops);
-          if (dropsOnly.length > 0) {
+          // Filtra apresentação se cliente pediu gotas expressamente
+          if (isDrops) {
+            const dropsOnly = finalProds.filter(isProductDrops);
+            if (dropsOnly.length > 0) {
+              finalProds = dropsOnly;
+            }
+          }
+
+          if (finalProds.length > 0) {
             const seen = new Set<string>();
-            const unique = dropsOnly.filter(p => {
+            const unique = finalProds.filter(p => {
               const lbl = formatMedicineLabel(p).toLowerCase();
               if (seen.has(lbl)) return false;
               seen.add(lbl);
@@ -2488,156 +2862,79 @@ ${taskInstruction}`;
             });
             return unique.slice(0, limit);
           }
-          // Se pediu gotas expressamente e não achou nesta dosagem, não retorne comprimidos! Continue para busca geral
-        } else if (isTablets) {
-          const tabletsOnly = matchingDosage.filter(isProductTablets);
-          if (tabletsOnly.length > 0) {
-            return tabletsOnly.slice(0, limit);
-          }
-        } else if (isSyrup) {
-          const syrupOnly = matchingDosage.filter(isProductSyrup);
-          if (syrupOnly.length > 0) {
-            return syrupOnly.slice(0, limit);
-          }
-        } else {
-          // Cliente não pediu gotas ou xarope: prioriza comprimidos/sólidos
-          const nonDrops = matchingDosage.filter(p => !isProductDrops(p) && !isProductSyrup(p));
-          return (nonDrops.length > 0 ? nonDrops : matchingDosage).slice(0, limit);
         }
+      } catch (err: any) {
+        console.warn("[searchProductsInDb] Erro no Passo 1 multi-coluna:", err.message);
       }
     }
 
     // =========================================================================
-    // PRIORIDADE 2: BUSCA GERAL POR PRINCÍPIO ATIVO (SE NÃO ENCONTROU A DOSAGEM OU NÃO ESPECIFICOU)
+    // 2º PASSO (FALLBACK OBRIGATÓRIO): BUSCA POR PALAVRAS INDIVIDUALMENTE
+    // Priorizando a marca/termo mais específico (ex: "babysec") e ordenando por relevância em name + category
     // =========================================================================
-    if (mainTerms.length > 0) {
-      let qGeneral = supabaseAdmin
-        .from("products")
-        .select(productSelectFields)
-        .in("tenant_id", tenantIds)
-        .gt("price", 0)
-        .gt("stock", 0)
-        .order("price", { ascending: true });
+    if (uniqueTokens.length > 0) {
+      console.log(`[searchProductsInDb] Passo 1 retornou 0 produtos. Acionando Fallback Progressivo para tokens:`, uniqueTokens);
+      const candidateMap = new Map<string, any>();
 
-      for (const term of mainTerms) {
-        qGeneral = qGeneral.or(buildTermOrClause(term));
-      }
+      // Prioriza buscar pelo termo mais específico primeiro (ex: "babysec")
+      for (const tok of uniqueTokens) {
+        const clause = buildMultiColumnClauseForTerm(tok);
+        if (!clause) continue;
 
-      if (formSqlFilter) {
-        qGeneral = qGeneral.or(formSqlFilter);
-      }
+        try {
+          const { data: tokData } = await supabaseAdmin
+            .from("products")
+            .select(productSelectFields)
+            .in("tenant_id", tenantIds)
+            .gt("price", 0)
+            .gt("stock", 0)
+            .or(clause)
+            .order("price", { ascending: true })
+            .limit(limit * 4);
 
-      const { data: dGeneral } = await qGeneral.limit(limit * 4);
-      let candidates = dGeneral || [];
+          if (tokData && tokData.length > 0) {
+            for (const p of tokData) {
+              if (p && p.id && !candidateMap.has(p.id)) {
+                candidateMap.set(p.id, p);
+              }
+            }
+          }
+        } catch (_) {}
 
-      // Se aplicou formSqlFilter e veio vazio, tenta uma busca sem o filtro SQL para avaliar em memória
-      if (candidates.length === 0 && formSqlFilter) {
-        let qBroad = supabaseAdmin
-          .from("products")
-          .select(productSelectFields)
-          .in("tenant_id", tenantIds)
-          .gt("price", 0)
-          .gt("stock", 0)
-          .order("price", { ascending: true });
-        for (const term of mainTerms) {
-          qBroad = qBroad.or(buildTermOrClause(term));
+        // Se já coletou produtos suficientes através do termo específico, não precisa sobrecarregar o banco
+        if (candidateMap.size >= limit * 3) {
+          break;
         }
-        const { data: dBroad } = await qBroad.limit(limit * 4);
-        candidates = dBroad || [];
       }
 
-      // 1. Se o cliente pediu GOTAS
-      if (isDrops) {
-        const drops = candidates.filter(isProductDrops);
-        if (drops.length > 0) {
-          const seen = new Set<string>();
-          const uniqueDrops = drops.filter(p => {
-            const lbl = formatMedicineLabel(p).toLowerCase();
-            if (seen.has(lbl)) return false;
-            seen.add(lbl);
-            return true;
-          });
-          return uniqueDrops.slice(0, limit);
+      const allCandidates = Array.from(candidateMap.values());
+      if (allCandidates.length > 0) {
+        // Avalia em memória quantos termos da frase bateram no name + category + description
+        const scoredCandidates = allCandidates
+          .map(p => ({
+            product: p,
+            score: scoreProductMatch(p, uniqueTokens)
+          }))
+          .filter(item => item.score > 0)
+          .sort((a, b) => b.score - a.score || Number(a.product.price) - Number(b.product.price));
+
+        let finalProds = scoredCandidates.map(item => item.product);
+
+        if (isDrops) {
+          const drops = finalProds.filter(isProductDrops);
+          if (drops.length > 0) finalProds = drops;
         }
-        // REGRA CRÍTICA: Se o cliente pediu gotas e não há gotas em estoque,
-        // NUNCA retorne comprimidos! Retorne array vazio para a IA informar adequadamente
-        return [];
+
+        const seen = new Set<string>();
+        const unique = finalProds.filter(p => {
+          const lbl = formatMedicineLabel(p).toLowerCase();
+          if (seen.has(lbl)) return false;
+          seen.add(lbl);
+          return true;
+        });
+
+        return unique.slice(0, limit);
       }
-
-      // 2. Se o cliente pediu COMPRIMIDOS
-      if (isTablets) {
-        const tablets = candidates.filter(isProductTablets);
-        if (tablets.length > 0) {
-          const seen = new Set<string>();
-          const uniqueTablets = tablets.filter(p => {
-            const lbl = formatMedicineLabel(p).toLowerCase();
-            if (seen.has(lbl)) return false;
-            seen.add(lbl);
-            return true;
-          });
-          return uniqueTablets.slice(0, limit);
-        }
-        return [];
-      }
-
-      // 3. Se o cliente pediu XAROPE
-      if (isSyrup) {
-        const syrups = candidates.filter(isProductSyrup);
-        if (syrups.length > 0) {
-          return syrups.slice(0, limit);
-        }
-        return [];
-      }
-
-      // 4. Se não especificou forma líquida ou gotas: prioriza comprimidos/sólidos
-      const nonDrops = candidates.filter(p => !isProductDrops(p) && !isProductSyrup(p));
-      const chosen = nonDrops.length > 0 ? nonDrops : candidates;
-      const seen = new Set<string>();
-      const unique = chosen.filter(p => {
-        const lbl = formatMedicineLabel(p).toLowerCase();
-        if (seen.has(lbl)) return false;
-        seen.add(lbl);
-        return true;
-      });
-      return unique.slice(0, limit);
-    }
-
-    // =========================================================================
-    // PRIORIDADE 3: FALLBACK POR TOKENS LIVRES
-    // =========================================================================
-    const rawTokens = normalized.split(/\s+/).filter(t => t.length >= 3 && !STOP_SEARCH_WORDS.has(t));
-    if (rawTokens.length > 0) {
-      const tokenOr = rawTokens.slice(0, 3).map(t => buildTermOrClause(t)).join(",");
-      let qFallback = supabaseAdmin
-        .from("products")
-        .select(productSelectFields)
-        .in("tenant_id", tenantIds)
-        .gt("price", 0)
-        .gt("stock", 0)
-        .or(tokenOr)
-        .order("price", { ascending: true });
-
-      if (formSqlFilter) {
-        qFallback = qFallback.or(formSqlFilter);
-      }
-
-      const { data: dFallback } = await qFallback.limit(limit * 3);
-      const candidates = dFallback || [];
-
-      if (isDrops) {
-        const drops = candidates.filter(isProductDrops);
-        return drops.slice(0, limit);
-      }
-      if (isTablets) {
-        const tablets = candidates.filter(isProductTablets);
-        return tablets.slice(0, limit);
-      }
-      if (isSyrup) {
-        const syrups = candidates.filter(isProductSyrup);
-        return syrups.slice(0, limit);
-      }
-
-      return candidates.slice(0, limit);
     }
 
     return [];
@@ -2727,10 +3024,14 @@ ${taskInstruction}`;
     }
 
     if (name === "buscar_produtos") {
-      let termo = String(args?.termo || args?.query || "").trim();
-      if (!termo) {
+      let rawTerm = String(args?.termo || args?.query || "").trim();
+      if (!rawTerm) {
         return { total: 0, produtos: [], mensagem: "Nenhum termo informado para busca." };
       }
+
+      // 1. Limpa conversas e interjeições ("ah", "show", "bom dia", "boa noite", "tem", "quero", "qual", "preço", "valor", "de", "da", "do", "ai", "aí")
+      const { cleaned: cleanedTerm } = cleanSearchInterjections(rawTerm);
+      let termo = cleanedTerm && cleanedTerm.length >= 2 ? cleanedTerm : rawTerm;
 
       // Se o usuário especificou dosagem ou forma na mensagem (ex: 500mg, gotas, comprimidos, xarope) e o termo da IA omitiu, adiciona
       if (userMessage) {
@@ -2772,10 +3073,11 @@ ${taskInstruction}`;
           .filter((p: any) => Number(p.price) > 0 && Number(p.stock ?? 1) > 0)
           .map((p: any) => {
           const promoTag = getProductPromotionTag(p);
+          const rawLabel = `${formatMedicineLabel(p)}${promoTag}`;
           return {
             id: p.id,
             nome: p.name,
-            nome_formatado: `${formatMedicineLabel(p)}${promoTag}`,
+            nome_formatado: formatToWhatsAppMarkdown(rawLabel),
             promocao_ativa: promoTag ? promoTag.trim() : null,
             apresentacao: p.presentation || "",
             preco: Number(p.price) || 0,

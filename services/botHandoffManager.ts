@@ -342,7 +342,7 @@ export function buildProductHandoffMessage(
 
 *(Pelo link você fecha em menos de 1 minuto, escolhe a forma de pagamento e seu pedido chega mais rápido!)*
 
-💬 **Prefere continuar aqui pelo WhatsApp?**
+💬 *Prefere continuar aqui pelo WhatsApp?*
 Sem problemas! Um dos nossos balconistas já vai assumir o atendimento para finalizar seu pedido.
 
 ${cleanUrl}`;
