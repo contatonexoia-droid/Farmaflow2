@@ -51,7 +51,8 @@ Seu objetivo é atender o cliente como um balconista experiente, humano, empáti
      * Evite repetir em todas as mensagens a frase robótica "Se precisar de mais alguma coisa, é só avisar! 😊" ou "Estou à disposição!". Converse de forma fluida e humana.
    - Quando o produto solicitado estiver disponível:
      * Diga imediatamente que temos disponível ("Temos sim!").
-     * Apresente NO MÁXIMO 2 A 3 OPÇÕES (as mais econômicas e relevantes) com laboratório/marca, apresentação/tamanho e preço, destacando a primeira com ⭐ Mais econômica.
+     * Se houver até 3 opções, apresente as opções mais econômicas. Se houver mais de 3 opções válidas (especialmente quando o cliente pedir um tamanho específico de fralda como tamanho G, M, P, XG, XXG, RN), liste as principais opções do mesmo tamanho ordenadas por preço ou quantidade (até 4 ou 5 opções reais do tamanho solicitado, como pacotes Jumbo, Premium, Mega, Hiper, Giga), destacando a primeira com ⭐ Mais econômica.
+     * REGRA ESTRITA DE TAMANHO: NUNCA inclua um produto de tamanho M (ex: JUMBO M) ou de outro tamanho quando o cliente pedir explicitamente o tamanho G!
      * Finalize com uma pergunta natural de balcão (ex: "Qual dessas você prefere que eu separe pra você?").
 
 4. RECONHECIMENTO DE ESCOLHA DO CLIENTE E LINK DIRETO DO PRODUTO:
@@ -481,6 +482,124 @@ function productMatchesDosage(product: any, detectedDosage: string | null): bool
 }
 
 /**
+ * Normaliza tokens de tamanho de fraldas, vestuário e calçados (RN, PP, P, M, G, GG, XG, XXG, XXXG)
+ */
+export function normalizeSizeToken(raw: string): string {
+  const s = (raw || "").trim().toUpperCase();
+  if (s === "RN+" || s === "RN") return "RN";
+  if (s === "XP" || s === "PP") return "PP";
+  if (s === "EG") return "XG";
+  if (s === "EXG") return "XXG";
+  return s;
+}
+
+/**
+ * Extrai o tamanho exato solicitado pelo cliente na busca ou mensagem (ex: "tamanho G", "tam G", "GG", "M", "P", "RN", "XG", "XXG", "XXXG")
+ * sem confundir com unidades de peso/dosagem ("1g", "75g", "500mg") ou abreviações ("p/").
+ */
+export function extractProductSize(text: string): string | null {
+  if (!text || typeof text !== "string") return null;
+  const norm = text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+
+  // 1. Menção explícita com "tamanho", "tam", "t-" (ex: "tamanho G", "tam G", "tam. M", "t-xxg")
+  const explicitMatch = norm.match(/\b(?:tamanho|tam\.?|t\s*-)\s*(xxxg|xxg|exg|xg|eg|gg|rn\+|rn|pp|xp|p|m|g)(?=$|[\s,.;:()\-?!])/i);
+  if (explicitMatch) {
+    return normalizeSizeToken(explicitMatch[1]);
+  }
+
+  // 2. Tamanhos compostos de múltiplas letras isolados na frase (ex: "RN", "PP", "GG", "XG", "XXG", "XXXG")
+  const multiLetterMatch = norm.match(/(?:^|[\s,.;:()\-])(xxxg|xxg|exg|xg|eg|gg|rn\+|rn|pp|xp)(?=$|[\s,.;:()\-?!])/i);
+  if (multiLetterMatch) {
+    return normalizeSizeToken(multiLetterMatch[1]);
+  }
+
+  // 3. Tamanhos de 1 letra ("P", "M", "G") isolados na busca
+  // Remove pesos/dosagens ("1g", "75g", "500mg", "10ml"), vitaminas ("vitamina d") e "p/" ("para")
+  const cleanWithoutUnits = norm
+    .replace(/\b\d+\s*unx\s*\d+\s*g\b/gi, " ")
+    .replace(/\b\d+(?:[.,]\d+)?\s*(?:mg|mcg|kg|g|ml|l|m|un|und|unid|cpr|comp|cps)\b/gi, " ")
+    .replace(/\b(?:vitamina|vit|complexo|hepatite|tipo|classe|fator|grup[oa])\s+[a-z]\b/gi, " ")
+    .replace(/\bp\s*\/\s*(?!m\b|g\b)/gi, " ");
+
+  const singleLetterMatch = cleanWithoutUnits.match(/(?:^|[\s,.;:()\-])(p|m|g)(?=$|[\s,.;:()\-?!])/i);
+  if (singleLetterMatch) {
+    return normalizeSizeToken(singleLetterMatch[1]);
+  }
+
+  return null;
+}
+
+/**
+ * Extrai rigorosamente os tokens de tamanho reais presentes no nome de cadastro do produto no ERP.
+ * Evita que letras soltas como "G" ou "M" deem match em palavras como "JUMBO", "MEGA", "GIGA", "HUGGIES", "PAMPERS" ou "75G".
+ */
+export function extractSizesFromProduct(product: any): string[] {
+  if (!product) return [];
+  const rawText = `${product.name || ""} ${product.variant_attribute || ""}`;
+  if (!rawText.trim()) return [];
+
+  // 1. Remove pesos, medidas, dosagens, quantidades e códigos de promoção (ex: 75G, 500MG, 60UNX5G, 22UN, C/80, L4P3, LV4 PG3)
+  const cleaned = rawText
+    .replace(/\b\d+\s*UNX\s*\d+\s*G\b/gi, " ")
+    .replace(/\b\d+(?:[.,]\d+)?\s*(?:MG|MCG|KG|G|ML|L|UN|UND|UNID|UNIDADES|CPR|COMP|CPS|UI)\b/gi, " ")
+    .replace(/\b(?:LV?\d+\s*PG?\d+)\b/gi, " ")
+    .replace(/\bC\s*\/\s*\d+(?:\s*UND|\s*UN)?\b/gi, " ")
+    .replace(/\bP\s*\/\s*(?!M\b|G\b)/gi, " ");
+
+  const sizes = new Set<string>();
+
+  // 2. Verifica tamanhos duplos (ex: P/M, G/XG, G/GG)
+  const dualMatches = cleaned.matchAll(/\b(RN|PP|P|M|G|GG|XG)\s*\/\s*(PP|P|M|G|GG|XG|XXG)\b/gi);
+  for (const dm of dualMatches) {
+    sizes.add(normalizeSizeToken(dm[1]));
+    sizes.add(normalizeSizeToken(dm[2]));
+  }
+
+  // 3. Verifica prefixos explícitos de tamanho (ex: TAM G, TAMANHO G, T-XXG, T- XXXG)
+  const explicitMatches = cleaned.matchAll(/\b(?:TAMANHO|TAM\.?|T\s*-)\s*(XXXG|XXG|EXG|XG|EG|GG|RN\+|RN|PP|XP|P|M|G)(?=$|[\s)\-/.,])/gi);
+  for (const em of explicitMatches) {
+    sizes.add(normalizeSizeToken(em[1]));
+  }
+
+  // 4. Verifica tokens de tamanho isolados no nome do produto (separados por espaços, hífens ou parênteses)
+  // Ex: "FRA BABYSEC ULTRA JUMBO G 22UN", "FRALDA PAMPERS (M)", "FRALDAS ... C/280UND G"
+  const tokenMatches = cleaned.matchAll(/(?:^|[\s(\-/])(XXXG|XXG|EXG|XG|EG|GG|RN\+|RN|PP|XP|P|M|G)(?=$|[\s)\-/.,])/gi);
+  for (const tm of tokenMatches) {
+    sizes.add(normalizeSizeToken(tm[1]));
+  }
+
+  return Array.from(sizes);
+}
+
+/**
+ * Valida com precisão estrita se o produto corresponde ao tamanho solicitado pelo cliente.
+ * - Regra para o tamanho G: exige o token isolado G (ex: " G ", "TAM G", "TAMANHO G", "(G)")
+ *   e NUNCA permite que um produto de tamanho M (ex: "JUMBO M") ou XG/XXG/P seja incluído.
+ */
+export function productMatchesSize(product: any, requestedSize: string | null): boolean {
+  if (!requestedSize) return true;
+  const target = normalizeSizeToken(requestedSize);
+  const prodSizes = extractSizesFromProduct(product);
+
+  if (prodSizes.length === 0) return false;
+
+  // Regra estrita anti-mistura M vs G: se o cliente pediu G e o produto tem tamanho M (sem ser tamanho duplo M/G), bloqueia imediatamente
+  const rawName = String(product?.name || "");
+  if (target === "G" && prodSizes.includes("M") && !/\b(?:M\s*\/\s*G|G\s*\/\s*M)\b/i.test(rawName)) {
+    return false;
+  }
+  if (target === "M" && prodSizes.includes("G") && !/\b(?:M\s*\/\s*G|G\s*\/\s*M)\b/i.test(rawName)) {
+    return false;
+  }
+
+  return prodSizes.includes(target);
+}
+
+/**
  * Garante que qualquer link de loja/produto esteja estritamente em uma linha isolada,
  * com quebras de linha antes e depois, sem prefixos colados (como "👉 http..."),
  * permitindo que a Evolution API e o WhatsApp identifiquem a URL e gerem o Link Preview com thumbnail.
@@ -586,8 +705,11 @@ export function cleanSearchInterjections(rawQuery: string): { cleaned: string; t
     "custa", "de", "da", "do", "dos", "das", "em", "na", "no", "nas", "nos",
     "ai", "aqui", "pra", "para", "com", "sem", "ola", "oi", "opa", "e",
     "voce", "voces", "vc", "vcs", "blz", "beleza", "favor", "dia", "tarde", "noite",
-    "bom", "boa", "por", "favor", "uma", "um", "uns", "umas", "esse", "essa", "esses", "essas"
+    "bom", "boa", "por", "favor", "uma", "um", "uns", "umas", "esse", "essa", "esses", "essas",
+    "tamanho", "tam"
   ]);
+
+  const SINGLE_LETTER_SIZES = new Set(["p", "m", "g"]);
 
   // Remove caracteres especiais exceto letras, números e hífens
   const tokens = text
@@ -595,12 +717,14 @@ export function cleanSearchInterjections(rawQuery: string): { cleaned: string; t
     .split(/\s+/)
     .filter(Boolean);
 
-  const meaningfulTerms = tokens.filter(t => !INTERJECTIONS.has(t) && t.length >= 2);
+  const meaningfulTerms = tokens.filter(
+    t => !INTERJECTIONS.has(t) && (t.length >= 2 || SINGLE_LETTER_SIZES.has(t))
+  );
 
   // Se o filtro removeu tudo (ex: usuário só digitou "tem"), preserva tokens com mais de 2 letras
   const finalTerms = meaningfulTerms.length > 0
     ? meaningfulTerms
-    : tokens.filter(t => t.length >= 2);
+    : tokens.filter(t => t.length >= 2 || SINGLE_LETTER_SIZES.has(t));
 
   return {
     cleaned: finalTerms.join(" "),
@@ -830,6 +954,7 @@ export async function resolveCustomerChosenProduct(
   if (!matchedOption && /\b(segund[ao]|2[aªoº])\b/i.test(norm)) matchedOption = options.find(o => o.idx === 2) || null;
   if (!matchedOption && /\b(terceir[ao]|3[aªoº])\b/i.test(norm)) matchedOption = options.find(o => o.idx === 3) || null;
   if (!matchedOption && /\b(quart[ao]|4[aªoº])\b/i.test(norm)) matchedOption = options.find(o => o.idx === 4) || null;
+  if (!matchedOption && /\b(quint[ao]|5[aªoº])\b/i.test(norm)) matchedOption = options.find(o => o.idx === 5) || null;
 
   // Por valor monetário mencionado (ex: "essa de 5,99", "o de 7,49")
   if (!matchedOption) {
@@ -1222,10 +1347,11 @@ CONCISÃO, LINGUAGEM NATURAL E EMPATIA DE BALCÃO (REGRAS OBRIGATÓRIAS DE RESPO
 - Use EXCLUSIVAMENTE negrito padrão do WhatsApp com 1 asterisco colado na palavra (*texto*), NUNCA use **texto**.
 - Quando o produto solicitado estiver disponível:
   * Diga imediatamente que temos disponível ("Temos sim!"). NUNCA diga que não tem se o item constar na lista de produtos.
-  * Apresente NO MÁXIMO 2 A 3 OPÇÕES (as mais econômicas e relevantes) com laboratório/marca, apresentação/tamanho e preço, destacando a primeira com ⭐ Mais econômica.
+  * Se houver mais de 3 opções válidas para o tamanho solicitado pelo cliente (ex: fraldas tamanho G com pacotes Jumbo, Premium, Mega, Hiper, Giga), liste as principais opções do mesmo tamanho ordenadas por preço ou quantidade (até 4 ou 5 opções reais do tamanho solicitado, numeradas com 1️⃣, 2️⃣, 3️⃣, 4️⃣, 5️⃣), destacando a primeira com ⭐ Mais econômica, garantindo que o cliente veja a variedade real que a farmácia tem no balcão.
+  * FILTRO RIGOROSO DE TAMANHO: NUNCA inclua um produto de tamanho M (ex: JUMBO M) ou de outro tamanho quando o cliente pedir explicitamente o tamanho G!
   * Finalize com uma pergunta curta e natural (ex: "Qual dessas você prefere que eu já deixe separada pra você?").
 
-ESTRUTURA DE RESPOSTA (MÁXIMO 2 A 3 OPÇÕES):
+ESTRUTURA DE RESPOSTA (ATÉ 4 OU 5 OPÇÕES QUANDO HOUVER VARIEDADE NO ESTOQUE):
 - Se o cliente pedir dipirona em gotas e tivermos em estoque:
   Exemplo ideal de resposta curta:
   "Temos dipirona em gotas sim! 😊
@@ -1359,15 +1485,27 @@ ${chosenMsg}
       const searchTerms = extractKeywordsAndIntents(incomingMessage);
       const primarySearchTerm = searchTerms[0] || incomingMessage.trim().split(/\s+/)[0] || "";
 
+      // Se a mensagem atual menciona apenas o tamanho (ex: "E tamanho G?", "Tem tam G?") sem repetir a marca/produto,
+      // recupera o produto/marca da última mensagem do histórico para manter precisão absoluta
+      let effectiveSearchQuery = incomingMessage;
+      const incomingSize = extractProductSize(incomingMessage);
+      if (incomingSize && searchTerms.filter(t => !["tamanho", "tam", "fralda", "fraldas"].includes(t)).length === 0 && chatHistory.length > 0) {
+        const recentText = chatHistory.slice(-4).map(m => m.content || "").join(" ");
+        const recentBrandMatch = recentText.match(/\b(babysec|pampers|huggies|mamypoko|pompom|cremer|looping|hipopo|bigfral|tena|cotidian|geriatex|turma da monica|fralda|fraldas)\b/i);
+        if (recentBrandMatch) {
+          effectiveSearchQuery = `fralda ${recentBrandMatch[1]} tamanho ${incomingSize}`;
+        }
+      }
+
       try {
         const matchedProducts = await this.searchProductsInDb(
           tenantIds.length > 0 ? tenantIds : [tenant.id || tenantId],
-          incomingMessage,
-          4
+          effectiveSearchQuery,
+          5
         );
         const validMatched = (matchedProducts || []).filter((p: any) => Number(p.price) > 0 && Number(p.stock ?? 1) > 0);
         if (validMatched.length > 0) {
-          const displayProducts = validMatched.slice(0, 3);
+          const displayProducts = validMatched.slice(0, 5);
           catalogContext = "\n\n[CATÁLOGO EM TEMPO REAL - PRODUTOS ENCONTRADOS NO BANCO DE DADOS DA DROGARIA]:\n" +
             displayProducts.map((p, idx) => {
               const preco = (Number(p.price) || 0).toFixed(2);
@@ -1384,7 +1522,7 @@ ${chosenMsg}
 - NUNCA pergunte "posso enviar o link da loja?" e NUNCA escreva textos sem URL como "👉 Clique aqui para comprar" ou "👉 Confira aqui na loja".
 - NUNCA repita em todas as mensagens a frase robótica "Se precisar de mais alguma coisa, é só avisar! 😊".
 - PROMOÇÕES E OFERTAS: Quando houver produto com promoção ativa indicada por [OFERTA: ...], DESTAQUE a promoção com entusiasmo na mensagem do WhatsApp.
-- Apresente NO MÁXIMO 2 A 3 OPÇÕES mais econômicas, numeradas (1️⃣, 2️⃣, 3️⃣) com Marca/Apresentação em negrito simples do WhatsApp (*Nome*) e R$ Preço, destacando a primeira com ⭐ Mais econômica.
+- EXIBIÇÃO COMPLETA DO ESTOQUE POR TAMANHO: Liste as opções encontradas acima (até 4 ou 5 opções quando houver variedade do tamanho solicitado, numeradas com 1️⃣, 2️⃣, 3️⃣, 4️⃣, 5️⃣) com Marca/Apresentação em negrito simples do WhatsApp (*Nome*) e R$ Preço, destacando a primeira com ⭐ Mais econômica. NUNCA inclua produtos de tamanho diferente do solicitado (ex: nunca liste tamanho M se o cliente pediu G).
 - Se o cliente pediu gotas, frascos com 'GTS' ou 'SOL' (10ml, 20ml) como Maxalgina, Germed, Medley SÃO gotas! NUNCA ofereça comprimidos se houver gotas disponíveis.`;
         } else if (searchTerms.length > 0) {
           catalogContext = `\n\n[CATÁLOGO EM TEMPO REAL]:
@@ -2755,12 +2893,14 @@ ${taskInstruction}`;
       return [];
     }
 
-    // 1. Limpeza de interjeições conversacionais e normalização
+    // 1. Limpeza de interjeições conversacionais, extração de tamanho exato e dosagem
     const { cleaned: cleanedTerm, terms: searchWords } = cleanSearchInterjections(searchTerm);
     const termToUse = cleanedTerm || searchTerm;
 
     const { detectedDosage, isDrops, isSyrup, isTablets } =
       extractDosageAndPresentation(searchTerm);
+
+    const detectedSize = extractProductSize(searchTerm);
 
     const normalized = termToUse
       .toLowerCase()
@@ -2777,17 +2917,42 @@ ${taskInstruction}`;
       "xaropes", "xpe", "pomada", "pomadas", "pom", "creme", "cr", "dental", "dent",
       "absorvente", "absorventes", "abs", "desodorante", "desodorantes", "desod", "aero",
       "sabonete", "sabonetes", "sab", "capsula", "capsulas", "pilula", "pilulas",
-      "caixa", "cartela", "un", "unidades", "mg", "g", "ml"
+      "caixa", "cartela", "un", "unidades", "mg", "g", "ml", "tamanho", "tam"
     ]);
 
-    // Extrai tokens relevantes (com 2+ caracteres)
-    let rawTokens = normalized.split(/\s+/).filter(t => t.length >= 2);
+    const SIZE_TOKEN_SET = new Set([
+      "rn", "pp", "xp", "p", "m", "g", "gg", "xg", "eg", "xxg", "exg", "xxxg", "tamanho", "tam", "t"
+    ]);
+
+    // Extrai tokens relevantes de busca textual (removendo tokens de tamanho isolados para que 'g' não dê match em 'MEGA' ou 'JUMBO')
+    let rawTokens = normalized
+      .split(/\s+/)
+      .filter(t => t.length >= 2 && (!detectedSize || !SIZE_TOKEN_SET.has(t)));
+
     if (rawTokens.length === 0 && searchWords.length > 0) {
-      rawTokens = searchWords;
+      rawTokens = searchWords.filter(t => t.length >= 2 && (!detectedSize || !SIZE_TOKEN_SET.has(t)));
+    }
+
+    // Se o cliente buscou apenas pelo tamanho (ex: "tamanho G" ou "tam G"), assume busca por fraldas daquele tamanho
+    if (rawTokens.length === 0 && detectedSize) {
+      rawTokens = ["fralda"];
     }
 
     // Detecta frases compostas como "creme dental" ou "pasta de dente"
     const hasCremeDental = normalized.includes("creme dental") || normalized.includes("pasta de dente") || normalized.includes("pasta dental");
+
+    // Detecta se é uma busca de fralda (para não misturar lenço/toalha umedecida, sabonete, shampoo ou fita quando o cliente pediu fralda)
+    const isDiaperSearch =
+      /\b(fraldas?|fra|babysec|pampers|huggies|mamypoko|pompom|looping|hipopo|bigfral|tena|cotidian|geriatex)\b/i.test(normalized) &&
+      !/\b(toalha|lenco|sabonete|sab|shampoo|sh|condicionador|cond|pomada|fita|creme)\b/i.test(normalized);
+
+    const isNonDiaperHygieneProduct = (prod: any): boolean => {
+      const pName = String(prod?.name || "");
+      return (
+        /\b(TOALHA\s+UMED|LENCO\s+UMED|LENÇO\s+UMED|FITA\s+PARA\s+FRALDAS|ALCACHFRA|\d+FRA\b)\b/i.test(pName) ||
+        /^(?:SAB|SABONETE|SH|SHAMPOO|COND|CONDICIONADOR|LENCO|TOALHA)\b/i.test(pName.trim())
+      );
+    };
 
     // Identifica termos específicos/marcas (ex: "babysec", "dorflex", "pampers", "neosaldina")
     const specificTerms = rawTokens.filter(t => !GENERIC_PHARMA_WORDS.has(t));
@@ -2836,9 +3001,20 @@ ${taskInstruction}`;
 
     const productSelectFields = "id, name, price, stock, presentation, category, active_principle, description, requires_prescription, promotional_price, promo_type, promo_buy_qty, promo_pay_qty, promo_progressive_price, promo_start_date, promo_end_date, promotion_type, buy_x, pay_y, discount_qty_threshold, discount_qty_percentage";
 
-    // Função de pontuação e ranking em memória com base em match em name, category, description e active_principle
+    // Função de pontuação e ranking em memória com base em match em name, category, description, active_principle e validação estrita de tamanho
     const scoreProductMatch = (product: any, allQueryTokens: string[]): number => {
       if (!product) return 0;
+
+      // Validação estrita de tamanho: se o cliente pediu tamanho exato (ex: G), rejeita imediatamente qualquer outro tamanho (ex: JUMBO M, XG, P)
+      if (detectedSize && !productMatchesSize(product, detectedSize)) {
+        return 0;
+      }
+
+      // Se a busca é de fralda, não inclui toalha umedecida, sabonete, condicionador ou fita
+      if (isDiaperSearch && isNonDiaperHygieneProduct(product)) {
+        return 0;
+      }
+
       let score = 0;
       const pName = (product.name || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
       const pCat = (product.category || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -2847,9 +3023,12 @@ ${taskInstruction}`;
       const pPres = (product.presentation || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
       let matchedTokensCount = 0;
+      let matchedSpecificCount = 0;
 
       for (const tok of allQueryTokens) {
         const normTok = tok.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        if (normTok.length < 2) continue;
+
         const expansions = new Set<string>([normTok]);
         if (PHARMA_EXPANSIONS[normTok]) {
           PHARMA_EXPANSIONS[normTok].forEach(e => expansions.add(e.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")));
@@ -2875,9 +3054,20 @@ ${taskInstruction}`;
         }
 
         // Bônus se termo específico de marca bater no nome
-        if (specificTerms.includes(normTok) && matchInName) {
-          score += 15;
+        if (specificTerms.includes(normTok) && (matchInName || matchInAct)) {
+          score += 20;
+          matchedSpecificCount++;
         }
+      }
+
+      // Se o cliente especificou uma marca/produto específico (ex: "babysec") e o produto NÃO é dessa marca, zera o score para não misturar outras marcas
+      if (specificTerms.length > 0 && matchedSpecificCount === 0) {
+        return 0;
+      }
+
+      // Bônus se bateu com o tamanho exato solicitado pelo cliente
+      if (detectedSize && productMatchesSize(product, detectedSize)) {
+        score += 35;
       }
 
       // Bônus proporcional se bateu com todos os termos da frase do cliente
@@ -2893,8 +3083,11 @@ ${taskInstruction}`;
       return score;
     };
 
+    // Limite amplo de busca no banco para garantir que todos os tamanhos de uma linha (Jumbo, Premium, Mega, Hiper, Giga) sejam avaliados
+    const dbFetchLimit = Math.max(limit * 25, 150);
+
     // =========================================================================
-    // 1º PASSO: BUSCA ONDE TODOS OS TERMOS BATAM NO name OU category OU description OU active_principle
+    // 1º PASSO: BUSCA ONDE OS TERMOS BATAM NO name OU category OU description OU active_principle
     // =========================================================================
     if (uniqueTokens.length > 0) {
       let qStep1 = supabaseAdmin
@@ -2905,12 +3098,11 @@ ${taskInstruction}`;
         .gt("stock", 0)
         .order("price", { ascending: true });
 
-      // Aplica as cláusulas multi-coluna para cada termo
-      for (const tok of uniqueTokens.slice(0, 4)) {
-        const clause = buildMultiColumnClauseForTerm(tok);
-        if (clause) {
-          qStep1 = qStep1.or(clause);
-        }
+      // Prioriza filtrar no banco pelo termo mais específico (ex: "babysec") para trazer 100% da linha daquela marca sem estourar limite
+      const primaryTokenForSql = specificTerms.length > 0 ? specificTerms[0] : uniqueTokens[0];
+      const primaryClause = buildMultiColumnClauseForTerm(primaryTokenForSql);
+      if (primaryClause) {
+        qStep1 = qStep1.or(primaryClause);
       }
 
       if (detectedDosage) {
@@ -2924,15 +3116,20 @@ ${taskInstruction}`;
       }
 
       try {
-        const { data: step1Data, error: step1Err } = await qStep1.limit(limit * 4);
+        const { data: step1Data, error: step1Err } = await qStep1.limit(dbFetchLimit);
         if (!step1Err && step1Data && step1Data.length > 0) {
-          // Pontua e reordena por relevância e custo-benefício
+          // Pontua e reordena por relevância e custo-benefício (scoreProductMatch já aplica productMatchesSize estrito)
           const scored = step1Data
             .map(p => ({ product: p, score: scoreProductMatch(p, uniqueTokens) }))
             .filter(item => item.score > 0)
             .sort((a, b) => b.score - a.score || Number(a.product.price) - Number(b.product.price));
 
           let finalProds = scored.map(item => item.product);
+
+          // Filtro rigoroso adicional de tamanho exato
+          if (detectedSize) {
+            finalProds = finalProds.filter(p => productMatchesSize(p, detectedSize));
+          }
 
           // Filtra apresentação se cliente pediu gotas expressamente
           if (isDrops) {
@@ -2980,7 +3177,7 @@ ${taskInstruction}`;
             .gt("stock", 0)
             .or(clause)
             .order("price", { ascending: true })
-            .limit(limit * 4);
+            .limit(dbFetchLimit);
 
           if (tokData && tokData.length > 0) {
             for (const p of tokData) {
@@ -2991,15 +3188,13 @@ ${taskInstruction}`;
           }
         } catch (_) {}
 
-        // Se já coletou produtos suficientes através do termo específico, não precisa sobrecarregar o banco
-        if (candidateMap.size >= limit * 3) {
+        if (candidateMap.size >= dbFetchLimit) {
           break;
         }
       }
 
       const allCandidates = Array.from(candidateMap.values());
       if (allCandidates.length > 0) {
-        // Avalia em memória quantos termos da frase bateram no name + category + description
         const scoredCandidates = allCandidates
           .map(p => ({
             product: p,
@@ -3009,6 +3204,10 @@ ${taskInstruction}`;
           .sort((a, b) => b.score - a.score || Number(a.product.price) - Number(b.product.price));
 
         let finalProds = scoredCandidates.map(item => item.product);
+
+        if (detectedSize) {
+          finalProds = finalProds.filter(p => productMatchesSize(p, detectedSize));
+        }
 
         if (isDrops) {
           const drops = finalProds.filter(isProductDrops);
@@ -3123,7 +3322,7 @@ ${taskInstruction}`;
       const { cleaned: cleanedTerm } = cleanSearchInterjections(rawTerm);
       let termo = cleanedTerm && cleanedTerm.length >= 2 ? cleanedTerm : rawTerm;
 
-      // Se o usuário especificou dosagem ou forma na mensagem (ex: 500mg, gotas, comprimidos, xarope) e o termo da IA omitiu, adiciona
+      // Se o usuário especificou dosagem, forma ou tamanho na mensagem (ex: 500mg, gotas, comprimidos, tamanho G) e o termo da IA omitiu, adiciona
       if (userMessage) {
         const userDosage = extractDosageAndPresentation(userMessage);
         const termDosage = extractDosageAndPresentation(termo);
@@ -3136,6 +3335,11 @@ ${taskInstruction}`;
           termo = `${termo} comprimidos`;
         } else if (userDosage.isSyrup && !termDosage.isSyrup) {
           termo = `${termo} xarope`;
+        }
+        const userSize = extractProductSize(userMessage);
+        const termSize = extractProductSize(termo);
+        if (userSize && !termSize) {
+          termo = `${termo} tamanho ${userSize}`;
         }
       }
 
@@ -3154,7 +3358,7 @@ ${taskInstruction}`;
         const prods = await this.searchProductsInDb(
           tenantIds.length > 0 ? tenantIds : [tenant?.id || ''],
           termo,
-          4
+          5
         );
 
         const effectiveStoreLink = storeLink || (tenant?.custom_domain ? `https://${tenant.custom_domain}` : `https://${tenant?.slug || tenant?.id || 'loja'}.farmaflow.online`);
@@ -3190,7 +3394,7 @@ ${taskInstruction}`;
             "1. 'DIPIRONA MONO' (Monoidratada) e 'DIPIRONA SODICA' são rigorosamente o mesmo medicamento (Dipirona).",
             "2. Maxalgina, Dipimed, Novalgina e Nevraldor são nomes comerciais de Dipirona. Frascos de 10ml e 20ml com 'GTS' ou 'SOL' SÃO gotas! NUNCA diga que são '(solução, mas não em gotas)'.",
             "3. Se o cliente pediu gotas e houver produtos com GTS ou SOL (10ml, 20ml) na lista, ELE ESTÁ DISPONÍVEL! Diga imediatamente que temos em gotas e NUNCA ofereça comprimidos.",
-            "4. CONCISÃO E DIRETO AO PONTO: Responda de forma CURTA e humanizada no WhatsApp (apresente no MÁXIMO 2 a 3 opções numeradas com 1️⃣, 2️⃣, 3️⃣, destacando a primeira com ⭐ Mais econômica e faça uma pergunta objetiva no final).",
+            "4. EXIBIÇÃO COMPLETA DO ESTOQUE POR TAMANHO: Se houver mais de 3 opções válidas na lista (especialmente para um tamanho solicitado como G, M, P, XG, XXG), liste as principais opções encontradas ordenadas por preço ou quantidade (até 4 ou 5 opções numeradas com 1️⃣, 2️⃣, 3️⃣, 4️⃣, 5️⃣, destacando a primeira com ⭐ Mais econômica). NUNCA inclua produtos de tamanho M quando o cliente pedir tamanho G.",
             "5. PROMOÇÕES ATIVAS: Se o produto tiver promoção ativa (ex: 'Leve 3 Pague 2' ou desconto progressivo), DESTAQUE esta promoção na mensagem para encantar o cliente."
           ]
         };

@@ -26,7 +26,7 @@ import { contactMergeManager } from "./services/contactMergeManager.js";
 import { inboxStore } from "./services/inboxStore.js";
 import { chatStore } from "./services/chatStore.js";
 import { teamStore } from "./services/teamStore.js";
-import { aiAgentService, DEFAULT_AI_AGENT_PROMPT, isolateUrlsInText, extractUrlAndCleanText, ensureStoreUrlCacheBuster, formatToWhatsAppMarkdown, cleanSearchInterjections, PHARMA_EXPANSIONS } from "./services/aiAgentService.js";
+import { aiAgentService, DEFAULT_AI_AGENT_PROMPT, isolateUrlsInText, extractUrlAndCleanText, ensureStoreUrlCacheBuster, formatToWhatsAppMarkdown, cleanSearchInterjections, PHARMA_EXPANSIONS, extractProductSize, productMatchesSize } from "./services/aiAgentService.js";
 import { evolutionApiService } from "./services/evolutionApiService.js";
 import { transcribeAudio } from "./services/audioAiService.js";
 import ogHandler, { buildCrawlerHtml, isCrawlerRequest } from "./api/og-handler.js";
@@ -2420,6 +2420,8 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
           ? "omeprazol | pantoprazol | esomeprazol | lansoprazol | rabeprazol | dexlansoprazol | peprazol | pantocal | gastrium | estomago | gastrico | digestivo | digestao | azia | antiacido | eno | estomazil | luftal | simeticona | ranitidina | antidin | pepto | domperidona | metoclopramida | plasil | digesan | gastro"
           : search;
 
+      const detectedSize = extractProductSize(search);
+
       try {
         const { data: rpcData, error: rpcError } = await supabase.rpc("search_products_v2", {
           p_tenant_id: tenantId,
@@ -2430,8 +2432,12 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
         });
 
         if (!rpcError && Array.isArray(rpcData)) {
-          const validRpcData = rpcData.filter((p: any) => Number(p.price) > 0 && Number(p.stock ?? 1) > 0);
-          if (validRpcData.length > 0) {
+          const validRpcData = rpcData.filter((p: any) =>
+            Number(p.price) > 0 &&
+            Number(p.stock ?? 1) > 0 &&
+            (!detectedSize || productMatchesSize(p, detectedSize))
+          );
+          if (validRpcData.length > 0 && !detectedSize) {
             res.setHeader("Cache-Control", "public, s-maxage=60, stale-while-revalidate=300");
             return res.json({
               data: validRpcData,
@@ -2441,7 +2447,7 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
               source: "postgres_rpc"
             });
           }
-          console.log(`[Search Fallback] RPC search_products_v2 retornou 0 itens para "${searchTermToUse}". Acionando busca inteligente com abreviações de ERP...`);
+          console.log(`[Search Fallback] RPC search_products_v2 retornou ${validRpcData.length} itens para "${searchTermToUse}" (detectedSize=${detectedSize || 'none'}). Acionando busca inteligente com abreviações de ERP e filtro estrito de tamanho...`);
         } else {
           console.warn("RPC search_products_v2 failed or not found, falling back to server intelligent search:", rpcError);
         }
@@ -2462,6 +2468,11 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
     }
 
     const cleanSearchText = search ? normalizeText(search) : "";
+    const detectedSizeFallback = search ? extractProductSize(search) : null;
+    const SIZE_STOP_TOKENS = new Set([
+      "rn", "pp", "xp", "p", "m", "g", "gg", "xg", "eg", "xxg", "exg", "xxxg", "tamanho", "tam", "t"
+    ]);
+
     const isDiaSeguinteFallback = 
       cleanSearchText.includes("pilula do dia seguinte") || 
       cleanSearchText.includes("pilula dia seguinte") || 
@@ -2498,8 +2509,15 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
           `name.fts.${tsQueryFormated},description.fts.${tsQueryFormated},category.fts.${tsQueryFormated},active_principle.fts.${tsQueryFormated}`
         );
       } else {
-        const searchTokens = cleanSearchText.split(/\s+/).filter(t => t.length > 0);
-        
+        // Remove tokens de 1 letra e indicadores de tamanho para evitar que 'g' dê match em qualquer palavra com G
+        let searchTokens = cleanSearchText
+          .split(/\s+/)
+          .filter(t => t.length >= 2 && (!detectedSizeFallback || !SIZE_STOP_TOKENS.has(t)));
+
+        if (searchTokens.length === 0 && detectedSizeFallback) {
+          searchTokens = ["fralda"];
+        }
+
         let expandedTokens = [...searchTokens];
         searchTokens.forEach(token => {
           const syns = ENDPOINT_PHARMA_SYNONYMS[token];
@@ -2507,24 +2525,36 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
             expandedTokens = [...expandedTokens, ...syns];
           }
         });
-        expandedTokens = Array.from(new Set(expandedTokens));
+        expandedTokens = Array.from(new Set(expandedTokens)).filter(t => t.length >= 2);
 
-        const tsQueryFormated = expandedTokens.map(tok => `${tok}:*`).join(" | ");
-        query = query.or(
-          `name.fts.${tsQueryFormated},description.fts.${tsQueryFormated},category.fts.${tsQueryFormated},active_principle.fts.${tsQueryFormated}`
-        );
+        const ilikeClauses = expandedTokens
+          .slice(0, 8)
+          .map(tok => `name.ilike.%${tok}%,category.ilike.%${tok}%,active_principle.ilike.%${tok}%`)
+          .join(",");
+
+        if (ilikeClauses) {
+          query = query.or(ilikeClauses);
+        }
       }
     }
 
-    const { data, count, error } = await query.range(from, to);
+    const fetchRangeEnd = detectedSizeFallback ? Math.max(to, 200) : to;
+    const { data, count, error } = await query.range(from, fetchRangeEnd);
     if (error) throw error;
 
     let finalData = data || [];
 
     if (search && search.trim().length > 0) {
+      // Filtro rigoroso de tamanho exato quando o cliente especificou tamanho (ex: G, M, P, GG, XG, XXG, RN)
+      if (detectedSizeFallback) {
+        finalData = finalData.filter((prod: any) => productMatchesSize(prod, detectedSizeFallback));
+      }
+
       const cleanSearch = normalizeText(search);
-      const searchTokens = cleanSearch.split(/\s+/).filter(t => t.length > 0);
-      
+      const searchTokens = cleanSearch
+        .split(/\s+/)
+        .filter(t => t.length >= 2 && (!detectedSizeFallback || !SIZE_STOP_TOKENS.has(t)));
+
       let expandedTokens = [...searchTokens];
       searchTokens.forEach(token => {
         const syns = ENDPOINT_PHARMA_SYNONYMS[token];
@@ -2532,7 +2562,7 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
           expandedTokens = [...expandedTokens, ...syns];
         }
       });
-      expandedTokens = Array.from(new Set(expandedTokens));
+      expandedTokens = Array.from(new Set(expandedTokens)).filter(t => t.length >= 2);
 
       const scoredProducts = finalData.map((prod: any) => {
         const name = normalizeText(prod.name);
@@ -2615,6 +2645,7 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
           }
 
           searchTokens.forEach(token => {
+            if (token.length < 2) return;
             if (name.includes(token)) score += 300;
             if (cat.includes(token)) score += 200;
             if (act.includes(token)) score += 200;
@@ -2624,6 +2655,7 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
           });
 
           expandedTokens.forEach(token => {
+            if (token.length < 2) return;
             if (!searchTokens.includes(token)) {
               if (name.includes(token)) score += 150;
               if (cat.includes(token)) score += 100;
@@ -2631,6 +2663,10 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
               if (desc.includes(token)) score += 5;
             }
           });
+
+          if (detectedSizeFallback && productMatchesSize(prod, detectedSizeFallback)) {
+            score += 500;
+          }
         }
 
         const nameWords = name.split(/\s+/);
@@ -2661,8 +2697,8 @@ app.get("/api/v1/store/:tenantId/products", async (req, res) => {
         return { ...prod, _score: score };
       });
 
-      scoredProducts.sort((a, b) => b._score - a._score);
-      finalData = scoredProducts.map(p => {
+      scoredProducts.sort((a, b) => b._score - a._score || Number(a.price) - Number(b.price));
+      finalData = scoredProducts.slice(0, limit).map(p => {
         const { _score, ...rest } = p;
         return rest;
       });
