@@ -498,7 +498,7 @@ export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConf
                   rows={2}
                   value={agentConfig.transitionToHumanMessage || ''}
                   onChange={(e) => setAgentConfig({ ...agentConfig, transitionToHumanMessage: e.target.value })}
-                  placeholder="Ex: Encaminhei sua dúvida e o link da nossa loja. Um dos nossos balconistas humanos já vai te atender por aqui!"
+                  placeholder="Ex: Perfeito! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido."
                   className="w-full bg-gray-50 border-2 border-gray-200 rounded-2xl p-3.5 text-xs md:text-sm font-medium text-gray-800 outline-none focus:border-purple-500 transition-colors"
                 />
               </div>

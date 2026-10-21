@@ -10,7 +10,8 @@ import {
   buildHumanizedHandoffMessage,
   buildProductHandoffMessage,
   registerBotSentMessage,
-  detectFinalCheckoutIntent
+  detectFinalCheckoutIntent,
+  botSentMessageIds
 } from "./botHandoffManager.js";
 import { realtimeHub } from "./realtimeHub.js";
 import { evolutionApiService } from "./evolutionApiService.js";
@@ -79,21 +80,18 @@ Seu objetivo é recepcionar o cliente com agilidade, tirar dúvidas sobre medica
 
        *(Pelo link você fecha em menos de 1 minuto, escolhe a forma de pagamento e seu pedido chega mais rápido!)*
 
-       💬 **Prefere continuar aqui pelo WhatsApp?**
-       Sem problemas! Um dos nossos balconistas já vai assumir o atendimento para finalizar seu pedido.
-
+       Para conferir mais detalhes ou comprar agora, acesse o link abaixo 👇:
        {link_direto_do_produto}"
-     * Inclua a tag [TRANSFERIR_ATENDIMENTO] para transferir a conversa para a equipe de balcão imediatamente.
+     * Continue atendendo o cliente normalmente. Não acione transbordo para humano a menos que o cliente peça expressamente.
 
 5. CANAL PREFERENCIAL (CATÁLOGO ONLINE):
    - Apresente a loja online como a forma mais prática e vantajosa para ver fotos, cupons, opções de genéricos/similares com desconto e calcular o frete automaticamente.
 
 6. PEDIDO DIRETO PELO WHATSAPP (VONTADE DO CLIENTE):
    - Se o cliente informar que prefere fechar pelo WhatsApp ou mandar a lista de compras no chat:
-     1. Não insista para que ele use o site.
-     2. Apresente os preços dos produtos consultados.
-     3. Avise educadamente que o balconista da farmácia vai continuar a conversa em instantes para anotar o endereço e concluir o pedido.
-     4. Acione a função interna de transbordo para a equipe de balcão [TRANSFERIR_ATENDIMENTO].
+     1. Não insista excessivamente para que ele use o site.
+     2. Apresente os preços dos produtos consultados e tire as dúvidas do cliente.
+     3. Auxilie o cliente na conferência dos itens e valores. Se o cliente solicitar expressamente falar com um atendente ou finalizar com um atendente humano, acione [TRANSFERIR_ATENDIMENTO].
 
 7. POLÍTICA DE ENTREGA E RECEITUÁRIO:
    - A drogaria opera com foco exclusivo em tele-entrega (delivery). Não ofereça retirada em loja física.
@@ -104,7 +102,7 @@ Seu objetivo é recepcionar o cliente com agilidade, tirar dúvidas sobre medica
    - Nunca polua o chat com múltiplos links na mesma mensagem.
    - Em buscas e listagens de preços, apresente apenas 'Nome - Preço' e inclua apenas o link geral da loja no final da mensagem em linha própria isolada.
    - Envie o link direto de um produto específico SOMENTE se o cliente solicitar a compra daquele item em particular.
-   - Se o cliente optar por pedir pelo WhatsApp, não envie links de carrinho; apresente os valores e acione o balconista humano para concluir a tele-entrega.
+   - Se o cliente optar por pedir pelo WhatsApp, não envie links de carrinho; apresente os valores, tire as dúvidas normalmente e auxilie o cliente. Apenas transfira se o cliente solicitar expressamente um atendente humano.
 
 9. POSTURA E LIMITES:
    - Mantenha respostas curtas, gentis e comerciais (1 a 3 parágrafos). Não colete dados de cartão de crédito no chat.
@@ -547,6 +545,18 @@ export function extractUrlAndCleanText(text: string): { mainText: string; url: s
       .replace(/[\t ]+$/gm, "")
       .trim();
 
+    // Limpeza de frases indevidas de balconista/transbordo que possam ter sido concatenadas
+    res = res
+      .replace(/Encaminhei sua d[uú]vida[^\n]*/gi, "")
+      .replace(/Um dos nossos balconistas[^\n]*/gi, "")
+      .replace(/J[aá] notifiquei nossa equipe[^\n]*/gi, "")
+      .replace(/Já encaminhei para a nossa equipe[^\n]*/gi, "")
+      .replace(/Estou transferindo o seu atendimento[^\n]*/gi, "")
+      .replace(/💬\s*\*?\*?Prefere continuar (por|aqui pelo)\s*WhatsApp\??\*?\*?[^\n]*/gi, "")
+      .replace(/[\t ]{2,}/g, " ")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+
     // Se o texto terminou com chamada para o link ou loja (ex: "Para conferir mais detalhes ou aproveitar as promoções, acesse...")
     if (/Para conferir mais detalhes ou aproveitar as promoções/i.test(res)) {
       res = res.replace(
@@ -556,7 +566,7 @@ export function extractUrlAndCleanText(text: string): { mainText: string; url: s
     } else {
       // Remove rótulo de loja online órfão no final
       res = res
-        .replace(/(?:em\s+nossa\s+|nossa\s+)?loja\s+online\s*[:\-–—]?\s*$/gim, "")
+        .replace(/(?:em\s+nossa\s+|na\s+nossa\s+|nossa\s+)?loja\s+online\s*[:\-–—]?\s*$/gim, "")
         .trim();
       // Se a frase terminou com "acesse", "confira", etc., direciona elegantemente para o link abaixo
       res = res.replace(/(?:acesse|confira|veja)\s*[:\-–—]?\s*$/i, "acesse o link abaixo 👇:");
@@ -998,7 +1008,8 @@ export class AiAgentService {
     tenantId: string,
     incomingMessage: string,
     chatHistory: AiChatMessage[] = [],
-    configOverride?: Partial<AiAgentConfig>
+    configOverride?: Partial<AiAgentConfig>,
+    options?: { sessionTurn?: number }
   ): Promise<AiAgentExecutionResult> {
     // 1. Validação estrita de autorização do tenant no Super Admin
     const tenant = await this.verifyTenantAuthorization(tenantId);
@@ -1111,21 +1122,20 @@ ESTRUTURA DE RESPOSTA (MÁXIMO 2 A 3 OPÇÕES):
 - Se o cliente pediu uma dosagem ou formato que realmente NÃO temos em estoque:
   * Diga educadamente e de forma curta que o formato específico não está disponível no momento e ofereça a alternativa mais próxima.
 
-RECONHECIMENTO DE ESCOLHA DO CLIENTE E TRANSLADO/CONCLUSÃO:
+RECONHECIMENTO DE ESCOLHA DO CLIENTE:
 - Se o cliente responder escolhendo uma opção (ex: "vou querer a [marca]", "vou querer essa da ems", "pode ser o número 1", "adiciona a de 4,49", "vou levar a medley", "quero essa", "prefiro a ems"):
   * NUNCA repita a lista de produtos ou alternativas.
   * NÃO apresente novas opções de medicamentos.
-  * Envie exatamente a seguinte resposta acolhedora e comercial:
+  * Envie a confirmação personalizada com o link da loja:
     "Perfeito! Já anotei a sua preferência. 😊
 
     🛒 *Dica para agilizar:* Você pode concluir seu pedido agora mesmo pela nossa loja online:
 
+    Para conferir mais detalhes ou comprar agora, acesse o link abaixo 👇:
     {STORE_LINK}
 
-    *(É muito mais rápido, prático e 100% seguro!)*
-
-    💬 **Prefere continuar por aqui?** Sem problemas! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido."
-  * Inclua a tag [TRANSFERIR_ATENDIMENTO] para transferir a conversa para a equipe de balcão imediatamente.`;
+    *(É muito mais rápido, prático e 100% seguro!)*"
+  * Continue atendendo o cliente normalmente. NÃO transfira para atendente humano nem diga que um balconista vai assumir a menos que o cliente solicite expressamente.`;
 
     if (basePrompt.includes("REGRAS DE EQUIVALÊNCIA FARMACÊUTICA")) {
       basePrompt = basePrompt.replace(/REGRAS DE EQUIVALÊNCIA FARMACÊUTICA:[\s\S]*?(?=\n\n(?:[0-9]+\.|\bDIRETRIZ\b|\bCANAL\b|\bCATÁLOGO\b|\bPOSTURA\b|$))/i, EQUIVALENCE_RULES.trim());
@@ -1273,7 +1283,7 @@ Nenhum produto específico identificado na mensagem. Link geral da Webloja: ${st
 
     // 7. Trava de Interações: Se for a última interação da sessão antes do transbordo
     const maxInteractions = Number(effectiveConfig.maxInteractionsPerSession) || 4;
-    const currentInteraction = (chatHistory.filter(m => m.role === 'user').length) + 1;
+    const currentInteraction = options?.sessionTurn ?? 1;
     const isFinalSessionTurn = currentInteraction >= maxInteractions;
 
     let finalTurnDirective = "";
@@ -1316,26 +1326,35 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
     // 9. Detecção Ativa de Pedido de Atendimento Humano ou Confirmação Final de Entrega/Pagamento
     const humanCheck = detectHumanHandoffIntent(incomingMessage);
     const checkoutCheck = detectFinalCheckoutIntent(incomingMessage);
-    const hasTransferTag = /\[(TRANSFERIR_ATENDIMENTO|TRANSFER_TO_HUMAN|HANDOFF_HUMAN|TRANSBORDO)\]/i.test(rawResult.reply);
 
     // O bot SÓ deve transferir para humano quando:
-    // 1) Atingir o limite real de interações (isFinalSessionTurn)
-    // 2) O cliente pedir explicitamente para falar com atendente/humano/farmacêutico
-    // 3) O cliente enviar confirmação final de endereço/pagamento
-    // 4) A LLM emitir tag explícita de transferência necessária
-    const shouldHandoff = isFinalSessionTurn || humanCheck.isHumanRequested || checkoutCheck.isFinalCheckout || hasTransferTag;
+    // a) Atingir o limite real de interações da sessão (isFinalSessionTurn, ex: 4/4 turnos)
+    // b) O cliente pedir explicitamente para falar com atendente/humano/farmacêutico (humanCheck.isHumanRequested)
+    // c) Confirmação final de checkout / endereço / pagamento (checkoutCheck.isFinalCheckout)
+    const shouldHandoff = isFinalSessionTurn || humanCheck.isHumanRequested || checkoutCheck.isFinalCheckout;
     const handoffReason = humanCheck.isHumanRequested 
       ? "HUMAN_REQUESTED" 
       : (checkoutCheck.isFinalCheckout 
           ? "CHECKOUT_FINAL_CONFIRMATION" 
-          : (hasTransferTag 
-              ? "HUMAN_REQUESTED" 
-              : (isFinalSessionTurn ? "MAX_INTERACTIONS_REACHED" : undefined)));
+          : (isFinalSessionTurn ? "MAX_INTERACTIONS_REACHED" : undefined));
 
     // 10. Limpeza de tags internas e garantia de presença do link da Webloja
     let enforcedReply = rawResult.reply
       .replace(/\[(TRANSFERIR_ATENDIMENTO|TRANSFER_TO_HUMAN|HANDOFF_HUMAN|TRANSBORDO)\]/gi, '')
       .trim();
+
+    // Se NÃO for transbordo (turnos 1, 2, 3 normais), limpa rigorosamente qualquer frase residual de balconista ou transbordo
+    if (!shouldHandoff) {
+      enforcedReply = enforcedReply
+        .replace(/Encaminhei sua d[uú]vida[^\n]*/gi, '')
+        .replace(/Um dos nossos balconistas[^\n]*/gi, '')
+        .replace(/J[aá] notifiquei nossa equipe[^\n]*/gi, '')
+        .replace(/Já encaminhei para a nossa equipe[^\n]*/gi, '')
+        .replace(/Estou transferindo o seu atendimento[^\n]*/gi, '')
+        .replace(/💬\s*\*?\*?Prefere continuar (por|aqui pelo)\s*WhatsApp\??\*?\*?[^\n]*/gi, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+    }
 
     // Se o cliente escolheu uma opção, garante a mensagem oficial com link direto do produto sem transbordo prematuro
     if (choiceCheck.isChoice) {
@@ -1353,10 +1372,14 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       }
     }
 
-    // 11. Se for o último turno da sessão por limite, anexa mensagem de transição humana caso não tenha
-    const transitionMsg = effectiveConfig.transitionToHumanMessage || buildHumanizedHandoffMessage(storeLink);
-    if (isFinalSessionTurn && !choiceCheck.isChoice && !enforcedReply.includes("balconista") && !enforcedReply.includes("atendente humano")) {
-      enforcedReply = `${enforcedReply}\n\n${transitionMsg}`;
+    // 11. Se for transbordo legítimo (ex: limite de turnos atingido), anexa mensagem de transição humana caso não tenha
+    const rawTransition = (effectiveConfig.transitionToHumanMessage || "");
+    const cleanTransition = (rawTransition && !rawTransition.includes("Encaminhei sua dúvida") && !rawTransition.includes("balconistas humanos já vai te atender"))
+      ? rawTransition
+      : "Perfeito! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.";
+
+    if (shouldHandoff && isFinalSessionTurn && !choiceCheck.isChoice && !enforcedReply.includes("balconista") && !enforcedReply.includes("atendente humano")) {
+      enforcedReply = `${enforcedReply}\n\n${cleanTransition}`;
     }
 
     return {
@@ -1497,9 +1520,20 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         return { success: false, error: sendResult1.error || "WHATSAPP_DELIVERY_FAILED" };
       }
 
-      // Registra ID do Balão 1 e ativa janela de proteção de 15s contra eco no webhook
-      const b1Id = sendResult1.data?.key?.id || sendResult1.data?.message?.key?.id || sendResult1.data?.id;
-      registerBotSentMessage(b1Id, conversationId, cleanPhone);
+      // Extrai e registra TODOS os IDs possíveis retornados pela Evolution API contra eco no webhook
+      const b1Candidates = [
+        sendResult1.data?.key?.id,
+        sendResult1.data?.message?.key?.id,
+        sendResult1.data?.messages?.[0]?.key?.id,
+        sendResult1.data?.id,
+        sendResult1.data?.messageId,
+        (sendResult1 as any).key?.id,
+        (sendResult1 as any).id
+      ].filter(Boolean);
+      for (const id of b1Candidates) {
+        botSentMessageIds.add(String(id).trim());
+        registerBotSentMessage(String(id).trim(), conversationId, cleanPhone);
+      }
 
       // Registra Balão 1 na tabela de mensagens e no chatStore
       const { message: msg1 } = await chatStore.addMessage(
@@ -1543,9 +1577,20 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       if (!sendResult2.success) {
         console.warn(`[AiAgentService] ⚠️ Aviso: Balão 2 (URL) falhou no WhatsApp, mas Balão 1 já foi entregue:`, sendResult2.error);
       } else {
-        // Registra ID do Balão 2 e reforça janela de proteção contra eco
-        const b2Id = sendResult2.data?.key?.id || sendResult2.data?.message?.key?.id || sendResult2.data?.id;
-        registerBotSentMessage(b2Id, conversationId, cleanPhone);
+        // Registra TODOS os IDs possíveis do Balão 2 contra eco
+        const b2Candidates = [
+          sendResult2.data?.key?.id,
+          sendResult2.data?.message?.key?.id,
+          sendResult2.data?.messages?.[0]?.key?.id,
+          sendResult2.data?.id,
+          sendResult2.data?.messageId,
+          (sendResult2 as any).key?.id,
+          (sendResult2 as any).id
+        ].filter(Boolean);
+        for (const id of b2Candidates) {
+          botSentMessageIds.add(String(id).trim());
+          registerBotSentMessage(String(id).trim(), conversationId, cleanPhone);
+        }
 
         // Registra Balão 2 na tabela de mensagens e no chatStore
         const { message: msg2 } = await chatStore.addMessage(
@@ -1590,9 +1635,20 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         return { success: false, error: sendResult.error || "WHATSAPP_DELIVERY_FAILED" };
       }
 
-      // Registra ID da mensagem única do bot e ativa janela de proteção
-      const sId = sendResult.data?.key?.id || sendResult.data?.message?.key?.id || sendResult.data?.id;
-      registerBotSentMessage(sId, conversationId, cleanPhone);
+      // Registra TODOS os IDs da mensagem única do bot contra eco
+      const sCandidates = [
+        sendResult.data?.key?.id,
+        sendResult.data?.message?.key?.id,
+        sendResult.data?.messages?.[0]?.key?.id,
+        sendResult.data?.id,
+        sendResult.data?.messageId,
+        (sendResult as any).key?.id,
+        (sendResult as any).id
+      ].filter(Boolean);
+      for (const id of sCandidates) {
+        botSentMessageIds.add(String(id).trim());
+        registerBotSentMessage(String(id).trim(), conversationId, cleanPhone);
+      }
 
       // Registra a resposta única
       const { message: singleMsg } = await chatStore.addMessage(
@@ -1859,12 +1915,28 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       }
       storeLink = storeLink.replace(/\/+$/, '');
 
-      const currentCount = conv?.bot_interaction_count || 0;
+      let currentCount = conv?.bot_interaction_count || 0;
       const maxInteractions = Number(dbConfig.maxInteractionsPerSession) || 4;
+
+      // Detecção de nova sessão:
+      // Se a conversa estiver com contador >= limite mas a mensagem atual for uma saudação ("boa noite", "bom dia", etc.)
+      // ou se o estágio for 'ia_atendendo' com contador estourado, reinicia a contagem para 0
+      const isGreeting = /^(boa\s+noite|bom\s+dia|boa\s+tarde|ol[aá]|oi|oii|oiii|hello|hey)\b/i.test(incomingMessage.trim());
+      if (currentCount >= maxInteractions && (isGreeting || conv?.kanban_stage === "ia_atendendo" || !conv?.is_human_controlled)) {
+        console.log(`[AiAgentService] 🔄 Reiniciando contador de interações da IA para 0 (Nova sessão iniciada para ${conversationId})`);
+        currentCount = 0;
+        try {
+          await supabaseAdmin
+            .from("chat_conversations")
+            .update({ bot_interaction_count: 0 })
+            .eq("id", conversationId);
+        } catch (_) {}
+      }
+
       const rawTransitionMsg = dbConfig.transitionToHumanMessage || "";
-      const transitionMsg = (rawTransitionMsg && !rawTransitionMsg.includes("Encaminhei sua dúvida"))
+      const transitionMsg = (rawTransitionMsg && !rawTransitionMsg.includes("Encaminhei sua dúvida") && !rawTransitionMsg.includes("balconistas humanos já vai te atender"))
         ? rawTransitionMsg.replace(/\{store_url\}|\{STORE_URL\}|\{storeLink\}|\{STORE_LINK\}/g, storeLink)
-        : buildHumanizedHandoffMessage(storeLink);
+        : "Perfeito! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.";
 
       // 4. Tratamento especial EXCLUSIVO para documentos e imagens de receitas médicas (PDFs, fotos)
       // NUNCA acionar para áudio de voz!
@@ -2099,19 +2171,26 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         };
       }
 
-      // 9. Gerar resposta com a LLM
+      // 9. Gerar resposta com a LLM passando o turno exato da sessão
       const aiResult = await this.generateReply(
         realTenantId,
         incomingMessage,
         history,
-        dbConfig
+        dbConfig,
+        { sessionTurn: nextCount }
       );
 
       let finalReply = aiResult.reply;
 
-      // 10. Se for a última interação da sessão ou se a IA transferiu para humano, realizar transbordo definitivo
-      if (isFinalTurn || aiResult.transferredToHuman) {
-        const resolvedReason = aiResult.handoffReason || (isFinalTurn ? "MAX_INTERACTIONS_REACHED" : "HUMAN_REQUESTED");
+      // 10. A frase de balconista e a mudança para Humano SÓ devem ocorrer quando:
+      // a) Atingir o limite máximo de turnos da IA (isFinalTurn, ex: 4/4 interações); OU
+      // b) O cliente pedir explicitamente para falar com atendente/humano/farmacêutico (handoffCheck.isHumanRequested)
+      const shouldHandoff = isFinalTurn || checkoutCheck.isFinalCheckout;
+
+      if (shouldHandoff) {
+        const resolvedReason = isFinalTurn
+          ? "MAX_INTERACTIONS_REACHED"
+          : (checkoutCheck.isFinalCheckout ? "CHECKOUT_FINAL_CONFIRMATION" : "HUMAN_REQUESTED");
 
         if (isFinalTurn && !finalReply.includes("balconista") && !finalReply.includes("atendente humano")) {
           finalReply = `${finalReply}\n\n${transitionMsg}`;
@@ -2146,7 +2225,20 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         };
       }
 
-      // 11. Interação normal do bot: Enviar mensagem pelo WhatsApp, confirmar entrega, gravar e incrementar contador
+      // 11. Interação normal do bot (Turnos 1, 2 e 3):
+      // A IA responde normalmente, consulta produtos e ajuda o cliente SEM dizer frase de balconista e SEM mudar para Humano!
+      // Se a IA enviar o link da loja durante a conversa, ela continua 100% ATIVA (ai_enabled = true, coluna da IA).
+      finalReply = finalReply
+        .replace(/\[(TRANSFERIR_ATENDIMENTO|TRANSFER_TO_HUMAN|HANDOFF_HUMAN|TRANSBORDO)\]/gi, '')
+        .replace(/Encaminhei sua d[uú]vida[^\n]*/gi, '')
+        .replace(/Um dos nossos balconistas[^\n]*/gi, '')
+        .replace(/J[aá] notifiquei nossa equipe[^\n]*/gi, '')
+        .replace(/Já encaminhei para a nossa equipe[^\n]*/gi, '')
+        .replace(/Estou transferindo o seu atendimento[^\n]*/gi, '')
+        .replace(/💬\s*\*?\*?Prefere continuar (por|aqui pelo)\s*WhatsApp\??\*?\*?[^\n]*/gi, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+
       const dispatchResult = await this.dispatchBotReplyAndRecord(
         realTenantId,
         conversationId,

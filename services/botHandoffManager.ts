@@ -115,7 +115,7 @@ export function registerBotSentMessage(messageId?: string, conversationId?: stri
     }
   }
 
-  const expiry = Date.now() + 15000; // 15 segundos de proteção
+  const expiry = Date.now() + 30000; // 30 segundos de proteção anti-eco
   if (conversationId) {
     botRecentDispatches.set(conversationId, expiry);
   }
@@ -141,6 +141,7 @@ export function isBotSentOrEcho(
   }
 
   const str = String(text || '').trim();
+  const lower = str.toLowerCase();
 
   // 1. Mensagens contendo URL da loja, link de checkout ou subdomínio FarmaFlow
   if (
@@ -148,29 +149,53 @@ export function isBotSentOrEcho(
     str.includes('farmaflow.online') ||
     str.includes('lojawhats.online') ||
     str.includes('farmaflow') ||
-    str.includes('https://') && str.includes('?v=')
+    (str.includes('https://') && (str.includes('?v=') || str.includes('?busca=') || str.includes('?produto=')))
   ) {
     return true;
   }
 
-  // 2. Frases padrão emitidas pelo Agente de IA FarmaFlow
+  // 2. Frases padrão e saudações emitidas pelo Agente de IA FarmaFlow
   if (
-    str.includes('Para conferir mais detalhes ou aproveitar as promoções') ||
-    str.includes('acesse o link abaixo') ||
-    str.includes('Nossa Loja Online') ||
-    str.includes('Nossa Webloja') ||
-    str.includes('Recebemos o seu') && str.includes('conferência e orçamento') ||
-    str.includes('Desculpe, não consegui entender o seu áudio') ||
-    str.includes('Um dos nossos balconistas já vai assumir') ||
-    str.includes('Já anotei a sua preferência') ||
-    str.includes('Perfeito! Já separei para você') ||
-    str.includes('Já encaminhei para a nossa equipe') ||
-    str.includes('estou transferindo o seu atendimento')
+    lower.includes('como posso te ajudar hoje') ||
+    lower.includes('como posso ajudar voce hoje') ||
+    lower.includes('como posso ajudar você hoje') ||
+    lower.includes('em que posso te ajudar hoje') ||
+    lower.includes('em que posso ajudar você hoje') ||
+    lower.includes('encaminhei sua dúvida') ||
+    lower.includes('encaminhei sua duvida') ||
+    lower.includes('estou à disposição') ||
+    lower.includes('estou a disposicao') ||
+    lower.includes('para conferir mais detalhes ou aproveitar as promoções') ||
+    lower.includes('para conferir mais detalhes ou aproveitar as promocoes') ||
+    lower.includes('acesse o link abaixo') ||
+    lower.includes('nossa loja online') ||
+    lower.includes('nossa webloja') ||
+    lower.includes('recebemos o seu') ||
+    lower.includes('desculpe, não consegui entender o seu áudio') ||
+    lower.includes('desculpe, nao consegui entender o seu audio') ||
+    lower.includes('um dos nossos balconistas') ||
+    lower.includes('nossa equipe e um dos nossos balconistas') ||
+    lower.includes('já anotei a sua preferência') ||
+    lower.includes('ja anotei a sua preferencia') ||
+    lower.includes('perfeito! já separei para você') ||
+    lower.includes('perfeito! ja separei para voce') ||
+    lower.includes('já encaminhei para a nossa equipe') ||
+    lower.includes('ja encaminhei para a nossa equipe') ||
+    lower.includes('estou transferindo o seu atendimento') ||
+    lower.includes('horário de funcionamento') ||
+    lower.includes('horario de funcionamento') ||
+    lower.includes('assistente virtual') ||
+    lower.includes('mais econômica') ||
+    lower.includes('mais economica') ||
+    lower.includes('qual dessas você prefere') ||
+    lower.includes('qual dessas voce prefere') ||
+    lower.includes('posso separar para você ou enviar o link da loja') ||
+    lower.includes('posso separar para voce ou enviar o link da loja')
   ) {
     return true;
   }
 
-  // 3. Janela de proteção de 15 segundos após envio do bot
+  // 3. Janela de proteção recente de 30 segundos após envio do bot
   const now = Date.now();
   if (conversationId && botRecentDispatches.has(conversationId)) {
     if ((botRecentDispatches.get(conversationId) || 0) > now) {

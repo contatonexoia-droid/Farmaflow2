@@ -4,7 +4,7 @@ import path from "path";
 import crypto from "crypto";
 import { inboxStore } from "./inboxStore.js";
 import { evolutionApiService } from "./evolutionApiService.js";
-import { isWeblojaOrderMessage, isBotSentOrEcho, registerBotSentMessage } from "./botHandoffManager.js";
+import { isWeblojaOrderMessage, isBotSentOrEcho, registerBotSentMessage, botSentMessageIds } from "./botHandoffManager.js";
 import { realtimeHub } from "./realtimeHub.js";
 
 function stringToUuid(str: string): string {
@@ -1071,6 +1071,34 @@ class ChatStore {
     const currentUnreadCount = convInfo?.unread_count || 0;
     const newUnreadCount = fromMe ? 0 : currentUnreadCount + 1;
 
+    // 0. BLINDAGEM ANTI-ECO: Verifica se a mensagem atual que chegou com fromMe já foi enviada pelo BOT/Sistema
+    // ou se é eco de webhook da Evolution API para balões de resposta, links e saudações
+    let isBotEcho = false;
+    if (fromMe) {
+      const isRegisteredId = (rawMsgKey && botSentMessageIds.has(rawMsgKey)) || 
+                             (msg.key?.id && botSentMessageIds.has(msg.key.id));
+      if (isRegisteredId || isBotSentOrEcho(rawMsgKey, text, convId, phone) || isBotSentOrEcho(msg.key?.id, text, convId, phone)) {
+        isBotEcho = true;
+      } else {
+        try {
+          const { data: existingBotMsg } = await supabaseAdmin
+            .from("chat_messages")
+            .select("id, sender_type")
+            .or(`id.eq.${msgId},remote_id.eq.${rawMsgKey}`)
+            .eq("conversation_id", convId)
+            .maybeSingle();
+
+          if (existingBotMsg && (existingBotMsg.sender_type === "BOT" || existingBotMsg.sender_type === "SYSTEM")) {
+            isBotEcho = true;
+          }
+        } catch (_) {}
+      }
+
+      if (isBotEcho) {
+        console.log(`[ChatStore] 🤖 [BLINDAGEM ANTI-ECO] Mensagem fromMe identificada como eco de resposta do BOT (não é atendente humano): "${typeof text === 'string' ? text.slice(0, 50) : ''}"`);
+      }
+    }
+
     // 1. PRESERVAÇÃO E REABERTURA DE ESTÁGIO:
     // Verifica se a conversa anterior existia e estava finalizada/fechada.
     const isPreviouslyClosed = Boolean(convInfo && (
@@ -1088,10 +1116,21 @@ class ChatStore {
       convInfo.stage === 'finalizada'
     ));
 
-    let finalStage = convInfo ? (convInfo.kanban_stage || convInfo.stage || resolveConversationKanbanStage(convInfo)) : (fromMe ? "em_atendimento" : "ia_atendendo");
-    let isBotActive = convInfo ? (convInfo.is_bot_active ?? (finalStage === "ia_atendendo")) : (!fromMe);
-    let isHuman = convInfo ? (convInfo.is_human_controlled ?? (finalStage === "em_atendimento" || Boolean(convInfo.assigned_user_id))) : (fromMe);
-    let finalStatus = convInfo ? (convInfo.status || (isBotActive ? "bot" : (isHuman ? "human_takeover" : "OPEN"))) : (fromMe ? "human_takeover" : "bot");
+    // Se a última mensagem foi há mais de 2 horas ou saudação nova, consideramos uma nova sessão de atendimento da IA
+    const lastMsgTime = convInfo?.last_message_at ? new Date(convInfo.last_message_at).getTime() : 0;
+    const isNewSessionAfterInactivity = !fromMe && lastMsgTime > 0 && (Date.now() - lastMsgTime > 2 * 60 * 60 * 1000);
+
+    let finalStage = convInfo ? (convInfo.kanban_stage || convInfo.stage || resolveConversationKanbanStage(convInfo)) : (fromMe ? (isBotEcho ? "ia_atendendo" : "em_atendimento") : "ia_atendendo");
+    let isBotActive = convInfo ? (convInfo.is_bot_active ?? (finalStage === "ia_atendendo")) : (!fromMe || isBotEcho);
+    let isHuman = convInfo ? (convInfo.is_human_controlled ?? (finalStage === "em_atendimento" || Boolean(convInfo.assigned_user_id))) : (fromMe && !isBotEcho);
+    let finalStatus = convInfo ? (convInfo.status || (isBotActive ? "bot" : (isHuman ? "human_takeover" : "OPEN"))) : (fromMe && !isBotEcho ? "human_takeover" : "bot");
+
+    if (fromMe && isBotEcho) {
+      isHuman = false;
+      isBotActive = true;
+      finalStage = "ia_atendendo";
+      finalStatus = "bot";
+    }
 
     // 2. DETECÇÃO AUTOMÁTICA DE PEDIDO DA WEBLOJA / LOJA ONLINE
     const orderCheck = !fromMe ? isWeblojaOrderMessage(text) : { isOrder: false };
@@ -1116,42 +1155,26 @@ class ChatStore {
       isHuman = false;
     }
 
-    // Verifica se a mensagem atual que chegou com fromMe já foi enviada pelo BOT/Sistema
-    // ou se é eco de webhook da Evolution API para os balões de resposta e links da Webloja
-    let isBotEcho = false;
-    if (fromMe) {
-      if (isBotSentOrEcho(rawMsgKey, text, convId, phone)) {
-        isBotEcho = true;
-      } else {
-        try {
-          const { data: existingBotMsg } = await supabaseAdmin
-            .from("chat_messages")
-            .select("id, sender_type")
-            .or(`id.eq.${msgId},remote_id.eq.${rawMsgKey}`)
-            .eq("conversation_id", convId)
-            .maybeSingle();
-
-          if (existingBotMsg && (existingBotMsg.sender_type === "BOT" || existingBotMsg.sender_type === "SYSTEM")) {
-            isBotEcho = true;
-          }
-        } catch (_) {}
-      }
-
-      if (isBotEcho) {
-        console.log(`[ChatStore] 🤖 Mensagem fromMe identificada como eco de resposta do BOT (não é atendente humano): "${typeof text === 'string' ? text.slice(0, 50) : ''}"`);
-        isHuman = false;
-        isBotActive = true;
-        finalStage = convInfo?.kanban_stage || convInfo?.stage || "ia_atendendo";
-        finalStatus = convInfo?.status || "bot";
-      }
-    }
-
-    if (fromMe && !isBotEcho && (!convInfo || convInfo.is_bot_active === false || Boolean(convInfo.assigned_user_id))) {
+    if (fromMe && isBotEcho) {
+      // Se for eco do próprio BOT, NUNCA pausar nem mudar para humano!
+      isHuman = false;
+      isBotActive = true;
+      finalStage = convInfo?.kanban_stage || convInfo?.stage || "ia_atendendo";
+      finalStatus = convInfo?.status || "bot";
+    } else if (fromMe && !isBotEcho && (!convInfo || convInfo.is_bot_active === false || Boolean(convInfo.assigned_user_id))) {
       // Mensagem enviada manualmente por operador humano no WhatsApp
       isHuman = true;
       isBotActive = false;
       finalStage = "em_atendimento";
       finalStatus = "human_takeover";
+    }
+
+    if (isNewSessionAfterInactivity && !isWeblojaOrder && !fromMe) {
+      console.log(`[ChatStore] ⏰ Nova sessão iniciada após inatividade (> 12h) na conversa ${convId}. Mantendo IA ativa e reiniciando contador.`);
+      isHuman = false;
+      isBotActive = true;
+      finalStage = "ia_atendendo";
+      finalStatus = "bot";
     }
 
     const conv: ChatConversation = {
@@ -1164,7 +1187,7 @@ class ChatStore {
       is_bot_active: isBotActive,
       kanban_stage: finalStage,
       stage: finalStage,
-      bot_interaction_count: (wasReopened || isWeblojaOrder) ? 0 : (convInfo?.bot_interaction_count || 0),
+      bot_interaction_count: (wasReopened || isWeblojaOrder || isNewSessionAfterInactivity) ? 0 : (convInfo?.bot_interaction_count || 0),
       bot_handoff_reason: isWeblojaOrder ? "WEBLOJA_ORDER_RECEIVED" : ((fromMe && !isBotEcho && isHuman) ? "HUMAN_OPERATOR_MESSAGE" : (wasReopened ? null : (convInfo?.bot_handoff_reason || null))),
       bot_handoff_at: (isWeblojaOrder || (fromMe && !isBotEcho && isHuman)) ? now : (wasReopened ? null : (convInfo?.bot_handoff_at || null)),
       assigned_user_id: wasReopened ? null : (isHuman ? (convInfo?.assigned_user_id || null) : (convInfo?.assigned_user_id || null)),
@@ -1213,6 +1236,23 @@ class ChatStore {
           convUpdateData.assigned_user_id = null;
           convUpdateData.bot_handoff_reason = null;
           convUpdateData.bot_interaction_count = 0;
+        } else if (isNewSessionAfterInactivity) {
+          convUpdateData.kanban_stage = "ia_atendendo";
+          convUpdateData.stage = "ia_atendendo";
+          convUpdateData.status = "bot";
+          convUpdateData.is_bot_active = true;
+          convUpdateData.is_human_controlled = false;
+          convUpdateData.assigned_user_id = null;
+          convUpdateData.bot_handoff_reason = null;
+          convUpdateData.bot_interaction_count = 0;
+        } else if (fromMe && isBotEcho) {
+          // BLINDAGEM ANTI-ECO: Mensagem disparada pelo próprio BOT FarmaFlow.
+          // Garante que NUNCA pause a IA nem mude o status para humano por causa de disparo do robô
+          convUpdateData.is_bot_active = true;
+          convUpdateData.is_human_controlled = false;
+          convUpdateData.status = "bot";
+          convUpdateData.kanban_stage = "ia_atendendo";
+          convUpdateData.stage = "ia_atendendo";
         } else if (fromMe && !isBotEcho && convInfo.is_human_controlled === true) {
           // Apenas transborda para humano se for mensagem manual confirmada de operador (não eco de bot) em conversa já sob controle humano
           convUpdateData.is_human_controlled = true;

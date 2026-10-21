@@ -19,7 +19,7 @@ import { calculateDeliveryDistance } from "./lib/maps.js";
 import { dispatcher } from "./services/asyncDispatcher.js";
 import { whatsappHealthManager } from "./services/whatsappHealthManager.js";
 import { realtimeHub } from "./services/realtimeHub.js";
-import { botHandoffManager, isWeblojaOrderMessage, isBotSentOrEcho, registerBotSentMessage } from "./services/botHandoffManager.js";
+import { botHandoffManager, isWeblojaOrderMessage, isBotSentOrEcho, registerBotSentMessage, botSentMessageIds } from "./services/botHandoffManager.js";
 import { continuousUseRefillManager } from "./services/continuousUseRefillManager.js";
 import { csatManager } from "./services/csatManager.js";
 import { contactMergeManager } from "./services/contactMergeManager.js";
@@ -8634,6 +8634,21 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
         throw new Error(firstResult.error || "Falha ao enviar primeiro balão de boas-vindas");
       }
 
+      // Registra TODOS os IDs possíveis do Balão 1 contra eco no webhook
+      const b1Candidates = [
+        firstResult.data?.key?.id,
+        firstResult.data?.message?.key?.id,
+        firstResult.data?.messages?.[0]?.key?.id,
+        firstResult.data?.id,
+        firstResult.data?.messageId,
+        (firstResult as any).key?.id,
+        (firstResult as any).id
+      ].filter(Boolean);
+      for (const id of b1Candidates) {
+        botSentMessageIds.add(String(id).trim());
+        registerBotSentMessage(String(id).trim(), conversation.id, cleanPhone);
+      }
+
       // Grava Balão 1 no banco e transmite no WebSocket
       const welcomeMsgId1 = crypto.randomUUID();
       const welcomeMsg1 = {
@@ -8672,6 +8687,21 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
       dispatchSuccess = Boolean(dispatchResult?.success);
 
       if (dispatchSuccess) {
+        // Registra TODOS os IDs possíveis do Balão 2 contra eco no webhook
+        const b2Candidates = [
+          dispatchResult.data?.key?.id,
+          dispatchResult.data?.message?.key?.id,
+          dispatchResult.data?.messages?.[0]?.key?.id,
+          dispatchResult.data?.id,
+          dispatchResult.data?.messageId,
+          (dispatchResult as any).key?.id,
+          (dispatchResult as any).id
+        ].filter(Boolean);
+        for (const id of b2Candidates) {
+          botSentMessageIds.add(String(id).trim());
+          registerBotSentMessage(String(id).trim(), conversation.id, cleanPhone);
+        }
+
         const nowIso2 = new Date().toISOString();
         const welcomeMsgId2 = crypto.randomUUID();
         const welcomeMsg2 = {
@@ -8689,12 +8719,22 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
             last_message_at: nowIso2,
             last_message_content: freshStoreUrl,
             last_welcome_sent_at: nowIso2,
+            bot_interaction_count: 0,
+            is_bot_active: true,
+            is_human_controlled: false,
+            kanban_stage: "ia_atendendo",
+            status: "bot",
             updated_at: nowIso2
           }).eq("id", conversation.id);
 
           conversation.last_message_at = nowIso2;
           conversation.last_message_content = freshStoreUrl;
           conversation.last_welcome_sent_at = nowIso2;
+          conversation.bot_interaction_count = 0;
+          conversation.is_bot_active = true;
+          conversation.is_human_controlled = false;
+          conversation.kanban_stage = "ia_atendendo";
+          conversation.status = "bot";
         } catch (dbErr: any) {
           console.warn("[WelcomeMessage] Erro ao persistir Balão 2 no banco:", dbErr.message);
         }
@@ -9101,7 +9141,9 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                 const cleanPhone = String(phone || '').replace(/\D/g, '');
 
                 if (cleanPhone && instanceName) {
-                  await evolutionApiService.sendTextMessage(instanceName, cleanPhone, audioFailFriendlyMessage, { delay: 1000 });
+                  const sendFailRes = await evolutionApiService.sendTextMessage(instanceName, cleanPhone, audioFailFriendlyMessage, { delay: 1000 });
+                  const failId = sendFailRes?.data?.key?.id || sendFailRes?.data?.message?.key?.id || sendFailRes?.data?.id || sendFailRes?.data?.messageId || sendFailRes?.key?.id;
+                  registerBotSentMessage(failId, result?.conversation?.id, cleanPhone);
                 }
 
                 if (result.conversation) {
@@ -9147,7 +9189,9 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
               const cleanPhone = String(phone || '').replace(/\D/g, '');
 
               if (cleanPhone && instanceName) {
-                await evolutionApiService.sendTextMessage(instanceName, cleanPhone, audioFailFriendlyMessage, { delay: 1000 });
+                const sendFailRes2 = await evolutionApiService.sendTextMessage(instanceName, cleanPhone, audioFailFriendlyMessage, { delay: 1000 });
+                const failId2 = sendFailRes2?.data?.key?.id || sendFailRes2?.data?.message?.key?.id || sendFailRes2?.data?.id || sendFailRes2?.data?.messageId || sendFailRes2?.key?.id;
+                registerBotSentMessage(failId2, result?.conversation?.id, cleanPhone);
               }
 
               if (result?.conversation) {
@@ -9411,7 +9455,9 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                   console.warn(`[WEBHOOK DEBOUNCE] ⚠️ Mensagem de áudio consolidada vazia para conversa ${conversation.id}. Enviando resposta amigável.`);
                   const failText = "Desculpe, não consegui entender o seu áudio com clareza. Você poderia digitar sua dúvida ou tentar mandar novamente?";
                   if (instanceName && cleanPhone) {
-                    await evolutionApiService.sendTextMessage(instanceName, cleanPhone, failText, { delay: 1000 });
+                    const sendFailRes3 = await evolutionApiService.sendTextMessage(instanceName, cleanPhone, failText, { delay: 1000 });
+                    const failId3 = sendFailRes3?.data?.key?.id || sendFailRes3?.data?.message?.key?.id || sendFailRes3?.data?.id || sendFailRes3?.data?.messageId || sendFailRes3?.key?.id;
+                    registerBotSentMessage(failId3, conversation.id, cleanPhone);
                   }
                   return res.status(200).json({ success: true, handled: 'audio_empty_friendly_replied' });
                 }
@@ -9457,6 +9503,44 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
               } catch (aiErr: any) {
                 console.error('[WEBHOOK - IA ISOLADA] Exceção no processamento do Agente de IA:', aiErr.message);
                 return res.status(200).json({ success: false, error: aiErr.message });
+              }
+            } else {
+              // BLINDAGEM ANTI-ECO (mensagens com fromMe === true)
+              const msgKeyId = msg.key?.id || msg.id;
+              const isEcho = (msgKeyId && botSentMessageIds.has(msgKeyId)) || isBotSentOrEcho(msgKeyId, effectiveText || text, conversation?.id, remoteJid);
+              if (isEcho) {
+                console.log(`[WEBHOOK BLINDAGEM ANTI-ECO] 🤖 Mensagem fromMe identificada como eco do bot (${msgKeyId}). Garantindo que a IA permaneça ATIVA na conversa ${conversation?.id}.`);
+                if (conversation) {
+                  conversation.is_bot_active = true;
+                  conversation.is_human_controlled = false;
+                  conversation.status = "bot";
+                  conversation.kanban_stage = "ia_atendendo";
+                  conversation.stage = "ia_atendendo";
+
+                  try {
+                    await supabaseAdmin
+                      .from("chat_conversations")
+                      .update({
+                        is_bot_active: true,
+                        is_human_controlled: false,
+                        status: "bot",
+                        kanban_stage: "ia_atendendo",
+                        stage: "ia_atendendo",
+                        updated_at: new Date().toISOString()
+                      })
+                      .eq("id", conversation.id);
+                  } catch (_) {}
+                }
+                if (!res.headersSent) {
+                  return res.status(200).json({ success: true, handled: 'bot_echo_ignored' });
+                }
+                continue;
+              } else {
+                console.log(`[WEBHOOK HUMAN TAKEOVER] 👤 Mensagem manual enviada por atendente humano no WhatsApp para ${remoteJid}.`);
+                if (!res.headersSent) {
+                  return res.status(200).json({ success: true, handled: 'human_message_recorded' });
+                }
+                continue;
               }
             }
           }
