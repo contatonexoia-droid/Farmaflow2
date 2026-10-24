@@ -23,6 +23,7 @@ import {
   isValidStoreProduct,
   hasValidProductImage,
 } from "../types";
+import { getStoreOperatingStatus } from "../utils/operatingHours";
 import {
   Search,
   Package,
@@ -3256,6 +3257,8 @@ export const Storefront: React.FC<StorefrontProps> = ({
     }
   };
 
+  const operatingStatus = getStoreOperatingStatus(tenant);
+
   return (
     <div className="bg-gray-50/50 min-h-screen font-sans relative flex flex-col justify-between">
       {onBack && (
@@ -3308,12 +3311,28 @@ export const Storefront: React.FC<StorefrontProps> = ({
               <span className="text-sm sm:text-base font-black text-gray-900 leading-tight truncate">
                 {tenant.name || "FarmaFlow"}
               </span>
-              <span
-                className="text-[9px] sm:text-[10px] font-black uppercase tracking-widest leading-none flex items-center gap-1"
-                style={{ color: tenant.primaryColor }}
-              >
-                <ShoppingBag size={10} /> Catálogo Digital
-              </span>
+              <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
+                <span
+                  className="text-[9px] sm:text-[10px] font-black uppercase tracking-widest leading-none flex items-center gap-1"
+                  style={{ color: tenant.primaryColor }}
+                >
+                  <ShoppingBag size={10} /> Catálogo Digital
+                </span>
+                <span
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] sm:text-[10px] font-bold leading-none border ${
+                    operatingStatus.isOpen
+                      ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                      : "bg-red-50 text-red-700 border-red-200"
+                  }`}
+                >
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                      operatingStatus.isOpen ? "bg-emerald-500 animate-pulse" : "bg-red-500"
+                    }`}
+                  />
+                  <span>{operatingStatus.badgeText}</span>
+                </span>
+              </div>
             </div>
           </div>
 

@@ -3677,22 +3677,48 @@ app.post("/api/v1/tenants/admin", async (req, res) => {
 
     let tenantData: any = null;
 
+    const stripStructuredHoursFields = (obj: any) => {
+      const copy = { ...obj };
+      delete copy.opening_time_weekdays;
+      delete copy.closing_time_weekdays;
+      delete copy.opening_time_saturdays;
+      delete copy.closing_time_saturdays;
+      delete copy.opening_time_sundays;
+      delete copy.closing_time_sundays;
+      delete copy.closed_on_sundays;
+      delete copy.is_24_hours;
+      return copy;
+    };
+
+    const stripRegulatoryFields = (obj: any) => {
+      const copy = stripStructuredHoursFields(obj);
+      delete copy.razao_social;
+      delete copy.farmaceutico_responsavel;
+      delete copy.crf;
+      delete copy.horario_funcionamento;
+      delete copy.telefone_contato;
+      return copy;
+    };
+
     if (isUpdate) {
       let { data, error } = await supabase
         .from("tenants")
         .upsert(enrichedPayload)
         .select();
       if (error && (error.code === "42703" || error.message?.includes("does not exist"))) {
-        console.warn("[TENANTS ADMIN] Coluna não encontrada na tabela tenants, salvando via fallback:", error.message);
-        const cleanPayload = { ...enrichedPayload };
-        delete cleanPayload.razao_social;
-        delete cleanPayload.farmaceutico_responsavel;
-        delete cleanPayload.crf;
-        delete cleanPayload.horario_funcionamento;
-        delete cleanPayload.telefone_contato;
-        const retry = await supabase.from("tenants").upsert(cleanPayload).select();
-        if (retry.error) throw retry.error;
-        data = retry.data;
+        console.warn("[TENANTS ADMIN] Coluna estruturada não encontrada em tenants, tentando mantendo campos regulatórios:", error.message);
+        const firstFallbackPayload = stripStructuredHoursFields(enrichedPayload);
+        const firstRetry = await supabase.from("tenants").upsert(firstFallbackPayload).select();
+        if (firstRetry.error && (firstRetry.error.code === "42703" || firstRetry.error.message?.includes("does not exist"))) {
+          const cleanPayload = stripRegulatoryFields(enrichedPayload);
+          const secondRetry = await supabase.from("tenants").upsert(cleanPayload).select();
+          if (secondRetry.error) throw secondRetry.error;
+          data = secondRetry.data;
+        } else if (firstRetry.error) {
+          throw firstRetry.error;
+        } else {
+          data = firstRetry.data;
+        }
       } else if (error) {
         throw error;
       }
@@ -3703,16 +3729,19 @@ app.post("/api/v1/tenants/admin", async (req, res) => {
         .insert(enrichedPayload)
         .select();
       if (error && (error.code === "42703" || error.message?.includes("does not exist"))) {
-        console.warn("[TENANTS ADMIN] Coluna não encontrada na tabela tenants (insert), salvando via fallback:", error.message);
-        const cleanPayload = { ...enrichedPayload };
-        delete cleanPayload.razao_social;
-        delete cleanPayload.farmaceutico_responsavel;
-        delete cleanPayload.crf;
-        delete cleanPayload.horario_funcionamento;
-        delete cleanPayload.telefone_contato;
-        const retry = await supabase.from("tenants").insert(cleanPayload).select();
-        if (retry.error) throw retry.error;
-        data = retry.data;
+        console.warn("[TENANTS ADMIN] Coluna estruturada não encontrada em tenants (insert), tentando mantendo campos regulatórios:", error.message);
+        const firstFallbackPayload = stripStructuredHoursFields(enrichedPayload);
+        const firstRetry = await supabase.from("tenants").insert(firstFallbackPayload).select();
+        if (firstRetry.error && (firstRetry.error.code === "42703" || firstRetry.error.message?.includes("does not exist"))) {
+          const cleanPayload = stripRegulatoryFields(enrichedPayload);
+          const secondRetry = await supabase.from("tenants").insert(cleanPayload).select();
+          if (secondRetry.error) throw secondRetry.error;
+          data = secondRetry.data;
+        } else if (firstRetry.error) {
+          throw firstRetry.error;
+        } else {
+          data = firstRetry.data;
+        }
       } else if (error) {
         throw error;
       }

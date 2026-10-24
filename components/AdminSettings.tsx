@@ -12,6 +12,11 @@ import { AiAgentSettings } from './AiAgentSettings';
 import { TenantSelector } from './TenantSelector';
 import { WelcomeSettings } from './WelcomeSettings';
 import { StoreShareCard } from './StoreShareCard';
+import {
+  parseOperatingHoursFromText,
+  buildOperatingHoursSummary,
+  resolveTenantOperatingHours,
+} from '../utils/operatingHours';
 
 export const formatCnpj = (value: string): string => {
   const digits = (value || '').replace(/\D/g, '').slice(0, 14);
@@ -244,7 +249,18 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
   };
 
   useEffect(() => {
-    setFormData({ ...config });
+    const resolvedHours = resolveTenantOperatingHours(config);
+    setFormData({
+      ...config,
+      opening_time_weekdays: config.opening_time_weekdays || resolvedHours.weekdays.open,
+      closing_time_weekdays: config.closing_time_weekdays || resolvedHours.weekdays.close,
+      opening_time_saturdays: config.opening_time_saturdays || resolvedHours.saturday.open,
+      closing_time_saturdays: config.closing_time_saturdays || resolvedHours.saturday.close,
+      opening_time_sundays: config.opening_time_sundays || resolvedHours.sunday.open,
+      closing_time_sundays: config.closing_time_sundays || resolvedHours.sunday.close,
+      closed_on_sundays: config.closed_on_sundays !== undefined ? config.closed_on_sundays : resolvedHours.sunday.closed,
+      is_24_hours: config.is_24_hours !== undefined ? config.is_24_hours : resolvedHours.is24Hours,
+    });
 
     if (config.street || config.neighborhood || config.city || config.cep) {
       setAddressData({
@@ -422,6 +438,14 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
       crf: formData.crf || "",
       horario_funcionamento: formData.horario_funcionamento || formData.horarioFuncionamento || "",
       horarioFuncionamento: formData.horario_funcionamento || formData.horarioFuncionamento || "",
+      opening_time_weekdays: formData.opening_time_weekdays || "07:00",
+      closing_time_weekdays: formData.closing_time_weekdays || "23:00",
+      opening_time_saturdays: formData.opening_time_saturdays || formData.opening_time_weekdays || "07:00",
+      closing_time_saturdays: formData.closing_time_saturdays || formData.closing_time_weekdays || "23:00",
+      opening_time_sundays: formData.opening_time_sundays || "07:00",
+      closing_time_sundays: formData.closing_time_sundays || "21:00",
+      closed_on_sundays: Boolean(formData.closed_on_sundays),
+      is_24_hours: Boolean(formData.is_24_hours),
       telefone_contato: formData.telefone_contato || "",
       cnpj: formData.cnpj || "",
       logo: formData.logo_url || formData.logo || "",
@@ -887,17 +911,171 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
               </div>
 
               {/* 5. Horário de Funcionamento */}
-              <div className="space-y-2">
-                <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest flex items-center gap-2">
-                  <Clock size={14} /> Horário de Funcionamento
-                </label>
-                <input
-                  type="text"
-                  className="w-full bg-gray-50 border-2 border-transparent focus:bg-white focus:border-brand rounded-2xl py-4 px-6 outline-none transition-all font-bold text-black"
-                  value={formData.horario_funcionamento || formData.horarioFuncionamento || ''}
-                  onChange={(e) => setFormData({ ...formData, horario_funcionamento: e.target.value, horarioFuncionamento: e.target.value })}
-                  placeholder="Ex: Segunda a Sábado das 07:00h às 22:00h"
-                />
+              <div className="space-y-3 md:col-span-2 bg-gray-50/70 p-4 sm:p-5 rounded-2xl border border-gray-100">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <label className="text-[11px] font-black text-gray-500 uppercase tracking-widest flex items-center gap-2">
+                    <Clock size={14} className="text-emerald-600" /> Horário de Funcionamento (Selo Dinâmico da Loja)
+                  </label>
+                  <label className="inline-flex items-center gap-2 text-xs font-bold text-gray-600 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                      checked={Boolean(formData.closed_on_sundays)}
+                      onChange={(e) => {
+                        const closedSun = e.target.checked;
+                        const wOpen = formData.opening_time_weekdays || "07:00";
+                        const wClose = formData.closing_time_weekdays || "23:00";
+                        const sOpen = formData.opening_time_sundays || "07:00";
+                        const sClose = formData.closing_time_sundays || "21:00";
+                        const summary = buildOperatingHoursSummary(wOpen, wClose, sOpen, sClose, closedSun, formData.is_24_hours);
+                        setFormData({
+                          ...formData,
+                          closed_on_sundays: closedSun,
+                          horario_funcionamento: summary,
+                          horarioFuncionamento: summary,
+                        });
+                      }}
+                    />
+                    Fechado aos domingos
+                  </label>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  {/* Segunda a Sábado */}
+                  <div className="bg-white p-3.5 rounded-xl border border-gray-200/80 space-y-2">
+                    <span className="text-[11px] font-extrabold text-gray-700 uppercase tracking-wider block">
+                      Segunda a Sábado
+                    </span>
+                    <div className="grid grid-cols-2 gap-2.5">
+                      <div>
+                        <span className="text-[10px] font-bold text-gray-400 uppercase block mb-1">Abertura</span>
+                        <input
+                          type="time"
+                          className="w-full bg-gray-50 border border-gray-200 focus:bg-white focus:border-brand rounded-xl py-2 px-3 outline-none font-bold text-sm text-black"
+                          value={formData.opening_time_weekdays || "07:00"}
+                          onChange={(e) => {
+                            const wOpen = e.target.value;
+                            const wClose = formData.closing_time_weekdays || "23:00";
+                            const sOpen = formData.opening_time_sundays || "07:00";
+                            const sClose = formData.closing_time_sundays || "21:00";
+                            const summary = buildOperatingHoursSummary(wOpen, wClose, sOpen, sClose, formData.closed_on_sundays, formData.is_24_hours);
+                            setFormData({
+                              ...formData,
+                              opening_time_weekdays: wOpen,
+                              opening_time_saturdays: wOpen,
+                              horario_funcionamento: summary,
+                              horarioFuncionamento: summary,
+                            });
+                          }}
+                        />
+                      </div>
+                      <div>
+                        <span className="text-[10px] font-bold text-gray-400 uppercase block mb-1">Fechamento</span>
+                        <input
+                          type="time"
+                          className="w-full bg-gray-50 border border-gray-200 focus:bg-white focus:border-brand rounded-xl py-2 px-3 outline-none font-bold text-sm text-black"
+                          value={formData.closing_time_weekdays || "23:00"}
+                          onChange={(e) => {
+                            const wOpen = formData.opening_time_weekdays || "07:00";
+                            const wClose = e.target.value;
+                            const sOpen = formData.opening_time_sundays || "07:00";
+                            const sClose = formData.closing_time_sundays || "21:00";
+                            const summary = buildOperatingHoursSummary(wOpen, wClose, sOpen, sClose, formData.closed_on_sundays, formData.is_24_hours);
+                            setFormData({
+                              ...formData,
+                              closing_time_weekdays: wClose,
+                              closing_time_saturdays: wClose,
+                              horario_funcionamento: summary,
+                              horarioFuncionamento: summary,
+                            });
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Domingo */}
+                  <div className={`bg-white p-3.5 rounded-xl border border-gray-200/80 space-y-2 transition-opacity ${formData.closed_on_sundays ? 'opacity-50 pointer-events-none' : ''}`}>
+                    <span className="text-[11px] font-extrabold text-gray-700 uppercase tracking-wider block">
+                      Domingo
+                    </span>
+                    <div className="grid grid-cols-2 gap-2.5">
+                      <div>
+                        <span className="text-[10px] font-bold text-gray-400 uppercase block mb-1">Abertura</span>
+                        <input
+                          type="time"
+                          disabled={Boolean(formData.closed_on_sundays)}
+                          className="w-full bg-gray-50 border border-gray-200 focus:bg-white focus:border-brand rounded-xl py-2 px-3 outline-none font-bold text-sm text-black"
+                          value={formData.opening_time_sundays || "07:00"}
+                          onChange={(e) => {
+                            const wOpen = formData.opening_time_weekdays || "07:00";
+                            const wClose = formData.closing_time_weekdays || "23:00";
+                            const sOpen = e.target.value;
+                            const sClose = formData.closing_time_sundays || "21:00";
+                            const summary = buildOperatingHoursSummary(wOpen, wClose, sOpen, sClose, formData.closed_on_sundays, formData.is_24_hours);
+                            setFormData({
+                              ...formData,
+                              opening_time_sundays: sOpen,
+                              horario_funcionamento: summary,
+                              horarioFuncionamento: summary,
+                            });
+                          }}
+                        />
+                      </div>
+                      <div>
+                        <span className="text-[10px] font-bold text-gray-400 uppercase block mb-1">Fechamento</span>
+                        <input
+                          type="time"
+                          disabled={Boolean(formData.closed_on_sundays)}
+                          className="w-full bg-gray-50 border border-gray-200 focus:bg-white focus:border-brand rounded-xl py-2 px-3 outline-none font-bold text-sm text-black"
+                          value={formData.closing_time_sundays || "21:00"}
+                          onChange={(e) => {
+                            const wOpen = formData.opening_time_weekdays || "07:00";
+                            const wClose = formData.closing_time_weekdays || "23:00";
+                            const sOpen = formData.opening_time_sundays || "07:00";
+                            const sClose = e.target.value;
+                            const summary = buildOperatingHoursSummary(wOpen, wClose, sOpen, sClose, formData.closed_on_sundays, formData.is_24_hours);
+                            setFormData({
+                              ...formData,
+                              closing_time_sundays: sClose,
+                              horario_funcionamento: summary,
+                              horarioFuncionamento: summary,
+                            });
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <span className="text-[10px] font-bold text-gray-400 uppercase block mb-1">
+                    Texto exibido no rodapé (sincronizado automaticamente ou personalizado)
+                  </span>
+                  <input
+                    type="text"
+                    className="w-full bg-white border-2 border-gray-200/80 focus:border-brand rounded-2xl py-3 px-4 outline-none transition-all font-bold text-sm text-black"
+                    value={formData.horario_funcionamento || formData.horarioFuncionamento || ''}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      const parsed = parseOperatingHoursFromText(val);
+                      setFormData({
+                        ...formData,
+                        horario_funcionamento: val,
+                        horarioFuncionamento: val,
+                        opening_time_weekdays: parsed.weekdays.open,
+                        closing_time_weekdays: parsed.weekdays.close,
+                        opening_time_saturdays: parsed.saturday.open,
+                        closing_time_saturdays: parsed.saturday.close,
+                        opening_time_sundays: parsed.sunday.open,
+                        closing_time_sundays: parsed.sunday.close,
+                        closed_on_sundays: parsed.sunday.closed,
+                        is_24_hours: parsed.is24Hours,
+                      });
+                    }}
+                    placeholder="Ex: Segunda a sábado das 07h às 23h e Domingo das 07h às 21h"
+                  />
+                </div>
               </div>
 
               {/* 6. Telefone de Contato / Atendimento */}

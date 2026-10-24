@@ -15,6 +15,7 @@ import {
   ExternalLink,
 } from "lucide-react";
 import { PharmacyConfig } from "../types";
+import { getStoreOperatingStatus } from "../utils/operatingHours";
 
 interface StorefrontFooterProps {
   tenant: PharmacyConfig;
@@ -22,6 +23,14 @@ interface StorefrontFooterProps {
 
 export const StorefrontFooter: React.FC<StorefrontFooterProps> = ({ tenant }) => {
   const [activeModal, setActiveModal] = useState<"privacy" | "terms" | null>(null);
+  const [now, setNow] = useState<Date>(() => new Date());
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setNow(new Date());
+    }, 60000);
+    return () => clearInterval(timer);
+  }, []);
 
   // Fechar modal ao pressionar ESC
   useEffect(() => {
@@ -87,9 +96,11 @@ export const StorefrontFooter: React.FC<StorefrontFooterProps> = ({ tenant }) =>
     store.farmaceuticoResponsavel ||
     "Consulte em loja";
   const crfDisplay = store.crf || "Consulte em loja";
+  const operatingStatus = getStoreOperatingStatus(store, now);
   const horarioFuncionamento =
     store.horario_funcionamento ||
     store.horarioFuncionamento ||
+    operatingStatus.scheduleSummary ||
     "Segunda a Sábado";
   const telefoneContato =
     store.telefone_contato || store.whatsapp || store.phone || "Consulte em loja";
@@ -101,13 +112,30 @@ export const StorefrontFooter: React.FC<StorefrontFooterProps> = ({ tenant }) =>
           
           {/* Status de Funcionamento */}
           <div className="flex flex-wrap items-center justify-center gap-3">
-            <div className="inline-flex items-center gap-2 bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 px-4 py-1.5 rounded-full text-xs font-semibold shadow-sm backdrop-blur-xs">
+            <div
+              className={`inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-xs font-semibold shadow-sm backdrop-blur-xs border transition-colors ${
+                operatingStatus.isOpen
+                  ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-300"
+                  : "bg-red-500/15 border-red-500/30 text-red-300"
+              }`}
+            >
               <span className="relative flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                {operatingStatus.isOpen && (
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                )}
+                <span
+                  className={`relative inline-flex rounded-full h-2 w-2 ${
+                    operatingStatus.isOpen ? "bg-emerald-500" : "bg-red-500"
+                  }`}
+                ></span>
               </span>
-              <Clock size={13} className="text-emerald-400 shrink-0" />
-              <span>Aberto até as 23:59h</span>
+              <Clock
+                size={13}
+                className={`shrink-0 ${
+                  operatingStatus.isOpen ? "text-emerald-400" : "text-red-400"
+                }`}
+              />
+              <span>{operatingStatus.badgeText}</span>
             </div>
             
             <div className="inline-flex items-center gap-1.5 bg-slate-800/60 border border-slate-700/50 text-slate-300 px-3.5 py-1.5 rounded-full text-[11px] font-medium">

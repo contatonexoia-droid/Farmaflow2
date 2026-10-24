@@ -271,6 +271,14 @@ export interface PharmacyConfig {
   crf?: string;
   horario_funcionamento?: string;
   horarioFuncionamento?: string;
+  opening_time_weekdays?: string;
+  closing_time_weekdays?: string;
+  opening_time_saturdays?: string;
+  closing_time_saturdays?: string;
+  opening_time_sundays?: string;
+  closing_time_sundays?: string;
+  closed_on_sundays?: boolean;
+  is_24_hours?: boolean;
   telefone_contato?: string;
   address_number?: string;
   full_address?: string;

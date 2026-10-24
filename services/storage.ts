@@ -9,6 +9,7 @@ import {
   CouponRule,
   FlashDealsScheduleConfig,
 } from "../types";
+import { parseOperatingHoursFromText } from "../utils/operatingHours";
 
 /**
  * SQL DEFINITIVO PARA CORREÇÃO DO BANCO (Execute no SQL Editor do Supabase):
@@ -243,6 +244,8 @@ export const mapDbTenantToApp = (t: any): PharmacyConfig => {
   const smartBannersObj = t.smart_banners || t.smartbanners || {};
   const fallbackSettings = smartBannersObj._deliverySettings || { enabled: false, fee: 0, minOrderForFreeDelivery: 0 };
   const fallbackRegulatory = smartBannersObj._regulatoryData || {};
+  const rawHorario = t.horario_funcionamento || t.horariofuncionamento || fallbackRegulatory.horario_funcionamento || "";
+  const parsedHours = parseOperatingHoursFromText(rawHorario);
   
   return {
     id: t.id,
@@ -294,7 +297,15 @@ export const mapDbTenantToApp = (t: any): PharmacyConfig => {
     razao_social: t.razao_social || t.razaosocial || fallbackRegulatory.razao_social || "",
     farmaceutico_responsavel: t.farmaceutico_responsavel || t.farmaceuticoresponsavel || fallbackRegulatory.farmaceutico_responsavel || "",
     crf: t.crf || fallbackRegulatory.crf || "",
-    horario_funcionamento: t.horario_funcionamento || t.horariofuncionamento || fallbackRegulatory.horario_funcionamento || "",
+    horario_funcionamento: rawHorario,
+    opening_time_weekdays: t.opening_time_weekdays || fallbackRegulatory.opening_time_weekdays || parsedHours.weekdays.open,
+    closing_time_weekdays: t.closing_time_weekdays || fallbackRegulatory.closing_time_weekdays || parsedHours.weekdays.close,
+    opening_time_saturdays: t.opening_time_saturdays || fallbackRegulatory.opening_time_saturdays || parsedHours.saturday.open,
+    closing_time_saturdays: t.closing_time_saturdays || fallbackRegulatory.closing_time_saturdays || parsedHours.saturday.close,
+    opening_time_sundays: t.opening_time_sundays || fallbackRegulatory.opening_time_sundays || parsedHours.sunday.open,
+    closing_time_sundays: t.closing_time_sundays || fallbackRegulatory.closing_time_sundays || parsedHours.sunday.close,
+    closed_on_sundays: t.closed_on_sundays !== undefined ? Boolean(t.closed_on_sundays) : (fallbackRegulatory.closed_on_sundays !== undefined ? Boolean(fallbackRegulatory.closed_on_sundays) : parsedHours.sunday.closed),
+    is_24_hours: t.is_24_hours !== undefined ? Boolean(t.is_24_hours) : (fallbackRegulatory.is_24_hours !== undefined ? Boolean(fallbackRegulatory.is_24_hours) : parsedHours.is24Hours),
     telefone_contato: t.telefone_contato || t.telefonecontato || fallbackRegulatory.telefone_contato || "",
     street: t.street || "",
     address_number: t.address_number || t.addressnumber || "",
@@ -553,12 +564,21 @@ export const saveTenant = async (
       payload.network_id = tenant.networkId || "";
     }
 
+    const parsedFromText = parseOperatingHoursFromText(tenant.horario_funcionamento || tenant.horarioFuncionamento || "");
     const regData = {
       razao_social: tenant.razao_social || tenant.razaoSocial || "",
       cnpj: tenant.cnpj || "",
       farmaceutico_responsavel: tenant.farmaceutico_responsavel || tenant.farmaceuticoResponsavel || "",
       crf: tenant.crf || "",
       horario_funcionamento: tenant.horario_funcionamento || tenant.horarioFuncionamento || "",
+      opening_time_weekdays: tenant.opening_time_weekdays || parsedFromText.weekdays.open,
+      closing_time_weekdays: tenant.closing_time_weekdays || parsedFromText.weekdays.close,
+      opening_time_saturdays: tenant.opening_time_saturdays || tenant.opening_time_weekdays || parsedFromText.saturday.open,
+      closing_time_saturdays: tenant.closing_time_saturdays || tenant.closing_time_weekdays || parsedFromText.saturday.close,
+      opening_time_sundays: tenant.opening_time_sundays || parsedFromText.sunday.open,
+      closing_time_sundays: tenant.closing_time_sundays || parsedFromText.sunday.close,
+      closed_on_sundays: tenant.closed_on_sundays !== undefined ? Boolean(tenant.closed_on_sundays) : parsedFromText.sunday.closed,
+      is_24_hours: tenant.is_24_hours !== undefined ? Boolean(tenant.is_24_hours) : parsedFromText.is24Hours,
       telefone_contato: tenant.telefone_contato || tenant.phone || "",
     };
 
@@ -572,6 +592,12 @@ export const saveTenant = async (
       payload.farmaceutico_responsavel = regData.farmaceutico_responsavel;
       payload.crf = regData.crf;
       payload.horario_funcionamento = regData.horario_funcionamento;
+      payload.opening_time_weekdays = regData.opening_time_weekdays;
+      payload.closing_time_weekdays = regData.closing_time_weekdays;
+      payload.opening_time_sundays = regData.opening_time_sundays;
+      payload.closing_time_sundays = regData.closing_time_sundays;
+      payload.closed_on_sundays = regData.closed_on_sundays;
+      payload.is_24_hours = regData.is_24_hours;
       payload.telefone_contato = regData.telefone_contato;
     }
 
