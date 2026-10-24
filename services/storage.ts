@@ -9,7 +9,7 @@ import {
   CouponRule,
   FlashDealsScheduleConfig,
 } from "../types";
-import { parseOperatingHoursFromText } from "../utils/operatingHours";
+import { parseOperatingHoursFromText, resolveTenantOperatingHours } from "../utils/operatingHours";
 
 /**
  * SQL DEFINITIVO PARA CORREÇÃO DO BANCO (Execute no SQL Editor do Supabase):
@@ -245,7 +245,11 @@ export const mapDbTenantToApp = (t: any): PharmacyConfig => {
   const fallbackSettings = smartBannersObj._deliverySettings || { enabled: false, fee: 0, minOrderForFreeDelivery: 0 };
   const fallbackRegulatory = smartBannersObj._regulatoryData || {};
   const rawHorario = t.horario_funcionamento || t.horariofuncionamento || fallbackRegulatory.horario_funcionamento || "";
-  const parsedHours = parseOperatingHoursFromText(rawHorario);
+  const resolvedHours = resolveTenantOperatingHours({
+    ...t,
+    horario_funcionamento: rawHorario,
+    smartBanners: smartBannersObj,
+  });
   
   return {
     id: t.id,
@@ -298,14 +302,14 @@ export const mapDbTenantToApp = (t: any): PharmacyConfig => {
     farmaceutico_responsavel: t.farmaceutico_responsavel || t.farmaceuticoresponsavel || fallbackRegulatory.farmaceutico_responsavel || "",
     crf: t.crf || fallbackRegulatory.crf || "",
     horario_funcionamento: rawHorario,
-    opening_time_weekdays: t.opening_time_weekdays || fallbackRegulatory.opening_time_weekdays || parsedHours.weekdays.open,
-    closing_time_weekdays: t.closing_time_weekdays || fallbackRegulatory.closing_time_weekdays || parsedHours.weekdays.close,
-    opening_time_saturdays: t.opening_time_saturdays || fallbackRegulatory.opening_time_saturdays || parsedHours.saturday.open,
-    closing_time_saturdays: t.closing_time_saturdays || fallbackRegulatory.closing_time_saturdays || parsedHours.saturday.close,
-    opening_time_sundays: t.opening_time_sundays || fallbackRegulatory.opening_time_sundays || parsedHours.sunday.open,
-    closing_time_sundays: t.closing_time_sundays || fallbackRegulatory.closing_time_sundays || parsedHours.sunday.close,
-    closed_on_sundays: t.closed_on_sundays !== undefined ? Boolean(t.closed_on_sundays) : (fallbackRegulatory.closed_on_sundays !== undefined ? Boolean(fallbackRegulatory.closed_on_sundays) : parsedHours.sunday.closed),
-    is_24_hours: t.is_24_hours !== undefined ? Boolean(t.is_24_hours) : (fallbackRegulatory.is_24_hours !== undefined ? Boolean(fallbackRegulatory.is_24_hours) : parsedHours.is24Hours),
+    opening_time_weekdays: resolvedHours.weekdays.open,
+    closing_time_weekdays: resolvedHours.weekdays.close,
+    opening_time_saturdays: resolvedHours.saturday.open,
+    closing_time_saturdays: resolvedHours.saturday.close,
+    opening_time_sundays: resolvedHours.sunday.open,
+    closing_time_sundays: resolvedHours.sunday.close,
+    closed_on_sundays: resolvedHours.sunday.closed,
+    is_24_hours: resolvedHours.is24Hours,
     telefone_contato: t.telefone_contato || t.telefonecontato || fallbackRegulatory.telefone_contato || "",
     street: t.street || "",
     address_number: t.address_number || t.addressnumber || "",
@@ -343,23 +347,10 @@ export const getTenants = async (): Promise<PharmacyConfig[]> => {
         );
       }
 
-      // Fallback para acesso direto (precisa que SQL RLS libere o acesso)
-      const support = await checkSchemaSupport();
-      let fields = "id, slug, custom_domain, name, whatsapp, logo, primary_color, secondary_color, accent_color, banner_title, banner_subtitle, is_blocked, is_chat_enabled, license_expiration, cnpj, full_address, corporate_email, manufacturer_logos, enable_smart_banners, smart_banners, coupon_banner_color, minimum_order_value, admin_email, admin_password, notification_sound, notification_volume, departments, welcome_message_enabled, welcome_message_text, welcome_message_format, welcome_message_link, is_ai_agent_enabled, ai_agent_config";
-      if (support.hasNetworkTenants) {
-        fields += ", is_network_master, network_id";
-      }
-      if (support.hasDeliverySettings) {
-        fields += ", delivery_settings";
-      }
-      if (support.hasRegulatoryFields) {
-        fields += ", razao_social, farmaceutico_responsavel, crf, horario_funcionamento, telefone_contato";
-      }
-      fields += ", street, address_number, complement, neighborhood, city, state, cep";
-
+      // Fallback para acesso direto buscando todas as colunas disponíveis (incluindo horários estruturados)
       const { data, error } = await supabase
         .from("tenants")
-        .select(fields);
+        .select("*");
       if (error) throw error;
       return (data || []).map(mapDbTenantToApp);
     });
@@ -573,8 +564,8 @@ export const saveTenant = async (
       horario_funcionamento: tenant.horario_funcionamento || tenant.horarioFuncionamento || "",
       opening_time_weekdays: tenant.opening_time_weekdays || parsedFromText.weekdays.open,
       closing_time_weekdays: tenant.closing_time_weekdays || parsedFromText.weekdays.close,
-      opening_time_saturdays: tenant.opening_time_saturdays || tenant.opening_time_weekdays || parsedFromText.saturday.open,
-      closing_time_saturdays: tenant.closing_time_saturdays || tenant.closing_time_weekdays || parsedFromText.saturday.close,
+      opening_time_saturdays: tenant.opening_time_weekdays || tenant.opening_time_saturdays || parsedFromText.saturday.open,
+      closing_time_saturdays: tenant.closing_time_weekdays || tenant.closing_time_saturdays || parsedFromText.saturday.close,
       opening_time_sundays: tenant.opening_time_sundays || parsedFromText.sunday.open,
       closing_time_sundays: tenant.closing_time_sundays || parsedFromText.sunday.close,
       closed_on_sundays: tenant.closed_on_sundays !== undefined ? Boolean(tenant.closed_on_sundays) : parsedFromText.sunday.closed,
@@ -587,19 +578,21 @@ export const saveTenant = async (
       _regulatoryData: regData
     };
 
-    if (support.hasRegulatoryFields) {
-      payload.razao_social = regData.razao_social;
-      payload.farmaceutico_responsavel = regData.farmaceutico_responsavel;
-      payload.crf = regData.crf;
-      payload.horario_funcionamento = regData.horario_funcionamento;
-      payload.opening_time_weekdays = regData.opening_time_weekdays;
-      payload.closing_time_weekdays = regData.closing_time_weekdays;
-      payload.opening_time_sundays = regData.opening_time_sundays;
-      payload.closing_time_sundays = regData.closing_time_sundays;
-      payload.closed_on_sundays = regData.closed_on_sundays;
-      payload.is_24_hours = regData.is_24_hours;
-      payload.telefone_contato = regData.telefone_contato;
-    }
+    // Sempre envia os campos estruturados de funcionamento e regulatórios no payload
+    // (o endpoint /api/v1/tenants/admin já faz fallback automático de colunas caso alguma não exista)
+    payload.razao_social = regData.razao_social;
+    payload.farmaceutico_responsavel = regData.farmaceutico_responsavel;
+    payload.crf = regData.crf;
+    payload.horario_funcionamento = regData.horario_funcionamento;
+    payload.opening_time_weekdays = regData.opening_time_weekdays;
+    payload.closing_time_weekdays = regData.closing_time_weekdays;
+    payload.opening_time_saturdays = regData.opening_time_saturdays;
+    payload.closing_time_saturdays = regData.closing_time_saturdays;
+    payload.opening_time_sundays = regData.opening_time_sundays;
+    payload.closing_time_sundays = regData.closing_time_sundays;
+    payload.closed_on_sundays = regData.closed_on_sundays;
+    payload.is_24_hours = regData.is_24_hours;
+    payload.telefone_contato = regData.telefone_contato;
 
     if (tenant.street !== undefined) payload.street = tenant.street || "";
     if (tenant.address_number !== undefined) payload.address_number = tenant.address_number || "";
@@ -627,12 +620,21 @@ export const saveTenant = async (
       }
 
       // Fallback: Acesso Direto
-      if (isUpdate) {
-        const { error } = await supabase.from("tenants").upsert(payload);
-        if (error) throw error;
-      } else {
-        const { error } = await supabase.from("tenants").insert(payload);
-        if (error) throw error;
+      const safePayload = { ...payload };
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const { error } = isUpdate
+          ? await supabase.from("tenants").upsert(safePayload)
+          : await supabase.from("tenants").insert(safePayload);
+        if (!error) break;
+        const missingColMatch =
+          error.message?.match(/Could not find the '([^']+)' column/i) ||
+          error.message?.match(/column "([^"]+)" of relation "tenants" does not exist/i);
+        if (missingColMatch && missingColMatch[1]) {
+          delete safePayload[missingColMatch[1]];
+          continue;
+        }
+        if (attempt === 4) throw error;
+        throw error;
       }
     });
   } catch (e: any) {

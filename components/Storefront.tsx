@@ -68,7 +68,8 @@ import {
   Timer,
   Menu,
 } from "lucide-react";
-import { saveAppReview, logSearch, getProductsByTenant } from "../services/storage";
+import { saveAppReview, logSearch, getProductsByTenant, mapDbTenantToApp } from "../services/storage";
+import { supabase } from "../services/supabase";
 import { CouponBanner } from "./CouponBanner";
 import { toast } from "react-hot-toast";
 import {
@@ -3257,7 +3258,65 @@ export const Storefront: React.FC<StorefrontProps> = ({
     }
   };
 
-  const operatingStatus = getStoreOperatingStatus(tenant);
+  const [liveTenant, setLiveTenant] = useState<PharmacyConfig>(tenant);
+  const [currentNow, setCurrentNow] = useState<Date>(() => new Date());
+
+  useEffect(() => {
+    setLiveTenant(tenant);
+  }, [tenant]);
+
+  useEffect(() => {
+    let isMounted = true;
+    const refreshTenantOperatingHours = async () => {
+      if (!tenant?.id) return;
+      try {
+        const { data, error } = await supabase
+          .from("tenants")
+          .select("*")
+          .eq("id", tenant.id)
+          .maybeSingle();
+        if (!error && data && isMounted) {
+          setLiveTenant(mapDbTenantToApp(data));
+          return;
+        }
+      } catch {
+        // Ignore direct query error and fallback to API
+      }
+      try {
+        const res = await fetch("/api/v1/tenants/admin");
+        if (res.ok) {
+          const json = await res.json();
+          const found = (json?.data || []).find((t: any) => t.id === tenant.id);
+          if (found && isMounted) {
+            setLiveTenant(mapDbTenantToApp(found));
+          }
+        }
+      } catch {
+        // Ignore fallback error
+      }
+    };
+
+    refreshTenantOperatingHours();
+    const clockInterval = setInterval(() => {
+      if (isMounted) setCurrentNow(new Date());
+    }, 60000);
+
+    return () => {
+      isMounted = false;
+      clearInterval(clockInterval);
+    };
+  }, [
+    tenant.id,
+    tenant.opening_time_weekdays,
+    tenant.closing_time_weekdays,
+    tenant.opening_time_sundays,
+    tenant.closing_time_sundays,
+    tenant.closed_on_sundays,
+    tenant.is_24_hours,
+    tenant.horario_funcionamento,
+  ]);
+
+  const operatingStatus = getStoreOperatingStatus(liveTenant, currentNow);
 
   return (
     <div className="bg-gray-50/50 min-h-screen font-sans relative flex flex-col justify-between">
@@ -4062,7 +4121,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
       </main>
 
       {/* Rodapé Regulatório da Farmácia (Compliance Anvisa RDC 44/2009 & LGPD) */}
-      <StorefrontFooter tenant={tenant} />
+      <StorefrontFooter tenant={liveTenant} />
 
       {/* Botão de Avaliação Discreto */}
       <button

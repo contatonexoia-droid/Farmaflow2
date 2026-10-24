@@ -252,14 +252,14 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
     const resolvedHours = resolveTenantOperatingHours(config);
     setFormData({
       ...config,
-      opening_time_weekdays: config.opening_time_weekdays || resolvedHours.weekdays.open,
-      closing_time_weekdays: config.closing_time_weekdays || resolvedHours.weekdays.close,
-      opening_time_saturdays: config.opening_time_saturdays || resolvedHours.saturday.open,
-      closing_time_saturdays: config.closing_time_saturdays || resolvedHours.saturday.close,
-      opening_time_sundays: config.opening_time_sundays || resolvedHours.sunday.open,
-      closing_time_sundays: config.closing_time_sundays || resolvedHours.sunday.close,
-      closed_on_sundays: config.closed_on_sundays !== undefined ? config.closed_on_sundays : resolvedHours.sunday.closed,
-      is_24_hours: config.is_24_hours !== undefined ? config.is_24_hours : resolvedHours.is24Hours,
+      opening_time_weekdays: resolvedHours.weekdays.open,
+      closing_time_weekdays: resolvedHours.weekdays.close,
+      opening_time_saturdays: resolvedHours.saturday.open,
+      closing_time_saturdays: resolvedHours.saturday.close,
+      opening_time_sundays: resolvedHours.sunday.open,
+      closing_time_sundays: resolvedHours.sunday.close,
+      closed_on_sundays: resolvedHours.sunday.closed,
+      is_24_hours: resolvedHours.is24Hours,
     });
 
     if (config.street || config.neighborhood || config.city || config.cep) {
@@ -286,7 +286,17 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
         state: ""
       });
     }
-  }, [config.id, config.updatedAt]);
+  }, [
+    config.id,
+    config.updatedAt,
+    config.opening_time_weekdays,
+    config.closing_time_weekdays,
+    config.opening_time_sundays,
+    config.closing_time_sundays,
+    config.closed_on_sundays,
+    config.is_24_hours,
+    config.horario_funcionamento,
+  ]);
 
   const formatPhone = (value: string) => {
     const numbers = value.replace(/\D/g, '').slice(0, 11);
