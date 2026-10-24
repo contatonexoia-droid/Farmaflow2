@@ -253,13 +253,187 @@ const readFileAsArrayBuffer = async (file: File): Promise<ArrayBuffer> => {
   }
 };
 
+const normalizeHeaderKey = (str: any): string =>
+  String(str ?? '')
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+
+const sanitizeEanValue = (rawVal: any): string => {
+  if (rawVal === undefined || rawVal === null) return '';
+
+  // Se já veio como número pela biblioteca XLSX
+  if (typeof rawVal === 'number') {
+    if (!Number.isFinite(rawVal) || rawVal <= 0) return '';
+    return Math.round(rawVal).toFixed(0);
+  }
+
+  let str = String(rawVal).trim();
+  if (!str) return '';
+
+  // Remove prefixo comum de proteção do Excel: ="789..." ou '789...
+  str = str.replace(/^=?"|"$|^'/g, '').trim();
+
+  // Detecta notação científica com ponto ou vírgula (ex: "7.896094e+12", "7,896094E+12", "7.896094000123e12")
+  if (/^[+-]?\d+(?:[.,]\d+)?e[+-]?\d+$/i.test(str)) {
+    const normalizedSci = str.replace(',', '.');
+    const num = Number(normalizedSci);
+    if (Number.isFinite(num) && num > 0) {
+      return Math.round(num).toFixed(0);
+    }
+  }
+
+  // Se terminar com .0 ou ,00 (float exportado como string pelo ERP/Excel, ex: "7896094000123.0")
+  if (/^\d+[.,]0+$/.test(str)) {
+    str = str.split(/[.,]/)[0];
+  }
+
+  // Extrai apenas dígitos numéricos limpos
+  const digitsOnly = str.replace(/\D/g, '');
+  return digitsOnly || str;
+};
+
+const sanitizeCodeValue = (rawVal: any): string => {
+  if (rawVal === undefined || rawVal === null) return '';
+  if (typeof rawVal === 'number') {
+    if (!Number.isFinite(rawVal)) return '';
+    return Math.round(rawVal).toFixed(0);
+  }
+  let str = String(rawVal).trim().replace(/^=?"|"$|^'/g, '').trim();
+  if (!str) return '';
+  if (/^[+-]?\d+(?:[.,]\d+)?e[+-]?\d+$/i.test(str)) {
+    const num = Number(str.replace(',', '.'));
+    if (Number.isFinite(num)) return Math.round(num).toFixed(0);
+  }
+  if (/^\d+[.,]0+$/.test(str)) {
+    str = str.split(/[.,]/)[0];
+  }
+  return str;
+};
+
+const IMPORT_COLUMN_KEYS = {
+  NAME_PRIMARY: [
+    'Nome do Produto', 'nome_do_produto', 'nomedoproduto',
+    'Nome', 'nome', 'name', 'product_name', 'productname',
+    'Produto', 'produto', 'NOME_PRODUTO', 'Nome produto', 'nome_produto',
+    'Descrição do Produto', 'descricao_do_produto', 'descricaodoproduto', 'descricao_produto',
+    'Mercadoria', 'mercadoria', 'Item', 'item', 'Titulo', 'titulo', 'title'
+  ],
+  NAME_FALLBACK: [
+    'Descricao', 'descricao', 'Descrição', 'description',
+    'DESCRICAO_COMERCIAL', 'Descricao Comercial', 'descricao_comercial'
+  ],
+  EAN: [
+    'EAN', 'ean', 'codigo_barras', 'codigobarras', 'barcode',
+    'ean_barras', 'codigo_de_barras', 'codigodebarras', 'codigo barras', 'Código de Barras',
+    'cod_barras', 'cod barras', 'codbarras', 'Barras', 'barras',
+    'CodigoBarras', 'EAN_BARRAS', 'gtin', 'GTIN', 'ean13', 'EAN13', 'cod_ean', 'codigo_ean'
+  ],
+  CODE: [
+    'Código Interno', 'Codigo Interno', 'codigo_interno', 'codigointerno', 'COD_INTERNO',
+    'Código', 'Codigo', 'codigo', 'Cod', 'cod', 'REF', 'ref', 'ID', 'id',
+    'referencia', 'ref.', 'sku', 'SKU', 'internal_code', 'internalcode', 'cod_produto', 'codigo_produto'
+  ],
+  PRICE: [
+    'Preço de Venda', 'Preco de Venda', 'preco_de_venda', 'precodevenda',
+    'preco_venda', 'precovenda', 'preco venda', 'PRECO_VENDA',
+    'price', 'Price', 'PRICE', 'preco', 'Preco', 'Preço',
+    'valor', 'Valor', 'valor_venda', 'valorvenda', 'valor_de_venda',
+    'venda', 'Venda', 'novo_preco', 'novopreco',
+    'Preço Atual', 'Preco Atual', 'preco_atual', 'precoatual', 'preco_final', 'precofinal'
+  ],
+  STOCK: [
+    'Estoque', 'estoque', 'stock', 'Stock', 'STOCK',
+    'quantidade', 'Quantidade', 'qtd', 'Qtd', 'qtde', 'Qtde',
+    'ESTOQUE_ATUAL', 'estoque_atual', 'estoqueatual', 'qtd_estoque',
+    'saldo', 'Saldo', 'saldo_estoque', 'disponivel', 'Disponivel'
+  ],
+  ORIGINAL_PRICE: [
+    'Preço Original / PMC', 'Preco Original / PMC', 'precooriginalpmc', 'preco_original_pmc',
+    'PrecoOriginal', 'PreçoOriginal', 'De', 'Original', 'PrecoDe',
+    'PRECO_ORIGINAL', 'Preço original', 'Preco original', 'preco_original',
+    'pmc', 'PMC', 'preco_pmc', 'PRECO_PMC', 'original_price', 'originalprice',
+    'preco_tabela', 'preco_cheio', 'valor_original'
+  ],
+  PROMOTIONAL_PRICE: [
+    'Preço Promocional', 'Preco Promocional', 'preco_promocional', 'precopromocional',
+    'PrecoPromocional', 'PreçoPromocional', 'Promocional', 'PrecoPromo',
+    'PRECO_PROMOCIONAL', 'PROMOTIONAL_PRICE', 'promotional_price', 'promotionalPrice',
+    'valor_promocional', 'Por', 'PrecoPor', 'PRECO_POR', 'preco_oferta', 'valor_oferta'
+  ],
+  DESCRIPTION: [
+    'DescricaoDetalhada', 'Descrição Detalhada', 'descricao_detalhada',
+    'Detalhes', 'detalhes', 'Info', 'info', 'Obs', 'obs', 'observacao',
+    'DESCRICAO_COMERCIAL', 'Descricao Comercial', 'descricao', 'Descricao', 'Descrição', 'description'
+  ],
+  MANUFACTURER: [
+    'Fabricante', 'fabricante', 'Laboratorio', 'Laboratório', 'laboratorio',
+    'Marca', 'marca', 'FABRICANTE_LAB', 'fabricantes', 'manufacturer', 'brand', 'fornecedor'
+  ],
+  ACTIVE_PRINCIPLE: [
+    'Princípio Ativo', 'Principio Ativo', 'PrincipioAtivo', 'principio_ativo', 'principioativo',
+    'Substancia', 'Substância', 'substancia', 'Formula', 'Fórmula', 'formula',
+    'PRINCIPIO_ATIVO', 'active_principle', 'activeprinciple'
+  ],
+  LEGAL_TYPE: [
+    'Tipo Legal', 'TipoLegal', 'tipo_legal', 'tipolegal',
+    'Tipo', 'tipo', 'CategoriaLegal', 'Medicamento', 'TIPO_MEDICAMENTO', 'tipo medicamento',
+    'drug_type', 'drugtype', 'classe_terapeutica'
+  ],
+  PRESENTATION: [
+    'Apresentação', 'Apresentacao', 'apresentacao', 'APRESENTACAO', 'presentation', 'embalagem'
+  ],
+  DEPARTMENT: [
+    'Departamento', 'DEPARTAMENTO', 'departamento', 'Secao', 'Seção', 'secao', 'department'
+  ],
+  CATEGORY: [
+    'Categoria', 'categoria', 'SUBCATEGORIA', 'Subcategoria', 'subcategoria',
+    'CATEGORIA_CLASSE', 'category', 'grupo', 'Grupo', 'classe'
+  ],
+  PRESCRIPTION: [
+    'Retenção de Receita', 'Retencao de Receita', 'retencao_de_receita', 'retencaodereceita',
+    'Receita', 'receita', 'RetencaoReceita', 'retencao_receita',
+    'Controlado', 'controlado', 'TarjaPreta', 'RequiresPrescription', 'requires_prescription', 'EXIGE_RECEITA'
+  ],
+  PROMO_TYPE: [
+    'Tipo Promoção', 'Tipo Promocao', 'tipo_promocao', 'tipopromocao',
+    'TipoPromocao', 'Promocao', 'Promoção', 'Promo', 'TipoOferta', 'TIPO_PROMOCAO', 'promotion_type'
+  ],
+  FEATURED: [
+    'Destaque', 'destaque', 'is_featured', 'isfeatured', 'featured', 'Em Destaque', 'em_destaque'
+  ],
+  BUY_X: [
+    'Leve', 'leve', 'BuyX', 'buy_x', 'QtdLeve', 'PROMO_LEVE', 'qtd_leve'
+  ],
+  PAY_Y: [
+    'Pague', 'pague', 'PayY', 'pay_y', 'QtdPague', 'PROMO_PAGUE', 'qtd_pague'
+  ],
+  IMAGE: [
+    'Imagem', 'imagem', 'Image', 'image', 'Foto', 'foto',
+    'UrlImagem', 'url_imagem', 'ImagemURL', 'imagem_url', 'IMAGEM_PRINCIPAL', 'imagem_principal'
+  ]
+};
+
 const readSpreadsheetToJSON = async (file: File): Promise<any[]> => {
   // 1. Tentar ler localmente primeiro
   try {
     let aoa: any[][] = [];
 
     if (file.name.toLowerCase().endsWith('.csv')) {
-      const text = await file.text();
+      const buffer = await readFileAsArrayBuffer(file);
+      let text = '';
+      try {
+        // Tenta decodificar como UTF-8 estrito primeiro; se houver bytes inválidos (ex: Windows-1252/ANSI do Excel BR), usa windows-1252
+        const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
+        text = utf8Decoder.decode(buffer);
+      } catch {
+        const latinDecoder = new TextDecoder('windows-1252');
+        text = latinDecoder.decode(buffer);
+      }
+      // Remove BOM se presente
+      text = text.replace(/^\uFEFF/, '');
+
       aoa = await new Promise<any[][]>((resolve, reject) => {
         Papa.parse(text, {
           header: false,
@@ -273,52 +447,86 @@ const readSpreadsheetToJSON = async (file: File): Promise<any[]> => {
         });
       });
     } else {
-      const data = await file.arrayBuffer();
+      const data = await readFileAsArrayBuffer(file);
       const workbook = XLSX.read(data, { type: 'array', codepage: 65001 });
       const worksheet = workbook.Sheets[workbook.SheetNames[0]];
-      aoa = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
+      aoa = XLSX.utils.sheet_to_json(worksheet, { header: 1, raw: true, defval: '' }) as any[][];
     }
 
-    const keywords = ['nome', 'produto', 'descricao', 'ean', 'codigo', 'barras', 'preco', 'valor', 'estoque', 'quantidade', 'ativo', 'unidade', 'un', 'fabricante', 'laboratorio', 'marca', 'fornecedor', 'empresa', 'logo', 'imagem'];
-    const normalize = (str: any) => String(str).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    const headerExactSet = new Set([
+      ...IMPORT_COLUMN_KEYS.NAME_PRIMARY,
+      ...IMPORT_COLUMN_KEYS.NAME_FALLBACK,
+      ...IMPORT_COLUMN_KEYS.EAN,
+      ...IMPORT_COLUMN_KEYS.CODE,
+      ...IMPORT_COLUMN_KEYS.PRICE,
+      ...IMPORT_COLUMN_KEYS.STOCK,
+      ...IMPORT_COLUMN_KEYS.ORIGINAL_PRICE,
+      ...IMPORT_COLUMN_KEYS.PROMOTIONAL_PRICE,
+      ...IMPORT_COLUMN_KEYS.MANUFACTURER,
+      ...IMPORT_COLUMN_KEYS.CATEGORY,
+      ...IMPORT_COLUMN_KEYS.DEPARTMENT,
+      ...IMPORT_COLUMN_KEYS.ACTIVE_PRINCIPLE,
+      ...IMPORT_COLUMN_KEYS.LEGAL_TYPE,
+      ...IMPORT_COLUMN_KEYS.PRESENTATION,
+      ...IMPORT_COLUMN_KEYS.PRESCRIPTION,
+      ...IMPORT_COLUMN_KEYS.PROMO_TYPE,
+      ...IMPORT_COLUMN_KEYS.FEATURED
+    ].map(k => normalizeHeaderKey(k)));
+
+    const headerPartialKeywords = [
+      'nome', 'name', 'produto', 'descricao', 'ean', 'barcode', 'codigo', 'barras',
+      'preco', 'price', 'valor', 'estoque', 'stock', 'quantidade', 'qtd',
+      'fabricante', 'laboratorio', 'marca', 'categoria', 'departamento'
+    ];
 
     let bestHeaderIdx = 0;
     let maxScore = -1;
 
     for (let i = 0; i < Math.min(20, aoa.length); i++) {
-        const row = aoa[i];
-        if (!row || !Array.isArray(row)) continue;
-        let score = 0;
-        for (const cell of row) {
-            if (!cell) continue;
-            const norm = normalize(cell);
-            for (const kw of keywords) {
-                if (norm.includes(kw)) score++;
-            }
+      const row = aoa[i];
+      if (!row || !Array.isArray(row)) continue;
+      let score = 0;
+      for (const cell of row) {
+        if (cell === null || cell === undefined) continue;
+        const cellStr = String(cell).trim();
+        // Cabeçalhos reais são textos curtos e não apenas números puros
+        if (!cellStr || cellStr.length > 45 || /^\d+([.,]\d+)?$/.test(cellStr)) continue;
+        const norm = normalizeHeaderKey(cellStr);
+        if (!norm) continue;
+        if (headerExactSet.has(norm)) {
+          score += 5;
+        } else if (headerPartialKeywords.some(kw => norm.includes(kw))) {
+          score += 2;
         }
-        if (score > maxScore) {
-            maxScore = score;
-            bestHeaderIdx = i;
-        }
+      }
+      if (score > maxScore) {
+        maxScore = score;
+        bestHeaderIdx = i;
+      }
+      // Se a primeira linha já tem múltiplos cabeçalhos reconhecidos, ela é o cabeçalho da planilha
+      if (i === 0 && score >= 6) {
+        bestHeaderIdx = 0;
+        break;
+      }
     }
 
     const headers = aoa[bestHeaderIdx] || [];
     const result = [];
     for (let i = bestHeaderIdx + 1; i < aoa.length; i++) {
-        const row = aoa[i];
-        if (!row || row.length === 0) continue;
-        
-        const isEmpty = row.every(c => c === null || c === undefined || String(c).trim() === '');
-        if (isEmpty) continue;
-        
-        const obj: any = {};
-        for (let j = 0; j < headers.length; j++) {
-            const header = headers[j];
-            if (header !== undefined && header !== null && String(header).trim() !== '') {
-                obj[String(header)] = row[j];
-            }
+      const row = aoa[i];
+      if (!row || row.length === 0) continue;
+
+      const isEmpty = row.every(c => c === null || c === undefined || String(c).trim() === '');
+      if (isEmpty) continue;
+
+      const obj: any = {};
+      for (let j = 0; j < headers.length; j++) {
+        const header = headers[j];
+        if (header !== undefined && header !== null && String(header).trim() !== '') {
+          obj[String(header).trim()] = row[j];
         }
-        result.push(obj);
+      }
+      result.push(obj);
     }
 
     return result;
@@ -2265,11 +2473,10 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
         const priceMap = new Map<string, number>();
 
         const getValFromRow = (row: any, keys: string[]) => {
-            const normalize = (str: string) => str.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
-            const normalizedKeys = keys.map(k => normalize(k));
+            const normalizedKeys = keys.map(k => normalizeHeaderKey(k));
             
             for (const key of Object.keys(row)) {
-                if (normalizedKeys.includes(normalize(key))) {
+                if (normalizedKeys.includes(normalizeHeaderKey(key))) {
                     return row[key];
                 }
             }
@@ -2279,19 +2486,10 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
         rawData.forEach(row => {
             const getVal = (keys: string[]) => getValFromRow(row, keys);
 
-            const rawEan = getVal(['ean', 'ean_barras', 'barcode', 'codigo_de_barras', 'codigo barras', 'cod barras', 'EAN', 'Barras', 'CodigoBarras', 'EAN_BARRAS']);
-            const priceRaw = getVal(['valor', 'preco', 'preco_venda', 'preco venda', 'valor_venda', 'novo_preco', 'Preco', 'Valor', 'Preço', 'Venda', 'PRECO_VENDA']);
+            const rawEan = getVal(IMPORT_COLUMN_KEYS.EAN);
+            const priceRaw = getVal(IMPORT_COLUMN_KEYS.PRICE);
 
-            let ean = rawEan !== undefined && rawEan !== null ? String(rawEan).trim() : '';
-            if (ean.toLowerCase().includes('e')) {
-                const parsed = Number(ean);
-                if (!isNaN(parsed)) {
-                    ean = parsed.toLocaleString('fullwide', { useGrouping: false });
-                }
-            }
-            if (ean.includes('.')) {
-                ean = ean.split('.')[0];
-            }
+            const ean = sanitizeEanValue(rawEan);
             console.log("[FarmaFlow Debug] EAN Processado da Planilha:", ean);
             
             // Tratamento de Strings Vazias na Leitura:
@@ -2479,72 +2677,100 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
 
   const executeProductImport = async (json: any[]) => {
         console.log("[FarmaFlow Debug] executeProductImport start. Total items:", json.length);
-        if (json.length > 0) {
-            console.log("[FarmaFlow Debug] First item in json:", JSON.stringify(json[0]));
-            const getVal = (keys: string[]) => {
-                const normalize = (str: string) => str.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
-                const normalizedKeys = keys.map(k => normalize(k));
-                for (const key of Object.keys(json[0])) {
-                    if (normalizedKeys.includes(normalize(key))) {
-                        return json[0][key];
+
+        const getValFromRow = (row: any, keys: string[]) => {
+            if (!row || typeof row !== 'object') return undefined;
+            const normalizedKeys = keys.map(k => normalizeHeaderKey(k));
+            for (const key of Object.keys(row)) {
+                if (normalizedKeys.includes(normalizeHeaderKey(key))) {
+                    const val = row[key];
+                    if (val !== undefined && val !== null && String(val).trim() !== '') {
+                        return val;
                     }
                 }
-                return undefined;
-            };
-            console.log("[FarmaFlow Debug] Extracted name for first item:", getVal(['Nome', 'Produto', 'Descricao', 'NOME_PRODUTO', 'Nome produto']));
-            console.log("[FarmaFlow Debug] Extracted code for first item:", getVal(['Código', 'Codigo', 'Cod', 'REF', 'ID', 'Código Interno', 'Codigo Interno', 'COD_INTERNO', 'referencia', 'ref.']));
-            console.log("[FarmaFlow Debug] Extracted ean for first item:", getVal(['ean', 'ean_barras', 'barcode', 'codigo_de_barras', 'codigo barras', 'cod barras', 'EAN', 'Barras', 'CodigoBarras', 'EAN_BARRAS']));
+            }
+            return undefined;
+        };
+
+        const getProductNameFromRow = (row: any) => {
+            const primary = getValFromRow(row, IMPORT_COLUMN_KEYS.NAME_PRIMARY);
+            if (primary !== undefined && primary !== null && String(primary).trim() !== '') {
+                return primary;
+            }
+            return getValFromRow(row, IMPORT_COLUMN_KEYS.NAME_FALLBACK);
+        };
+
+        if (json.length > 0) {
+            console.log("[FarmaFlow Debug] First item in json:", JSON.stringify(json[0]));
+            console.log("[FarmaFlow Debug] Extracted name for first item:", getProductNameFromRow(json[0]));
+            console.log("[FarmaFlow Debug] Extracted code for first item:", getValFromRow(json[0], IMPORT_COLUMN_KEYS.CODE));
+            console.log("[FarmaFlow Debug] Extracted ean for first item:", getValFromRow(json[0], IMPORT_COLUMN_KEYS.EAN));
         }
 
         const total = json.length;
-        const firstRow = json[0] || {};
-        const headers = Object.keys(firstRow);
-        const hasImageColumn = headers.some(header => {
-            const norm = header.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
-            return ['imagem', 'image', 'foto', 'urlimagem', 'imagemurl', 'imagemprincipal'].includes(norm);
-        });
+        // Coleta todos os cabeçalhos presentes nas primeiras linhas para garantir que colunas com célula vazia na 1ª linha sejam detectadas
+        const headerSet = new Set<string>();
+        for (let idx = 0; idx < Math.min(10, json.length); idx++) {
+            if (json[idx] && typeof json[idx] === 'object') {
+                Object.keys(json[idx]).forEach(k => headerSet.add(k));
+            }
+        }
+        const headers = Array.from(headerSet);
 
         const hasColumn = (keys: string[]) => {
-            const normalize = (str: string) => str.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
-            const normalizedKeys = keys.map(k => normalize(k));
-            return headers.some(h => normalizedKeys.includes(normalize(h)));
+            const normalizedKeys = keys.map(k => normalizeHeaderKey(k));
+            return headers.some(h => normalizedKeys.includes(normalizeHeaderKey(h)));
         };
 
-        const hasStockCol = hasColumn(['Estoque', 'Qtd', 'Quantidade', 'ESTOQUE_ATUAL', 'estoque']);
-        const hasPriceCol = hasColumn(['valor', 'preco', 'preco_venda', 'preco venda', 'valor_venda', 'novo_preco', 'Preco', 'Valor', 'Preço', 'Venda', 'PRECO_VENDA']);
-        const hasOriginalPriceCol = hasColumn(['PrecoOriginal', 'PreçoOriginal', 'De', 'Original', 'PrecoDe', 'PRECO_ORIGINAL', 'Preço original', 'Preco original', 'preco_original', 'pmc', 'PMC', 'preco_pmc', 'PRECO_PMC']);
-        const hasPromotionalPriceCol = hasColumn(['PrecoPromocional', 'PreçoPromocional', 'Promocional', 'PrecoPromo', 'PRECO_PROMOCIONAL', 'PROMOTIONAL_PRICE', 'promotional_price', 'promotionalPrice', 'Preço promocional', 'Preco promocional', 'preco_promocional', 'valor_promocional', 'Por', 'PrecoPor', 'PRECO_POR']);
-        const hasDescCol = hasColumn(['Descricao', 'Descrição', 'Detalhes', 'Info', 'DESCRICAO_COMERCIAL', 'DescricaoDetalhada', 'Obs']);
-        const hasLabCol = hasColumn(['Laboratorio', 'Fabricante', 'Marca', 'FABRICANTE_LAB', 'fabricantes']);
-        const hasActivePrincipleCol = hasColumn(['Principio Ativo', 'PrincipioAtivo', 'Princípio Ativo', 'Substancia', 'Formula', 'PRINCIPIO_ATIVO']);
-        const hasLegalTypeCol = hasColumn(['Tipo Legal', 'TipoLegal', 'Tipo', 'CategoriaLegal', 'Medicamento', 'TIPO_MEDICAMENTO', 'tipo medicamento']);
-        const hasDeptCol = hasColumn(['Departamento', 'DEPARTAMENTO', 'Secao']);
-        const hasSubcatCol = hasColumn(['SUBCATEGORIA', 'Subcategoria', 'Categoria', 'CATEGORIA_CLASSE', 'categoria']);
-        const hasEanCol = hasColumn(['ean', 'ean_barras', 'barcode', 'codigo_de_barras', 'codigo barras', 'cod barras', 'EAN', 'Barras', 'CodigoBarras', 'EAN_BARRAS']);
-        const hasNameCol = hasColumn(['Nome', 'Produto', 'Descricao', 'NOME_PRODUTO', 'Nome produto']);
-        const hasCodeCol = hasColumn(['Código', 'Codigo', 'Cod', 'REF', 'ID', 'Código Interno', 'Codigo Interno', 'COD_INTERNO', 'referencia', 'ref.']);
-        const hasPrescriptionCol = hasColumn(['Receita', 'RetencaoReceita', 'Controlado', 'TarjaPreta', 'RequiresPrescription', 'EXIGE_RECEITA']);
-        const hasPromoTypeCol = hasColumn(['TipoPromocao', 'Promocao', 'Promo', 'TipoOferta', 'TIPO_PROMOCAO']);
-        const hasBuyXCol = hasColumn(['Leve', 'BuyX', 'QtdLeve', 'PROMO_LEVE']);
-        const hasPayYCol = hasColumn(['Pague', 'PayY', 'QtdPague', 'PROMO_PAGUE']);
-
+        const hasImageColumn = hasColumn(IMPORT_COLUMN_KEYS.IMAGE);
+        const hasStockCol = hasColumn(IMPORT_COLUMN_KEYS.STOCK);
+        const hasPriceCol = hasColumn(IMPORT_COLUMN_KEYS.PRICE);
+        const hasOriginalPriceCol = hasColumn(IMPORT_COLUMN_KEYS.ORIGINAL_PRICE);
+        const hasPromotionalPriceCol = hasColumn(IMPORT_COLUMN_KEYS.PROMOTIONAL_PRICE);
+        const hasPrimaryNameCol = hasColumn(IMPORT_COLUMN_KEYS.NAME_PRIMARY);
+        const hasDescCol = hasPrimaryNameCol
+            ? hasColumn(IMPORT_COLUMN_KEYS.DESCRIPTION)
+            : hasColumn(IMPORT_COLUMN_KEYS.DESCRIPTION.filter(k => !['descricao', 'description'].includes(normalizeHeaderKey(k))));
+        const hasLabCol = hasColumn(IMPORT_COLUMN_KEYS.MANUFACTURER);
+        const hasActivePrincipleCol = hasColumn(IMPORT_COLUMN_KEYS.ACTIVE_PRINCIPLE);
+        const hasLegalTypeCol = hasColumn(IMPORT_COLUMN_KEYS.LEGAL_TYPE);
+        const hasPresentationCol = hasColumn(IMPORT_COLUMN_KEYS.PRESENTATION);
+        const hasDeptCol = hasColumn(IMPORT_COLUMN_KEYS.DEPARTMENT);
+        const hasSubcatCol = hasColumn(IMPORT_COLUMN_KEYS.CATEGORY);
+        const hasEanCol = hasColumn(IMPORT_COLUMN_KEYS.EAN);
+        const hasNameCol = hasPrimaryNameCol || hasColumn(IMPORT_COLUMN_KEYS.NAME_FALLBACK);
+        const hasCodeCol = hasColumn(IMPORT_COLUMN_KEYS.CODE);
+        const hasPrescriptionCol = hasColumn(IMPORT_COLUMN_KEYS.PRESCRIPTION);
+        const hasPromoTypeCol = hasColumn(IMPORT_COLUMN_KEYS.PROMO_TYPE);
+        const hasFeaturedCol = hasColumn(IMPORT_COLUMN_KEYS.FEATURED);
+        const hasBuyXCol = hasColumn(IMPORT_COLUMN_KEYS.BUY_X);
+        const hasPayYCol = hasColumn(IMPORT_COLUMN_KEYS.PAY_Y);
 
         const audit: AuditItem[] = [];
         const newProducts: Product[] = [];
         const updatedProducts: Product[] = [];
         const importedProducts: Product[] = [];
         
-        // Identificador Único Absoluto: Cruzamento estritamente por EAN (Código de Barras)
-        // O código interno NUNCA é utilizado como critério de busca ou correspondência entre planilhas
+        // Indexação por EAN (prioritário) e por Código Interno (fallback quando EAN não informado)
         const productsByEan = new Map<string, Product>();
+        const productsByCode = new Map<string, Product>();
         
         products.forEach(p => {
+            const cleanDbEan = sanitizeEanValue(p.barcode);
+            if (cleanDbEan) {
+                productsByEan.set(cleanDbEan, p);
+            }
             if (p.barcode && String(p.barcode).trim() !== '') {
                 productsByEan.set(String(p.barcode).trim(), p);
+            }
+            const cleanDbCode = sanitizeCodeValue(p.internalCode);
+            if (cleanDbCode) {
+                productsByCode.set(cleanDbCode, p);
             }
         });
 
         const newProductsByEan = new Map<string, Product>();
+        const newProductsByCode = new Map<string, Product>();
 
         let countUpdated = 0;
         let countCreated = 0;
@@ -2557,35 +2783,20 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
         let trackedDepartments = tenant.departments ? JSON.parse(JSON.stringify(tenant.departments)) : [];
         let departmentsChanged = false;
 
-        const getValFromRow = (row: any, keys: string[]) => {
-            const normalize = (str: string) => str.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
-            const normalizedKeys = keys.map(k => normalize(k));
-            
-            for (const key of Object.keys(row)) {
-                if (normalizedKeys.includes(normalize(key))) {
-                    return row[key];
-                }
-            }
-            return undefined;
-        };
-
         // Passo 1: Construir/Mapear Departamentos e Subcategorias (Lookup Table em Memória)
-        // Mapeamento_Departamentos[ID_Antigo] = ID_Novo_Criado
         const deptIdMap = new Map<string, string>();
         const deptNameMap = new Map<string, string>();
-        const subcatIdMap = new Map<string, string>(); // [SUBCATEGORIA_ID] = Nome Subcat Local Resultante
+        const subcatIdMap = new Map<string, string>();
         
         for (const row of json) {
             try {
-                const rowDept = getValFromRow(row, ['Departamento', 'DEPARTAMENTO', 'Secao']);
+                const rowDept = getValFromRow(row, IMPORT_COLUMN_KEYS.DEPARTMENT);
                 const rowDeptId = getValFromRow(row, ['DEPARTAMENTO_ID']);
-                const providedSubcat = getValFromRow(row, ['SUBCATEGORIA', 'Subcategoria', 'Categoria', 'CATEGORIA_CLASSE', 'categoria']);
+                const providedSubcat = getValFromRow(row, IMPORT_COLUMN_KEYS.CATEGORY);
                 const providedSubcatId = getValFromRow(row, ['SUBCATEGORIA_ID']);
 
                 if (rowDept && String(rowDept).trim() !== '') {
                     const normDept = String(rowDept).trim();
-                    
-                    // Sanitização Estrita de Strings para Departamentos
                     const lowerNormDept = normDept.toLowerCase();
 
                     let exactDept = trackedDepartments.find((d: any) => d.name.toLowerCase() === lowerNormDept);
@@ -2637,41 +2848,45 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
 
             const getVal = (keys: string[]) => getValFromRow(row, keys);
 
-            const name = getVal(['Nome', 'Produto', 'Descricao', 'NOME_PRODUTO', 'Nome produto']);
+            const name = getProductNameFromRow(row);
+            const rawCode = getVal(IMPORT_COLUMN_KEYS.CODE);
+            const rawEan = getVal(IMPORT_COLUMN_KEYS.EAN);
+
+            const cleanCode = sanitizeCodeValue(rawCode);
+            const cleanEan = sanitizeEanValue(rawEan);
+
             if (!name || String(name).trim() === '') {
                 countEmptyRows++;
                 ignoredDetails.push({
                     linha: i + 2,
                     motivo: 'Linha vazia ou sem nome de produto',
                     item: 'N/A',
+                    codigo: cleanCode || 'N/A',
+                    ean: cleanEan || 'N/A'
+                });
+                continue;
+            }
+
+            // Exige apenas que o nome do produto e o EAN (ou código interno) estejam presentes
+            if (!cleanEan && !cleanCode) {
+                countEmptyRows++;
+                ignoredDetails.push({
+                    linha: i + 2,
+                    motivo: 'Produto sem EAN e sem código interno',
+                    item: String(name).trim(),
                     codigo: 'N/A',
                     ean: 'N/A'
                 });
                 continue;
             }
 
-            const rawCode = getVal(['Código', 'Codigo', 'Cod', 'REF', 'ID', 'Código Interno', 'Codigo Interno', 'COD_INTERNO', 'referencia', 'ref.']);
-            const rawEan = getVal(['ean', 'ean_barras', 'barcode', 'codigo_de_barras', 'codigo barras', 'cod barras', 'EAN', 'Barras', 'CodigoBarras', 'EAN_BARRAS']);
-            
-            const code = rawCode !== undefined && rawCode !== null ? String(rawCode).trim() : undefined;
-            let ean = rawEan !== undefined && rawEan !== null ? String(rawEan).trim() : '';
-            if (ean.toLowerCase().includes('e')) {
-                const parsed = Number(ean);
-                if (!isNaN(parsed)) {
-                    ean = parsed.toLocaleString('fullwide', { useGrouping: false });
-                }
-            }
-            if (ean.includes('.')) {
-                ean = ean.split('.')[0];
-            }
+            const code = cleanCode || undefined;
+            const ean = cleanEan;
 
-            const cleanEan = String(ean).trim();
-            const cleanCode = code ? String(code).trim() : '';
             let existingProduct: Product | undefined = undefined;
             let isNewProductUpdate = false;
             
-            // Identificador Único Absoluto: Cruzamento estritamente por EAN (Código de Barras)
-            // O código interno NUNCA é utilizado para buscar ou cruzar produtos entre planilhas
+            // Cruzamento prioritário por EAN limpo; se não houver EAN na linha, usa o Código Interno
             if (cleanEan) {
                 existingProduct = productsByEan.get(cleanEan);
                 if (!existingProduct) {
@@ -2688,17 +2903,36 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                         });
                     }
                 }
+            } else if (cleanCode) {
+                existingProduct = productsByCode.get(cleanCode);
+                if (!existingProduct) {
+                    existingProduct = newProductsByCode.get(cleanCode);
+                    if (existingProduct) {
+                        isNewProductUpdate = true;
+                        countDuplicatesMerged++;
+                    }
+                }
             }
 
-            const rowPrice = parseNumberSafe(getVal(['valor', 'preco', 'preco_venda', 'preco venda', 'valor_venda', 'novo_preco', 'Preco', 'Valor', 'Preço', 'Venda', 'PRECO_VENDA']));
-            let rowStock = parseNumberSafe(getVal(['Estoque', 'Qtd', 'Quantidade', 'ESTOQUE_ATUAL', 'estoque']));
+            const rawPriceVal = getVal(IMPORT_COLUMN_KEYS.PRICE);
+            const hasRowPrice = rawPriceVal !== undefined && rawPriceVal !== null && String(rawPriceVal).trim() !== '';
+            const rowPrice = hasRowPrice ? parseNumberSafe(rawPriceVal) : 0;
+
+            const rawStockVal = getVal(IMPORT_COLUMN_KEYS.STOCK);
+            const hasRowStock = rawStockVal !== undefined && rawStockVal !== null && String(rawStockVal).trim() !== '';
+            let rowStock = hasRowStock ? parseNumberSafe(rawStockVal) : 0;
             if (rowStock < 0) {
                 rowStock = Math.abs(rowStock);
             }
-            let rowImage = getVal(['Imagem', 'Image', 'Foto', 'UrlImagem', 'ImagemURL', 'IMAGEM_PRINCIPAL']);
+            const rowImage = getVal(IMPORT_COLUMN_KEYS.IMAGE);
 
-            const rowOriginalPrice = parseNumberSafe(getVal(['PrecoOriginal', 'PreçoOriginal', 'De', 'Original', 'PrecoDe', 'PRECO_ORIGINAL', 'Preço original', 'Preco original', 'preco_original', 'pmc', 'PMC', 'preco_pmc', 'PRECO_PMC']));
-            const rowPromotionalPrice = parseNumberSafe(getVal(['PrecoPromocional', 'PreçoPromocional', 'Promocional', 'PrecoPromo', 'PRECO_PROMOCIONAL', 'PROMOTIONAL_PRICE', 'promotional_price', 'promotionalPrice', 'Preço promocional', 'Preco promocional', 'preco_promocional', 'valor_promocional', 'Por', 'PrecoPor', 'PRECO_POR']));
+            const rawOrigPriceVal = getVal(IMPORT_COLUMN_KEYS.ORIGINAL_PRICE);
+            const hasRowOrigPrice = rawOrigPriceVal !== undefined && rawOrigPriceVal !== null && String(rawOrigPriceVal).trim() !== '';
+            const rowOriginalPrice = hasRowOrigPrice ? parseNumberSafe(rawOrigPriceVal) : 0;
+
+            const rawPromoPriceVal = getVal(IMPORT_COLUMN_KEYS.PROMOTIONAL_PRICE);
+            const hasRowPromoPrice = rawPromoPriceVal !== undefined && rawPromoPriceVal !== null && String(rawPromoPriceVal).trim() !== '';
+            const rowPromotionalPrice = hasRowPromoPrice ? parseNumberSafe(rawPromoPriceVal) : 0;
             
             // Promotional & Price logic
             let finalPrice = rowPrice || 0;
@@ -2707,7 +2941,6 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
             let rowPromoType: 'NONE' | 'DISCOUNT' | 'BUY_X_PAY_Y' | undefined = undefined;
 
             if (finalPromotionalPrice > 0) {
-                // Se houver Preço Promocional válido
                 if (finalPrice > 0 && finalPromotionalPrice < finalPrice) {
                     finalOriginalPrice = finalOriginalPrice > 0 ? finalOriginalPrice : finalPrice;
                     finalPrice = finalPromotionalPrice;
@@ -2721,7 +2954,6 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                     finalPrice = finalPromotionalPrice;
                 }
             } else if (finalPrice > 0 && finalOriginalPrice > 0) {
-                // Ambos preenchidos: price recebe preco_venda, original_price recebe preco_original / PMC
                 if (finalPrice < finalOriginalPrice) {
                     rowPromoType = 'DISCOUNT';
                     countPromotional++;
@@ -2729,17 +2961,15 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                     rowPromoType = 'NONE';
                 }
             } else if (finalOriginalPrice > 0 && finalPrice === 0) {
-                // Apenas preco_original preenchido: price recebe preco_original, original_price recebe 0
                 finalPrice = finalOriginalPrice;
                 finalOriginalPrice = 0;
                 rowPromoType = 'NONE';
             } else {
-                // Apenas preco_venda preenchido ou nenhum
                 finalOriginalPrice = 0;
                 rowPromoType = 'NONE';
             }
 
-            const rawPromo = getVal(['TipoPromocao', 'Promocao', 'Promo', 'TipoOferta', 'TIPO_PROMOCAO']);
+            const rawPromo = getVal(IMPORT_COLUMN_KEYS.PROMO_TYPE);
             if (rawPromo) {
                 const s = String(rawPromo).toUpperCase().trim();
                 if (s === 'DESCONTO' || s === 'DISCOUNT' || s === 'OFERTA') rowPromoType = 'DISCOUNT';
@@ -2747,19 +2977,26 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                 else if (s === 'NENHUMA' || s === 'NONE') rowPromoType = 'NONE';
             }
 
-            const rowBuyX = parseNumberSafe(getVal(['Leve', 'BuyX', 'QtdLeve', 'PROMO_LEVE']));
-            const rowPayY = parseNumberSafe(getVal(['Pague', 'PayY', 'QtdPague', 'PROMO_PAGUE']));
+            const rowBuyX = parseNumberSafe(getVal(IMPORT_COLUMN_KEYS.BUY_X));
+            const rowPayY = parseNumberSafe(getVal(IMPORT_COLUMN_KEYS.PAY_Y));
             
-            const rawRequiresPrescription = getVal(['Receita', 'RetencaoReceita', 'Controlado', 'TarjaPreta', 'RequiresPrescription', 'EXIGE_RECEITA']);
+            const rawRequiresPrescription = getVal(IMPORT_COLUMN_KEYS.PRESCRIPTION);
             let rowRequiresPrescription: boolean | undefined = undefined;
             if (rawRequiresPrescription !== undefined) {
                 const s = String(rawRequiresPrescription).toLowerCase().trim();
                 rowRequiresPrescription = s === 'sim' || s === 'true' || s === '1' || s === 's' || s === 'y' || s === 'yes';
             }
 
-            const providedSubcat = getVal(['SUBCATEGORIA', 'Subcategoria', 'Categoria', 'CATEGORIA_CLASSE', 'categoria']);
+            const rawFeatured = getVal(IMPORT_COLUMN_KEYS.FEATURED);
+            let rowIsFeatured: boolean | undefined = undefined;
+            if (rawFeatured !== undefined) {
+                const s = String(rawFeatured).toLowerCase().trim();
+                rowIsFeatured = s === 'sim' || s === 'true' || s === '1' || s === 's' || s === 'y' || s === 'yes';
+            }
+
+            const providedSubcat = getVal(IMPORT_COLUMN_KEYS.CATEGORY);
             const providedSubcatId = getVal(['SUBCATEGORIA_ID']);
-            const rowDept = getVal(['Departamento', 'DEPARTAMENTO', 'Secao']);
+            const rowDept = getVal(IMPORT_COLUMN_KEYS.DEPARTMENT);
             const rowDeptId = getVal(['DEPARTAMENTO_ID']);
 
             let finalCategoryStr = 'Geral'; // Fallback
@@ -2784,18 +3021,14 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                     }
 
                     if (selectedDept) {
-                        // Tenta achar pelo ID de mapeamento exato
                         if (providedSubcatId && subcatIdMap.has(String(providedSubcatId))) {
-                            // O valor no mapa já é a string exata salva em categories
                             const mappedSubcat = subcatIdMap.get(String(providedSubcatId)) as string;
-                            if(selectedDept.categories.includes(mappedSubcat)) {
+                            if (selectedDept.categories.includes(mappedSubcat)) {
                                 finalCategoryStr = mappedSubcat;
                             } else {
-                                // Fallback
                                 finalCategoryStr = rawSubcat;
                             }
                         } else {
-                            // Mapeia para a string exata armazenada neste departamento
                             const existingSub = selectedDept.categories.find((c: string) => c.trim().toLowerCase() === lowerRawSubcat);
                             if (existingSub) {
                                 finalCategoryStr = existingSub;
@@ -2804,10 +3037,9 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                             }
                         }
                     } else if (!rowDept || String(rowDept).trim().toLowerCase() === 'outros') {
-                        // Cenário 2: Movido para Outros somente se explícito ou fallback máximo sem depart
                         finalCategoryStr = rawSubcat; 
                     } else {
-                        finalCategoryStr = rawSubcat; // Fallback extremo
+                        finalCategoryStr = rawSubcat;
                     }
                 }
             } catch (e) {
@@ -2819,7 +3051,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                 let newStock = p.stock;
                 let changeTxt = "";
                 
-                if (hasStockCol && rowStock !== undefined) {
+                if (hasStockCol && hasRowStock) {
                     if (importStockMode === 'ADD') {
                         newStock += rowStock;
                         changeTxt = `Acrescentado ${rowStock} un.`;
@@ -2836,15 +3068,15 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                 // Preserva o nome do produto já existente no catálogo para manter a padronização
                 const newName = (preserveNamesOnImport && p.name && String(p.name).trim() !== '')
                     ? p.name
-                    : (hasNameCol && name ? String(name) : p.name);
+                    : (hasNameCol && name ? String(name).trim() : p.name);
                 const newCode = hasCodeCol && code !== undefined ? String(code) : (p.internalCode ? String(p.internalCode).trim() : undefined);
                 const newEan = hasEanCol && ean ? String(ean).trim() : (p.barcode && String(p.barcode).trim() !== '' ? String(p.barcode).trim() : undefined);
                 const newPrice = (hasPriceCol || hasPromotionalPriceCol || hasOriginalPriceCol) && finalPrice > 0 ? finalPrice : p.price;
-                const newOriginalPrice = (hasOriginalPriceCol || hasPromotionalPriceCol) ? (finalOriginalPrice > 0 ? finalOriginalPrice : 0) : p.originalPrice;
-                const newPromotionalPrice = hasPromotionalPriceCol ? (finalPromotionalPrice > 0 ? finalPromotionalPrice : undefined) : p.promotionalPrice;
+                const newOriginalPrice = (hasOriginalPriceCol || hasPromotionalPriceCol) && (hasRowOrigPrice || hasRowPromoPrice) ? (finalOriginalPrice > 0 ? finalOriginalPrice : 0) : p.originalPrice;
+                const newPromotionalPrice = hasPromotionalPriceCol && hasRowPromoPrice ? (finalPromotionalPrice > 0 ? finalPromotionalPrice : undefined) : p.promotionalPrice;
                 
                 let newPromoType = p.promotionType;
-                if (hasPromoTypeCol && rowPromoType !== undefined) {
+                if (hasPromoTypeCol && rowPromoType !== undefined && rawPromo !== undefined) {
                     newPromoType = rowPromoType;
                 } else if (hasOriginalPriceCol || hasPriceCol || hasPromotionalPriceCol) {
                     if ((newOriginalPrice || 0) > 0 && newPrice < (newOriginalPrice || 0)) {
@@ -2853,6 +3085,12 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                         newPromoType = 'NONE';
                     }
                 }
+
+                const rowDescVal = hasDescCol ? getVal(IMPORT_COLUMN_KEYS.DESCRIPTION) : undefined;
+                const rowLabVal = hasLabCol ? getVal(IMPORT_COLUMN_KEYS.MANUFACTURER) : undefined;
+                const rowActivePrincipleVal = hasActivePrincipleCol ? getVal(IMPORT_COLUMN_KEYS.ACTIVE_PRINCIPLE) : undefined;
+                const rowLegalTypeVal = hasLegalTypeCol ? getVal(IMPORT_COLUMN_KEYS.LEGAL_TYPE) : undefined;
+                const rowPresentationVal = hasPresentationCol ? getVal(IMPORT_COLUMN_KEYS.PRESENTATION) : undefined;
 
                 const hasChanges = 
                     p.internalCode !== newCode ||
@@ -2863,11 +3101,13 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                     p.stock !== newStock ||
                     p.name !== newName ||
                     p.barcode !== newEan ||
-                    (hasDescCol && getVal(['Descricao', 'DescricaoDetalhada', 'Obs', 'DESCRICAO_COMERCIAL'])) ||
-                    (hasLabCol && getVal(['Laboratorio', 'Fabricante', 'Marca', 'FABRICANTE_LAB', 'fabricantes'])) ||
-                    (hasActivePrincipleCol && getVal(['PrincipioAtivo', 'Formula', 'PRINCIPIO_ATIVO'])) ||
-                    (hasLegalTypeCol && getVal(['Tipo', 'TipoLegal', 'TIPO_MEDICAMENTO', 'tipo medicamento'])) ||
-                    (hasDeptCol || hasSubcatCol);
+                    Boolean(rowDescVal) ||
+                    Boolean(rowLabVal) ||
+                    Boolean(rowActivePrincipleVal) ||
+                    Boolean(rowLegalTypeVal) ||
+                    Boolean(rowPresentationVal) ||
+                    (hasFeaturedCol && rowIsFeatured !== undefined && p.isFeatured !== rowIsFeatured) ||
+                    ((hasDeptCol || hasSubcatCol) && Boolean(providedSubcat || rowDept));
 
                 if (hasChanges) {
                     const updatedProductData = {
@@ -2883,29 +3123,29 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                         barcode: newEan
                     };
                     
-                    if (hasDescCol) {
-                        const val = getVal(['Descricao', 'DescricaoDetalhada', 'Obs', 'DESCRICAO_COMERCIAL']);
-                        if (val !== undefined) updatedProductData.description = String(val);
+                    if (rowDescVal !== undefined) {
+                        updatedProductData.description = String(rowDescVal).trim();
                     }
-                    if (hasLabCol) {
-                        const val = getVal(['Laboratorio', 'Fabricante', 'Marca', 'FABRICANTE_LAB', 'fabricantes']);
-                        if (val !== undefined) {
-                            updatedProductData.manufacturer = findMatchingManufacturer(val, manufacturerOptions, tenant.manufacturerSynonyms || {});
-                        }
+                    if (rowLabVal !== undefined) {
+                        updatedProductData.manufacturer = findMatchingManufacturer(rowLabVal, manufacturerOptions, tenant.manufacturerSynonyms || {});
                     }
-                    if (hasActivePrincipleCol) {
-                        const val = getVal(['PrincipioAtivo', 'Formula', 'PRINCIPIO_ATIVO']);
-                        if (val !== undefined) updatedProductData.activePrinciple = String(val);
+                    if (rowActivePrincipleVal !== undefined) {
+                        updatedProductData.activePrinciple = String(rowActivePrincipleVal).trim();
                     }
-                    if (hasLegalTypeCol) {
-                        const val = getVal(['Tipo', 'TipoLegal', 'TIPO_MEDICAMENTO', 'tipo medicamento']);
-                        if (val !== undefined) updatedProductData.drugType = String(val);
+                    if (rowLegalTypeVal !== undefined) {
+                        updatedProductData.drugType = String(rowLegalTypeVal).trim();
                     }
-                    if (hasDeptCol || hasSubcatCol) {
+                    if (rowPresentationVal !== undefined) {
+                        updatedProductData.presentation = String(rowPresentationVal).trim();
+                    }
+                    if ((hasDeptCol || hasSubcatCol) && (providedSubcat || rowDept)) {
                         updatedProductData.category = finalCategoryStr !== undefined ? finalCategoryStr : p.category;
                     }
                     if (hasPrescriptionCol && rowRequiresPrescription !== undefined) {
                         updatedProductData.requires_prescription = rowRequiresPrescription;
+                    }
+                    if (hasFeaturedCol && rowIsFeatured !== undefined) {
+                        updatedProductData.isFeatured = rowIsFeatured;
                     }
                     if (hasImageColumn) {
                         updatedProductData.image = rowImage !== undefined && rowImage !== null && String(rowImage).trim() !== "" && String(rowImage).trim().toLowerCase() !== "null" ? String(rowImage).trim() : p.image;
@@ -2917,6 +3157,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                         const idx = newProducts.findIndex(np => np.id === p.id);
                         if (idx > -1) newProducts[idx] = updatedProductData;
                         if (newEan) newProductsByEan.set(newEan, updatedProductData);
+                        if (newCode) newProductsByCode.set(newCode, updatedProductData);
                         importedProducts.push(updatedProductData);
                     } else {
                         const idx = updatedProducts.findIndex(up => up.id === p.id);
@@ -2927,6 +3168,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                             countUpdated++;
                         }
                         if (newEan) productsByEan.set(newEan, updatedProductData);
+                        if (newCode) productsByCode.set(newCode, updatedProductData);
                         importedProducts.push(updatedProductData);
                     }
 
@@ -2953,24 +3195,24 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                 let productData: Product = {
                     id: Math.random().toString(36).substr(2, 9),
                     tenantId: tenant.id,
-                    name: String(name),
+                    name: String(name).trim(),
                     price: finalPrice || 0,
                     stock: rowStock || 0,
                     internalCode: code ? String(code) : Math.random().toString(36).substr(2, 6).toUpperCase(),
                     barcode: (ean && ean.trim() !== '') ? String(ean).trim() : undefined,
                     category: finalCategoryStr !== undefined ? finalCategoryStr : 'Geral',
                     manufacturer: findMatchingManufacturer(
-                        getVal(['Laboratorio', 'Fabricante', 'Marca', 'FABRICANTE_LAB', 'fabricantes']) || 'Outros',
+                        getVal(IMPORT_COLUMN_KEYS.MANUFACTURER) || 'Outros',
                         manufacturerOptions,
                         tenant.manufacturerSynonyms || {}
                     ),
-                    activePrinciple: getVal(['PrincipioAtivo', 'Formula', 'PRINCIPIO_ATIVO']) || '',
-                    drugType: getVal(['Tipo', 'TipoLegal', 'TIPO_MEDICAMENTO', 'tipo medicamento']) || 'Outros',
-                    presentation: getVal(['Apresentacao', 'APRESENTACAO']) || '',
-                    description: getVal(['Descricao', 'DescricaoDetalhada', 'Obs', 'DESCRICAO_COMERCIAL']) || '',
-                    indications: getVal(['Indicacoes', 'INDICACOES']) || '',
+                    activePrinciple: String(getVal(IMPORT_COLUMN_KEYS.ACTIVE_PRINCIPLE) || '').trim(),
+                    drugType: String(getVal(IMPORT_COLUMN_KEYS.LEGAL_TYPE) || 'Outros').trim(),
+                    presentation: String(getVal(IMPORT_COLUMN_KEYS.PRESENTATION) || '').trim(),
+                    description: String((hasDescCol ? getVal(IMPORT_COLUMN_KEYS.DESCRIPTION) : '') || '').trim(),
+                    indications: String(getVal(['Indicacoes', 'Indicações', 'INDICACOES', 'indications']) || '').trim(),
                     image: finalImage,
-                    isFeatured: false,
+                    isFeatured: rowIsFeatured || false,
                     originalPrice: finalOriginalPrice || 0,
                     promotionalPrice: finalPromotionalPrice > 0 ? finalPromotionalPrice : undefined,
                     promotional_price: finalPromotionalPrice > 0 ? finalPromotionalPrice : null,
@@ -2984,9 +3226,10 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                 newProducts.push(productData);
                 importedProducts.push(productData);
                 if (productData.barcode) newProductsByEan.set(productData.barcode, productData);
+                if (productData.internalCode) newProductsByCode.set(productData.internalCode, productData);
                 countCreated++;
 
-                audit.push({ name: String(name), code: String(productData.internalCode || productData.barcode), status: 'created', details: `Novo item cadastrado (${rowStock} un.)` });
+                audit.push({ name: String(name).trim(), code: String(productData.internalCode || productData.barcode), status: 'created', details: `Novo item cadastrado (${rowStock} un.)` });
             }
         }
 

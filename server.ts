@@ -329,7 +329,64 @@ app.post("/api/v1/parse-excel", upload.single("file"), (req, res) => {
     const workbook = XLSX.read(buffer, { type: "buffer", codepage: 65001 });
     const sheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[sheetName];
-    const data = XLSX.utils.sheet_to_json(worksheet);
+    const aoa = XLSX.utils.sheet_to_json(worksheet, { header: 1, raw: true, defval: "" }) as any[][];
+
+    const normalize = (str: any) =>
+      String(str ?? "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, "");
+
+    const headerKeywords = [
+      "nomedoproduto", "nomeproduto", "nome", "name", "produto", "descricao",
+      "ean", "barcode", "codigobarras", "codigodebarras", "codigointerno", "codigo",
+      "precodevenda", "precovenda", "preco", "price", "valor",
+      "estoque", "stock", "quantidade", "qtd", "fabricante", "categoria"
+    ];
+
+    let bestHeaderIdx = 0;
+    let maxScore = -1;
+    for (let i = 0; i < Math.min(20, aoa.length); i++) {
+      const row = aoa[i];
+      if (!row || !Array.isArray(row)) continue;
+      let score = 0;
+      for (const cell of row) {
+        if (cell === null || cell === undefined) continue;
+        const cellStr = String(cell).trim();
+        if (!cellStr || cellStr.length > 45 || /^\d+([.,]\d+)?$/.test(cellStr)) continue;
+        const norm = normalize(cellStr);
+        if (!norm) continue;
+        if (headerKeywords.includes(norm)) score += 5;
+        else if (headerKeywords.some(kw => norm.includes(kw))) score += 2;
+      }
+      if (score > maxScore) {
+        maxScore = score;
+        bestHeaderIdx = i;
+      }
+      if (i === 0 && score >= 6) {
+        bestHeaderIdx = 0;
+        break;
+      }
+    }
+
+    const headers = aoa[bestHeaderIdx] || [];
+    const data: any[] = [];
+    for (let i = bestHeaderIdx + 1; i < aoa.length; i++) {
+      const row = aoa[i];
+      if (!row || row.length === 0) continue;
+      const isEmpty = row.every((c: any) => c === null || c === undefined || String(c).trim() === "");
+      if (isEmpty) continue;
+      const obj: any = {};
+      for (let j = 0; j < headers.length; j++) {
+        const header = headers[j];
+        if (header !== undefined && header !== null && String(header).trim() !== "") {
+          obj[String(header).trim()] = row[j];
+        }
+      }
+      data.push(obj);
+    }
+
     res.json({ data });
   } catch (error: any) {
     console.error("Erro ao processar planilha no servidor:", error);
@@ -2885,7 +2942,20 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
       const rawStock = p.stock !== undefined && p.stock !== null ? Number(p.stock) : 0;
       const validStock = !isNaN(rawStock) ? rawStock : 0;
 
-      const cleanBarcode = p.barcode && String(p.barcode).trim() !== '' ? String(p.barcode).trim() : null;
+      let cleanBarcode: string | null = null;
+      if (p.barcode !== undefined && p.barcode !== null && String(p.barcode).trim() !== '') {
+        let rawBc = String(p.barcode).trim().replace(/^=?"|"$|^'/g, '').trim();
+        if (/^[+-]?\d+(?:[.,]\d+)?e[+-]?\d+$/i.test(rawBc)) {
+          const parsedNum = Number(rawBc.replace(',', '.'));
+          if (Number.isFinite(parsedNum) && parsedNum > 0) {
+            rawBc = Math.round(parsedNum).toFixed(0);
+          }
+        } else if (/^\d+[.,]0+$/.test(rawBc)) {
+          rawBc = rawBc.split(/[.,]/)[0];
+        }
+        const digitsOnly = rawBc.replace(/\D/g, '');
+        cleanBarcode = digitsOnly || rawBc || null;
+      }
       const cleanInternalCode = p.internal_code ?? p.internalCode;
       const cleanCode = cleanInternalCode && String(cleanInternalCode).trim() !== '' ? String(cleanInternalCode).trim() : null;
 
