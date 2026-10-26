@@ -47,6 +47,11 @@ export interface Product {
   requires_prescription?: boolean;
   is_continuous_use?: boolean;
   continuous_use_days?: number;
+  erpProductId?: string;
+  erp_product_id?: string;
+  unitMeasure?: string;
+  unidade_medida?: string;
+  additionalEans?: string[];
 }
 
 export interface CartItem extends Product {
@@ -128,6 +133,21 @@ export interface Order {
   networkId?: string;
   deliveryMode?: "delivery" | "pickup";
   prescriptionStatus?: string;
+  codigoVendaOnLine?: string;
+  codigo_venda_online?: string;
+  codigoVendaInova?: string;
+  codigo_venda_inova?: string;
+  numeroNotaFiscal?: string;
+  numero_nota_fiscal?: string;
+  chaveAcessoNotaFiscal?: string;
+  chave_acesso_nota_fiscal?: string;
+  valorNotaFiscal?: number;
+  valor_nota_fiscal?: number;
+  divergenciaNotaFiscal?: boolean;
+  divergencia_nota_fiscal?: boolean;
+  enviadoParaEntrega?: boolean;
+  entregaFinalizada?: boolean;
+  vendaEliminada?: boolean;
 }
 
 export interface AppReview {
@@ -240,6 +260,28 @@ export interface PharmacyConfig {
   };
   integrationToken?: string;
   erpUrl?: string;
+  erp_base_url?: string;
+  erpBaseUrl?: string;
+  erp_route_id?: string;
+  erpRouteId?: string;
+  erp_cnpj?: string;
+  erpCnpj?: string;
+  erp_login?: string;
+  erpLogin?: string;
+  erp_password?: string;
+  erpPassword?: string;
+  erp_api_key?: string;
+  erpApiKey?: string;
+  erp_access_token?: string;
+  erpAccessToken?: string;
+  has_erp_access_token?: boolean;
+  hasErpAccessToken?: boolean;
+  erp_token_expiration?: string;
+  erpTokenExpiration?: string;
+  last_product_sync?: string;
+  lastProductSync?: string;
+  last_customer_sync?: string;
+  lastCustomerSync?: string;
   erpType?: string;
   erpApiLogin?: string;
   erp_api_login?: string;

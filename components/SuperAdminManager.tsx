@@ -71,7 +71,9 @@ export const SuperAdminManager: React.FC<SuperAdminManagerProps> = ({ session, o
     try {
       const result = await triggerInovafarmaSync({
         tenantId: selectedTenantForIntegration.id,
-        erpUrl: selectedTenantForIntegration.erpUrl || INOVAFARMA_DEFAULT_API_URL,
+        erpUrl: selectedTenantForIntegration.erpBaseUrl || selectedTenantForIntegration.erpUrl || INOVAFARMA_DEFAULT_API_URL,
+        erpRouteId: selectedTenantForIntegration.erpRouteId || selectedTenantForIntegration.erp_route_id || 'homologacao',
+        cnpj: selectedTenantForIntegration.erpCnpj || selectedTenantForIntegration.erp_cnpj || selectedTenantForIntegration.cnpj || '',
         apiToken: selectedTenantForIntegration.integrationToken || '',
         ignoreErpPrices: Boolean(selectedTenantForIntegration.ignore_erp_prices),
       });
@@ -627,12 +629,22 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
           cnpj: editData.cnpj || '',
           fullAddress: editData.fullAddress || '',
           corporateEmail: editData.corporateEmail || '',
-          erpUrl: editData.erpUrl || '',
+          erpUrl: editData.erpBaseUrl || editData.erpUrl || '',
+          erpBaseUrl: editData.erpBaseUrl || editData.erpUrl || '',
+          erp_base_url: editData.erpBaseUrl || editData.erpUrl || '',
+          erpRouteId: (editData.erpRouteId ?? editData.erp_route_id ?? existingTenant?.erpRouteId ?? '').trim(),
+          erp_route_id: (editData.erpRouteId ?? editData.erp_route_id ?? existingTenant?.erpRouteId ?? '').trim(),
+          erpCnpj: (editData.erpCnpj ?? editData.erp_cnpj ?? editData.cnpj ?? existingTenant?.erpCnpj ?? '').trim(),
+          erp_cnpj: (editData.erpCnpj ?? editData.erp_cnpj ?? editData.cnpj ?? existingTenant?.erpCnpj ?? '').trim(),
+          erpApiKey: (editData.erpApiKey ?? editData.erp_api_key ?? existingTenant?.erpApiKey ?? '').trim(),
+          erp_api_key: (editData.erpApiKey ?? editData.erp_api_key ?? existingTenant?.erpApiKey ?? '').trim(),
           erpType: editData.erpType || '',
-          erpApiLogin: (editData.erpApiLogin ?? editData.erp_api_login ?? existingTenant?.erpApiLogin ?? '').trim(),
-          erp_api_login: (editData.erpApiLogin ?? editData.erp_api_login ?? existingTenant?.erpApiLogin ?? '').trim(),
-          erpApiPassword: (editData.erpApiPassword ?? editData.erp_api_password ?? '').trim(),
-          erp_api_password: (editData.erpApiPassword ?? editData.erp_api_password ?? '').trim(),
+          erp_login: (editData.erp_login ?? editData.erpApiLogin ?? editData.erp_api_login ?? existingTenant?.erpApiLogin ?? '').trim(),
+          erpApiLogin: (editData.erp_login ?? editData.erpApiLogin ?? editData.erp_api_login ?? existingTenant?.erpApiLogin ?? '').trim(),
+          erp_api_login: (editData.erp_login ?? editData.erpApiLogin ?? editData.erp_api_login ?? existingTenant?.erpApiLogin ?? '').trim(),
+          erp_password: (editData.erp_password ?? editData.erpApiPassword ?? editData.erp_api_password ?? '').trim(),
+          erpApiPassword: (editData.erp_password ?? editData.erpApiPassword ?? editData.erp_api_password ?? '').trim(),
+          erp_api_password: (editData.erp_password ?? editData.erpApiPassword ?? editData.erp_api_password ?? '').trim(),
           isChatEnabled: editData.isChatEnabled || false,
           isAiAgentEnabled: editData.isAiAgentEnabled || false,
           isAiCopilotEnabled: editData.isAiCopilotEnabled || false,
@@ -1268,9 +1280,15 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
                         </div>
                       </div>
                     </div>
-                    <div className="space-y-1">
-                      <label className="text-[11px] font-black uppercase text-gray-800 ml-2">URL do ERP</label>
-                      <input type="text" className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black" value={editData.erpUrl || ''} onChange={e => setEditData({...editData, erpUrl: e.target.value})} placeholder="https://erp.exemplo.com" />
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-black uppercase text-gray-800 ml-2">URL Base do ERP (`erp_base_url`)</label>
+                        <input type="text" className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black" value={editData.erpBaseUrl || editData.erpUrl || ''} onChange={e => setEditData({...editData, erpBaseUrl: e.target.value, erp_base_url: e.target.value, erpUrl: e.target.value})} placeholder="https://integracao.portalps.app" />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-black uppercase text-gray-800 ml-2">Rota `&#123;integracao&#125;` (`erp_route_id`)</label>
+                        <input type="text" className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black" value={editData.erpRouteId || editData.erp_route_id || ''} onChange={e => setEditData({...editData, erpRouteId: e.target.value, erp_route_id: e.target.value})} placeholder="homologacao" />
+                      </div>
                     </div>
                     <div className="space-y-1">
                       <label className="text-[11px] font-black uppercase text-gray-800 ml-2">Tipo de ERP</label>
@@ -1288,8 +1306,8 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
                         type="text"
                         autoComplete="off"
                         className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black"
-                        value={editData.erpApiLogin || editData.erp_api_login || ''}
-                        onChange={e => setEditData({ ...editData, erpApiLogin: e.target.value, erp_api_login: e.target.value })}
+                        value={editData.erp_login || editData.erpApiLogin || editData.erp_api_login || ''}
+                        onChange={e => setEditData({ ...editData, erp_login: e.target.value, erpApiLogin: e.target.value, erp_api_login: e.target.value })}
                         placeholder="Login de acesso da API do Inovafarma"
                       />
                     </div>
@@ -1299,8 +1317,8 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
                         type="password"
                         autoComplete="new-password"
                         className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black"
-                        value={editData.erpApiPassword || ''}
-                        onChange={e => setEditData({ ...editData, erpApiPassword: e.target.value, erp_api_password: e.target.value })}
+                        value={editData.erp_password || editData.erpApiPassword || ''}
+                        onChange={e => setEditData({ ...editData, erp_password: e.target.value, erpApiPassword: e.target.value, erp_api_password: e.target.value })}
                         placeholder={editData.hasErpApiPassword ? '•••••••••••• (Digite apenas para alterar)' : 'Senha da API do Inovafarma'}
                       />
                     </div>

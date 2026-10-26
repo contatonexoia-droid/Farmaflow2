@@ -280,26 +280,81 @@ export const mapDbTenantToApp = (t: any): PharmacyConfig => {
     manufacturerLogos: t.manufacturer_logos || t.manufacturerlogos || {},
     backupConfig: t.backup_config || t.backupconfig || { frequency: "OFF" },
     integrationToken: t.integration_token || t.integrationtoken || "",
-    erpUrl: t.erp_url || t.erpurl || "",
+    erpUrl:
+      t.erp_base_url ||
+      t.erp_url ||
+      t.erpurl ||
+      smartBannersObj?._erpCredentials?.erp_base_url ||
+      "",
+    erpBaseUrl:
+      t.erp_base_url ||
+      t.erp_url ||
+      t.erpurl ||
+      smartBannersObj?._erpCredentials?.erp_base_url ||
+      "",
+    erp_base_url:
+      t.erp_base_url ||
+      t.erp_url ||
+      t.erpurl ||
+      smartBannersObj?._erpCredentials?.erp_base_url ||
+      "",
+    erpRouteId:
+      t.erp_route_id ||
+      t.erprouteid ||
+      smartBannersObj?._erpCredentials?.erp_route_id ||
+      "",
+    erp_route_id:
+      t.erp_route_id ||
+      t.erprouteid ||
+      smartBannersObj?._erpCredentials?.erp_route_id ||
+      "",
+    erpCnpj:
+      t.erp_cnpj ||
+      t.erpcnpj ||
+      smartBannersObj?._erpCredentials?.erp_cnpj ||
+      t.cnpj ||
+      fallbackRegulatory.cnpj ||
+      "",
+    erp_cnpj:
+      t.erp_cnpj ||
+      t.erpcnpj ||
+      smartBannersObj?._erpCredentials?.erp_cnpj ||
+      t.cnpj ||
+      fallbackRegulatory.cnpj ||
+      "",
     erpType: t.erp_type || t.erptype || "",
-    erpApiLogin:
+    erp_login:
+      t.erp_login ||
       t.erp_api_login ||
       t.erpapilogin ||
       t.erpApiLogin ||
+      smartBannersObj?._erpCredentials?.erp_login ||
+      smartBannersObj?._erpCredentials?.erp_api_login ||
+      "",
+    erpApiLogin:
+      t.erp_login ||
+      t.erp_api_login ||
+      t.erpapilogin ||
+      t.erpApiLogin ||
+      smartBannersObj?._erpCredentials?.erp_login ||
       smartBannersObj?._erpCredentials?.erp_api_login ||
       "",
     erp_api_login:
+      t.erp_login ||
       t.erp_api_login ||
       t.erpapilogin ||
       t.erpApiLogin ||
+      smartBannersObj?._erpCredentials?.erp_login ||
       smartBannersObj?._erpCredentials?.erp_api_login ||
       "",
     // Nunca retorna a senha da API em texto plano para o frontend após salva
+    erp_password: "",
     erpApiPassword: "",
     erp_api_password: "",
     hasErpApiPassword: Boolean(
       t.has_erp_api_password ||
         t.hasErpApiPassword ||
+        t.erp_password ||
         t.erp_api_password ||
         smartBannersObj?._erpCredentials?.has_erp_api_password ||
         smartBannersObj?._erpCredentials?.erp_api_password_enc ||
@@ -308,11 +363,46 @@ export const mapDbTenantToApp = (t: any): PharmacyConfig => {
     has_erp_api_password: Boolean(
       t.has_erp_api_password ||
         t.hasErpApiPassword ||
+        t.erp_password ||
         t.erp_api_password ||
         smartBannersObj?._erpCredentials?.has_erp_api_password ||
         smartBannersObj?._erpCredentials?.erp_api_password_enc ||
         smartBannersObj?._erpCredentials?.erp_api_password,
     ),
+    erpApiKey:
+      t.erp_api_key ||
+      t.erpapikey ||
+      smartBannersObj?._erpCredentials?.erp_api_key ||
+      "",
+    erp_api_key:
+      t.erp_api_key ||
+      t.erpapikey ||
+      smartBannersObj?._erpCredentials?.erp_api_key ||
+      "",
+    erpTokenExpiration:
+      t.erp_token_expiration ||
+      smartBannersObj?._erpCredentials?.erp_token_expiration ||
+      "",
+    erp_token_expiration:
+      t.erp_token_expiration ||
+      smartBannersObj?._erpCredentials?.erp_token_expiration ||
+      "",
+    lastProductSync:
+      t.last_product_sync ||
+      smartBannersObj?._erpCredentials?.last_product_sync ||
+      "",
+    last_product_sync:
+      t.last_product_sync ||
+      smartBannersObj?._erpCredentials?.last_product_sync ||
+      "",
+    lastCustomerSync:
+      t.last_customer_sync ||
+      smartBannersObj?._erpCredentials?.last_customer_sync ||
+      "",
+    last_customer_sync:
+      t.last_customer_sync ||
+      smartBannersObj?._erpCredentials?.last_customer_sync ||
+      "",
     enableSmartBanners: t.enable_smart_banners || t.enablesmartbanners || false,
     smartBanners: smartBannersObj,
     couponBannerColor: t.coupon_banner_color || t.couponbannercolor || "",
@@ -604,12 +694,53 @@ export const saveTenant = async (
       telefone_contato: tenant.telefone_contato || tenant.phone || "",
     };
 
-    const rawErpLogin = (tenant.erpApiLogin ?? tenant.erp_api_login ?? "").trim();
-    const rawErpPassword = (tenant.erpApiPassword ?? tenant.erp_api_password ?? "").trim();
+    const rawErpBaseUrl = (
+      tenant.erpBaseUrl ??
+      tenant.erp_base_url ??
+      tenant.erpUrl ??
+      ""
+    ).trim();
+    const rawErpRouteId = (
+      tenant.erpRouteId ??
+      tenant.erp_route_id ??
+      ""
+    ).trim();
+    const rawErpCnpj = (
+      tenant.erpCnpj ??
+      tenant.erp_cnpj ??
+      tenant.cnpj ??
+      ""
+    ).trim();
+    const rawErpLogin = (
+      tenant.erp_login ??
+      tenant.erpApiLogin ??
+      tenant.erp_api_login ??
+      ""
+    ).trim();
+    const rawErpPassword = (
+      tenant.erp_password ??
+      tenant.erpApiPassword ??
+      tenant.erp_api_password ??
+      ""
+    ).trim();
+    const rawErpApiKey = (
+      tenant.erpApiKey ??
+      tenant.erp_api_key ??
+      ""
+    ).trim();
     const isPasswordMask = /^[*•]+$/.test(rawErpPassword) || (rawErpPassword.includes("...") && rawErpPassword.length <= 20);
 
+    if (rawErpBaseUrl) {
+      payload.erp_url = rawErpBaseUrl;
+      payload.erp_base_url = rawErpBaseUrl;
+    }
+    payload.erp_route_id = rawErpRouteId;
+    payload.erp_cnpj = rawErpCnpj;
+    payload.erp_login = rawErpLogin;
     payload.erp_api_login = rawErpLogin;
+    payload.erp_api_key = rawErpApiKey;
     if (rawErpPassword && !isPasswordMask) {
+      payload.erp_password = rawErpPassword;
       payload.erp_api_password = rawErpPassword;
     }
 
@@ -618,7 +749,12 @@ export const saveTenant = async (
       _regulatoryData: regData,
       _erpCredentials: {
         ...(payload.smart_banners?._erpCredentials || {}),
+        erp_base_url: rawErpBaseUrl,
+        erp_route_id: rawErpRouteId,
+        erp_cnpj: rawErpCnpj,
+        erp_login: rawErpLogin,
         erp_api_login: rawErpLogin,
+        erp_api_key: rawErpApiKey,
         ...(rawErpPassword && !isPasswordMask ? { erp_api_password: rawErpPassword } : {}),
       },
     };
@@ -772,6 +908,13 @@ export const mapDbProductToApp = (p: any): Product => ({
   requires_prescription: p.requires_prescription === true || p.requiresprescription === true || p.requires_prescription === 1 || p.requires_prescription === "true",
   is_continuous_use: p.is_continuous_use === true || p.iscontinuoususe === true || p.is_continuous_use === 1 || p.is_continuous_use === "true",
   continuous_use_days: Number(p.continuous_use_days || p.continuoususedays) || undefined,
+  erpProductId:
+    p.erp_product_id !== undefined && p.erp_product_id !== null
+      ? Number(p.erp_product_id)
+      : p.internal_code && /^\d+$/.test(String(p.internal_code))
+        ? Number(p.internal_code)
+        : undefined,
+  unitMeasure: p.unit_measure || p.unidade_medida || undefined,
 });
 
 export const mapDbOrderToApp = (o: any): Order => ({
@@ -793,6 +936,27 @@ export const mapDbOrderToApp = (o: any): Order => ({
         (o.customer as any)?.couponDiscount,
     ) || 0,
   prescriptionStatus: o.prescription_status,
+  codigoVendaOnLine: o.codigo_venda_online || o.codigoVendaOnLine || undefined,
+  codigoVendaInova:
+    o.codigo_venda_inova !== undefined && o.codigo_venda_inova !== null
+      ? Number(o.codigo_venda_inova)
+      : o.codigoVendaInova !== undefined && o.codigoVendaInova !== null
+        ? Number(o.codigoVendaInova)
+        : undefined,
+  numeroNotaFiscal:
+    o.numero_nota_fiscal !== undefined && o.numero_nota_fiscal !== null
+      ? Number(o.numero_nota_fiscal)
+      : o.numeroNotaFiscal !== undefined && o.numeroNotaFiscal !== null
+        ? Number(o.numeroNotaFiscal)
+        : undefined,
+  chaveAcessoNotaFiscal: o.chave_acesso_nota_fiscal || o.chaveAcessoNotaFiscal || undefined,
+  valorNotaFiscal:
+    o.valor_nota_fiscal !== undefined && o.valor_nota_fiscal !== null
+      ? Number(o.valor_nota_fiscal)
+      : o.valorNotaFiscal !== undefined && o.valorNotaFiscal !== null
+        ? Number(o.valorNotaFiscal)
+        : undefined,
+  divergenciaNotaFiscal: Boolean(o.divergencia_nota_fiscal || o.divergenciaNotaFiscal),
 });
 
 import localforage from "localforage";
