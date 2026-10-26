@@ -282,6 +282,37 @@ export const mapDbTenantToApp = (t: any): PharmacyConfig => {
     integrationToken: t.integration_token || t.integrationtoken || "",
     erpUrl: t.erp_url || t.erpurl || "",
     erpType: t.erp_type || t.erptype || "",
+    erpApiLogin:
+      t.erp_api_login ||
+      t.erpapilogin ||
+      t.erpApiLogin ||
+      smartBannersObj?._erpCredentials?.erp_api_login ||
+      "",
+    erp_api_login:
+      t.erp_api_login ||
+      t.erpapilogin ||
+      t.erpApiLogin ||
+      smartBannersObj?._erpCredentials?.erp_api_login ||
+      "",
+    // Nunca retorna a senha da API em texto plano para o frontend após salva
+    erpApiPassword: "",
+    erp_api_password: "",
+    hasErpApiPassword: Boolean(
+      t.has_erp_api_password ||
+        t.hasErpApiPassword ||
+        t.erp_api_password ||
+        smartBannersObj?._erpCredentials?.has_erp_api_password ||
+        smartBannersObj?._erpCredentials?.erp_api_password_enc ||
+        smartBannersObj?._erpCredentials?.erp_api_password,
+    ),
+    has_erp_api_password: Boolean(
+      t.has_erp_api_password ||
+        t.hasErpApiPassword ||
+        t.erp_api_password ||
+        smartBannersObj?._erpCredentials?.has_erp_api_password ||
+        smartBannersObj?._erpCredentials?.erp_api_password_enc ||
+        smartBannersObj?._erpCredentials?.erp_api_password,
+    ),
     enableSmartBanners: t.enable_smart_banners || t.enablesmartbanners || false,
     smartBanners: smartBannersObj,
     couponBannerColor: t.coupon_banner_color || t.couponbannercolor || "",
@@ -573,9 +604,23 @@ export const saveTenant = async (
       telefone_contato: tenant.telefone_contato || tenant.phone || "",
     };
 
+    const rawErpLogin = (tenant.erpApiLogin ?? tenant.erp_api_login ?? "").trim();
+    const rawErpPassword = (tenant.erpApiPassword ?? tenant.erp_api_password ?? "").trim();
+    const isPasswordMask = /^[*•]+$/.test(rawErpPassword) || (rawErpPassword.includes("...") && rawErpPassword.length <= 20);
+
+    payload.erp_api_login = rawErpLogin;
+    if (rawErpPassword && !isPasswordMask) {
+      payload.erp_api_password = rawErpPassword;
+    }
+
     payload.smart_banners = {
       ...(payload.smart_banners || {}),
-      _regulatoryData: regData
+      _regulatoryData: regData,
+      _erpCredentials: {
+        ...(payload.smart_banners?._erpCredentials || {}),
+        erp_api_login: rawErpLogin,
+        ...(rawErpPassword && !isPasswordMask ? { erp_api_password: rawErpPassword } : {}),
+      },
     };
 
     // Sempre envia os campos estruturados de funcionamento e regulatórios no payload

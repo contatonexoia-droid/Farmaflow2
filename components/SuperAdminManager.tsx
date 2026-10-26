@@ -629,6 +629,10 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
           corporateEmail: editData.corporateEmail || '',
           erpUrl: editData.erpUrl || '',
           erpType: editData.erpType || '',
+          erpApiLogin: (editData.erpApiLogin ?? editData.erp_api_login ?? existingTenant?.erpApiLogin ?? '').trim(),
+          erp_api_login: (editData.erpApiLogin ?? editData.erp_api_login ?? existingTenant?.erpApiLogin ?? '').trim(),
+          erpApiPassword: (editData.erpApiPassword ?? editData.erp_api_password ?? '').trim(),
+          erp_api_password: (editData.erpApiPassword ?? editData.erp_api_password ?? '').trim(),
           isChatEnabled: editData.isChatEnabled || false,
           isAiAgentEnabled: editData.isAiAgentEnabled || false,
           isAiCopilotEnabled: editData.isAiCopilotEnabled || false,
@@ -1272,11 +1276,33 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
                       <label className="text-[11px] font-black uppercase text-gray-800 ml-2">Tipo de ERP</label>
                       <select className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black" value={editData.erpType || ''} onChange={e => setEditData({...editData, erpType: e.target.value})}>
                         <option value="">Selecione o tipo de ERP</option>
-                        <option value="inovafarma">InovaFarma (SQL Server)</option>
+                        <option value="inovafarma">InovaFarma (Portal PS)</option>
                         <option value="siagold">Siagold</option>
                         <option value="softpharma">Softpharma</option>
                         <option value="outros">Outros</option>
                       </select>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-black uppercase text-gray-800 ml-2">Login da API (ERP / Inovafarma)</label>
+                      <input
+                        type="text"
+                        autoComplete="off"
+                        className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black"
+                        value={editData.erpApiLogin || editData.erp_api_login || ''}
+                        onChange={e => setEditData({ ...editData, erpApiLogin: e.target.value, erp_api_login: e.target.value })}
+                        placeholder="Login de acesso da API do Inovafarma"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-black uppercase text-gray-800 ml-2">Senha da API (ERP / Inovafarma)</label>
+                      <input
+                        type="password"
+                        autoComplete="new-password"
+                        className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black"
+                        value={editData.erpApiPassword || ''}
+                        onChange={e => setEditData({ ...editData, erpApiPassword: e.target.value, erp_api_password: e.target.value })}
+                        placeholder={editData.hasErpApiPassword ? '•••••••••••• (Digite apenas para alterar)' : 'Senha da API do Inovafarma'}
+                      />
                     </div>
                 </div>
 

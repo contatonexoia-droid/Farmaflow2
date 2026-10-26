@@ -241,6 +241,12 @@ export interface PharmacyConfig {
   integrationToken?: string;
   erpUrl?: string;
   erpType?: string;
+  erpApiLogin?: string;
+  erp_api_login?: string;
+  erpApiPassword?: string;
+  erp_api_password?: string;
+  hasErpApiPassword?: boolean;
+  has_erp_api_password?: boolean;
   enableSmartBanners?: boolean;
   smartBanners?: Record<string, SmartBannerConfig>;
   couponBannerColor?: string;

@@ -248,6 +248,16 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
     }
   }, [config.id, activeTab]);
 
+  const [inovafarmaSyncMode, setInovafarmaSyncMode] = useState<'full' | 'delta'>('full');
+  const [inovafarmaDateInicial, setInovafarmaDateInicial] = useState<string>(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 7);
+    return d.toISOString().slice(0, 10);
+  });
+  const [inovafarmaDateFinal, setInovafarmaDateFinal] = useState<string>(() => {
+    return new Date().toISOString().slice(0, 10);
+  });
+
   const handleSyncInovafarmaNow = async () => {
     if (!config.id) return;
     setIsSyncingInovafarma(true);
@@ -256,13 +266,34 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
     try {
       const tokenToUse = (formData.integrationToken || config.integrationToken || '').trim();
       const urlToUse = (formData.erpUrl || config.erpUrl || INOVAFARMA_DEFAULT_API_URL).trim();
+      const cnpjToUse = (formData.cnpj || config.cnpj || '').replace(/\D+/g, '');
+      const loginToUse = (formData.erpApiLogin || formData.erp_api_login || config.erpApiLogin || config.erp_api_login || '').trim();
+      const passwordToUse = (formData.erpApiPassword || formData.erp_api_password || '').trim();
 
       const result = await triggerInovafarmaSync({
         tenantId: config.id,
         erpUrl: urlToUse,
         apiToken: tokenToUse,
+        apiLogin: loginToUse || undefined,
+        apiPassword: passwordToUse || undefined,
+        cnpj: cnpjToUse,
+        mode: inovafarmaSyncMode,
+        inicial: inovafarmaSyncMode === 'delta' ? inovafarmaDateInicial : undefined,
+        final: inovafarmaSyncMode === 'delta' ? inovafarmaDateFinal : undefined,
+        offset: 1,
+        limit: 500,
         ignoreErpPrices: Boolean(formData.ignore_erp_prices),
       });
+
+      if (passwordToUse) {
+        setFormData((prev) => ({
+          ...prev,
+          erpApiPassword: '',
+          erp_api_password: '',
+          hasErpApiPassword: true,
+          has_erp_api_password: true,
+        }));
+      }
 
       setInovafarmaFeedback({
         type: 'success',
@@ -285,13 +316,14 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
       setInovafarmaFeedback({
         type: 'error',
         message: 'Falha ao sincronizar com Inovafarma (Portal PS)',
-        details: err?.message || 'Verifique se o Token Bearer/API Key e a URL da API estão configurados corretamente.',
+        details: err?.message || 'Verifique se o Login da API, a Senha da API, o CNPJ da farmácia e a URL da API estão configurados corretamente.',
       });
       await fetchTenantIntegrationLogs(config.id);
     } finally {
       setIsSyncingInovafarma(false);
     }
   };
+
 
 
   const handleCepChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -552,11 +584,27 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
       logo: formData.logo_url || formData.logo || "",
       logo_url: formData.logo_url || formData.logo || "",
       logoUrl: formData.logo_url || formData.logo || "",
+      erpApiLogin: (formData.erpApiLogin ?? formData.erp_api_login ?? "").trim(),
+      erp_api_login: (formData.erpApiLogin ?? formData.erp_api_login ?? "").trim(),
+      erpApiPassword: (formData.erpApiPassword ?? formData.erp_api_password ?? "").trim(),
+      erp_api_password: (formData.erpApiPassword ?? formData.erp_api_password ?? "").trim(),
     };
 
     try {
         await onConfigUpdate(updatedFormData);
-        setFormData(updatedFormData);
+        const hasPassNow = Boolean(
+          updatedFormData.erpApiPassword ||
+            formData.hasErpApiPassword ||
+            formData.has_erp_api_password,
+        );
+        // Limpa a senha em texto plano do estado após salvar no banco
+        setFormData({
+          ...updatedFormData,
+          erpApiPassword: "",
+          erp_api_password: "",
+          hasErpApiPassword: hasPassNow,
+          has_erp_api_password: hasPassNow,
+        });
         setShowSaved(true);
         setTimeout(() => setShowSaved(false), 3000);
     } catch (e: any) {
@@ -1473,6 +1521,111 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
                           </div>
                       </div>
                   </div>
+
+                  {/* Credenciais de Autenticação da API do Inovafarma (POST /api/login -> accessToken) */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t border-gray-200/70">
+                      <div>
+                          <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
+                              Login da API
+                          </label>
+                          <input
+                              type="text"
+                              autoComplete="off"
+                              placeholder="Informe o login de acesso da API do Inovafarma"
+                              value={formData.erpApiLogin ?? formData.erp_api_login ?? ''}
+                              onChange={(e) =>
+                                  setFormData({
+                                      ...formData,
+                                      erpApiLogin: e.target.value,
+                                      erp_api_login: e.target.value,
+                                  })
+                              }
+                              className="w-full p-3.5 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-800 outline-none focus:ring-2 focus:ring-brand"
+                          />
+                          <p className="text-[10px] text-gray-400 mt-1.5">
+                              Utilizado pelo serviço de sincronização para autenticar em <code className="bg-gray-100 px-1 rounded">POST /api/login</code> e gerar o <code className="bg-gray-100 px-1 rounded">accessToken</code> da farmácia.
+                          </p>
+                      </div>
+
+                      <div>
+                          <div className="flex items-center justify-between mb-2">
+                              <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest">
+                                  Senha da API
+                              </label>
+                              {(formData.hasErpApiPassword || formData.has_erp_api_password) && !formData.erpApiPassword && (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-[10px] font-black text-emerald-700 uppercase tracking-wider">
+                                      <ShieldCheck size={12} /> Senha Salva com Segurança
+                                  </span>
+                              )}
+                          </div>
+                          <input
+                              type="password"
+                              autoComplete="new-password"
+                              placeholder={
+                                  formData.hasErpApiPassword || formData.has_erp_api_password
+                                      ? '•••••••••••• (Salva no banco — digite apenas para alterar)'
+                                      : 'Informe a senha da API do Inovafarma'
+                              }
+                              value={formData.erpApiPassword ?? ''}
+                              onChange={(e) =>
+                                  setFormData({
+                                      ...formData,
+                                      erpApiPassword: e.target.value,
+                                      erp_api_password: e.target.value,
+                                  })
+                              }
+                              className="w-full p-3.5 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-800 outline-none focus:ring-2 focus:ring-brand"
+                          />
+                          <p className="text-[10px] text-gray-400 mt-1.5">
+                              Armazenada de forma criptografada e isolada por <code className="bg-gray-100 px-1 rounded">tenant_id</code>. Nunca é exibida em texto plano após salva.
+                          </p>
+                      </div>
+                  </div>
+
+                  {/* Modo de Sincronização (/produtos vs /produtosalterados com janela máx 31 dias) */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-4 border-t border-gray-200/70">
+                      <div>
+                          <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
+                              Modo de Sincronização (offset=1, limit=500)
+                          </label>
+                          <select
+                              value={inovafarmaSyncMode}
+                              onChange={(e) => setInovafarmaSyncMode(e.target.value as 'full' | 'delta')}
+                              className="w-full p-3 bg-white border border-gray-200 rounded-2xl font-bold text-xs text-gray-800 outline-none focus:ring-2 focus:ring-brand"
+                          >
+                              <option value="full">Catálogo Completo (/produtos)</option>
+                              <option value="delta">Apenas Alterados (/produtosalterados - máx. 31 dias)</option>
+                          </select>
+                      </div>
+
+                      {inovafarmaSyncMode === 'delta' && (
+                          <>
+                              <div>
+                                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
+                                      Data Inicial (AAAA-MM-DD)
+                                  </label>
+                                  <input
+                                      type="date"
+                                      value={inovafarmaDateInicial}
+                                      onChange={(e) => setInovafarmaDateInicial(e.target.value)}
+                                      className="w-full p-3 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-700 outline-none focus:ring-2 focus:ring-brand"
+                                  />
+                              </div>
+                              <div>
+                                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
+                                      Data Final (AAAA-MM-DD - Janela máx. 31 dias)
+                                  </label>
+                                  <input
+                                      type="date"
+                                      value={inovafarmaDateFinal}
+                                      onChange={(e) => setInovafarmaDateFinal(e.target.value)}
+                                      className="w-full p-3 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-700 outline-none focus:ring-2 focus:ring-brand"
+                                  />
+                              </div>
+                          </>
+                      )}
+                  </div>
+
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t border-gray-200/70">
                       <div className="bg-white p-4 rounded-2xl border border-gray-100">

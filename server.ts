@@ -37,7 +37,26 @@ import {
   sanitizeInovafarmaEan,
   parseInovafarmaNumber,
   INOVAFARMA_DEFAULT_API_URL,
+  fetchInovafarmaProducts,
+  fetchInovafarmaProdutosAlterados,
+  fetchInovafarmaClientes,
+  fetchInovafarmaClientesAlterados,
+  fetchInovafarmaFuncionarios,
+  buildInovafarmaVendaPayload,
+  sendInovafarmaVenda,
+  sanitizeCnpj,
+  roundCurrency,
+  authenticateInovafarma,
+  resolveTenantInovafarmaToken,
+  encryptErpPassword,
+  decryptErpPassword,
+  isMaskedErpPassword,
+  extractTenantErpLogin,
+  extractTenantErpPassword,
+  hasTenantErpPassword,
+  sanitizeTenantErpCredentialsForClient,
 } from "./services/inovafarma.js";
+
 
 
 // Permitir conexões com instâncias auto-hospedadas / certificados personalizados da Evolution API
@@ -480,7 +499,10 @@ app.get("/api/v1/tenants/admin", async (req, res) => {
   try {
     const { data, error } = await supabase.from("tenants").select("*");
     if (error) throw error;
-    res.json({ data });
+    const sanitized = Array.isArray(data)
+      ? data.map((row) => sanitizeTenantErpCredentialsForClient(row))
+      : data;
+    res.json({ data: sanitized });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
@@ -546,7 +568,7 @@ app.get("/api/v1/resolve-tenant", async (req, res) => {
     }
 
     if (tenantData) {
-      return res.json({ tenant: tenantData });
+      return res.json({ tenant: sanitizeTenantErpCredentialsForClient(tenantData) });
     } else {
       return res.status(404).json({ error: "Tenant not found for this domain" });
     }
@@ -2215,7 +2237,10 @@ app.all(["/api/v1/tenants/:tenantId/settings", "/api/v1/tenants/settings", "/api
     }
 
     if (req.method === "GET") {
-      return res.json({ success: true, data: targetTenant });
+      return res.json({
+        success: true,
+        data: sanitizeTenantErpCredentialsForClient(targetTenant),
+      });
     }
 
     // Update settings payload
@@ -2240,8 +2265,41 @@ app.all(["/api/v1/tenants/:tenantId/settings", "/api/v1/tenants/settings", "/api
     if (body.ai_agent_config !== undefined || body.aiAgentConfig !== undefined) {
       updates.ai_agent_config = body.ai_agent_config ?? body.aiAgentConfig;
     }
+    if (body.erp_api_login !== undefined || body.erpApiLogin !== undefined) {
+      const cleanLogin = String(body.erp_api_login ?? body.erpApiLogin ?? "").trim();
+      const existingSmartBanners =
+        targetTenant.smart_banners && typeof targetTenant.smart_banners === "object"
+          ? { ...targetTenant.smart_banners }
+          : {};
+      const existingCreds =
+        existingSmartBanners._erpCredentials && typeof existingSmartBanners._erpCredentials === "object"
+          ? { ...existingSmartBanners._erpCredentials }
+          : {};
+      existingCreds.erp_api_login = cleanLogin;
+      existingSmartBanners._erpCredentials = existingCreds;
+      updates.smart_banners = existingSmartBanners;
+    }
+    if (body.erp_api_password !== undefined || body.erpApiPassword !== undefined) {
+      const rawPassword = String(body.erp_api_password ?? body.erpApiPassword ?? "").trim();
+      if (rawPassword && !isMaskedErpPassword(rawPassword)) {
+        const encryptedPass = encryptErpPassword(rawPassword, targetTenant.id);
+        const existingSmartBanners =
+          (updates.smart_banners || targetTenant.smart_banners) &&
+          typeof (updates.smart_banners || targetTenant.smart_banners) === "object"
+            ? { ...(updates.smart_banners || targetTenant.smart_banners) }
+            : {};
+        const existingCreds =
+          existingSmartBanners._erpCredentials && typeof existingSmartBanners._erpCredentials === "object"
+            ? { ...existingSmartBanners._erpCredentials }
+            : {};
+        existingCreds.erp_api_password_enc = encryptedPass;
+        delete existingCreds.erp_api_password;
+        existingSmartBanners._erpCredentials = existingCreds;
+        updates.smart_banners = existingSmartBanners;
+      }
+    }
 
-    console.log(`[TenantSettings] Atualizando configurações para tenant "${targetTenant.name}" (${targetTenant.id}):`, updates);
+    console.log(`[TenantSettings] Atualizando configurações para tenant "${targetTenant.name}" (${targetTenant.id})`);
 
     const { data: updated, error } = await supabaseAdmin
       .from("tenants")
@@ -2258,7 +2316,7 @@ app.all(["/api/v1/tenants/:tenantId/settings", "/api/v1/tenants/settings", "/api
     return res.json({
       success: true,
       message: "Configurações atualizadas com sucesso",
-      data: updated || { ...targetTenant, ...updates }
+      data: sanitizeTenantErpCredentialsForClient(updated || { ...targetTenant, ...updates }),
     });
   } catch (err: any) {
     console.error("[TenantSettings] Exceção ao processar configurações:", err.message);
@@ -3751,6 +3809,76 @@ app.post("/api/v1/tenants/admin", async (req, res) => {
       };
     }
 
+    // Tratamento seguro e isolado por tenant_id para Login da API e Senha da API do Inovafarma
+    let existingTenantRow: any = null;
+    if (enrichedPayload.id) {
+      const { data: existingData } = await supabaseAdmin
+        .from("tenants")
+        .select("*")
+        .eq("id", enrichedPayload.id)
+        .maybeSingle();
+      existingTenantRow = existingData;
+    }
+
+    const incomingErpLogin =
+      enrichedPayload.erp_api_login !== undefined || enrichedPayload.erpApiLogin !== undefined
+        ? String(enrichedPayload.erp_api_login ?? enrichedPayload.erpApiLogin ?? "").trim()
+        : existingTenantRow
+          ? extractTenantErpLogin(existingTenantRow)
+          : "";
+
+    const rawIncomingErpPassword = String(
+      enrichedPayload.erp_api_password ??
+        enrichedPayload.erpApiPassword ??
+        enrichedPayload.smart_banners?._erpCredentials?.erp_api_password ??
+        "",
+    ).trim();
+
+    let finalEncryptedErpPassword = "";
+    if (rawIncomingErpPassword && !isMaskedErpPassword(rawIncomingErpPassword)) {
+      finalEncryptedErpPassword = encryptErpPassword(
+        rawIncomingErpPassword,
+        String(enrichedPayload.id || ""),
+      );
+    } else if (existingTenantRow) {
+      const existingPlain = extractTenantErpPassword(existingTenantRow);
+      if (existingPlain) {
+        finalEncryptedErpPassword = encryptErpPassword(
+          existingPlain,
+          String(enrichedPayload.id || ""),
+        );
+      }
+    }
+
+    delete enrichedPayload.erpApiLogin;
+    delete enrichedPayload.erpApiPassword;
+    delete enrichedPayload.hasErpApiPassword;
+    delete enrichedPayload.has_erp_api_password;
+
+    enrichedPayload.erp_api_login = incomingErpLogin;
+    if (finalEncryptedErpPassword) {
+      enrichedPayload.erp_api_password = finalEncryptedErpPassword;
+    } else {
+      delete enrichedPayload.erp_api_password;
+    }
+
+    enrichedPayload.smart_banners = {
+      ...(existingTenantRow?.smart_banners && typeof existingTenantRow.smart_banners === "object"
+        ? existingTenantRow.smart_banners
+        : {}),
+      ...(enrichedPayload.smart_banners && typeof enrichedPayload.smart_banners === "object"
+        ? enrichedPayload.smart_banners
+        : {}),
+      _erpCredentials: {
+        erp_api_login: incomingErpLogin,
+        ...(finalEncryptedErpPassword
+          ? { erp_api_password_enc: finalEncryptedErpPassword }
+          : {}),
+        updated_at: new Date().toISOString(),
+      },
+    };
+    delete enrichedPayload.smart_banners._erpCredentials.erp_api_password;
+
     let tenantData: any = null;
 
     const stripStructuredHoursFields = (obj: any) => {
@@ -3763,6 +3891,8 @@ app.post("/api/v1/tenants/admin", async (req, res) => {
       delete copy.closing_time_sundays;
       delete copy.closed_on_sundays;
       delete copy.is_24_hours;
+      delete copy.erp_api_login;
+      delete copy.erp_api_password;
       return copy;
     };
 
@@ -3876,7 +4006,13 @@ app.post("/api/v1/tenants/admin", async (req, res) => {
       }
     }
 
-    res.json({ data: tenantData });
+    const sanitizedResult = Array.isArray(tenantData)
+      ? tenantData.map((row) => sanitizeTenantErpCredentialsForClient(row))
+      : tenantData
+        ? sanitizeTenantErpCredentialsForClient(tenantData)
+        : tenantData;
+
+    res.json({ data: sanitizedResult });
   } catch (e: any) {
     console.error("[ONBOARDING ERROR]:", e.message);
     res.status(500).json({ error: e.message });
@@ -5398,6 +5534,49 @@ app.post(
 );
 
 /**
+ * Rota de autenticação dinâmica no Inovafarma (`POST /api/login`) por `tenant_id`:
+ * Busca dinamicamente o login e a senha salvos no cadastro da farmácia no Supabase
+ * para gerar o `accessToken`.
+ */
+app.post(
+  [
+    "/api/integration/inovafarma/login",
+    "/api/v1/integration/inovafarma/login",
+  ],
+  async (req, res) => {
+    try {
+      const body = req.body || {};
+      const tenantId = (body.tenantId || body.tenant_id || "").toString().trim();
+      if (!tenantId) {
+        return res.status(400).json({
+          error: "O identificador da farmácia (tenantId) é obrigatório para autenticar no Inovafarma.",
+        });
+      }
+
+      const authResult = await authenticateInovafarma({
+        supabaseClient: supabaseAdmin,
+        tenantId,
+        baseUrl: body.erpUrl || body.erp_url || undefined,
+        cnpj: body.cnpj || undefined,
+        login: body.login || body.apiLogin || body.erpApiLogin || undefined,
+        password: body.password || body.senha || body.apiPassword || body.erpApiPassword || undefined,
+      });
+
+      return res.status(200).json({
+        success: true,
+        accessToken: authResult.accessToken,
+        endpointUsed: authResult.endpointUsed,
+      });
+    } catch (err: any) {
+      return res.status(401).json({
+        success: false,
+        error: err?.message || "Falha ao autenticar na API do Inovafarma (POST /api/login).",
+      });
+    }
+  },
+);
+
+/**
  * Rota oficial para sincronização manual ou agendada com o ERP Inovafarma (Portal PS)
  */
 app.post(
@@ -5411,6 +5590,26 @@ app.post(
       const headerKey = (req.headers["x-api-key"] as string | undefined)?.trim();
       let tenantId = (body.tenantId || body.tenant_id || "").toString().trim();
       const erpUrl = (body.erpUrl || body.erp_url || "").toString().trim();
+      const cnpj = sanitizeCnpj(body.cnpj || req.headers["cnpj"] || "");
+      const apiLogin = (
+        body.apiLogin ||
+        body.erpApiLogin ||
+        body.erp_api_login ||
+        ""
+      )
+        .toString()
+        .trim();
+      const rawApiPassword = (
+        body.apiPassword ||
+        body.erpApiPassword ||
+        body.erp_api_password ||
+        ""
+      )
+        .toString()
+        .trim();
+      const apiPassword =
+        rawApiPassword && !isMaskedErpPassword(rawApiPassword) ? rawApiPassword : "";
+
       const apiToken = (
         body.apiToken ||
         body.integrationToken ||
@@ -5439,12 +5638,41 @@ app.post(
         });
       }
 
-      // Persiste atualizações de erp_url, erp_type ou integration_token se enviadas pelo painel
+      // Persiste atualizações de erp_url, erp_type, cnpj, credenciais da API ou integration_token se enviadas pelo painel
+      const { data: currentTenant } = await supabaseAdmin
+        .from("tenants")
+        .select("*")
+        .eq("id", tenantId)
+        .maybeSingle();
+
       const tenantUpdates: Record<string, any> = { erp_type: "inovafarma" };
       if (erpUrl) tenantUpdates.erp_url = erpUrl;
       if (apiToken) tenantUpdates.integration_token = apiToken;
+      if (cnpj && cnpj.length >= 11) tenantUpdates.cnpj = cnpj;
       if (typeof body.ignoreErpPrices === "boolean") {
         tenantUpdates.ignore_erp_prices = body.ignoreErpPrices;
+      }
+
+      if (apiLogin || apiPassword) {
+        const existingBanners =
+          currentTenant?.smart_banners && typeof currentTenant.smart_banners === "object"
+            ? { ...currentTenant.smart_banners }
+            : {};
+        const existingCreds =
+          existingBanners._erpCredentials && typeof existingBanners._erpCredentials === "object"
+            ? { ...existingBanners._erpCredentials }
+            : {};
+
+        if (apiLogin) {
+          existingCreds.erp_api_login = apiLogin;
+        }
+        if (apiPassword) {
+          existingCreds.erp_api_password_enc = encryptErpPassword(apiPassword, tenantId);
+          delete existingCreds.erp_api_password;
+        }
+        existingCreds.updated_at = new Date().toISOString();
+        existingBanners._erpCredentials = existingCreds;
+        tenantUpdates.smart_banners = existingBanners;
       }
 
       await supabaseAdmin
@@ -5458,6 +5686,14 @@ app.post(
           tenantId,
           erpUrl: erpUrl || undefined,
           apiToken: apiToken || undefined,
+          apiLogin: apiLogin || undefined,
+          apiPassword: apiPassword || undefined,
+          cnpj: cnpj || undefined,
+          mode: body.mode === "delta" ? "delta" : "full",
+          inicial: body.inicial ? String(body.inicial).trim() : undefined,
+          final: body.final ? String(body.final).trim() : undefined,
+          offset: body.offset !== undefined ? Number(body.offset) : undefined,
+          limit: body.limit !== undefined ? Number(body.limit) : undefined,
           ignoreErpPrices:
             typeof body.ignoreErpPrices === "boolean"
               ? body.ignoreErpPrices
@@ -5499,6 +5735,124 @@ app.post(
         error:
           error?.message ||
           "Erro ao sincronizar catálogo com a API do Inovafarma.",
+      });
+    }
+  },
+);
+
+/**
+ * Rotas auxiliares oficiais do Inovafarma (Portal PS):
+ * - GET /api/integration/inovafarma/produtos (offset>=1, limit<=500)
+ * - GET /api/integration/inovafarma/produtosalterados (inicial, final AAAA-MM-DD máx 31 dias, offset>=1, limit<=500)
+ * - GET /api/integration/inovafarma/clientes (offset>=1, limit<=500)
+ * - GET /api/integration/inovafarma/clientesalterados (inicial, final AAAA-MM-DD máx 31 dias, offset>=1, limit<=500)
+ * - GET /api/integration/inovafarma/funcionarios (offset>=1, limit<=500)
+ */
+app.get(
+  [
+    "/api/integration/inovafarma/produtos",
+    "/api/v1/integration/inovafarma/produtos",
+    "/api/integration/inovafarma/produtosalterados",
+    "/api/v1/integration/inovafarma/produtosalterados",
+    "/api/integration/inovafarma/clientes",
+    "/api/v1/integration/inovafarma/clientes",
+    "/api/integration/inovafarma/clientesalterados",
+    "/api/v1/integration/inovafarma/clientesalterados",
+    "/api/integration/inovafarma/funcionarios",
+    "/api/v1/integration/inovafarma/funcionarios",
+  ],
+  async (req, res) => {
+    try {
+      const tenantId = (req.query.tenantId || req.query.tenant_id || "").toString().trim();
+      let token =
+        (req.headers["authorization"] as string | undefined)?.replace(/^Bearer\s+/i, "").trim() ||
+        (req.headers["x-api-key"] as string | undefined)?.trim() ||
+        (req.query.token as string | undefined)?.trim() ||
+        "";
+      let cnpj = sanitizeCnpj(req.headers["cnpj"] || req.query.cnpj || "");
+      let baseUrl = (req.query.erpUrl || "").toString().trim();
+
+      if (tenantId) {
+        const resolvedAuth = await resolveTenantInovafarmaToken({
+          supabaseClient: supabaseAdmin,
+          tenantId,
+          baseUrlOverride: baseUrl || undefined,
+          cnpjOverride: cnpj || undefined,
+          tokenOverride: token || undefined,
+        });
+        token = resolvedAuth.token;
+        cnpj = resolvedAuth.cnpj;
+        baseUrl = resolvedAuth.baseUrl;
+      }
+
+      const offset = req.query.offset ? Number(req.query.offset) : 1;
+      const limit = req.query.limit ? Number(req.query.limit) : 500;
+      const inicial = (req.query.inicial || "").toString().trim();
+      const final = (req.query.final || "").toString().trim();
+      const pathLower = req.path.toLowerCase();
+
+      if (pathLower.endsWith("/produtosalterados")) {
+        const result = await fetchInovafarmaProdutosAlterados({
+          baseUrl,
+          token,
+          cnpj,
+          inicial,
+          final,
+          offset,
+          limit,
+          fetchAllPages: false,
+        });
+        return res.json({ success: true, ...result });
+      }
+
+      if (pathLower.endsWith("/clientesalterados")) {
+        const result = await fetchInovafarmaClientesAlterados({
+          baseUrl,
+          token,
+          cnpj,
+          inicial,
+          final,
+          offset,
+          limit,
+        });
+        return res.json({ success: true, ...result });
+      }
+
+      if (pathLower.endsWith("/clientes")) {
+        const result = await fetchInovafarmaClientes({
+          baseUrl,
+          token,
+          cnpj,
+          offset,
+          limit,
+        });
+        return res.json({ success: true, ...result });
+      }
+
+      if (pathLower.endsWith("/funcionarios")) {
+        const result = await fetchInovafarmaFuncionarios({
+          baseUrl,
+          token,
+          cnpj,
+          offset,
+          limit,
+        });
+        return res.json({ success: true, ...result });
+      }
+
+      const result = await fetchInovafarmaProducts({
+        baseUrl,
+        token,
+        cnpj,
+        offset,
+        limit,
+        fetchAllPages: false,
+      });
+      return res.json({ success: true, ...result });
+    } catch (err: any) {
+      return res.status(400).json({
+        success: false,
+        error: err?.message || "Erro na consulta à API do Inovafarma.",
       });
     }
   },
@@ -5548,141 +5902,415 @@ app.get(
   },
 );
 
-app.post("/api/integrations/erp/send-order", async (req, res) => {
-  try {
-    const { order_id, tenant_id } = req.body;
-    if (!order_id || !tenant_id) {
-      return res.status(400).json({ error: 'Missing order_id or tenant_id' });
-    }
+/**
+ * Envio de Pedido de Venda ao PDV / ERP Inovafarma (POST /Venda):
+ * - Garante que o campo `vendedor` envie apenas CPF ou CODIGOFUNCIONARIO mapeado de `/funcionarios` (nunca nome).
+ * - Distribui descontos diretamente nos itens (`descontoUnitario`), sem desconto global no cabeçalho.
+ * - Valida se o somatório dos pagamentos bate exatamente com (itens líquidos + taxa de entrega).
+ * - Envia obrigatoriamente os headers `Authorization: Bearer <token>` e `cnpj` para o Inovafarma.
+ */
+app.post(
+  [
+    "/api/integrations/erp/send-order",
+    "/api/integration/inovafarma/venda",
+    "/api/v1/integration/inovafarma/venda",
+  ],
+  async (req, res) => {
+    try {
+      const body = req.body || {};
+      const order_id = body.order_id || body.orderId || body.pedidoId;
+      const tenant_id = body.tenant_id || body.tenantId;
 
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
-    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '';
-    const supabaseClient = createClient(supabaseUrl, supabaseKey);
-
-    const { data: order, error: fetchError } = await supabaseClient
-      .from('orders')
-      .select(`
-        *,
-        order_items (
-          quantity,
-          unit_price,
-          products (
-            barcode,
-            ean
-          )
-        ),
-        customers (
-          name,
-          phone,
-          cpf,
-          address,
-          address_number,
-          neighborhood,
-          city
-        )
-      `)
-      .eq('id', order_id)
-      .eq('tenant_id', tenant_id)
-      .single();
-
-    let targetOrder = order;
-
-    if (fetchError || !order) {
-      const { data: orderJson, error: fetchJsonError } = await supabaseClient
-        .from('orders')
-        .select('*')
-        .eq('id', order_id)
-        .eq('tenant_id', tenant_id)
-        .single();
-        
-      if (fetchJsonError || !orderJson) {
-         return res.status(404).json({ error: 'Pedido não encontrado ou acesso negado ao tenant.' });
+      if (!tenant_id) {
+        return res.status(400).json({ error: "O 'tenant_id' da farmácia é obrigatório." });
       }
-      targetOrder = orderJson;
-    }
-    
-    const customer = targetOrder.customers || targetOrder.customer || {};
-    const items = targetOrder.order_items || targetOrder.items || [];
 
-    const dados_cliente = {
-      nome: customer.name || customer.nome || 'Cliente Não Identificado',
-      telefone: customer.phone || customer.telefone || '',
-      cpf: customer.cpf || '',
-      endereco: {
-        rua: customer.address || customer.street || customer.rua || '',
-        numero: customer.address_number || customer.addressNumber || customer.number || customer.numero || '',
-        bairro: customer.neighborhood || customer.bairro || '',
-        cidade: customer.city || customer.cidade || ''
-      }
-    };
+      // 1. Busca configurações da farmácia no Supabase (via supabaseAdmin) e resolve token dinâmico (POST /api/login)
+      const { data: tenantSettings } = await supabaseAdmin
+        .from("tenants")
+        .select("*")
+        .eq("id", tenant_id)
+        .maybeSingle();
 
-    const payload_itens = items.map((item: any) => {
-      const barcode = item.products?.barcode || item.products?.ean || item.barcode || item.product?.barcode || item.ean || '';
-      const ean = barcode.replace(/[^0-9]/g, '');
-      return {
-        ean: ean,
-        quantidade: item.quantity || item.quantidade || 1,
-        preco_unitario: item.unit_price || item.price || item.preco_unitario || 0
-      };
-    });
+      let effectiveErpToken = tenantSettings?.integration_token || "";
+      const effectiveErpCnpj = sanitizeCnpj(
+        tenantSettings?.cnpj ||
+          tenantSettings?.smart_banners?._regulatoryData?.cnpj ||
+          body.cnpj ||
+          "",
+      );
+      const effectiveErpBaseUrl =
+        tenantSettings?.erp_url || INOVAFARMA_DEFAULT_API_URL;
 
-    const payload = {
-      order_id: targetOrder.id,
-      tenant_id: targetOrder.tenant_id,
-      dados_cliente,
-      itens: payload_itens,
-      pagamento: {
-        forma_pagamento: targetOrder.paymentMethod || targetOrder.payment_method || targetOrder.forma_pagamento || '',
-        taxa_entrega: targetOrder.deliveryFee || targetOrder.delivery_fee || targetOrder.taxa_entrega || 0,
-        valor_total: targetOrder.total || targetOrder.total_amount || targetOrder.valor_total || 0
-      }
-    };
-
-    const { data: tenantSettings } = await supabaseClient
-      .from('tenants')
-      .select('erp_webhook_url, erp_webhook_secret')
-      .eq('id', targetOrder.tenant_id)
-      .maybeSingle();
-
-    if (tenantSettings?.erp_webhook_url) {
-      try {
-        const webhookResponse = await fetch(tenantSettings.erp_webhook_url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(tenantSettings.erp_webhook_secret ? { 'Authorization': `Bearer ${tenantSettings.erp_webhook_secret}` } : {})
-          },
-          body: JSON.stringify(payload)
-        });
-        if (!webhookResponse.ok) {
-          console.error(`Erro ao enviar payload ao Webhook. Status: ${webhookResponse.status}`);
+      if (tenantSettings) {
+        const savedLogin = extractTenantErpLogin(tenantSettings);
+        const savedPassword = extractTenantErpPassword(tenantSettings);
+        if (savedLogin && savedPassword) {
+          try {
+            const loginAuth = await authenticateInovafarma({
+              supabaseClient: supabaseAdmin,
+              tenantId: tenant_id,
+              baseUrl: effectiveErpBaseUrl,
+              cnpj: effectiveErpCnpj,
+              login: savedLogin,
+              password: savedPassword,
+            });
+            effectiveErpToken = loginAuth.accessToken;
+          } catch (authErr: any) {
+            console.warn(
+              "[Inovafarma Venda] Aviso ao autenticar via POST /api/login, tentando fallback token:",
+              authErr?.message,
+            );
+          }
         }
-      } catch (err) {
-        console.error('Falha na requisição para o Webhook do ERP', err);
       }
+
+      // Caso o body já traga um payload direto de venda (ex: teste ou chamada direta para /api/integration/inovafarma/venda)
+      if (!order_id && Array.isArray(body.itens) && body.itens.length > 0) {
+        const vendaPayload = await buildInovafarmaVendaPayload(
+          {
+            pedidoId: body.numeroPedido || body.pedidoId,
+            vendedor: body.vendedor,
+            cliente: body.cliente,
+            itens: body.itens,
+            descontoGlobal: body.descontoGlobal ?? body.desconto ?? 0,
+            taxaEntrega: body.taxaEntrega ?? 0,
+            pagamentos: body.pagamentos,
+            formaPagamentoPadrao: body.formaPagamento,
+            observacao: body.observacao,
+          },
+          {
+            baseUrl: effectiveErpBaseUrl,
+            token: effectiveErpToken,
+            cnpj: effectiveErpCnpj,
+          },
+        );
+
+        if (effectiveErpToken && effectiveErpCnpj) {
+          const sent = await sendInovafarmaVenda({
+            baseUrl: effectiveErpBaseUrl,
+            token: effectiveErpToken,
+            cnpj: effectiveErpCnpj,
+            venda: {
+              pedidoId: vendaPayload.numeroPedido,
+              vendedor: vendaPayload.vendedor,
+              cliente: vendaPayload.cliente,
+              itens: vendaPayload.itens,
+              taxaEntrega: vendaPayload.taxaEntrega,
+              pagamentos: vendaPayload.pagamentos,
+              observacao: vendaPayload.observacao,
+            },
+          });
+          await logIntegration(
+            tenant_id,
+            "/Venda",
+            vendaPayload,
+            "SUCCESS",
+          );
+          return res.json({
+            success: true,
+            message: "Venda enviada com sucesso ao PDV Inovafarma.",
+            payload_enviado: vendaPayload,
+            erp_response: sent.response,
+          });
+        }
+
+        return res.json({
+          success: true,
+          message: "Payload de venda validado conforme regras do Inovafarma (POST /Venda).",
+          payload_enviado: vendaPayload,
+        });
+      }
+
+      if (!order_id) {
+        return res.status(400).json({ error: "Missing order_id or tenant_id" });
+      }
+
+      const { data: order, error: fetchError } = await supabaseAdmin
+        .from("orders")
+        .select(`
+          *,
+          order_items (
+            quantity,
+            unit_price,
+            products (
+              barcode,
+              internal_code
+            )
+          ),
+          customers (
+            name,
+            phone,
+            cpf,
+            address,
+            address_number,
+            neighborhood,
+            city
+          )
+        `)
+        .eq("id", order_id)
+        .eq("tenant_id", tenant_id)
+        .maybeSingle();
+
+      let targetOrder: any = order;
+
+      if (fetchError || !order) {
+        const { data: orderJson, error: fetchJsonError } = await supabaseAdmin
+          .from("orders")
+          .select("*")
+          .eq("id", order_id)
+          .eq("tenant_id", tenant_id)
+          .maybeSingle();
+
+        if (fetchJsonError || !orderJson) {
+          return res.status(404).json({
+            error: "Pedido não encontrado ou acesso negado ao tenant.",
+          });
+        }
+        targetOrder = orderJson;
+      }
+
+      const customer = targetOrder.customers || targetOrder.customer || {};
+      const items = targetOrder.order_items || targetOrder.items || [];
+
+      const rawItemsForVenda = items.map((item: any) => {
+        const barcode =
+          item.products?.barcode ||
+          item.barcode ||
+          item.product?.barcode ||
+          item.ean ||
+          "";
+        const internalCode =
+          item.products?.internal_code ||
+          item.internal_code ||
+          item.internalCode ||
+          item.product?.internalCode ||
+          barcode;
+        const quantidade = Number(item.quantity || item.quantidade || 1);
+        const precoUnitario = Number(
+          item.unit_price ?? item.price ?? item.preco_unitario ?? 0,
+        );
+        const descontoUnitario = Number(
+          item.descontoUnitario ?? item.unit_discount ?? item.discount_per_unit ?? 0,
+        );
+        return {
+          ean: sanitizeInovafarmaEan(barcode),
+          codigoProduto: String(internalCode || barcode || "").trim(),
+          quantidade,
+          precoUnitario,
+          descontoUnitario,
+        };
+      });
+
+      const taxaEntrega = roundCurrency(
+        Number(
+          targetOrder.deliveryFee ??
+            targetOrder.delivery_fee ??
+            targetOrder.taxa_entrega ??
+            0,
+        ),
+      );
+
+      const somaBrutaItens = roundCurrency(
+        rawItemsForVenda.reduce(
+          (acc: number, it: any) =>
+            acc + roundCurrency((it.precoUnitario - (it.descontoUnitario || 0)) * it.quantidade),
+          0,
+        ),
+      );
+
+      const valorTotalPedido = roundCurrency(
+        Number(
+          targetOrder.total ??
+            targetOrder.total_amount ??
+            targetOrder.valor_total ??
+            somaBrutaItens + taxaEntrega,
+        ),
+      );
+
+      // Se houver desconto global no pedido (ex: cupom ou diferença entre somaBrutaItens + taxaEntrega e valorTotalPedido),
+      // calcula o desconto global para ser distribuído no campo `descontoUnitario` de cada item
+      const explicitOrderDiscount = roundCurrency(
+        Number(
+          targetOrder.discount ??
+            targetOrder.discount_amount ??
+            targetOrder.desconto ??
+            0,
+        ),
+      );
+      const implicitDiscount = roundCurrency(
+        Math.max(0, somaBrutaItens + taxaEntrega - valorTotalPedido),
+      );
+      const descontoGlobalParaDistribuir =
+        explicitOrderDiscount > 0 ? explicitOrderDiscount : implicitDiscount;
+
+      const rawVendedor =
+        body.vendedor ??
+        targetOrder.seller_code ??
+        targetOrder.seller_cpf ??
+        targetOrder.vendedor_codigo ??
+        targetOrder.vendedor_cpf ??
+        targetOrder.vendedor;
+
+      const formaPagamento = String(
+        targetOrder.paymentMethod ||
+          targetOrder.payment_method ||
+          targetOrder.forma_pagamento ||
+          "PIX",
+      ).trim();
+
+      // Constrói o payload validado seguindo estritamente as regras do Inovafarma (POST /Venda):
+      // 1. `vendedor` = apenas CPF ou CODIGOFUNCIONARIO mapeado de /funcionarios (nunca nome)
+      // 2. Descontos distribuídos em `descontoUnitario` nos itens (sem campo de desconto global no cabeçalho)
+      // 3. Somatório dos pagamentos validado contra (itens líquidos + taxaEntrega)
+      const vendaPayload = await buildInovafarmaVendaPayload(
+        {
+          pedidoId: targetOrder.id,
+          vendedor: rawVendedor,
+          cliente: {
+            nome:
+              customer.name ||
+              customer.nome ||
+              targetOrder.customer_name ||
+              "Cliente Consumidor",
+            cpf: customer.cpf || targetOrder.customer_cpf || "",
+            telefone:
+              customer.phone ||
+              customer.telefone ||
+              targetOrder.customer_phone ||
+              "",
+            endereco: {
+              logradouro:
+                customer.address ||
+                customer.street ||
+                customer.rua ||
+                targetOrder.address ||
+                "",
+              numero:
+                customer.address_number ||
+                customer.addressNumber ||
+                customer.number ||
+                customer.numero ||
+                "S/N",
+              bairro: customer.neighborhood || customer.bairro || "",
+              cidade: customer.city || customer.cidade || "",
+            },
+          },
+          itens: rawItemsForVenda,
+          descontoGlobal: descontoGlobalParaDistribuir,
+          taxaEntrega,
+          pagamentos: Array.isArray(body.pagamentos)
+            ? body.pagamentos
+            : undefined,
+          formaPagamentoPadrao: formaPagamento,
+          observacao: targetOrder.notes || targetOrder.observacao || undefined,
+        },
+        {
+          baseUrl: effectiveErpBaseUrl,
+          token: effectiveErpToken,
+          cnpj: effectiveErpCnpj,
+        },
+      );
+
+      // Dispara para a API do Inovafarma (POST /Venda) se a farmácia tiver credenciais configuradas
+      let erpResponseData: any = null;
+      if (
+        effectiveErpToken &&
+        effectiveErpCnpj &&
+        (tenantSettings?.erp_type === "inovafarma" || tenantSettings?.erp_url)
+      ) {
+        try {
+          const sent = await sendInovafarmaVenda({
+            baseUrl: effectiveErpBaseUrl,
+            token: effectiveErpToken,
+            cnpj: effectiveErpCnpj,
+            venda: {
+              pedidoId: vendaPayload.numeroPedido,
+              vendedor: vendaPayload.vendedor,
+              cliente: vendaPayload.cliente,
+              itens: vendaPayload.itens,
+              taxaEntrega: vendaPayload.taxaEntrega,
+              pagamentos: vendaPayload.pagamentos,
+              observacao: vendaPayload.observacao,
+            },
+          });
+          erpResponseData = sent.response;
+          await logIntegration(
+            targetOrder.tenant_id,
+            "/Venda",
+            vendaPayload,
+            "SUCCESS",
+          );
+        } catch (erpErr: any) {
+          await logIntegration(
+            targetOrder.tenant_id,
+            "/Venda",
+            vendaPayload,
+            "FAILED",
+            erpErr?.message,
+          );
+          console.warn("Aviso ao transmitir POST /Venda ao Inovafarma:", erpErr?.message);
+        }
+      }
+
+      // Compatibilidade adicional com erp_webhook_url se configurado
+      if (tenantSettings?.erp_webhook_url) {
+        try {
+          const cleanCnpj = sanitizeCnpj(tenantSettings.cnpj || "");
+          const tokenSecret =
+            tenantSettings.erp_webhook_secret ||
+            tenantSettings.integration_token ||
+            "";
+          const webhookResponse = await fetch(tenantSettings.erp_webhook_url, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...(tokenSecret ? { Authorization: `Bearer ${tokenSecret}` } : {}),
+              ...(cleanCnpj ? { cnpj: cleanCnpj } : {}),
+            },
+            body: JSON.stringify(vendaPayload),
+          });
+          if (!webhookResponse.ok) {
+            console.error(
+              `Erro ao enviar payload ao Webhook ERP. Status: ${webhookResponse.status}`,
+            );
+          }
+        } catch (err) {
+          console.error("Falha na requisição para o Webhook do ERP", err);
+        }
+      }
+
+      const { error: updateError } = await supabaseAdmin
+        .from("orders")
+        .update({ status: "enviado_ao_pdv" })
+        .eq("id", targetOrder.id)
+        .eq("tenant_id", targetOrder.tenant_id);
+
+      if (updateError) {
+        console.error(
+          "Erro ao atualizar status do pedido no Supabase:",
+          updateError,
+        );
+        return res.status(500).json({
+          error: "Falha ao atualizar status do pedido para enviado_ao_pdv",
+        });
+      }
+
+      return res.json({
+        success: true,
+        message: "Pedido enviado ao PDV Inovafarma com sucesso",
+        payload_enviado: vendaPayload,
+        erp_response: erpResponseData,
+      });
+    } catch (error: any) {
+      console.error("Erro ao processar integração ERP (POST /Venda):", error);
+      return res.status(400).json({
+        error: error.message || "Erro interno no servidor",
+        details: error.message,
+      });
     }
-
-    const { error: updateError } = await supabaseClient
-      .from('orders')
-      .update({ status: 'enviado_ao_pdv' })
-      .eq('id', targetOrder.id)
-      .eq('tenant_id', targetOrder.tenant_id);
-
-    if (updateError) {
-      console.error('Erro ao atualizar status do pedido no Supabase:', updateError);
-      return res.status(500).json({ error: 'Falha ao atualizar status do pedido para enviado_ao_pdv' });
-    }
-
-    return res.json({
-      success: true,
-      message: 'Pedido enviado à fila de integração do ERP (PDV) com sucesso',
-      payload_enviado: payload
-    });
-  } catch (error: any) {
-    console.error('Erro ao processar integração ERP:', error);
-    return res.status(500).json({ error: 'Erro interno no servidor', details: error.message });
-  }
-});
+  },
+);
 
 app.post("/api/v1/integration/logs/internal", async (req, res) => {
   try {
@@ -11223,31 +11851,33 @@ app.post("/api/v1/chat/conversations/:id/transfer", handleTransferConversation);
 app.post("/api/v1/chat/transfer", handleTransferConversation);
 
 async function startServer() {
-  let __filename = "";
-  let __dirname = "";
-
-  try {
-    // @ts-ignore
-    if (import.meta && import.meta.url) {
-      __filename = fileURLToPath(import.meta.url);
-      __dirname = path.dirname(__filename);
-    } else {
-      __dirname = process.cwd();
-    }
-  } catch (e) {
-    __dirname = process.cwd();
-  }
+  const listenPort = Number(process.env.PORT) || 3000;
 
   if (process.env.NODE_ENV !== "production") {
-    const { createServer: createViteServer } = await import("vite");
-    const vite = await createViteServer({
-      server: {
-        middlewareMode: true,
-        hmr: process.env.DISABLE_HMR === "true" ? false : undefined,
-      },
-      appType: "spa",
+    let viteMiddleware: any = null;
+    const viteReady = (async () => {
+      const { createServer: createViteServer } = await import("vite");
+      const vite = await createViteServer({
+        server: {
+          middlewareMode: true,
+          hmr: false,
+        },
+        appType: "spa",
+      });
+      viteMiddleware = vite.middlewares;
+    })().catch((err) => {
+      console.error("[Vite Init Error]:", err);
     });
-    app.use(vite.middlewares);
+
+    app.use(async (req, res, next) => {
+      if (!viteMiddleware) {
+        await viteReady;
+      }
+      if (viteMiddleware) {
+        return viteMiddleware(req, res, next);
+      }
+      next();
+    });
   } else if (!process.env.VERCEL) {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath, {
@@ -11280,7 +11910,6 @@ async function startServer() {
     });
   }
 
-  const listenPort = Number(process.env.PORT) || 3000;
   app.listen(listenPort, "0.0.0.0", () => {
     console.log(`Server running on http://0.0.0.0:${listenPort}`);
   });
