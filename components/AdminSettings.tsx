@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { PharmacyConfig, AuthSession } from '../types';
 import { UpsellCard } from './UpsellCard';
-import { Tags, Zap, Upload, Palette, Phone, Building, Save, CheckCircle, Loader2, Type, MessageSquare, AlertTriangle, FileText, MapPin, Mail, DollarSign, BellRing, PlayCircle, Volume2, Store, CreditCard, Truck, Bot, Sparkles, Building2, ShieldCheck, UserCheck, Scale, Clock } from 'lucide-react';
+import { Tags, Zap, Upload, Palette, Phone, Building, Save, CheckCircle, Loader2, Type, MessageSquare, AlertTriangle, FileText, MapPin, Mail, DollarSign, BellRing, PlayCircle, Volume2, Store, CreditCard, Truck, Bot, Sparkles, Building2, ShieldCheck, UserCheck, Scale, Clock, RefreshCw, Key, Copy, Check, History, ExternalLink } from 'lucide-react';
 import { ImageMigrationTool } from './ImageMigrationTool';
 import { ControlledProductsMigrationTool } from './ControlledProductsMigrationTool';
 import { SmartNumberInput } from './SmartNumberInput';
@@ -17,6 +17,8 @@ import {
   buildOperatingHoursSummary,
   resolveTenantOperatingHours,
 } from '../utils/operatingHours';
+import { triggerInovafarmaSync, INOVAFARMA_DEFAULT_API_URL } from '../services/inovafarma';
+
 
 export const formatCnpj = (value: string): string => {
   const digits = (value || '').replace(/\D/g, '').slice(0, 14);
@@ -202,6 +204,95 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
   const [isUploadingAudio, setIsUploadingAudio] = useState(false);
   const [isUploadingLogo, setIsUploadingLogo] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+
+  // Estados da Integração Inovafarma (Portal PS)
+  const [isSyncingInovafarma, setIsSyncingInovafarma] = useState(false);
+  const [inovafarmaFeedback, setInovafarmaFeedback] = useState<{
+    type: 'success' | 'error';
+    message: string;
+    details?: string;
+    stats?: { totalFetched: number; insertedCount: number; updatedCount: number; skippedCount: number };
+  } | null>(null);
+  const [integrationLogs, setIntegrationLogs] = useState<any[]>([]);
+  const [isLoadingLogs, setIsLoadingLogs] = useState(false);
+  const [copiedField, setCopiedField] = useState<string | null>(null);
+
+  const handleCopyText = (text: string, fieldKey: string) => {
+    if (!text) return;
+    navigator.clipboard.writeText(text);
+    setCopiedField(fieldKey);
+    setTimeout(() => setCopiedField(null), 2500);
+  };
+
+  const fetchTenantIntegrationLogs = async (tenantId: string) => {
+    if (!tenantId) return;
+    setIsLoadingLogs(true);
+    try {
+      const res = await fetch(`/api/integration/logs/${tenantId}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          setIntegrationLogs(data.slice(0, 15));
+        }
+      }
+    } catch (err) {
+      console.error('Erro ao buscar logs de integração:', err);
+    } finally {
+      setIsLoadingLogs(false);
+    }
+  };
+
+  useEffect(() => {
+    if (config.id && activeTab === 'geral') {
+      fetchTenantIntegrationLogs(config.id);
+    }
+  }, [config.id, activeTab]);
+
+  const handleSyncInovafarmaNow = async () => {
+    if (!config.id) return;
+    setIsSyncingInovafarma(true);
+    setInovafarmaFeedback(null);
+
+    try {
+      const tokenToUse = (formData.integrationToken || config.integrationToken || '').trim();
+      const urlToUse = (formData.erpUrl || config.erpUrl || INOVAFARMA_DEFAULT_API_URL).trim();
+
+      const result = await triggerInovafarmaSync({
+        tenantId: config.id,
+        erpUrl: urlToUse,
+        apiToken: tokenToUse,
+        ignoreErpPrices: Boolean(formData.ignore_erp_prices),
+      });
+
+      setInovafarmaFeedback({
+        type: 'success',
+        message: result.message || 'Sincronização com Inovafarma concluída com sucesso!',
+        details: `Endpoint utilizado: ${result.endpointUsed}`,
+        stats: {
+          totalFetched: result.totalFetched,
+          insertedCount: result.insertedCount,
+          updatedCount: result.updatedCount,
+          skippedCount: result.skippedCount,
+        },
+      });
+
+      if (Array.isArray((result as any).logs)) {
+        setIntegrationLogs((result as any).logs.slice(0, 15));
+      } else {
+        await fetchTenantIntegrationLogs(config.id);
+      }
+    } catch (err: any) {
+      setInovafarmaFeedback({
+        type: 'error',
+        message: 'Falha ao sincronizar com Inovafarma (Portal PS)',
+        details: err?.message || 'Verifique se o Token Bearer/API Key e a URL da API estão configurados corretamente.',
+      });
+      await fetchTenantIntegrationLogs(config.id);
+    } finally {
+      setIsSyncingInovafarma(false);
+    }
+  };
+
 
   const handleCepChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     let value = e.target.value.replace(/\D/g, "");
@@ -1222,16 +1313,237 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
           </div>
 
           <div className="border-t border-gray-50 pt-8 mb-8 mt-8">
-              <div className="mb-6">
-                  <h3 className="text-lg font-black text-gray-900 flex items-center gap-2"><Store size={20} className="text-brand" /> Integração com ERP (Sincronização)</h3>
-                  <p className="text-sm text-gray-500">Controle como os dados do seu sistema de gestão (ERP/PDV físico) interagem com a plataforma online.</p>
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
+                  <div>
+                      <h3 className="text-lg font-black text-gray-900 flex items-center gap-2">
+                          <Store size={20} className="text-brand" /> Integração com ERP / PDV (Inovafarma - Portal PS)
+                      </h3>
+                      <p className="text-sm text-gray-500">
+                          Conecte o catálogo da sua farmácia à API oficial do Inovafarma (<span className="font-mono text-xs">guiaintegracao.portalps.app</span>) e receba baixas de estoque em tempo real do PDV.
+                      </p>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                      <a
+                          href="https://guiaintegracao.portalps.app/"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="px-4 py-2.5 rounded-2xl border border-gray-200 bg-white hover:bg-gray-50 text-xs font-bold text-gray-700 flex items-center gap-1.5 transition-all"
+                      >
+                          <ExternalLink size={14} /> Guia Portal PS
+                      </a>
+                      <button
+                          type="button"
+                          onClick={handleSyncInovafarmaNow}
+                          disabled={isSyncingInovafarma}
+                          className="px-5 py-2.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white font-black text-xs uppercase tracking-wider flex items-center gap-2 shadow-lg shadow-emerald-600/20 transition-all cursor-pointer"
+                      >
+                          {isSyncingInovafarma ? (
+                              <>
+                                  <Loader2 size={16} className="animate-spin" />
+                                  Sincronizando...
+                              </>
+                          ) : (
+                              <>
+                                  <RefreshCw size={16} />
+                                  Sincronizar Agora com Inovafarma
+                              </>
+                          )}
+                      </button>
+                  </div>
               </div>
 
-              <div className="bg-gray-50/50 p-6 rounded-3xl border border-gray-100 space-y-4">
-                  <div className="flex items-center justify-between gap-4">
+              {inovafarmaFeedback && (
+                  <div
+                      className={`mb-6 p-5 rounded-3xl border flex flex-col gap-2 ${
+                          inovafarmaFeedback.type === 'success'
+                              ? 'bg-emerald-50/90 border-emerald-200 text-emerald-900'
+                              : 'bg-red-50/90 border-red-200 text-red-900'
+                      }`}
+                  >
+                      <div className="flex items-start justify-between gap-3">
+                          <div className="flex items-center gap-2 font-black text-sm">
+                              {inovafarmaFeedback.type === 'success' ? (
+                                  <CheckCircle size={18} className="text-emerald-600 shrink-0" />
+                              ) : (
+                                  <AlertTriangle size={18} className="text-red-600 shrink-0" />
+                              )}
+                              <span>{inovafarmaFeedback.message}</span>
+                          </div>
+                          <button
+                              type="button"
+                              onClick={() => setInovafarmaFeedback(null)}
+                              className="text-xs font-bold opacity-60 hover:opacity-100"
+                          >
+                              Fechar
+                          </button>
+                      </div>
+                      {inovafarmaFeedback.details && (
+                          <p className="text-xs opacity-80 leading-relaxed pl-6">{inovafarmaFeedback.details}</p>
+                      )}
+                      {inovafarmaFeedback.stats && (
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-2 pl-6">
+                              <div className="bg-white/80 rounded-2xl p-3 border border-emerald-100">
+                                  <span className="block text-[10px] font-bold uppercase text-gray-400">Recebidos da API</span>
+                                  <span className="text-lg font-black text-gray-900">{inovafarmaFeedback.stats.totalFetched}</span>
+                              </div>
+                              <div className="bg-white/80 rounded-2xl p-3 border border-emerald-100">
+                                  <span className="block text-[10px] font-bold uppercase text-emerald-600">Novos Produtos</span>
+                                  <span className="text-lg font-black text-emerald-700">{inovafarmaFeedback.stats.insertedCount}</span>
+                              </div>
+                              <div className="bg-white/80 rounded-2xl p-3 border border-emerald-100">
+                                  <span className="block text-[10px] font-bold uppercase text-blue-600">Atualizados</span>
+                                  <span className="text-lg font-black text-blue-700">{inovafarmaFeedback.stats.updatedCount}</span>
+                              </div>
+                              <div className="bg-white/80 rounded-2xl p-3 border border-emerald-100">
+                                  <span className="block text-[10px] font-bold uppercase text-gray-400">Ignorados</span>
+                                  <span className="text-lg font-black text-gray-600">{inovafarmaFeedback.stats.skippedCount}</span>
+                              </div>
+                          </div>
+                      )}
+                  </div>
+              )}
+
+              <div className="bg-gray-50/50 p-6 rounded-3xl border border-gray-100 space-y-6">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      <div>
+                          <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
+                              Sistema ERP / PDV
+                          </label>
+                          <select
+                              value={formData.erpType || 'inovafarma'}
+                              onChange={(e) => setFormData({ ...formData, erpType: e.target.value })}
+                              className="w-full p-3.5 bg-white border border-gray-200 rounded-2xl font-bold text-sm text-gray-800 outline-none focus:ring-2 focus:ring-brand"
+                          >
+                              <option value="inovafarma">Inovafarma (Portal PS)</option>
+                              <option value="trier">Trier Sistemas</option>
+                              <option value="linx">Linx / Big</option>
+                              <option value="hos">HOS Sistemas</option>
+                              <option value="custom">Outro ERP / Webhook Padrão</option>
+                          </select>
+                      </div>
+
+                      <div>
+                          <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
+                              URL da API Inovafarma (Portal PS)
+                          </label>
+                          <input
+                              type="text"
+                              placeholder="https://guiaintegracao.portalps.app"
+                              value={formData.erpUrl ?? INOVAFARMA_DEFAULT_API_URL}
+                              onChange={(e) => setFormData({ ...formData, erpUrl: e.target.value })}
+                              className="w-full p-3.5 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-700 outline-none focus:ring-2 focus:ring-brand"
+                          />
+                      </div>
+
+                      <div>
+                          <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
+                              Token de Integração (Bearer / x-api-key)
+                          </label>
+                          <div className="flex items-center gap-2">
+                              <input
+                                  type="text"
+                                  placeholder="Token da API / Chave do Webhook"
+                                  value={formData.integrationToken || ''}
+                                  onChange={(e) => setFormData({ ...formData, integrationToken: e.target.value })}
+                                  className="w-full p-3.5 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-700 outline-none focus:ring-2 focus:ring-brand"
+                              />
+                              <button
+                                  type="button"
+                                  onClick={() => {
+                                      const generated = (typeof crypto !== 'undefined' && crypto.randomUUID)
+                                          ? crypto.randomUUID()
+                                          : `ff_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+                                      setFormData({ ...formData, integrationToken: generated });
+                                  }}
+                                  title="Gerar novo token"
+                                  className="p-3.5 bg-white border border-gray-200 hover:bg-gray-100 rounded-2xl text-gray-600 text-xs font-bold shrink-0"
+                              >
+                                  <Key size={16} />
+                              </button>
+                              {formData.integrationToken && (
+                                  <button
+                                      type="button"
+                                      onClick={() => handleCopyText(formData.integrationToken || '', 'token')}
+                                      title="Copiar Token"
+                                      className="p-3.5 bg-white border border-gray-200 hover:bg-gray-100 rounded-2xl text-gray-600 text-xs font-bold shrink-0"
+                                  >
+                                      {copiedField === 'token' ? <Check size={16} className="text-emerald-600" /> : <Copy size={16} />}
+                                  </button>
+                              )}
+                          </div>
+                      </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t border-gray-200/70">
+                      <div className="bg-white p-4 rounded-2xl border border-gray-100">
+                          <div className="flex items-center justify-between mb-1.5">
+                              <span className="text-[10px] font-black uppercase tracking-wider text-emerald-700">
+                                  Webhook PDV - Baixa de Venda (POST)
+                              </span>
+                              <span className="text-[10px] font-mono bg-gray-100 px-2 py-0.5 rounded text-gray-600">
+                                  Header: x-api-key
+                              </span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                              <input
+                                  type="text"
+                                  readOnly
+                                  value={`${typeof window !== 'undefined' ? window.location.origin : ''}/api/integration/venda`}
+                                  className="w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-xs font-mono text-gray-600"
+                              />
+                              <button
+                                  type="button"
+                                  onClick={() =>
+                                      handleCopyText(
+                                          `${typeof window !== 'undefined' ? window.location.origin : ''}/api/integration/venda`,
+                                          'venda_url',
+                                      )
+                                  }
+                                  className="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-xl text-xs font-bold text-gray-700 flex items-center gap-1 shrink-0"
+                              >
+                                  {copiedField === 'venda_url' ? <Check size={14} className="text-emerald-600" /> : <Copy size={14} />}
+                                  {copiedField === 'venda_url' ? 'Copiado' : 'Copiar'}
+                              </button>
+                          </div>
+                      </div>
+
+                      <div className="bg-white p-4 rounded-2xl border border-gray-100">
+                          <div className="flex items-center justify-between mb-1.5">
+                              <span className="text-[10px] font-black uppercase tracking-wider text-blue-700">
+                                  Webhook PDV - Entrada de Compra (POST)
+                              </span>
+                              <span className="text-[10px] font-mono bg-gray-100 px-2 py-0.5 rounded text-gray-600">
+                                  Header: x-api-key
+                              </span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                              <input
+                                  type="text"
+                                  readOnly
+                                  value={`${typeof window !== 'undefined' ? window.location.origin : ''}/api/integration/compra`}
+                                  className="w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-xs font-mono text-gray-600"
+                              />
+                              <button
+                                  type="button"
+                                  onClick={() =>
+                                      handleCopyText(
+                                          `${typeof window !== 'undefined' ? window.location.origin : ''}/api/integration/compra`,
+                                          'compra_url',
+                                      )
+                                  }
+                                  className="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-xl text-xs font-bold text-gray-700 flex items-center gap-1 shrink-0"
+                              >
+                                  {copiedField === 'compra_url' ? <Check size={14} className="text-emerald-600" /> : <Copy size={14} />}
+                                  {copiedField === 'compra_url' ? 'Copiado' : 'Copiar'}
+                              </button>
+                          </div>
+                      </div>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-4 pt-4 border-t border-gray-200/70">
                       <div className="flex-1">
                           <h4 className="font-black text-gray-900 text-sm">Ignorar Preços do ERP (Preservar Preços Manuais / Planilha)</h4>
-                          <p className="text-xs text-gray-500 mt-1">Ative para manter os preços que você cadastra manualmente ou envia via planilha no FarmaFlow. Quando ativo, o agente local do seu computador atualizará apenas o estoque, mantendo seus preços intactos.</p>
+                          <p className="text-xs text-gray-500 mt-1">Ative para manter os preços que você cadastra manualmente ou envia via planilha no FarmaFlow. Quando ativo, a sincronização com o Inovafarma e o PDV atualizará apenas o estoque, mantendo seus preços intactos.</p>
                       </div>
                       <label className="relative inline-flex items-center cursor-pointer shrink-0">
                          <input 
@@ -1242,6 +1554,68 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
                          />
                          <div className="w-14 h-7 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-6 after:w-6 after:transition-all peer-checked:bg-brand"></div>
                       </label>
+                  </div>
+
+                  {/* Logs Recentes da Integração ERP/PDV */}
+                  <div className="pt-4 border-t border-gray-200/70">
+                      <div className="flex items-center justify-between mb-3">
+                          <h4 className="font-black text-gray-800 text-xs uppercase tracking-wider flex items-center gap-1.5">
+                              <History size={15} className="text-gray-500" /> Logs Recentes de Sincronização e Webhooks PDV
+                          </h4>
+                          <button
+                              type="button"
+                              onClick={() => fetchTenantIntegrationLogs(config.id)}
+                              disabled={isLoadingLogs}
+                              className="text-xs font-bold text-gray-500 hover:text-gray-800 flex items-center gap-1"
+                          >
+                              <RefreshCw size={13} className={isLoadingLogs ? 'animate-spin' : ''} /> Atualizar Logs
+                          </button>
+                      </div>
+
+                      {integrationLogs.length === 0 ? (
+                          <div className="bg-white rounded-2xl border border-gray-100 p-4 text-center text-xs text-gray-400 font-medium">
+                              Nenhum registro de sincronização ou webhook recebido recentemente.
+                          </div>
+                      ) : (
+                          <div className="max-h-60 overflow-y-auto space-y-2 pr-1">
+                              {integrationLogs.map((log: any) => (
+                                  <div
+                                      key={log.id || `${log.endpoint}-${log.created_at}`}
+                                      className="bg-white border border-gray-100 rounded-2xl p-3 flex items-start justify-between gap-3 text-xs"
+                                  >
+                                      <div className="flex items-start gap-2.5 min-w-0">
+                                          <span
+                                              className={`px-2 py-0.5 rounded-lg font-black text-[10px] uppercase shrink-0 ${
+                                                  log.status === 'SUCCESS'
+                                                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                                      : 'bg-red-50 text-red-700 border border-red-200'
+                                              }`}
+                                          >
+                                              {log.status === 'SUCCESS' ? 'SUCESSO' : 'ERRO'}
+                                          </span>
+                                          <div className="min-w-0">
+                                              <div className="font-mono font-bold text-gray-800 truncate">
+                                                  {log.endpoint}
+                                              </div>
+                                              {log.error_message && (
+                                                  <div className="text-red-600 font-medium mt-0.5 break-words">
+                                                      {log.error_message}
+                                                  </div>
+                                              )}
+                                              {log.payload && typeof log.payload === 'object' && log.payload.totalValid !== undefined && (
+                                                  <div className="text-gray-500 mt-0.5">
+                                                      Processados: {log.payload.totalValid} ({log.payload.insertedCount || 0} novos, {log.payload.updatedCount || 0} atualizados)
+                                                  </div>
+                                              )}
+                                          </div>
+                                      </div>
+                                      <span className="text-[10px] font-mono text-gray-400 shrink-0">
+                                          {log.created_at ? new Date(log.created_at).toLocaleString('pt-BR') : ''}
+                                      </span>
+                                  </div>
+                              ))}
+                          </div>
+                      )}
                   </div>
               </div>
           </div>

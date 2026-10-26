@@ -32,6 +32,12 @@ import { transcribeAudio } from "./services/audioAiService.js";
 import ogHandler, { buildCrawlerHtml, isCrawlerRequest } from "./api/og-handler.js";
 import QRCode from "qrcode";
 import { fetchAndStoreProductImageByEan, syncEanImagesBatch, validateAndCleanEan } from "./services/eanImageService.js";
+import {
+  syncInovafarmaProductsToSupabase,
+  sanitizeInovafarmaEan,
+  parseInovafarmaNumber,
+  INOVAFARMA_DEFAULT_API_URL,
+} from "./services/inovafarma.js";
 
 
 // Permitir conexões com instâncias auto-hospedadas / certificados personalizados da Evolution API
@@ -4872,42 +4878,59 @@ async function processRestore(
   };
 }
 
-// --- INTEGRATION API (ERP/PDV) ---
+// --- INTEGRATION API (ERP/PDV & INOVAFARMA PORTAL PS) ---
 
-// Middleware para autenticação via API Key
+// Middleware para autenticação via Header x-api-key comparando com integration_token salvo no banco
 const authenticateIntegration = async (
   req: express.Request,
   res: express.Response,
   next: express.NextFunction,
 ) => {
-  const apiKey = req.headers["x-api-key"] as string;
-  if (!apiKey) {
-    return res.status(401).json({ error: "API Key não fornecida (x-api-key)" });
+  const headerApiKey = (req.headers["x-api-key"] as string | undefined)?.trim();
+  const bearerHeader = (req.headers["authorization"] as string | undefined)?.trim();
+  const queryToken = (req.query?.token as string | undefined)?.trim();
+
+  const rawKey =
+    headerApiKey ||
+    (bearerHeader?.toLowerCase().startsWith("bearer ")
+      ? bearerHeader.slice(7).trim()
+      : "") ||
+    queryToken ||
+    "";
+
+  if (!rawKey) {
+    return res
+      .status(401)
+      .json({ error: "API Key não fornecida no header x-api-key" });
   }
 
-  // Busca o tenant pela integration_token
-  const { data: tenant, error } = await supabase
+  // Busca o tenant pela integration_token usando supabaseAdmin (ignora bloqueios de RLS)
+  const { data: tenant, error } = await supabaseAdmin
     .from("tenants")
-    .select("id")
-    .eq("integration_token", apiKey)
-    .single();
+    .select("id, name, integration_token, ignore_erp_prices, erp_url, erp_type")
+    .eq("integration_token", rawKey)
+    .maybeSingle();
 
   if (error || !tenant) {
-    // Fallback: permite usar o próprio ID do tenant como token para testes/compatibilidade
-    const { data: tenantById, error: errById } = await supabase
+    // Fallback: permite usar o próprio ID do tenant caso configurado como chave em testes
+    const { data: tenantById, error: errById } = await supabaseAdmin
       .from("tenants")
-      .select("id")
-      .eq("id", apiKey)
-      .single();
+      .select("id, name, integration_token, ignore_erp_prices, erp_url, erp_type")
+      .eq("id", rawKey)
+      .maybeSingle();
 
     if (errById || !tenantById) {
-      return res.status(401).json({ error: "API Key inválida" });
+      return res
+        .status(401)
+        .json({ error: "API Key inválida (x-api-key não corresponde ao integration_token da farmácia)" });
     }
     (req as any).tenantId = tenantById.id;
+    (req as any).tenant = tenantById;
     return next();
   }
 
   (req as any).tenantId = tenant.id;
+  (req as any).tenant = tenant;
   next();
 };
 
@@ -4915,90 +4938,53 @@ const authenticateIntegration = async (
  * @swagger
  * /sale:
  *   post:
- *     summary: Webhook de Baixa de Estoque (Venda no Balcão)
- *     description: Subtrai a quantidade vendida do estoque da loja online. Se o estoque chegar a zero, o produto é ocultado da vitrine principal.
+ *     summary: Webhook de Baixa de Estoque (Venda no Balcão / PDV Inovafarma)
+ *     description: Subtrai a quantidade vendida do estoque da loja online. Se o estoque chegar a zero, o produto é ocultado da vitrine principal. Suporta rotas /api/integration/venda e /api/v1/integration/sale.
  *     tags: [Vendas]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - quantity
- *             properties:
- *               ean:
- *                 type: string
- *                 description: Código de barras (EAN) do produto
- *               internalCode:
- *                 type: string
- *                 description: Código interno do produto no ERP
- *               quantity:
- *                 type: number
- *                 description: Quantidade vendida
- *               transactionId:
- *                 type: string
- *                 description: "ID transacional exclusivo da venda/cupom gerado pelo ERP. Usado como trava de segurança (idempotência) para evitar baixas duplicadas de estoque caso a rede oscile."
- *     responses:
- *       200:
- *         description: Estoque atualizado com sucesso
- *       400:
- *         description: EAN ou Código Interno não fornecido
- *       404:
- *         description: Produto não encontrado
  */
 app.post(
-  "/api/v1/integration/sale",
+  [
+    "/api/integration/venda",
+    "/api/v1/integration/venda",
+    "/api/integration/sale",
+    "/api/v1/integration/sale",
+  ],
   authenticateIntegration,
   async (req, res) => {
     const tenantId = (req as any).tenantId;
-    const { ean, internalCode, quantity, transactionId } = req.body;
+    const body = req.body || {};
+    const transactionId =
+      body.transactionId ??
+      body.idTransacao ??
+      body.idVenda ??
+      body.cupom ??
+      body.vendaId;
 
-    // Sanitização e Normalização
-    const sanitizedEan = ean ? String(ean).replace(/\s+/g, "").trim() : "";
-    const sanitizedInternalCode = internalCode
-      ? String(internalCode).trim()
-      : "";
-
-    if (!sanitizedEan && !sanitizedInternalCode) {
-      return res
-        .status(400)
-        .json({
-          error:
-            "É necessário fornecer o 'ean' ou o 'internalCode' para realizar a baixa de estoque.",
-        });
-    }
-
-    if (typeof quantity !== "number" || quantity <= 0) {
-      return res
-        .status(400)
-        .json({
-          error: "Quantidade inválida. Deve ser um número maior que zero.",
-        });
-    }
+    // Suporta tanto envio de item único quanto array de itens do cupom PDV (itens / items / produtos)
+    const rawItems: any[] = Array.isArray(body.itens)
+      ? body.itens
+      : Array.isArray(body.items)
+        ? body.items
+        : Array.isArray(body.produtos)
+          ? body.produtos
+          : [body];
 
     try {
-      // Mecanismo de Idempotência (Proteção contra Cliques Duplos)
+      // Mecanismo de Idempotência (Proteção contra envios duplicados do PDV)
       if (transactionId) {
         const yesterday = new Date();
         yesterday.setHours(yesterday.getHours() - 24);
 
-        // Busca logs de sucesso nas últimas 24h contendo o mesmo transactionId
-        const { data: previousLogs, error: checkError } = await supabase
+        const { data: previousLogs, error: checkError } = await supabaseAdmin
           .from("integration_logs")
           .select("id")
           .eq("tenant_id", tenantId)
-          .eq("endpoint", "/sale")
+          .in("endpoint", ["/sale", "/api/integration/venda"])
           .eq("status", "SUCCESS")
           .gte("created_at", yesterday.toISOString())
           .contains("payload", { transactionId });
 
-        if (checkError)
-          throw new Error(
-            `Falha ao verificar idempotência: ${checkError.message}`,
-          );
-
-        if (previousLogs && previousLogs.length > 0) {
+        if (!checkError && previousLogs && previousLogs.length > 0) {
           return res.status(200).json({
             success: true,
             message:
@@ -5008,62 +4994,165 @@ app.post(
         }
       }
 
-      // Busca o produto
-      let query = supabase
-        .from("products")
-        .select("*")
-        .eq("tenant_id", tenantId);
-      if (sanitizedEan) {
-        query = query.eq("barcode", sanitizedEan);
-      } else {
-        query = query.eq("internal_code", sanitizedInternalCode);
+      const processedItems: Array<{
+        productId: string;
+        barcode: string;
+        name: string;
+        previousStock: number;
+        newStock: number;
+        hiddenFromShowcase: boolean;
+      }> = [];
+      const notFoundItems: string[] = [];
+
+      for (const rawItem of rawItems) {
+        const rawEan =
+          rawItem.ean ??
+          rawItem.codigoBarras ??
+          rawItem.codBarras ??
+          rawItem.codigo_barras ??
+          rawItem.barcode ??
+          rawItem.gtin;
+
+        const rawInternalCode =
+          rawItem.internalCode ??
+          rawItem.codigoInterno ??
+          rawItem.codigo_interno ??
+          rawItem.codigo ??
+          rawItem.codProduto ??
+          rawItem.sku;
+
+        const rawQty =
+          rawItem.quantity ??
+          rawItem.quantidade ??
+          rawItem.qtd ??
+          rawItem.qty ??
+          1;
+
+        const rawCurrentStock =
+          rawItem.estoqueAtual ??
+          rawItem.saldoAtual ??
+          rawItem.currentStock ??
+          rawItem.novoEstoque;
+
+        const sanitizedEan = sanitizeInovafarmaEan(rawEan);
+        const sanitizedInternalCode = rawInternalCode
+          ? String(rawInternalCode).trim()
+          : "";
+        const quantity = parseInovafarmaNumber(rawQty, 0);
+
+        if (!sanitizedEan && !sanitizedInternalCode) {
+          return res.status(400).json({
+            error:
+              "É necessário fornecer o 'ean' (ou 'codigo_barras') ou o 'internalCode' (ou 'codigo_interno') para realizar a baixa de estoque.",
+          });
+        }
+
+        if (quantity <= 0 && rawCurrentStock === undefined) {
+          return res.status(400).json({
+            error: "Quantidade inválida. Deve ser um número maior que zero.",
+          });
+        }
+
+        // Busca o produto no Supabase da respectiva drogaria
+        let products: any[] | null = null;
+
+        if (sanitizedEan) {
+          const { data: byEan, error: searchErr } = await supabaseAdmin
+            .from("products")
+            .select("*")
+            .eq("tenant_id", tenantId)
+            .eq("barcode", sanitizedEan);
+          if (searchErr) throw searchErr;
+          products = byEan;
+        }
+
+        if ((!products || products.length === 0) && sanitizedInternalCode) {
+          const { data: byInternal, error: searchIntErr } = await supabaseAdmin
+            .from("products")
+            .select("*")
+            .eq("tenant_id", tenantId)
+            .eq("internal_code", sanitizedInternalCode);
+          if (searchIntErr) throw searchIntErr;
+          products = byInternal;
+        }
+
+        if (!products || products.length === 0) {
+          notFoundItems.push(sanitizedEan || sanitizedInternalCode);
+          continue;
+        }
+
+        const product = products[0];
+        const previousStock = Number(product.stock || 0);
+        const newStock =
+          rawCurrentStock !== undefined && rawCurrentStock !== null
+            ? Math.max(0, Math.floor(parseInovafarmaNumber(rawCurrentStock, 0)))
+            : Math.max(0, previousStock - quantity);
+
+        const updates: any = { stock: newStock };
+        if (newStock === 0 && product.is_featured) {
+          updates.is_featured = false;
+        }
+
+        const { error: updateError } = await supabaseAdmin
+          .from("products")
+          .update(updates)
+          .eq("id", product.id)
+          .eq("tenant_id", tenantId);
+
+        if (updateError) throw updateError;
+
+        processedItems.push({
+          productId: product.id,
+          barcode: product.barcode || sanitizedEan,
+          name: product.name,
+          previousStock,
+          newStock,
+          hiddenFromShowcase: newStock === 0,
+        });
       }
 
-      const { data: products, error: searchError } = await query;
-      if (searchError) throw searchError;
-
-      if (!products || products.length === 0) {
-        return res
-          .status(404)
-          .json({ error: "Produto não encontrado no catálogo." });
+      if (processedItems.length === 0 && notFoundItems.length > 0) {
+        await logIntegration(
+          tenantId,
+          "/api/integration/venda",
+          req.body,
+          "FAILED",
+          `Produto(s) não encontrado(s) no catálogo: ${notFoundItems.join(", ")}`,
+        );
+        return res.status(404).json({
+          error: "Produto não encontrado no catálogo da drogaria.",
+          notFound: notFoundItems,
+        });
       }
 
-      const product = products[0];
-      const newStock = Math.max(0, (product.stock || 0) - quantity);
+      await logIntegration(
+        tenantId,
+        "/api/integration/venda",
+        req.body,
+        "SUCCESS",
+      );
 
-      // Regra de Visibilidade: Se o estoque chegar a zero, ocultar da vitrine (is_featured = false)
-      const updates: any = { stock: newStock };
-      if (newStock === 0 && product.is_featured) {
-        updates.is_featured = false;
-      }
-
-      const { error: updateError } = await supabase
-        .from("products")
-        .update(updates)
-        .eq("id", product.id);
-
-      if (updateError) throw updateError;
-
-      // Log integration
-      await logIntegration(tenantId, "/sale", req.body, "SUCCESS");
-
-      res
-        .status(200)
-        .json({ success: true, newStock, hiddenFromShowcase: newStock === 0 });
+      const first = processedItems[0];
+      res.status(200).json({
+        success: true,
+        newStock: first?.newStock ?? 0,
+        hiddenFromShowcase: first?.hiddenFromShowcase ?? false,
+        processedCount: processedItems.length,
+        items: processedItems,
+        notFound: notFoundItems.length > 0 ? notFoundItems : undefined,
+      });
     } catch (error: any) {
       await logIntegration(
         tenantId,
-        "/sale",
+        "/api/integration/venda",
         req.body,
         "FAILED",
         error.message,
       );
-      res
-        .status(500)
-        .json({
-          error: "Erro interno no servidor de integração.",
-          details: error.message,
-        });
+      res.status(500).json({
+        error: "Erro interno no servidor de integração.",
+        details: error.message,
+      });
     }
   },
 );
@@ -5072,193 +5161,392 @@ app.post(
  * @swagger
  * /purchase:
  *   post:
- *     summary: Sincronização de Entrada de Mercadoria (Notas Fiscais)
- *     description: Soma a quantidade de entrada ao saldo atual. Atualiza preços se necessário. Cria rascunho se o produto for novo.
+ *     summary: Sincronização de Entrada de Mercadoria (Notas Fiscais / Compra PDV Inovafarma)
+ *     description: Soma a quantidade de entrada ao saldo atual (ou define saldo exato). Atualiza preços se necessário. Cria rascunho se o produto for novo. Suporta rotas /api/integration/compra e /api/v1/integration/purchase.
  *     tags: [Compras]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - ean
- *               - quantity
- *               - costPrice
- *             properties:
- *               ean:
- *                 type: string
- *               internalCode:
- *                 type: string
- *               name:
- *                 type: string
- *               quantity:
- *                 type: number
- *               costPrice:
- *                 type: number
- *               salePrice:
- *                 type: number
- *     responses:
- *       200:
- *         description: Estoque/Preço atualizado ou produto criado
  */
 app.post(
-  "/api/v1/integration/purchase",
+  [
+    "/api/integration/compra",
+    "/api/v1/integration/compra",
+    "/api/integration/purchase",
+    "/api/v1/integration/purchase",
+  ],
   authenticateIntegration,
   async (req, res) => {
     const tenantId = (req as any).tenantId;
-    const { ean, internalCode, name, quantity, costPrice, salePrice } =
-      req.body;
+    const tenantObj = (req as any).tenant || {};
+    const ignoreErpPrices = Boolean(tenantObj.ignore_erp_prices);
+    const body = req.body || {};
 
-    // Sanitização e Normalização
-    const sanitizedEan = ean ? String(ean).replace(/\s+/g, "").trim() : "";
-    const sanitizedInternalCode = internalCode
-      ? String(internalCode).trim()
-      : "";
-
-    if (!sanitizedEan) {
-      return res
-        .status(400)
-        .json({ error: "O 'ean' é obrigatório para entrada de mercadoria." });
-    }
-    if (typeof quantity !== "number" || quantity <= 0) {
-      return res
-        .status(400)
-        .json({
-          error: "Quantidade inválida. Deve ser um número maior que zero.",
-        });
-    }
-
-    // Tratamento de Precisão Decimal (Preços)
-    const sanitizedCostPrice =
-      typeof costPrice === "number"
-        ? Math.round(costPrice * 100) / 100
-        : undefined;
-    let sanitizedSalePrice =
-      typeof salePrice === "number"
-        ? Math.round(salePrice * 100) / 100
-        : undefined;
+    const rawItems: any[] = Array.isArray(body.itens)
+      ? body.itens
+      : Array.isArray(body.items)
+        ? body.items
+        : Array.isArray(body.produtos)
+          ? body.produtos
+          : [body];
 
     try {
-      const { data: products, error: searchError } = await supabase
-        .from("products")
-        .select("*")
-        .eq("tenant_id", tenantId)
-        .eq("barcode", sanitizedEan);
+      const results: any[] = [];
 
-      if (searchError) throw searchError;
+      for (const rawItem of rawItems) {
+        const rawEan =
+          rawItem.ean ??
+          rawItem.codigoBarras ??
+          rawItem.codBarras ??
+          rawItem.codigo_barras ??
+          rawItem.barcode ??
+          rawItem.gtin;
 
-      if (products && products.length > 0) {
-        // Produto existe, atualiza estoque e preço
-        const product = products[0];
-        const newStock = (product.stock || 0) + quantity;
+        const rawInternalCode =
+          rawItem.internalCode ??
+          rawItem.codigoInterno ??
+          rawItem.codigo_interno ??
+          rawItem.codigo ??
+          rawItem.codProduto ??
+          rawItem.sku;
 
-        const updates: any = { stock: newStock };
-        if (
-          sanitizedSalePrice !== undefined &&
-          sanitizedSalePrice !== product.price
-        ) {
-          updates.price = sanitizedSalePrice;
+        const rawName =
+          rawItem.name ??
+          rawItem.nome ??
+          rawItem.descricao ??
+          rawItem.produto ??
+          rawItem.nomeProduto;
+
+        const rawQty =
+          rawItem.quantity ??
+          rawItem.quantidade ??
+          rawItem.qtd ??
+          rawItem.qty;
+
+        const rawSetStock =
+          rawItem.estoqueAtual ??
+          rawItem.saldoAtual ??
+          rawItem.estoque ??
+          rawItem.setStock;
+
+        const rawCostPrice =
+          rawItem.costPrice ??
+          rawItem.precoCusto ??
+          rawItem.preco_custo ??
+          rawItem.valorCusto ??
+          rawItem.custo;
+
+        const rawSalePrice =
+          rawItem.salePrice ??
+          rawItem.precoVenda ??
+          rawItem.preco_venda ??
+          rawItem.valorVenda ??
+          rawItem.preco ??
+          rawItem.price;
+
+        const sanitizedEan = sanitizeInovafarmaEan(rawEan);
+        const sanitizedInternalCode = rawInternalCode
+          ? String(rawInternalCode).trim()
+          : "";
+
+        if (!sanitizedEan && !sanitizedInternalCode) {
+          return res.status(400).json({
+            error:
+              "O 'ean' (ou 'codigo_barras') é obrigatório para entrada de mercadoria.",
+          });
         }
 
-        const { error: updateError } = await supabase
-          .from("products")
-          .update(updates)
-          .eq("id", product.id);
+        const quantity = parseInovafarmaNumber(rawQty, 0);
+        const exactStock =
+          rawSetStock !== undefined && rawSetStock !== null
+            ? Math.max(0, Math.floor(parseInovafarmaNumber(rawSetStock, 0)))
+            : undefined;
 
-        if (updateError) throw updateError;
-        res.status(200).json({ success: true, action: "updated", newStock });
-      } else {
-        // Fallback de preço de venda (Padrão de 50% de margem sobre o preço de custo)
-        if (
-          sanitizedSalePrice === undefined &&
-          sanitizedCostPrice !== undefined
-        ) {
-          sanitizedSalePrice = Math.round(sanitizedCostPrice * 1.5 * 100) / 100;
+        if (quantity <= 0 && exactStock === undefined) {
+          return res.status(400).json({
+            error: "Quantidade inválida. Deve ser um número maior que zero.",
+          });
         }
 
-        // Produto novo, cria rascunho. Garante Fallback de Código Interno
-        const newProduct = {
-          id: crypto.randomUUID(),
-          tenant_id: tenantId,
-          barcode: sanitizedEan,
-          internal_code: sanitizedInternalCode || sanitizedEan,
-          name: name ? String(name).trim() : `Produto Novo (${sanitizedEan})`,
-          stock: quantity,
-          price: sanitizedSalePrice ?? 0,
-          category: "Geral",
-          is_ai_enriched: false,
-          is_featured: false,
-        };
+        const parsedCost = parseInovafarmaNumber(rawCostPrice, -1);
+        const sanitizedCostPrice =
+          parsedCost >= 0 ? Math.round(parsedCost * 100) / 100 : undefined;
 
-        const { data: inserted, error: insertError } = await supabase
-          .from("products")
-          .insert(newProduct)
-          .select();
+        const parsedSale = parseInovafarmaNumber(rawSalePrice, -1);
+        let sanitizedSalePrice =
+          parsedSale >= 0 ? Math.round(parsedSale * 100) / 100 : undefined;
 
-        if (insertError) throw insertError;
+        let products: any[] | null = null;
+        if (sanitizedEan) {
+          const { data: byEan, error: searchErr } = await supabaseAdmin
+            .from("products")
+            .select("*")
+            .eq("tenant_id", tenantId)
+            .eq("barcode", sanitizedEan);
+          if (searchErr) throw searchErr;
+          products = byEan;
+        }
 
-        // O "Exército de Agentes" (cron job ou trigger) vai pegar os produtos com is_ai_enriched = false
-        res
-          .status(201)
-          .json({ success: true, action: "created", product: inserted[0] });
+        if ((!products || products.length === 0) && sanitizedInternalCode) {
+          const { data: byInternal, error: searchIntErr } = await supabaseAdmin
+            .from("products")
+            .select("*")
+            .eq("tenant_id", tenantId)
+            .eq("internal_code", sanitizedInternalCode);
+          if (searchIntErr) throw searchIntErr;
+          products = byInternal;
+        }
+
+        if (products && products.length > 0) {
+          const product = products[0];
+          const newStock =
+            exactStock !== undefined
+              ? exactStock
+              : Number(product.stock || 0) + quantity;
+
+          const updates: any = { stock: newStock };
+          if (
+            !ignoreErpPrices &&
+            sanitizedSalePrice !== undefined &&
+            sanitizedSalePrice > 0 &&
+            sanitizedSalePrice !== product.price
+          ) {
+            updates.price = sanitizedSalePrice;
+          }
+
+          const { error: updateError } = await supabaseAdmin
+            .from("products")
+            .update(updates)
+            .eq("id", product.id)
+            .eq("tenant_id", tenantId);
+
+          if (updateError) throw updateError;
+          results.push({
+            action: "updated",
+            productId: product.id,
+            barcode: product.barcode,
+            newStock,
+          });
+        } else {
+          if (
+            sanitizedSalePrice === undefined &&
+            sanitizedCostPrice !== undefined
+          ) {
+            sanitizedSalePrice =
+              Math.round(sanitizedCostPrice * 1.5 * 100) / 100;
+          }
+
+          const finalBarcode = sanitizedEan || sanitizedInternalCode;
+          const newProduct = {
+            id: crypto.randomUUID(),
+            tenant_id: tenantId,
+            barcode: finalBarcode,
+            internal_code: sanitizedInternalCode || finalBarcode,
+            name: rawName
+              ? String(rawName).trim()
+              : `Produto Novo (${finalBarcode})`,
+            stock: exactStock !== undefined ? exactStock : quantity,
+            price: sanitizedSalePrice ?? 0,
+            category: "Geral",
+            is_ai_enriched: false,
+            is_featured: false,
+          };
+
+          const { data: inserted, error: insertError } = await supabaseAdmin
+            .from("products")
+            .insert(newProduct)
+            .select();
+
+          if (insertError) throw insertError;
+          results.push({
+            action: "created",
+            product: inserted?.[0] || newProduct,
+            newStock: newProduct.stock,
+          });
+        }
       }
 
-      await logIntegration(tenantId, "/purchase", req.body, "SUCCESS");
+      await logIntegration(
+        tenantId,
+        "/api/integration/compra",
+        req.body,
+        "SUCCESS",
+      );
+
+      const first = results[0];
+      const statusCode =
+        results.length === 1 && first?.action === "created" ? 201 : 200;
+      res.status(statusCode).json({
+        success: true,
+        action: first?.action || "updated",
+        newStock: first?.newStock,
+        product: first?.product,
+        processedCount: results.length,
+        results,
+      });
     } catch (error: any) {
       await logIntegration(
         tenantId,
-        "/purchase",
+        "/api/integration/compra",
         req.body,
         "FAILED",
         error.message,
       );
-      res
-        .status(500)
-        .json({
-          error: "Erro interno no processamento da entrada de mercadoria.",
-          details: error.message,
-        });
+      res.status(500).json({
+        error: "Erro interno no processamento da entrada de mercadoria.",
+        details: error.message,
+      });
     }
   },
 );
 
-app.get("/api/v1/integration/logs/:tenantId", checkTenantAccess, async (req, res) => {
-  try {
-    const { tenantId } = req.params;
-    const { data, error } = await supabase
-      .from("integration_logs")
-      .select("*")
-      .eq("tenant_id", tenantId)
-      .order("created_at", { ascending: false })
-      .limit(50);
+/**
+ * Rota oficial para sincronização manual ou agendada com o ERP Inovafarma (Portal PS)
+ */
+app.post(
+  [
+    "/api/integration/inovafarma/sync",
+    "/api/v1/integration/inovafarma/sync",
+  ],
+  async (req, res) => {
+    try {
+      const body = req.body || {};
+      const headerKey = (req.headers["x-api-key"] as string | undefined)?.trim();
+      let tenantId = (body.tenantId || body.tenant_id || "").toString().trim();
+      const erpUrl = (body.erpUrl || body.erp_url || "").toString().trim();
+      const apiToken = (
+        body.apiToken ||
+        body.integrationToken ||
+        body.token ||
+        headerKey ||
+        ""
+      )
+        .toString()
+        .trim();
 
-    if (error) {
-      const errMsg = error.message || String(error);
-      const errStr = JSON.stringify(error);
+      // Caso tenantId não venha no body, tenta localizar pelo x-api-key
+      if (!tenantId && apiToken) {
+        const { data: tenantByToken } = await supabaseAdmin
+          .from("tenants")
+          .select("id")
+          .eq("integration_token", apiToken)
+          .maybeSingle();
+        if (tenantByToken?.id) {
+          tenantId = tenantByToken.id;
+        }
+      }
+
+      if (!tenantId) {
+        return res.status(400).json({
+          error: "O identificador da farmácia (tenantId) é obrigatório para sincronizar com o Inovafarma.",
+        });
+      }
+
+      // Persiste atualizações de erp_url, erp_type ou integration_token se enviadas pelo painel
+      const tenantUpdates: Record<string, any> = { erp_type: "inovafarma" };
+      if (erpUrl) tenantUpdates.erp_url = erpUrl;
+      if (apiToken) tenantUpdates.integration_token = apiToken;
+      if (typeof body.ignoreErpPrices === "boolean") {
+        tenantUpdates.ignore_erp_prices = body.ignoreErpPrices;
+      }
+
+      await supabaseAdmin
+        .from("tenants")
+        .update(tenantUpdates)
+        .eq("id", tenantId);
+
+      const syncResult = await syncInovafarmaProductsToSupabase(
+        supabaseAdmin,
+        {
+          tenantId,
+          erpUrl: erpUrl || undefined,
+          apiToken: apiToken || undefined,
+          ignoreErpPrices:
+            typeof body.ignoreErpPrices === "boolean"
+              ? body.ignoreErpPrices
+              : undefined,
+          productsOverride: Array.isArray(body.products)
+            ? body.products
+            : Array.isArray(body.produtos)
+              ? body.produtos
+              : undefined,
+        },
+        (name, category) => {
+          try {
+            return classifyProductTaxonomy(name, category || "Geral");
+          } catch {
+            return {
+              department: "Outros",
+              category: category || "Geral",
+              subcategory: "Outros",
+            };
+          }
+        },
+      );
+
+      // Busca logs recentes atualizados para retornar ao painel administrativo
+      const { data: recentLogs } = await supabaseAdmin
+        .from("integration_logs")
+        .select("*")
+        .eq("tenant_id", tenantId)
+        .order("created_at", { ascending: false })
+        .limit(20);
+
+      return res.status(200).json({
+        ...syncResult,
+        logs: recentLogs || [],
+      });
+    } catch (error: any) {
+      return res.status(500).json({
+        success: false,
+        error:
+          error?.message ||
+          "Erro ao sincronizar catálogo com a API do Inovafarma.",
+      });
+    }
+  },
+);
+
+app.get(
+  [
+    "/api/integration/logs/:tenantId",
+    "/api/v1/integration/logs/:tenantId",
+  ],
+  checkTenantAccess,
+  async (req, res) => {
+    try {
+      const { tenantId } = req.params;
+      const { data, error } = await supabaseAdmin
+        .from("integration_logs")
+        .select("*")
+        .eq("tenant_id", tenantId)
+        .order("created_at", { ascending: false })
+        .limit(50);
+
+      if (error) {
+        const errMsg = error.message || String(error);
+        const errStr = JSON.stringify(error);
+        if (
+          errMsg.includes("schema cache") ||
+          errStr.includes("schema cache") ||
+          error.code === "42P01"
+        ) {
+          return res.json([]);
+        }
+        return res.status(500).json({ error: errMsg });
+      }
+      res.json(data || []);
+    } catch (err: any) {
+      const errMsg = err?.message || err?.error || String(err);
+      const errStr = JSON.stringify(err);
       if (
         errMsg.includes("schema cache") ||
         errStr.includes("schema cache") ||
-        error.code === "42P01"
+        err?.code === "42P01"
       ) {
         return res.json([]);
       }
-      return res.status(500).json({ error: errMsg });
+      res.status(500).json({ error: errMsg });
     }
-    res.json(data);
-  } catch (err: any) {
-    const errMsg = err?.message || err?.error || String(err);
-    const errStr = JSON.stringify(err);
-    if (
-      errMsg.includes("schema cache") ||
-      errStr.includes("schema cache") ||
-      err?.code === "42P01"
-    ) {
-      return res.json([]);
-    }
-    res.status(500).json({ error: errMsg });
-  }
-});
+  },
+);
 
 app.post("/api/integrations/erp/send-order", async (req, res) => {
   try {

@@ -7,6 +7,8 @@ import { Plus, Trash2, Edit3, ExternalLink, X, Loader2, Key, Calendar, RefreshCw
 import * as XLSX from 'xlsx';
 import { ActivationTokenManager } from './ActivationTokenManager';
 import { StatusMonitor } from './StatusMonitor';
+import { triggerInovafarmaSync, INOVAFARMA_DEFAULT_API_URL } from '../services/inovafarma';
+
 
 interface SuperAdminManagerProps {
   session: AuthSession;
@@ -51,9 +53,52 @@ export const SuperAdminManager: React.FC<SuperAdminManagerProps> = ({ session, o
   const [isIntegrationOpen, setIsIntegrationOpen] = useState(false);
   const [selectedTenantForIntegration, setSelectedTenantForIntegration] = useState<PharmacyConfig | null>(null);
   const [integrationLogs, setIntegrationLogs] = useState<any[]>([]);
+  const [isSyncingInovafarma, setIsSyncingInovafarma] = useState(false);
+  const [inovafarmaSyncFeedback, setInovafarmaSyncFeedback] = useState<{
+    type: 'success' | 'error';
+    message: string;
+    details?: string;
+  } | null>(null);
+  const [copiedWebhookField, setCopiedWebhookField] = useState<string | null>(null);
   const [isQueueDashboardOpen, setIsQueueDashboardOpen] = useState(false);
   const [queueStats, setQueueStats] = useState<any>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+  const handleSyncTenantInovafarma = async () => {
+    if (!selectedTenantForIntegration?.id) return;
+    setIsSyncingInovafarma(true);
+    setInovafarmaSyncFeedback(null);
+    try {
+      const result = await triggerInovafarmaSync({
+        tenantId: selectedTenantForIntegration.id,
+        erpUrl: selectedTenantForIntegration.erpUrl || INOVAFARMA_DEFAULT_API_URL,
+        apiToken: selectedTenantForIntegration.integrationToken || '',
+        ignoreErpPrices: Boolean(selectedTenantForIntegration.ignore_erp_prices),
+      });
+      setInovafarmaSyncFeedback({
+        type: 'success',
+        message: result.message || 'Sincronização com Inovafarma concluída!',
+        details: `Endpoint: ${result.endpointUsed} | Recebidos: ${result.totalFetched} | Novos: ${result.insertedCount} | Atualizados: ${result.updatedCount}`,
+      });
+      if (Array.isArray((result as any).logs)) {
+        setIntegrationLogs((result as any).logs);
+      } else {
+        const updatedLogs = await getIntegrationLogs(selectedTenantForIntegration.id);
+        setIntegrationLogs(updatedLogs);
+      }
+    } catch (err: any) {
+      setInovafarmaSyncFeedback({
+        type: 'error',
+        message: 'Erro ao sincronizar com Inovafarma',
+        details: err?.message || 'Verifique o Token e a URL da API do Portal PS.',
+      });
+      const updatedLogs = await getIntegrationLogs(selectedTenantForIntegration.id);
+      setIntegrationLogs(updatedLogs);
+    } finally {
+      setIsSyncingInovafarma(false);
+    }
+  };
+
   
   
   const [addressData, setAddressData] = useState({
@@ -1648,18 +1693,62 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
       {isIntegrationOpen && selectedTenantForIntegration && (
           <div className="fixed inset-0 z-[100] bg-gray-900/60 backdrop-blur-sm flex items-center justify-center p-4">
               <div className="bg-white w-full max-w-4xl rounded-[3rem] shadow-2xl p-8 overflow-y-auto max-h-[90vh] animate-in zoom-in-95 flex flex-col">
-                  <div className="flex justify-between items-center mb-8 shrink-0">
+                  <div className="flex justify-between items-center mb-6 shrink-0">
                       <div className="flex items-center gap-4">
                           <div className="w-12 h-12 bg-purple-50 text-purple-600 rounded-2xl flex items-center justify-center">
                               <Link size={24} />
                           </div>
                           <div>
-                              <h3 className="text-2xl font-black text-gray-900">Integração ERP/PDV</h3>
+                              <h3 className="text-2xl font-black text-gray-900">Integração ERP/PDV (Inovafarma)</h3>
                               <p className="text-sm font-bold text-gray-400">Empresa: {selectedTenantForIntegration.name}</p>
                           </div>
                       </div>
-                      <button onClick={() => setIsIntegrationOpen(false)} className="p-2 bg-gray-50 rounded-full hover:text-red-500"><X size={24}/></button>
+                      <div className="flex items-center gap-3">
+                          <button
+                              type="button"
+                              onClick={handleSyncTenantInovafarma}
+                              disabled={isSyncingInovafarma}
+                              className="px-4 py-2.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white font-black text-xs uppercase tracking-wider flex items-center gap-2 shadow-lg shadow-emerald-600/20 transition-all cursor-pointer"
+                          >
+                              {isSyncingInovafarma ? (
+                                  <>
+                                      <Loader2 size={16} className="animate-spin" />
+                                      Sincronizando...
+                                  </>
+                              ) : (
+                                  <>
+                                      <RefreshCw size={16} />
+                                      Sincronizar Agora com Inovafarma
+                                  </>
+                              )}
+                          </button>
+                          <button onClick={() => setIsIntegrationOpen(false)} className="p-2 bg-gray-50 rounded-full hover:text-red-500"><X size={24}/></button>
+                      </div>
                   </div>
+
+                  {inovafarmaSyncFeedback && (
+                      <div
+                          className={`mb-6 p-4 rounded-2xl border flex items-start justify-between gap-3 ${
+                              inovafarmaSyncFeedback.type === 'success'
+                                  ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                                  : 'bg-red-50 border-red-200 text-red-900'
+                          }`}
+                      >
+                          <div>
+                              <p className="font-black text-sm">{inovafarmaSyncFeedback.message}</p>
+                              {inovafarmaSyncFeedback.details && (
+                                  <p className="text-xs opacity-80 mt-1">{inovafarmaSyncFeedback.details}</p>
+                              )}
+                          </div>
+                          <button
+                              type="button"
+                              onClick={() => setInovafarmaSyncFeedback(null)}
+                              className="text-xs font-bold opacity-60 hover:opacity-100"
+                          >
+                              Fechar
+                          </button>
+                      </div>
+                  )}
 
                   <div className="bg-gray-50 p-6 rounded-3xl border border-gray-100 mb-8">
                       <h4 className="font-bold text-gray-900 mb-4 flex items-center gap-2">
@@ -1668,7 +1757,7 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
                       </h4>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                           <div>
-                              <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Integration Token (API Key)</label>
+                              <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Integration Token (Header x-api-key)</label>
                               <div className="flex items-center gap-2">
                                   <input 
                                       type="text" 
@@ -1678,98 +1767,94 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
                                   />
                                   <button 
                                       onClick={() => {
-                                          if (!selectedTenantForIntegration.integrationToken) {
-                                              alert('Edite a empresa e salve para gerar um token.');
-                                              return;
-                                          }
+                                          if (!selectedTenantForIntegration.integrationToken) return;
                                           navigator.clipboard.writeText(selectedTenantForIntegration.integrationToken);
-                                          alert('Token copiado!');
+                                          setCopiedWebhookField('token');
+                                          setTimeout(() => setCopiedWebhookField(null), 2000);
                                       }}
-                                      className="p-3 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 text-gray-600"
+                                      className="p-3 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 text-gray-600 text-xs font-bold"
                                   >
-                                      Copiar
+                                      {copiedWebhookField === 'token' ? 'Copiado!' : 'Copiar'}
                                   </button>
                               </div>
-                              <p className="text-xs text-gray-400 mt-2">Envie este token no header <code className="bg-gray-100 px-1 rounded">x-api-key</code> das requisições.</p>
+                              <p className="text-xs text-gray-400 mt-2">Envie este token no header <code className="bg-gray-100 px-1 rounded">x-api-key</code> das requisições do PDV.</p>
                           </div>
                           <div>
-                              <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">URL Base da API</label>
+                              <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Portal PS / Inovafarma API</label>
                               <div className="flex items-center gap-2">
                                   <input 
                                       type="text" 
                                       readOnly 
-                                      value={`${window.location.origin}/api/v1/integration`} 
+                                      value={selectedTenantForIntegration.erpUrl || INOVAFARMA_DEFAULT_API_URL} 
                                       className="w-full bg-white border border-gray-200 rounded-xl px-4 py-3 text-sm font-mono text-gray-600"
                                   />
                                   <button 
                                       onClick={() => {
-                                          navigator.clipboard.writeText(`${window.location.origin}/api/v1/integration`);
-                                          alert('URL copiada!');
+                                          navigator.clipboard.writeText(selectedTenantForIntegration.erpUrl || INOVAFARMA_DEFAULT_API_URL);
+                                          setCopiedWebhookField('erp_url');
+                                          setTimeout(() => setCopiedWebhookField(null), 2000);
                                       }}
-                                      className="p-3 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 text-gray-600"
+                                      className="p-3 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 text-gray-600 text-xs font-bold"
                                   >
-                                      Copiar
+                                      {copiedWebhookField === 'erp_url' ? 'Copiado!' : 'Copiar'}
                                   </button>
                               </div>
                           </div>
                       </div>
                       <div className="mt-4 pt-4 border-t border-gray-200">
-                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">URLs de Integração</label>
+                          <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Webhooks de Entrada (PDV -&gt; FarmaFlow)</label>
                           
                           <div className="mb-3">
-                              <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Venda (Baixa de Estoque)</label>
+                              <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Venda / Baixa de Estoque (POST com header x-api-key)</label>
                               <div className="flex items-center gap-2">
                                   <input 
                                       type="text" 
                                       readOnly 
-                                      value={selectedTenantForIntegration.integrationToken ? `${window.location.origin}/api/v1/integration/sale?token=${selectedTenantForIntegration.integrationToken}` : 'Token não gerado'} 
+                                      value={`${window.location.origin}/api/integration/venda`} 
                                       className="w-full bg-white border border-gray-200 rounded-xl px-4 py-2 text-xs font-mono text-gray-600"
                                   />
                                   <button 
                                       onClick={() => {
-                                          if (!selectedTenantForIntegration.integrationToken) {
-                                              alert('Edite a empresa e salve para gerar um token.');
-                                              return;
-                                          }
-                                          navigator.clipboard.writeText(`${window.location.origin}/api/v1/integration/sale?token=${selectedTenantForIntegration.integrationToken}`);
-                                          alert('URL de Venda copiada!');
+                                          navigator.clipboard.writeText(`${window.location.origin}/api/integration/venda`);
+                                          setCopiedWebhookField('venda');
+                                          setTimeout(() => setCopiedWebhookField(null), 2000);
                                       }}
-                                      className="p-2 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 text-gray-600"
+                                      className="p-2 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 text-gray-600 text-xs font-bold"
                                   >
-                                      Copiar
+                                      {copiedWebhookField === 'venda' ? 'Copiado!' : 'Copiar'}
                                   </button>
                               </div>
                           </div>
 
                           <div>
-                              <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Compra (Entrada de Estoque)</label>
+                              <label className="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">Compra / Entrada de Mercadoria (POST com header x-api-key)</label>
                               <div className="flex items-center gap-2">
                                   <input 
                                       type="text" 
                                       readOnly 
-                                      value={selectedTenantForIntegration.integrationToken ? `${window.location.origin}/api/v1/integration/purchase?token=${selectedTenantForIntegration.integrationToken}` : 'Token não gerado'} 
+                                      value={`${window.location.origin}/api/integration/compra`} 
                                       className="w-full bg-white border border-gray-200 rounded-xl px-4 py-2 text-xs font-mono text-gray-600"
                                   />
                                   <button 
                                       onClick={() => {
-                                          if (!selectedTenantForIntegration.integrationToken) {
-                                              alert('Edite a empresa e salve para gerar um token.');
-                                              return;
-                                          }
-                                          navigator.clipboard.writeText(`${window.location.origin}/api/v1/integration/purchase?token=${selectedTenantForIntegration.integrationToken}`);
-                                          alert('URL de Compra copiada!');
+                                          navigator.clipboard.writeText(`${window.location.origin}/api/integration/compra`);
+                                          setCopiedWebhookField('compra');
+                                          setTimeout(() => setCopiedWebhookField(null), 2000);
                                       }}
-                                      className="p-2 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 text-gray-600"
+                                      className="p-2 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 text-gray-600 text-xs font-bold"
                                   >
-                                      Copiar
+                                      {copiedWebhookField === 'compra' ? 'Copiado!' : 'Copiar'}
                                   </button>
                               </div>
                           </div>
-                          <p className="text-xs text-gray-400 mt-2">Utilize estas URLs para enviar requisições POST com os dados de venda ou compra.</p>
+                          <p className="text-xs text-gray-400 mt-2">Envie o header <code className="bg-gray-100 px-1 rounded">x-api-key</code> com o Integration Token da drogaria nas rotas <code className="bg-gray-100 px-1 rounded">/api/integration/venda</code> e <code className="bg-gray-100 px-1 rounded">/api/integration/compra</code>.</p>
                       </div>
-                      <div className="mt-4 pt-4 border-t border-gray-200">
+                      <div className="mt-4 pt-4 border-t border-gray-200 flex items-center gap-6">
                           <a href="/api-docs" target="_blank" rel="noopener noreferrer" className="text-purple-600 hover:text-purple-700 font-bold text-sm flex items-center gap-1">
                               <FileText size={16} /> Ver Documentação da API (Swagger)
+                          </a>
+                          <a href="https://guiaintegracao.portalps.app/" target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:text-emerald-700 font-bold text-sm flex items-center gap-1">
+                              <ExternalLink size={16} /> Guia de Integração Inovafarma (Portal PS)
                           </a>
                       </div>
                   </div>
