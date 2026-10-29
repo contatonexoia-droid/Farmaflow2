@@ -58,6 +58,7 @@ import {
   decryptErpPassword,
   isMaskedErpPassword,
   extractTenantErpConfig,
+  parseInovafarmaUrlAndRoute,
   extractTenantErpLogin,
   extractTenantErpPassword,
   hasTenantErpPassword,
@@ -3861,7 +3862,7 @@ app.post("/api/v1/tenants/admin", async (req, res) => {
       ? extractTenantErpConfig(existingTenantRow)
       : null;
 
-    const incomingErpBaseUrl =
+    const rawIncomingErpBaseUrl =
       enrichedPayload.erp_base_url !== undefined ||
       enrichedPayload.erpBaseUrl !== undefined ||
       enrichedPayload.erp_url !== undefined ||
@@ -3873,13 +3874,22 @@ app.post("/api/v1/tenants/admin", async (req, res) => {
               enrichedPayload.erpUrl ??
               "",
           ).trim()
-        : existingErpConfig?.erpBaseUrl || "";
+        : existingErpConfig?.erp_base_url || "";
 
-    const incomingErpRouteId =
+    const rawIncomingErpRouteId =
       enrichedPayload.erp_route_id !== undefined ||
       enrichedPayload.erpRouteId !== undefined
         ? String(enrichedPayload.erp_route_id ?? enrichedPayload.erpRouteId ?? "").trim()
-        : existingErpConfig?.erpRouteId || INOVAFARMA_DEFAULT_ROUTE_ID;
+        : existingErpConfig?.erp_route_id || "";
+
+    const parsedIncomingErp = parseInovafarmaUrlAndRoute(
+      rawIncomingErpBaseUrl,
+      rawIncomingErpRouteId,
+    );
+    const incomingErpBaseUrl = rawIncomingErpBaseUrl
+      ? parsedIncomingErp.origin
+      : "";
+    const incomingErpRouteId = parsedIncomingErp.slug || INOVAFARMA_DEFAULT_ROUTE_ID;
 
     const incomingErpCnpj =
       enrichedPayload.erp_cnpj !== undefined ||
@@ -5885,20 +5895,21 @@ app.post(
         });
       }
 
+      const parsedSyncErp = parseInovafarmaUrlAndRoute(erpUrl, erpRouteId);
+
       // Persiste atualizações de erp_base_url, erp_route_id, erp_cnpj, credenciais da API ou integration_token se enviadas pelo painel
       await saveTenantInovafarmaState(supabaseAdmin, tenantId, {
-        erpBaseUrl: erpUrl || undefined,
-        erpRouteId: erpRouteId || undefined,
-        erpCnpj: cnpj || undefined,
-        erpLogin: apiLogin || undefined,
-        erpPassword: apiPassword || undefined,
-        erpApiKey: apiKey || undefined,
+        erp_base_url: erpUrl ? parsedSyncErp.origin : undefined,
+        erp_route_id: erpRouteId || erpUrl ? parsedSyncErp.slug : undefined,
+        erp_cnpj: cnpj || undefined,
+        erp_login: apiLogin || undefined,
+        erp_password_plain: apiPassword || undefined,
+        erp_api_key: apiKey || undefined,
       });
 
       const tenantUpdates: Record<string, any> = { erp_type: "inovafarma" };
-      if (erpUrl) tenantUpdates.erp_url = erpUrl;
+      if (erpUrl) tenantUpdates.erp_url = parsedSyncErp.origin;
       if (apiToken) tenantUpdates.integration_token = apiToken;
-      if (cnpj && cnpj.length >= 11) tenantUpdates.cnpj = cnpj;
       if (typeof body.ignoreErpPrices === "boolean") {
         tenantUpdates.ignore_erp_prices = body.ignoreErpPrices;
       }

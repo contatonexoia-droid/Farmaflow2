@@ -17,17 +17,164 @@ export const INOVAFARMA_HOMOLOGACAO_PRESET = {
 
 export interface InovafarmaTenantConfig {
   erp_base_url: string;
+  erpBaseUrl: string;
   erp_route_id: string;
+  erpRouteId: string;
   erp_cnpj: string;
+  erpCnpj: string;
   erp_login: string;
+  erpLogin: string;
   erp_password: string;
   has_erp_password: boolean;
   erp_api_key: string;
+  erpApiKey: string;
   erp_access_token: string;
   erp_token_expiration: string;
   last_product_sync: string;
   last_customer_sync: string;
   ignore_erp_prices: boolean;
+}
+
+const RESERVED_INOVAFARMA_PATH_SEGMENTS = new Set([
+  "api",
+  "v1",
+  "login",
+  "server",
+  "produtos",
+  "produtosalterados",
+  "clientes",
+  "clientesalterados",
+  "funcionarios",
+  "metodospagamentos",
+  "venda",
+  "vendaporid",
+]);
+
+/**
+ * Parser oficial da URL e do Slug (`{integracao}`) do Inovafarma (Portal PS):
+ * 1. Higieniza colchetes acidentais de Markdown (ex: `[https://...](...)` ou `[https://...]`), parênteses e aspas.
+ * 2. Extrai SEMPRE apenas a origem (`https://integracao.portalps.app`) para chamar o `POST {origin}/api/login`,
+ *    evitando o erro HTTP 405 causado por concatenar `/api/login` no final de `/api/v1/homologacao`.
+ * 3. Extrai o `{slug}` do campo `erp_route_id` (padrão `homologacao`) ou do final da URL caso o usuário
+ *    tenha colado `https://integracao.portalps.app/api/v1/homologacao`, montando sempre
+ *    `https://integracao.portalps.app/api/v1/{slug}/{recurso}` para as demais rotas (`server`, `produtos`, `Venda`, etc.).
+ */
+export function parseInovafarmaUrlAndRoute(
+  rawUrl?: string | null,
+  rawRouteId?: string | null,
+): {
+  origin: string;
+  slug: string;
+  loginUrl: string;
+  v1BaseUrl: string;
+} {
+  let cleanUrlStr = String(rawUrl ?? "").trim();
+
+  // Remove formatação Markdown acidental: [texto](https://...) ou [https://...]
+  const urlMatch = cleanUrlStr.match(/https?:\/\/[^\s\])"'>]+/i);
+  if (urlMatch && urlMatch[0]) {
+    cleanUrlStr = urlMatch[0];
+  } else {
+    cleanUrlStr = cleanUrlStr.replace(/[\[\]()<>"']/g, "").trim();
+  }
+
+  if (cleanUrlStr && !/^https?:\/\//i.test(cleanUrlStr)) {
+    cleanUrlStr = `https://${cleanUrlStr}`;
+  }
+
+  let origin = INOVAFARMA_DEFAULT_API_URL;
+  let slugFromUrl = "";
+
+  if (cleanUrlStr) {
+    try {
+      const parsed = new URL(cleanUrlStr);
+      // Se o usuário colou o domínio da documentação (guiaintegracao.portalps.app), usa o host oficial da API
+      if (parsed.hostname.toLowerCase().includes("guiaintegracao.portalps.app")) {
+        origin = INOVAFARMA_DEFAULT_API_URL;
+      } else {
+        origin = parsed.origin.replace(/\/+$/, "");
+      }
+
+      const pathname = (parsed.pathname || "").replace(/\/+$/, "");
+      const v1Match = pathname.match(/\/api\/v1\/([^/?#]+)/i);
+      if (v1Match && v1Match[1]) {
+        const candidate = v1Match[1].trim();
+        if (
+          candidate &&
+          !RESERVED_INOVAFARMA_PATH_SEGMENTS.has(candidate.toLowerCase())
+        ) {
+          slugFromUrl = candidate;
+        }
+      } else if (pathname && pathname !== "/") {
+        const segments = pathname
+          .split("/")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (
+          segments.length === 1 &&
+          !RESERVED_INOVAFARMA_PATH_SEGMENTS.has(segments[0].toLowerCase())
+        ) {
+          slugFromUrl = segments[0];
+        }
+      }
+    } catch {
+      origin = INOVAFARMA_DEFAULT_API_URL;
+    }
+  }
+
+  // Higieniza o campo erp_route_id caso o usuário também tenha colado URL ou barras nele
+  let cleanRouteStr = String(rawRouteId ?? "")
+    .replace(/[\[\]()<>"']/g, "")
+    .trim();
+  if (cleanRouteStr) {
+    const routeV1Match = cleanRouteStr.match(/\/api\/v1\/([^/?#\s]+)/i);
+    if (routeV1Match && routeV1Match[1]) {
+      cleanRouteStr = routeV1Match[1].trim();
+    } else if (/^https?:\/\//i.test(cleanRouteStr)) {
+      try {
+        const parsedRouteUrl = new URL(cleanRouteStr);
+        const segs = parsedRouteUrl.pathname
+          .split("/")
+          .map((s) => s.trim())
+          .filter(
+            (s) => s && !RESERVED_INOVAFARMA_PATH_SEGMENTS.has(s.toLowerCase()),
+          );
+        cleanRouteStr = segs[0] || "";
+      } catch {
+        cleanRouteStr = "";
+      }
+    } else {
+      cleanRouteStr = cleanRouteStr
+        .replace(/^\/+|\/+$/g, "")
+        .replace(/^api\/v1\//i, "")
+        .split("/")[0]
+        .trim();
+    }
+  }
+
+  if (
+    cleanRouteStr &&
+    RESERVED_INOVAFARMA_PATH_SEGMENTS.has(cleanRouteStr.toLowerCase())
+  ) {
+    cleanRouteStr = "";
+  }
+
+  // Prioriza o slug explícito de erp_route_id; se estiver vazio ou no padrão e a URL trouxer um slug, usa o da URL
+  let finalSlug = INOVAFARMA_DEFAULT_ROUTE_ID;
+  if (cleanRouteStr && cleanRouteStr !== INOVAFARMA_DEFAULT_ROUTE_ID) {
+    finalSlug = cleanRouteStr;
+  } else if (slugFromUrl) {
+    finalSlug = slugFromUrl;
+  } else if (cleanRouteStr) {
+    finalSlug = cleanRouteStr;
+  }
+
+  return {
+    origin,
+    slug: finalSlug,
+    loginUrl: `${origin}/api/login`,
+    v1BaseUrl: `${origin}/api/v1/${finalSlug}`,
+  };
 }
 
 export interface InovafarmaRawProduct {
@@ -538,12 +685,17 @@ export function extractTenantErpConfig(tenant: any): InovafarmaTenantConfig {
   if (!tenant || typeof tenant !== "object") {
     return {
       erp_base_url: INOVAFARMA_DEFAULT_API_URL,
+      erpBaseUrl: INOVAFARMA_DEFAULT_API_URL,
       erp_route_id: INOVAFARMA_DEFAULT_ROUTE_ID,
+      erpRouteId: INOVAFARMA_DEFAULT_ROUTE_ID,
       erp_cnpj: "",
+      erpCnpj: "",
       erp_login: "",
+      erpLogin: "",
       erp_password: "",
       has_erp_password: false,
       erp_api_key: "",
+      erpApiKey: "",
       erp_access_token: "",
       erp_token_expiration: "",
       last_product_sync: "",
@@ -567,20 +719,16 @@ export function extractTenantErpConfig(tenant: any): InovafarmaTenantConfig {
       INOVAFARMA_DEFAULT_API_URL,
   ).trim();
 
-  // Normaliza caso a URL antiga de documentação (guiaintegracao.portalps.app) esteja salva sem rota específica
-  const normalizedBaseUrl =
-    !rawBaseUrl || rawBaseUrl.includes("guiaintegracao.portalps.app")
-      ? INOVAFARMA_DEFAULT_API_URL
-      : rawBaseUrl.replace(/\/+$/, "");
-
-  const routeId = String(
+  const rawRouteId = String(
     tenant.erp_route_id ||
       tenant.erpRouteId ||
       creds.erp_route_id ||
-      INOVAFARMA_DEFAULT_ROUTE_ID,
-  )
-    .trim()
-    .replace(/^\/+|\/+$/g, "");
+      "",
+  ).trim();
+
+  const parsedUrlAndRoute = parseInovafarmaUrlAndRoute(rawBaseUrl, rawRouteId);
+  const normalizedBaseUrl = parsedUrlAndRoute.origin;
+  const routeId = parsedUrlAndRoute.slug;
 
   const erpCnpj = sanitizeCnpj(
     tenant.erp_cnpj ||
@@ -641,12 +789,17 @@ export function extractTenantErpConfig(tenant: any): InovafarmaTenantConfig {
 
   return {
     erp_base_url: normalizedBaseUrl || INOVAFARMA_DEFAULT_API_URL,
+    erpBaseUrl: normalizedBaseUrl || INOVAFARMA_DEFAULT_API_URL,
     erp_route_id: routeId || INOVAFARMA_DEFAULT_ROUTE_ID,
+    erpRouteId: routeId || INOVAFARMA_DEFAULT_ROUTE_ID,
     erp_cnpj: erpCnpj,
+    erpCnpj: erpCnpj,
     erp_login: erpLogin,
+    erpLogin: erpLogin,
     erp_password: erpPassword,
     has_erp_password: hasPassword,
     erp_api_key: erpApiKey,
+    erpApiKey: erpApiKey,
     erp_access_token: erpAccessToken,
     erp_token_expiration: erpTokenExpiration,
     last_product_sync: lastProductSync,
@@ -744,11 +897,17 @@ export async function saveTenantInovafarmaState(
   tenantId: string,
   stateUpdates: Partial<{
     erp_base_url: string;
+    erpBaseUrl: string;
     erp_route_id: string;
+    erpRouteId: string;
     erp_cnpj: string;
+    erpCnpj: string;
     erp_login: string;
+    erpLogin: string;
     erp_password_plain: string;
+    erpPassword: string;
     erp_api_key: string;
+    erpApiKey: string;
     erp_access_token: string;
     erp_token_expiration: string;
     last_product_sync: string;
@@ -774,38 +933,51 @@ export async function saveTenantInovafarmaState(
 
     const topLevelUpdates: Record<string, any> = {};
 
-    if (stateUpdates.erp_base_url !== undefined) {
-      const cleanUrl = stateUpdates.erp_base_url.trim().replace(/\/+$/, "");
-      existingCreds.erp_base_url = cleanUrl;
-      topLevelUpdates.erp_base_url = cleanUrl;
-      topLevelUpdates.erp_url = cleanUrl;
+    const incomingBaseUrl = stateUpdates.erp_base_url ?? stateUpdates.erpBaseUrl;
+    const incomingRouteId = stateUpdates.erp_route_id ?? stateUpdates.erpRouteId;
+    const incomingCnpj = stateUpdates.erp_cnpj ?? stateUpdates.erpCnpj;
+    const incomingLogin = stateUpdates.erp_login ?? stateUpdates.erpLogin;
+    const incomingPasswordPlain =
+      stateUpdates.erp_password_plain ?? stateUpdates.erpPassword;
+    const incomingApiKey = stateUpdates.erp_api_key ?? stateUpdates.erpApiKey;
+
+    if (incomingBaseUrl !== undefined || incomingRouteId !== undefined) {
+      const parsed = parseInovafarmaUrlAndRoute(
+        incomingBaseUrl ?? existingCreds.erp_base_url ?? currentTenant?.erp_base_url ?? currentTenant?.erp_url,
+        incomingRouteId ?? existingCreds.erp_route_id ?? currentTenant?.erp_route_id,
+      );
+      if (incomingBaseUrl !== undefined) {
+        existingCreds.erp_base_url = parsed.origin;
+        topLevelUpdates.erp_base_url = parsed.origin;
+        topLevelUpdates.erp_url = parsed.origin;
+      }
+      if (incomingRouteId !== undefined || incomingBaseUrl !== undefined) {
+        existingCreds.erp_route_id = parsed.slug;
+        topLevelUpdates.erp_route_id = parsed.slug;
+      }
     }
-    if (stateUpdates.erp_route_id !== undefined) {
-      const cleanRoute = stateUpdates.erp_route_id.trim().replace(/^\/+|\/+$/g, "");
-      existingCreds.erp_route_id = cleanRoute;
-      topLevelUpdates.erp_route_id = cleanRoute;
-    }
-    if (stateUpdates.erp_cnpj !== undefined) {
-      const cleanCnpj = sanitizeCnpj(stateUpdates.erp_cnpj);
+    if (incomingCnpj !== undefined) {
+      const cleanCnpj = sanitizeCnpj(incomingCnpj);
       existingCreds.erp_cnpj = cleanCnpj;
       topLevelUpdates.erp_cnpj = cleanCnpj;
-      if (cleanCnpj.length >= 11) {
+      // Preserva o CNPJ principal da loja se já existir, permitindo testar com 02433981097173 na homologação sem alterar o CNPJ da farmácia
+      if (cleanCnpj.length >= 11 && !currentTenant?.cnpj) {
         topLevelUpdates.cnpj = cleanCnpj;
       }
     }
-    if (stateUpdates.erp_login !== undefined) {
-      const cleanLogin = stateUpdates.erp_login.trim();
+    if (incomingLogin !== undefined) {
+      const cleanLogin = incomingLogin.trim();
       existingCreds.erp_login = cleanLogin;
       existingCreds.erp_api_login = cleanLogin;
       topLevelUpdates.erp_login = cleanLogin;
       topLevelUpdates.erp_api_login = cleanLogin;
     }
     if (
-      stateUpdates.erp_password_plain !== undefined &&
-      stateUpdates.erp_password_plain &&
-      !isMaskedErpPassword(stateUpdates.erp_password_plain)
+      incomingPasswordPlain !== undefined &&
+      incomingPasswordPlain &&
+      !isMaskedErpPassword(incomingPasswordPlain)
     ) {
-      const encPass = encryptErpPassword(stateUpdates.erp_password_plain.trim(), tenantId);
+      const encPass = encryptErpPassword(incomingPasswordPlain.trim(), tenantId);
       existingCreds.erp_password_enc = encPass;
       existingCreds.erp_api_password_enc = encPass;
       delete existingCreds.erp_password;
@@ -813,8 +985,8 @@ export async function saveTenantInovafarmaState(
       topLevelUpdates.erp_password = encPass;
       topLevelUpdates.erp_api_password = encPass;
     }
-    if (stateUpdates.erp_api_key !== undefined) {
-      const cleanApiKey = stateUpdates.erp_api_key.trim();
+    if (incomingApiKey !== undefined) {
+      const cleanApiKey = incomingApiKey.trim();
       existingCreds.erp_api_key = cleanApiKey;
       topLevelUpdates.erp_api_key = cleanApiKey;
     }
@@ -1009,39 +1181,17 @@ export async function authenticateInovafarma(params: {
     );
   }
 
-  const rawBase = (effectiveBaseUrl || INOVAFARMA_DEFAULT_API_URL).trim();
-  const cleanBase = rawBase.replace(/\/+$/, "");
-  const cleanRoute = (effectiveRouteId || INOVAFARMA_DEFAULT_ROUTE_ID)
-    .trim()
-    .replace(/^\/+|\/+$/g, "");
+  // Extrai SEMPRE apenas a origem (ex: https://integracao.portalps.app) para o POST /api/login,
+  // mesmo que o usuário tenha digitado https://integracao.portalps.app/api/v1/homologacao (ou com colchetes),
+  // evitando o erro HTTP 405 Method Not Allowed.
+  const { origin, loginUrl } = parseInovafarmaUrlAndRoute(
+    effectiveBaseUrl || INOVAFARMA_DEFAULT_API_URL,
+    effectiveRouteId || INOVAFARMA_DEFAULT_ROUTE_ID,
+  );
 
-  const candidateUrls: string[] = [];
-  try {
-    const parsed = new URL(cleanBase);
-    const origin = parsed.origin;
-    const basePath =
-      parsed.pathname && parsed.pathname !== "/" ? parsed.pathname.replace(/\/+$/, "") : "";
-    const loginPaths = [
-      "/api/login",
-      `/api/v1/${cleanRoute}/login`,
-      "/login",
-      "/v1/login",
-      "/api/v1/login",
-    ];
-
-    for (const p of loginPaths) {
-      if (basePath && !basePath.toLowerCase().endsWith(p.toLowerCase())) {
-        const candidate = `${origin}${basePath}${p}`;
-        if (!candidateUrls.includes(candidate)) candidateUrls.push(candidate);
-      }
-      const rootUrl = `${origin}${p}`;
-      if (!candidateUrls.includes(rootUrl)) {
-        candidateUrls.push(rootUrl);
-      }
-    }
-  } catch {
-    candidateUrls.push(`${INOVAFARMA_DEFAULT_API_URL}/api/login`);
-    candidateUrls.push(`${INOVAFARMA_DEFAULT_API_URL}/login`);
+  const candidateUrls: string[] = [loginUrl];
+  if (!candidateUrls.includes(`${origin}/api/login`)) {
+    candidateUrls.push(`${origin}/api/login`);
   }
 
   const headers: Record<string, string> = {
@@ -1217,10 +1367,12 @@ export async function resolveTenantInovafarmaToken(params: {
 
   const cfg = extractTenantErpConfig(tenant);
 
-  const baseUrl = (params.baseUrlOverride || cfg.erp_base_url || INOVAFARMA_DEFAULT_API_URL).trim();
-  const routeId = (params.routeIdOverride || cfg.erp_route_id || INOVAFARMA_DEFAULT_ROUTE_ID)
-    .trim()
-    .replace(/^\/+|\/+$/g, "");
+  const parsedUrlAndRoute = parseInovafarmaUrlAndRoute(
+    params.baseUrlOverride || cfg.erp_base_url || INOVAFARMA_DEFAULT_API_URL,
+    params.routeIdOverride || cfg.erp_route_id || INOVAFARMA_DEFAULT_ROUTE_ID,
+  );
+  const baseUrl = parsedUrlAndRoute.origin;
+  const routeId = parsedUrlAndRoute.slug;
   const cnpj = sanitizeCnpj(params.cnpjOverride || cfg.erp_cnpj || "");
   const apiKey = (params.apiKeyOverride ?? cfg.erp_api_key ?? "").trim();
 
@@ -1768,50 +1920,27 @@ export function buildInovafarmaCandidateUrls(params: {
   routeId?: string;
   resourcePaths: string[];
 }): string[] {
-  const rawBase = (params.baseUrl || INOVAFARMA_DEFAULT_API_URL).trim();
-  const cleanBase = rawBase.replace(/\/+$/, "");
-  const cleanRoute = (params.routeId || INOVAFARMA_DEFAULT_ROUTE_ID)
-    .trim()
-    .replace(/^\/+|\/+$/g, "");
+  const { origin, slug } = parseInovafarmaUrlAndRoute(
+    params.baseUrl,
+    params.routeId,
+  );
 
   const candidateUrls: string[] = [];
   const addUnique = (u: string) => {
     if (u && !candidateUrls.includes(u)) candidateUrls.push(u);
   };
 
-  try {
-    const parsed = new URL(cleanBase);
-    const origin = parsed.origin;
-    const basePath =
-      parsed.pathname && parsed.pathname !== "/" ? parsed.pathname.replace(/\/+$/, "") : "";
+  for (const rawPath of params.resourcePaths) {
+    const cleanResource = rawPath
+      .trim()
+      .replace(/^\/+/, "")
+      .replace(/^api\/v1\/[^/]+\//i, "")
+      .replace(/^api\/v1\//i, "")
+      .replace(/^api\//i, "");
+    if (!cleanResource) continue;
 
-    for (const rawPath of params.resourcePaths) {
-      const cleanResource = rawPath.replace(/^\/+/, "");
-      // 1. Se basePath já inclui /api/v1/{rota}
-      if (basePath) {
-        if (basePath.toLowerCase().endsWith(`/${cleanResource.toLowerCase()}`)) {
-          addUnique(`${origin}${basePath}`);
-        } else {
-          addUnique(`${origin}${basePath}/${cleanResource}`);
-        }
-      }
-      // 2. Rota oficial da API Pública v1: /api/v1/{integracao}/{recurso}
-      if (cleanRoute && !cleanResource.toLowerCase().startsWith("api/v1/")) {
-        addUnique(`${origin}/api/v1/${cleanRoute}/${cleanResource}`);
-      }
-      // 3. Fallbacks diretos para servidores mock ou legados
-      addUnique(`${origin}/${cleanResource}`);
-      if (!cleanResource.toLowerCase().startsWith("api/")) {
-        addUnique(`${origin}/api/${cleanResource}`);
-        addUnique(`${origin}/api/v1/${cleanResource}`);
-      }
-    }
-  } catch {
-    for (const rawPath of params.resourcePaths) {
-      const cleanResource = rawPath.replace(/^\/+/, "");
-      addUnique(`${INOVAFARMA_DEFAULT_API_URL}/api/v1/${cleanRoute}/${cleanResource}`);
-      addUnique(`${INOVAFARMA_DEFAULT_API_URL}/${cleanResource}`);
-    }
+    // Monta SEMPRE https://integracao.portalps.app/api/v1/{slug}/{recurso}
+    addUnique(`${origin}/api/v1/${slug}/${cleanResource}`);
   }
 
   return candidateUrls;
@@ -3549,14 +3678,12 @@ export async function syncInovafarmaProductsToSupabase(
   }
 
   const cfg = extractTenantErpConfig(tenant);
-  const effectiveUrl = (options.erpUrl || cfg.erp_base_url || INOVAFARMA_DEFAULT_API_URL).trim();
-  const effectiveRouteId = (
-    options.erpRouteId ||
-    cfg.erp_route_id ||
-    INOVAFARMA_DEFAULT_ROUTE_ID
-  )
-    .trim()
-    .replace(/^\/+|\/+$/g, "");
+  const parsedUrlAndRoute = parseInovafarmaUrlAndRoute(
+    options.erpUrl || cfg.erp_base_url || INOVAFARMA_DEFAULT_API_URL,
+    options.erpRouteId || cfg.erp_route_id || INOVAFARMA_DEFAULT_ROUTE_ID,
+  );
+  const effectiveUrl = parsedUrlAndRoute.origin;
+  const effectiveRouteId = parsedUrlAndRoute.slug;
   const effectiveCnpj = sanitizeCnpj(options.cnpj || cfg.erp_cnpj || "");
   const effectiveApiKey = (options.apiKey ?? cfg.erp_api_key ?? "").trim();
   const ignoreErpPrices =

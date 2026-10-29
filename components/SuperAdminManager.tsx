@@ -7,7 +7,12 @@ import { Plus, Trash2, Edit3, ExternalLink, X, Loader2, Key, Calendar, RefreshCw
 import * as XLSX from 'xlsx';
 import { ActivationTokenManager } from './ActivationTokenManager';
 import { StatusMonitor } from './StatusMonitor';
-import { triggerInovafarmaSync, INOVAFARMA_DEFAULT_API_URL } from '../services/inovafarma';
+import {
+  triggerInovafarmaSync,
+  parseInovafarmaUrlAndRoute,
+  INOVAFARMA_DEFAULT_API_URL,
+  INOVAFARMA_DEFAULT_ROUTE_ID,
+} from '../services/inovafarma';
 
 
 interface SuperAdminManagerProps {
@@ -629,13 +634,28 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
           cnpj: editData.cnpj || '',
           fullAddress: editData.fullAddress || '',
           corporateEmail: editData.corporateEmail || '',
-          erpUrl: editData.erpBaseUrl || editData.erpUrl || '',
-          erpBaseUrl: editData.erpBaseUrl || editData.erpUrl || '',
-          erp_base_url: editData.erpBaseUrl || editData.erpUrl || '',
-          erpRouteId: (editData.erpRouteId ?? editData.erp_route_id ?? existingTenant?.erpRouteId ?? '').trim(),
-          erp_route_id: (editData.erpRouteId ?? editData.erp_route_id ?? existingTenant?.erpRouteId ?? '').trim(),
-          erpCnpj: (editData.erpCnpj ?? editData.erp_cnpj ?? editData.cnpj ?? existingTenant?.erpCnpj ?? '').trim(),
-          erp_cnpj: (editData.erpCnpj ?? editData.erp_cnpj ?? editData.cnpj ?? existingTenant?.erpCnpj ?? '').trim(),
+          ...(() => {
+            const parsedErp = parseInovafarmaUrlAndRoute(
+              editData.erpBaseUrl ?? editData.erp_base_url ?? editData.erpUrl ?? '',
+              editData.erpRouteId ?? editData.erp_route_id ?? existingTenant?.erpRouteId ?? '',
+            );
+            const integrationCnpj = (
+              editData.erpCnpj ??
+              editData.erp_cnpj ??
+              editData.cnpj ??
+              existingTenant?.erpCnpj ??
+              ''
+            ).trim();
+            return {
+              erpUrl: parsedErp.origin,
+              erpBaseUrl: parsedErp.origin,
+              erp_base_url: parsedErp.origin,
+              erpRouteId: parsedErp.routeId,
+              erp_route_id: parsedErp.routeId,
+              erpCnpj: integrationCnpj,
+              erp_cnpj: integrationCnpj,
+            };
+          })(),
           erpApiKey: (editData.erpApiKey ?? editData.erp_api_key ?? existingTenant?.erpApiKey ?? '').trim(),
           erp_api_key: (editData.erpApiKey ?? editData.erp_api_key ?? existingTenant?.erpApiKey ?? '').trim(),
           erpType: editData.erpType || '',
@@ -1280,14 +1300,65 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
                         </div>
                       </div>
                     </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="space-y-4">
                       <div className="space-y-1">
-                        <label className="text-[11px] font-black uppercase text-gray-800 ml-2">URL Base do ERP (`erp_base_url`)</label>
-                        <input type="text" className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black" value={editData.erpBaseUrl || editData.erpUrl || ''} onChange={e => setEditData({...editData, erpBaseUrl: e.target.value, erp_base_url: e.target.value, erpUrl: e.target.value})} placeholder="https://integracao.portalps.app" />
+                        <label className="text-[11px] font-black uppercase text-gray-800 ml-2">URL da API Inovafarma</label>
+                        <input
+                          type="text"
+                          className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black"
+                          value={editData.erpBaseUrl ?? editData.erp_base_url ?? editData.erpUrl ?? ''}
+                          onChange={e => {
+                            const rawVal = e.target.value;
+                            const routeMatch = rawVal.match(/\/api\/v1\/([^/?#[\]()]+)/i);
+                            const extractedSlug = routeMatch?.[1]?.trim();
+                            setEditData({
+                              ...editData,
+                              erpBaseUrl: rawVal,
+                              erp_base_url: rawVal,
+                              erpUrl: rawVal,
+                              ...(extractedSlug && extractedSlug.toLowerCase() !== 'api' && extractedSlug.toLowerCase() !== 'login'
+                                ? { erpRouteId: extractedSlug, erp_route_id: extractedSlug }
+                                : {}),
+                            });
+                          }}
+                          onBlur={e => {
+                            const parsed = parseInovafarmaUrlAndRoute(
+                              e.target.value,
+                              editData.erpRouteId ?? editData.erp_route_id,
+                            );
+                            setEditData(prev => ({
+                              ...prev,
+                              erpBaseUrl: parsed.origin,
+                              erp_base_url: parsed.origin,
+                              erpUrl: parsed.origin,
+                              erpRouteId: parsed.routeId,
+                              erp_route_id: parsed.routeId,
+                            }));
+                          }}
+                          placeholder="https://integracao.portalps.app"
+                        />
                       </div>
-                      <div className="space-y-1">
-                        <label className="text-[11px] font-black uppercase text-gray-800 ml-2">Rota `&#123;integracao&#125;` (`erp_route_id`)</label>
-                        <input type="text" className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black" value={editData.erpRouteId || editData.erp_route_id || ''} onChange={e => setEditData({...editData, erpRouteId: e.target.value, erp_route_id: e.target.value})} placeholder="homologacao" />
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="space-y-1">
+                          <label className="text-[11px] font-black uppercase text-gray-800 ml-2">Slug / Identificador da Rota (`&#123;integracao&#125;`)</label>
+                          <input
+                            type="text"
+                            className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black"
+                            value={editData.erpRouteId ?? editData.erp_route_id ?? INOVAFARMA_DEFAULT_ROUTE_ID}
+                            onChange={e => setEditData({ ...editData, erpRouteId: e.target.value, erp_route_id: e.target.value })}
+                            placeholder="homologacao"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-[11px] font-black uppercase text-gray-800 ml-2">CNPJ da Integração (Header `cnpj`)</label>
+                          <input
+                            type="text"
+                            className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black"
+                            value={editData.erpCnpj ?? editData.erp_cnpj ?? editData.cnpj ?? ''}
+                            onChange={e => setEditData({ ...editData, erpCnpj: e.target.value, erp_cnpj: e.target.value })}
+                            placeholder="02433981097173"
+                          />
+                        </div>
                       </div>
                     </div>
                     <div className="space-y-1">

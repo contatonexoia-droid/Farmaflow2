@@ -21,6 +21,7 @@ import {
   triggerInovafarmaSync,
   triggerInovafarmaConnectivityTest,
   triggerInovafarmaReconciliation,
+  parseInovafarmaUrlAndRoute,
   INOVAFARMA_DEFAULT_API_URL,
   INOVAFARMA_DEFAULT_ROUTE_ID,
   INOVAFARMA_HOMOLOGACAO_PRESET,
@@ -791,13 +792,27 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
       logo: formData.logo_url || formData.logo || "",
       logo_url: formData.logo_url || formData.logo || "",
       logoUrl: formData.logo_url || formData.logo || "",
-      erpBaseUrl: (formData.erpBaseUrl ?? formData.erp_base_url ?? formData.erpUrl ?? "").trim(),
-      erp_base_url: (formData.erpBaseUrl ?? formData.erp_base_url ?? formData.erpUrl ?? "").trim(),
-      erpUrl: (formData.erpBaseUrl ?? formData.erp_base_url ?? formData.erpUrl ?? "").trim(),
-      erpRouteId: (formData.erpRouteId ?? formData.erp_route_id ?? "").trim(),
-      erp_route_id: (formData.erpRouteId ?? formData.erp_route_id ?? "").trim(),
-      erpCnpj: (formData.erpCnpj ?? formData.erp_cnpj ?? formData.cnpj ?? "").trim(),
-      erp_cnpj: (formData.erpCnpj ?? formData.erp_cnpj ?? formData.cnpj ?? "").trim(),
+      ...(() => {
+        const parsedErp = parseInovafarmaUrlAndRoute(
+          formData.erpBaseUrl ?? formData.erp_base_url ?? formData.erpUrl ?? "",
+          formData.erpRouteId ?? formData.erp_route_id ?? "",
+        );
+        const integrationCnpjRaw = (
+          formData.erpCnpj ??
+          formData.erp_cnpj ??
+          formData.cnpj ??
+          ""
+        ).trim();
+        return {
+          erpBaseUrl: parsedErp.origin,
+          erp_base_url: parsedErp.origin,
+          erpUrl: parsedErp.origin,
+          erpRouteId: parsedErp.routeId,
+          erp_route_id: parsedErp.routeId,
+          erpCnpj: integrationCnpjRaw,
+          erp_cnpj: integrationCnpjRaw,
+        };
+      })(),
       erpApiKey: (formData.erpApiKey ?? formData.erp_api_key ?? "").trim(),
       erp_api_key: (formData.erpApiKey ?? formData.erp_api_key ?? "").trim(),
       erp_login: (formData.erp_login ?? formData.erpApiLogin ?? formData.erp_api_login ?? "").trim(),
@@ -1583,7 +1598,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
               <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 mb-6">
                   <div>
                       <h3 className="text-lg font-black text-gray-900 flex items-center gap-2">
-                          <Store size={20} className="text-brand" /> Integração Oficial API E-commerce v1 — Inovafarma (Portal PS)
+                          <Store size={20} className="text-brand" /> Integração com ERP / PDV (Inovafarma - Portal PS)
                       </h3>
                       <p className="text-sm text-gray-500">
                           Arquitetura oficial 100% via consultas ativas (<span className="font-mono text-xs">GET /api/v1/&#123;integracao&#125;/...</span>) e envio/conciliação de pedidos (<span className="font-mono text-xs">POST /Venda</span> &amp; <span className="font-mono text-xs">GET /vendaporid</span>).
@@ -1699,8 +1714,8 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
               )}
 
               <div className="bg-gray-50/50 p-6 rounded-3xl border border-gray-100 space-y-6">
-                  {/* Linha 1: ERP, URL Base (erp_base_url), Rota {integracao} (erp_route_id) e CNPJ (erp_cnpj) */}
-                  <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                  {/* Linha 1: Sistema ERP / PDV e URL da API Inovafarma */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                       <div>
                           <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
                               Sistema ERP / PDV
@@ -1718,29 +1733,55 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
                           </select>
                       </div>
 
-                      <div>
+                      <div className="md:col-span-2">
                           <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
-                              URL Base (`erp_base_url`)
+                              URL da API Inovafarma
                           </label>
                           <input
                               type="text"
                               placeholder="https://integracao.portalps.app"
                               value={formData.erpBaseUrl ?? formData.erp_base_url ?? formData.erpUrl ?? INOVAFARMA_DEFAULT_API_URL}
-                              onChange={(e) =>
+                              onChange={(e) => {
+                                  const rawVal = e.target.value;
+                                  const routeMatch = rawVal.match(/\/api\/v1\/([^/?#[\]()]+)/i);
+                                  const extractedSlug = routeMatch?.[1]?.trim();
                                   setFormData({
                                       ...formData,
-                                      erpBaseUrl: e.target.value,
-                                      erp_base_url: e.target.value,
-                                      erpUrl: e.target.value,
-                                  })
-                              }
+                                      erpBaseUrl: rawVal,
+                                      erp_base_url: rawVal,
+                                      erpUrl: rawVal,
+                                      ...(extractedSlug && extractedSlug.toLowerCase() !== 'api' && extractedSlug.toLowerCase() !== 'login'
+                                          ? { erpRouteId: extractedSlug, erp_route_id: extractedSlug }
+                                          : {}),
+                                  });
+                              }}
+                              onBlur={(e) => {
+                                  const parsed = parseInovafarmaUrlAndRoute(
+                                      e.target.value,
+                                      formData.erpRouteId ?? formData.erp_route_id,
+                                  );
+                                  setFormData((prev) => ({
+                                      ...prev,
+                                      erpBaseUrl: parsed.origin,
+                                      erp_base_url: parsed.origin,
+                                      erpUrl: parsed.origin,
+                                      erpRouteId: parsed.routeId,
+                                      erp_route_id: parsed.routeId,
+                                  }));
+                              }}
                               className="w-full p-3.5 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-700 outline-none focus:ring-2 focus:ring-brand"
                           />
+                          <p className="text-[10px] text-gray-400 mt-1">
+                              O sistema extrai automaticamente a origem (<code className="bg-gray-100 px-1 rounded">https://integracao.portalps.app</code>) para o <code className="bg-gray-100 px-1 rounded">POST /api/login</code> mesmo se você colar <code className="bg-gray-100 px-1 rounded">/api/v1/homologacao</code>.
+                          </p>
                       </div>
+                  </div>
 
+                  {/* Linha logo abaixo de URL da API Inovafarma: Slug / Identificador da Rota ({integracao}) e CNPJ da Integração (Header cnpj) */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-gray-200/70">
                       <div>
                           <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
-                              Rota `&#123;integracao&#125;` (`erp_route_id`)
+                              Slug / Identificador da Rota (`&#123;integracao&#125;`)
                           </label>
                           <input
                               type="text"
@@ -1756,30 +1797,30 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
                               className="w-full p-3.5 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-700 outline-none focus:ring-2 focus:ring-brand"
                           />
                           <p className="text-[10px] text-gray-400 mt-1">
-                              Ex: <code className="bg-gray-100 px-1 rounded">homologacao</code> ou o identificador de produção da loja.
+                              Ex: <code className="bg-gray-100 px-1 rounded">homologacao</code>. Monta <code className="bg-gray-100 px-1 rounded">{`${parseInovafarmaUrlAndRoute(formData.erpBaseUrl ?? formData.erp_base_url ?? formData.erpUrl, formData.erpRouteId ?? formData.erp_route_id).v1BaseUrl}/{recurso}`}</code>.
                           </p>
                       </div>
 
                       <div>
                           <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
-                              CNPJ do ERP (`erp_cnpj`)
+                              CNPJ da Integração (Header `cnpj`)
                           </label>
                           <input
                               type="text"
-                              placeholder="02.433.981/0971-73"
+                              placeholder="02433981097173"
                               value={formData.erpCnpj ?? formData.erp_cnpj ?? formData.cnpj ?? ''}
                               onChange={(e) =>
                                   setFormData({
                                       ...formData,
-                                      erpCnpj: formatCnpj(e.target.value),
-                                      erp_cnpj: formatCnpj(e.target.value),
+                                      erpCnpj: e.target.value,
+                                      erp_cnpj: e.target.value,
                                   })
                               }
                               maxLength={18}
                               className="w-full p-3.5 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-700 outline-none focus:ring-2 focus:ring-brand"
                           />
                           <p className="text-[10px] text-gray-400 mt-1">
-                              Enviado obrigatoriamente nos headers GET e no POST /api/login.
+                              Permite testar com <code className="bg-gray-100 px-1 rounded">02433981097173</code> sem alterar o CNPJ principal da loja.
                           </p>
                       </div>
                   </div>
