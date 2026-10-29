@@ -65,6 +65,7 @@ export const SuperAdminManager: React.FC<SuperAdminManagerProps> = ({ session, o
     message: string;
     details?: string;
   } | null>(null);
+  const [inovafarmaSyncProgressText, setInovafarmaSyncProgressText] = useState<string>('');
   const [copiedWebhookField, setCopiedWebhookField] = useState<string | null>(null);
   const [isQueueDashboardOpen, setIsQueueDashboardOpen] = useState(false);
   const [queueStats, setQueueStats] = useState<any>(null);
@@ -73,7 +74,13 @@ export const SuperAdminManager: React.FC<SuperAdminManagerProps> = ({ session, o
   const handleSyncTenantInovafarma = async () => {
     if (!selectedTenantForIntegration?.id) return;
     setIsSyncingInovafarma(true);
+    setInovafarmaSyncProgressText('Sincronizando... 0 produtos processados');
     setInovafarmaSyncFeedback(null);
+
+    let totalReceived = 0;
+    let totalCreated = 0;
+    let totalUpdated = 0;
+
     try {
       const parsedRoute = parseInovafarmaUrlAndRoute(
         selectedTenantForIntegration.erpBaseUrl || selectedTenantForIntegration.erpUrl || INOVAFARMA_DEFAULT_API_URL,
@@ -83,37 +90,75 @@ export const SuperAdminManager: React.FC<SuperAdminManagerProps> = ({ session, o
         selectedTenantForIntegration.erpCnpj || selectedTenantForIntegration.erp_cnpj || selectedTenantForIntegration.cnpj || '',
         parsedRoute.slug,
       );
-      const result = await triggerInovafarmaSync({
-        tenantId: selectedTenantForIntegration.id,
-        erpUrl: parsedRoute.origin,
-        erpRouteId: parsedRoute.slug,
-        cnpj: effectiveCnpj,
-        apiToken: selectedTenantForIntegration.integrationToken || '',
-        ignoreErpPrices: Boolean(selectedTenantForIntegration.ignore_erp_prices),
-      });
-      const exactStatus = result.httpStatus ?? 200;
-      const exactCnpj = result.cnpjSent || effectiveCnpj;
-      setInovafarmaSyncFeedback({
-        type: 'success',
-        message: result.message || `Sincronização com Inovafarma concluída (HTTP ${exactStatus} | Header cnpj: ${exactCnpj})!`,
-        details: `Status HTTP: ${exactStatus} | Header cnpj enviado: ${exactCnpj} | Endpoint: ${result.endpointUsed} | Recebidos: ${result.totalFetched} | Novos: ${result.insertedCount} | Atualizados: ${result.updatedCount}`,
-      });
-      if (Array.isArray((result as any).logs)) {
-        setIntegrationLogs((result as any).logs);
-      } else {
-        const updatedLogs = await getIntegrationLogs(selectedTenantForIntegration.id);
-        setIntegrationLogs(updatedLogs);
+
+      let currentOffset = 1;
+      let lastResult: any = null;
+      const MAX_BATCHES = 100;
+
+      for (let batchIdx = 0; batchIdx < MAX_BATCHES; batchIdx++) {
+        const result = await triggerInovafarmaSync({
+          tenantId: selectedTenantForIntegration.id,
+          erpUrl: parsedRoute.origin,
+          erpRouteId: parsedRoute.slug,
+          cnpj: effectiveCnpj,
+          apiToken: selectedTenantForIntegration.integrationToken || '',
+          offset: currentOffset,
+          limit: 500,
+          maxPages: 3,
+          ignoreErpPrices: Boolean(selectedTenantForIntegration.ignore_erp_prices),
+        });
+
+        lastResult = result;
+        totalReceived += result.receivedCount ?? result.totalFetched ?? 0;
+        totalCreated += result.createdCount ?? result.insertedCount ?? 0;
+        totalUpdated += result.updatedCount ?? 0;
+
+        const progressMsg = `Sincronizando... ${totalReceived} produtos processados`;
+        setInovafarmaSyncProgressText(progressMsg);
+
+        if (result.partial && result.nextOffset && result.nextOffset > currentOffset) {
+          setInovafarmaSyncFeedback({
+            type: 'success',
+            message: `${progressMsg} (Próximo offset: ${result.nextOffset})`,
+            details: `Novos: ${totalCreated} | Atualizados: ${totalUpdated} | Endpoint: ${result.endpointUsed}`,
+          });
+          currentOffset = result.nextOffset;
+        } else {
+          break;
+        }
+      }
+
+      if (lastResult) {
+        const exactStatus = lastResult.httpStatus ?? 200;
+        const exactCnpj = lastResult.cnpjSent || effectiveCnpj;
+        setInovafarmaSyncFeedback({
+          type: 'success',
+          message:
+            totalReceived > 0
+              ? `Sincronização com Inovafarma concluída! ${totalReceived} produtos processados (${totalCreated} novos, ${totalUpdated} atualizados).`
+              : lastResult.message || `Sincronização com Inovafarma concluída (HTTP ${exactStatus} | Header cnpj: ${exactCnpj})!`,
+          details: `Status HTTP: ${exactStatus} | Header cnpj enviado: ${exactCnpj} | Endpoint: ${lastResult.endpointUsed} | Recebidos: ${totalReceived} | Novos: ${totalCreated} | Atualizados: ${totalUpdated}`,
+        });
+        if (Array.isArray(lastResult.logs) && lastResult.logs.length > 0) {
+          setIntegrationLogs(lastResult.logs);
+        } else {
+          const updatedLogs = await getIntegrationLogs(selectedTenantForIntegration.id);
+          setIntegrationLogs(updatedLogs);
+        }
       }
     } catch (err: any) {
       setInovafarmaSyncFeedback({
         type: 'error',
         message: 'Erro ao sincronizar com Inovafarma',
-        details: err?.message || 'Verifique o Token e a URL da API do Portal PS.',
+        details: `${err?.message || 'Verifique o Token e a URL da API do Portal PS.'}${
+          totalReceived > 0 ? ` (${totalReceived} produtos já haviam sido processados antes da interrupção.)` : ''
+        }`,
       });
       const updatedLogs = await getIntegrationLogs(selectedTenantForIntegration.id);
       setIntegrationLogs(updatedLogs);
     } finally {
       setIsSyncingInovafarma(false);
+      setInovafarmaSyncProgressText('');
     }
   };
 
@@ -1839,12 +1884,12 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
                               {isSyncingInovafarma ? (
                                   <>
                                       <Loader2 size={16} className="animate-spin" />
-                                      Sincronizando...
+                                      {inovafarmaSyncProgressText || 'Sincronizando...'}
                                   </>
                               ) : (
                                   <>
                                       <RefreshCw size={16} />
-                                      Sincronizar Agora com Inovafarma
+                                      SINCRONIZAR AGORA COM INOVAFARMA
                                   </>
                               )}
                           </button>

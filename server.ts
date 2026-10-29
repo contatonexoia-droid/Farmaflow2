@@ -5911,28 +5911,42 @@ app.post(
         cnpj,
         parsedSyncErp.slug,
       );
+      const requestedOffset =
+        body.offset !== undefined && Number(body.offset) >= 1
+          ? Math.floor(Number(body.offset))
+          : 1;
+      const requestedLimit =
+        body.limit !== undefined && Number(body.limit) >= 1
+          ? Math.min(500, Math.floor(Number(body.limit)))
+          : 500;
+      const requestedMaxPages =
+        body.maxPages !== undefined && Number(body.maxPages) >= 1
+          ? Math.min(3, Math.floor(Number(body.maxPages)))
+          : 3;
 
-      // Persiste atualizações de erp_base_url, erp_route_id, erp_cnpj, credenciais da API ou integration_token se enviadas pelo painel
-      await saveTenantInovafarmaState(supabaseAdmin, tenantId, {
-        erp_base_url: erpUrl ? parsedSyncErp.origin : undefined,
-        erp_route_id: erpRouteId || erpUrl ? parsedSyncErp.slug : undefined,
-        erp_cnpj: effectiveSyncCnpj || undefined,
-        erp_login: apiLogin || undefined,
-        erp_password_plain: apiPassword || undefined,
-        erp_api_key: apiKey || undefined,
-      });
+      // Persiste configurações da farmácia apenas no lote inicial (offset = 1) para manter os lotes seguintes ultra-rápidos
+      if (requestedOffset <= 1) {
+        await saveTenantInovafarmaState(supabaseAdmin, tenantId, {
+          erp_base_url: erpUrl ? parsedSyncErp.origin : undefined,
+          erp_route_id: erpRouteId || erpUrl ? parsedSyncErp.slug : undefined,
+          erp_cnpj: effectiveSyncCnpj || undefined,
+          erp_login: apiLogin || undefined,
+          erp_password_plain: apiPassword || undefined,
+          erp_api_key: apiKey || undefined,
+        });
 
-      const tenantUpdates: Record<string, any> = { erp_type: "inovafarma" };
-      if (erpUrl) tenantUpdates.erp_url = parsedSyncErp.origin;
-      if (apiToken) tenantUpdates.integration_token = apiToken;
-      if (typeof body.ignoreErpPrices === "boolean") {
-        tenantUpdates.ignore_erp_prices = body.ignoreErpPrices;
+        const tenantUpdates: Record<string, any> = { erp_type: "inovafarma" };
+        if (erpUrl) tenantUpdates.erp_url = parsedSyncErp.origin;
+        if (apiToken) tenantUpdates.integration_token = apiToken;
+        if (typeof body.ignoreErpPrices === "boolean") {
+          tenantUpdates.ignore_erp_prices = body.ignoreErpPrices;
+        }
+
+        await supabaseAdmin
+          .from("tenants")
+          .update(tenantUpdates)
+          .eq("id", tenantId);
       }
-
-      await supabaseAdmin
-        .from("tenants")
-        .update(tenantUpdates)
-        .eq("id", tenantId);
 
       const syncResult = await syncInovafarmaProductsToSupabase(
         supabaseAdmin,
@@ -5948,8 +5962,9 @@ app.post(
           mode: body.mode === "delta" ? "delta" : "full",
           inicial: body.inicial ? String(body.inicial).trim() : undefined,
           final: body.final ? String(body.final).trim() : undefined,
-          offset: body.offset !== undefined ? Number(body.offset) : undefined,
-          limit: body.limit !== undefined ? Number(body.limit) : undefined,
+          offset: requestedOffset,
+          limit: requestedLimit,
+          maxPages: requestedMaxPages,
           ignoreErpPrices:
             typeof body.ignoreErpPrices === "boolean"
               ? body.ignoreErpPrices
@@ -5973,17 +5988,27 @@ app.post(
         },
       );
 
-      // Busca logs recentes atualizados para retornar ao painel administrativo
-      const { data: recentLogs } = await supabaseAdmin
-        .from("integration_logs")
-        .select("*")
-        .eq("tenant_id", tenantId)
-        .order("created_at", { ascending: false })
-        .limit(20);
+      // Busca logs recentes apenas quando finalizar a sincronização (ou lote único) para não atrasar os lotes intermediários
+      let recentLogs: any[] = [];
+      if (!syncResult.partial) {
+        const { data } = await supabaseAdmin
+          .from("integration_logs")
+          .select("*")
+          .eq("tenant_id", tenantId)
+          .order("created_at", { ascending: false })
+          .limit(20);
+        recentLogs = data || [];
+      }
 
       return res.status(200).json({
         ...syncResult,
-        logs: recentLogs || [],
+        success: true,
+        partial: Boolean(syncResult.partial),
+        nextOffset: syncResult.partial ? syncResult.nextOffset ?? null : null,
+        receivedCount: syncResult.receivedCount ?? syncResult.totalFetched ?? 0,
+        createdCount: syncResult.createdCount ?? syncResult.insertedCount ?? 0,
+        updatedCount: syncResult.updatedCount ?? 0,
+        logs: recentLogs,
       });
     } catch (error: any) {
       return res.status(500).json({

@@ -331,12 +331,19 @@ export interface InovafarmaSyncOptions {
   offset?: number;
   /** Limite por página (máximo: 500) */
   limit?: number;
+  /** Máximo de páginas de 500 itens por chamada HTTP (padrão: 3 páginas = 1.500 produtos, < 20s) */
+  maxPages?: number;
   /** Permite enviar uma lista de produtos diretamente caso o agente local / ponte envie via push */
   productsOverride?: InovafarmaRawProduct[];
 }
 
 export interface InovafarmaSyncResult {
   success: boolean;
+  partial?: boolean;
+  nextOffset?: number | null;
+  receivedCount: number;
+  createdCount: number;
+  updatedCount: number;
   tenantId: string;
   endpointUsed: string;
   httpStatus?: number;
@@ -345,7 +352,6 @@ export interface InovafarmaSyncResult {
   totalFetched: number;
   totalValid: number;
   insertedCount: number;
-  updatedCount: number;
   skippedCount: number;
   ignoreErpPrices: boolean;
   syncedAt: string;
@@ -2347,6 +2353,7 @@ async function performInovafarmaGet<T = any>(params: {
   login?: string;
   password?: string;
   rateLimitWaitMs?: number;
+  timeoutMs?: number;
 }): Promise<{
   items: T[];
   endpointUsed: string;
@@ -2368,7 +2375,8 @@ async function performInovafarmaGet<T = any>(params: {
     tenantId: params.tenantId,
     login: params.login,
     password: params.password,
-    rateLimitWaitMs: params.rateLimitWaitMs,
+    rateLimitWaitMs: params.rateLimitWaitMs ?? 4000,
+    timeoutMs: params.timeoutMs ?? 12000,
   });
 
   if (res.empty || res.status === 204 || res.data === null) {
@@ -2482,7 +2490,9 @@ export async function checkInovafarmaServerConnectivity(params: {
 
 /**
  * Busca produtos paginados (`GET /api/v1/{integracao}/produtos?offset=1&limit=500`):
- * - `offset` começa em 1 e avança somando `limit` (+500) a cada página até receber HTTP 204 ou array vazio.
+ * - `offset` começa em 1 e avança somando `limit` (+500) a cada página.
+ * - Processa no máximo 3 páginas de 500 itens (1.500 produtos) ou até 15 segundos por chamada HTTP
+ *   para nunca ultrapassar o limite de 25s por requisição e evitar HTTP 524 na Cloudflare.
  */
 export async function fetchInovafarmaProducts(params: {
   baseUrl?: string;
@@ -2492,6 +2502,8 @@ export async function fetchInovafarmaProducts(params: {
   apiKey?: string;
   offset?: number;
   limit?: number;
+  maxPages?: number;
+  maxDurationMs?: number;
   fetchAllPages?: boolean;
   supabaseClient?: SupabaseClient;
   tenantId?: string;
@@ -2504,12 +2516,19 @@ export async function fetchInovafarmaProducts(params: {
   cnpjSent: string;
   rawPreview?: string;
   highestUpdatedAt?: string;
+  partial: boolean;
+  nextOffset: number | null;
 }> {
   const { offset: initialOffset, limit } = normalizeInovafarmaPagination(
     params.offset,
     params.limit,
   );
-  const fetchAll = params.fetchAllPages !== false && params.offset === undefined;
+  const allowMultiPage = params.fetchAllPages !== false;
+  const maxPages = allowMultiPage
+    ? Math.max(1, Math.min(3, Number(params.maxPages) || 3))
+    : 1;
+  const maxDurationMs = params.maxDurationMs ?? 15000;
+  const batchStartMs = Date.now();
 
   const allProducts: InovafarmaRawProduct[] = [];
   let currentOffset = initialOffset;
@@ -2519,9 +2538,16 @@ export async function fetchInovafarmaProducts(params: {
   let firstRawPreview = "";
   let currentToken = params.token;
   let highestUpdatedAt = "";
-  const MAX_PAGES = 50; // Até 25.000 itens com limit=500
+  let partial = false;
+  let nextOffset: number | null = null;
 
-  for (let page = 0; page < MAX_PAGES; page++) {
+  for (let page = 0; page < maxPages; page++) {
+    if (page > 0 && Date.now() - batchStartMs >= maxDurationMs) {
+      partial = true;
+      nextOffset = currentOffset;
+      break;
+    }
+
     const {
       items,
       endpointUsed,
@@ -2544,6 +2570,7 @@ export async function fetchInovafarmaProducts(params: {
       tenantId: params.tenantId,
       login: params.login,
       password: params.password,
+      timeoutMs: 11000,
     });
 
     if (refreshedToken) currentToken = refreshedToken;
@@ -2554,8 +2581,10 @@ export async function fetchInovafarmaProducts(params: {
       firstRawPreview = rawPreview || "";
     }
 
-    // Para a paginação ao receber HTTP 204 ou array vazio
+    // Para a paginação ao receber HTTP 204 ou array vazio (fim do catálogo)
     if (status === 204 || !items || items.length === 0) {
+      partial = false;
+      nextOffset = null;
       break;
     }
 
@@ -2572,12 +2601,23 @@ export async function fetchInovafarmaProducts(params: {
       }
     }
 
-    if (!fetchAll || items.length < limit) {
+    // Se vieram menos itens que o limit (500), chegou à última página do catálogo
+    if (items.length < limit) {
+      partial = false;
+      nextOffset = null;
       break;
     }
 
-    // Offset avança somando o limit a cada página (ex: 1 -> 501 -> 1001)
-    currentOffset += limit;
+    // Página cheia (500 itens): verifica se ainda cabe mais uma página neste lote (< 3 páginas e < 15s)
+    const candidateNextOffset = currentOffset + limit;
+    const elapsedMs = Date.now() - batchStartMs;
+    if (!allowMultiPage || page + 1 >= maxPages || elapsedMs >= maxDurationMs) {
+      partial = true;
+      nextOffset = candidateNextOffset;
+      break;
+    }
+
+    currentOffset = candidateNextOffset;
   }
 
   return {
@@ -2587,12 +2627,15 @@ export async function fetchInovafarmaProducts(params: {
     cnpjSent,
     rawPreview: firstRawPreview || undefined,
     highestUpdatedAt: highestUpdatedAt || undefined,
+    partial,
+    nextOffset,
   };
 }
 
 /**
  * Busca produtos alterados (`GET /api/v1/{integracao}/produtosalterados?offset=1&limit=500&inicial=AAAA-MM-DD&final=AAAA-MM-DD`):
  * - Sempre envia `inicial` e `final` juntos (janela máx 31 dias) para evitar erro de variável escalar `@INICIAL`.
+ * - Processa no máximo 3 páginas de 500 itens (1.500 produtos) ou até 15s por chamada HTTP.
  * - Retorna a maior `DATAATUALIZACAOPRODUTO` recebida para salvar em `last_product_sync`.
  */
 export async function fetchInovafarmaProdutosAlterados(params: {
@@ -2606,6 +2649,8 @@ export async function fetchInovafarmaProdutosAlterados(params: {
   lastProductSyncWatermark?: string;
   offset?: number;
   limit?: number;
+  maxPages?: number;
+  maxDurationMs?: number;
   fetchAllPages?: boolean;
   supabaseClient?: SupabaseClient;
   tenantId?: string;
@@ -2620,6 +2665,8 @@ export async function fetchInovafarmaProdutosAlterados(params: {
   inicialUsed: string;
   finalUsed: string;
   highestUpdatedAt?: string;
+  partial: boolean;
+  nextOffset: number | null;
 }> {
   const derivedDates =
     params.inicial && params.final
@@ -2638,7 +2685,12 @@ export async function fetchInovafarmaProdutosAlterados(params: {
     params.offset,
     params.limit,
   );
-  const fetchAll = params.fetchAllPages !== false && params.offset === undefined;
+  const allowMultiPage = params.fetchAllPages !== false;
+  const maxPages = allowMultiPage
+    ? Math.max(1, Math.min(3, Number(params.maxPages) || 3))
+    : 1;
+  const maxDurationMs = params.maxDurationMs ?? 15000;
+  const batchStartMs = Date.now();
 
   const allProducts: InovafarmaRawProduct[] = [];
   let currentOffset = initialOffset;
@@ -2648,9 +2700,16 @@ export async function fetchInovafarmaProdutosAlterados(params: {
   let firstRawPreview = "";
   let currentToken = params.token;
   let highestUpdatedAt = "";
-  const MAX_PAGES = 50;
+  let partial = false;
+  let nextOffset: number | null = null;
 
-  for (let page = 0; page < MAX_PAGES; page++) {
+  for (let page = 0; page < maxPages; page++) {
+    if (page > 0 && Date.now() - batchStartMs >= maxDurationMs) {
+      partial = true;
+      nextOffset = currentOffset;
+      break;
+    }
+
     const {
       items,
       endpointUsed,
@@ -2675,6 +2734,7 @@ export async function fetchInovafarmaProdutosAlterados(params: {
       tenantId: params.tenantId,
       login: params.login,
       password: params.password,
+      timeoutMs: 11000,
     });
 
     if (refreshedToken) currentToken = refreshedToken;
@@ -2686,6 +2746,8 @@ export async function fetchInovafarmaProdutosAlterados(params: {
     }
 
     if (status === 204 || !items || items.length === 0) {
+      partial = false;
+      nextOffset = null;
       break;
     }
 
@@ -2702,11 +2764,21 @@ export async function fetchInovafarmaProdutosAlterados(params: {
       }
     }
 
-    if (!fetchAll || items.length < limit) {
+    if (items.length < limit) {
+      partial = false;
+      nextOffset = null;
       break;
     }
 
-    currentOffset += limit;
+    const candidateNextOffset = currentOffset + limit;
+    const elapsedMs = Date.now() - batchStartMs;
+    if (!allowMultiPage || page + 1 >= maxPages || elapsedMs >= maxDurationMs) {
+      partial = true;
+      nextOffset = candidateNextOffset;
+      break;
+    }
+
+    currentOffset = candidateNextOffset;
   }
 
   return {
@@ -2718,6 +2790,8 @@ export async function fetchInovafarmaProdutosAlterados(params: {
     inicialUsed: inicial,
     finalUsed: final,
     highestUpdatedAt: highestUpdatedAt || undefined,
+    partial,
+    nextOffset,
   };
 }
 
@@ -3943,9 +4017,11 @@ export async function syncInovafarmaProductsToSupabase(
   let cnpjSent = effectiveCnpj;
   let rawResponsePreview: string | undefined;
   let highestUpdatedAtWatermark = "";
+  let partial = false;
+  let nextOffset: number | null = null;
 
   try {
-    // Reutiliza o token válido por 30 dias ou gera um novo em POST /api/login se ausente/expirado
+    // Reutiliza o token válido por 30 dias em cache ou gera um novo em POST /api/login se ausente/expirado
     if (
       (!Array.isArray(options.productsOverride) || options.productsOverride.length === 0) &&
       savedLogin &&
@@ -3964,10 +4040,25 @@ export async function syncInovafarmaProductsToSupabase(
       effectiveToken = loginResult.accessToken;
     }
 
+    const effectiveOffset =
+      options.offset !== undefined && Number(options.offset) >= 1
+        ? Math.floor(Number(options.offset))
+        : 1;
+    const effectiveLimit =
+      options.limit !== undefined && Number(options.limit) >= 1
+        ? Math.min(500, Math.floor(Number(options.limit)))
+        : 500;
+    const effectiveMaxPages =
+      options.maxPages !== undefined && Number(options.maxPages) >= 1
+        ? Math.min(3, Math.floor(Number(options.maxPages)))
+        : 3;
+
     if (Array.isArray(options.productsOverride) && options.productsOverride.length > 0) {
       rawProducts = options.productsOverride;
       endpointUsed = "push_payload";
       httpStatus = 200;
+      partial = false;
+      nextOffset = null;
     } else if (options.mode === "delta" || (options.inicial && options.final)) {
       const fetched = await fetchInovafarmaProdutosAlterados({
         baseUrl: effectiveUrl,
@@ -3978,8 +4069,10 @@ export async function syncInovafarmaProductsToSupabase(
         inicial: options.inicial,
         final: options.final,
         lastProductSyncWatermark: cfg.last_product_sync,
-        offset: options.offset,
-        limit: options.limit,
+        offset: effectiveOffset,
+        limit: effectiveLimit,
+        maxPages: effectiveMaxPages,
+        maxDurationMs: 14000,
         supabaseClient,
         tenantId,
         login: savedLogin,
@@ -3990,6 +4083,8 @@ export async function syncInovafarmaProductsToSupabase(
       httpStatus = fetched.httpStatus;
       cnpjSent = fetched.cnpjSent || effectiveCnpj;
       rawResponsePreview = fetched.rawPreview;
+      partial = fetched.partial;
+      nextOffset = fetched.nextOffset;
       if (fetched.highestUpdatedAt) {
         highestUpdatedAtWatermark = fetched.highestUpdatedAt;
       }
@@ -4000,8 +4095,10 @@ export async function syncInovafarmaProductsToSupabase(
         token: effectiveToken,
         cnpj: effectiveCnpj,
         apiKey: effectiveApiKey,
-        offset: options.offset,
-        limit: options.limit,
+        offset: effectiveOffset,
+        limit: effectiveLimit,
+        maxPages: effectiveMaxPages,
+        maxDurationMs: 14000,
         supabaseClient,
         tenantId,
         login: savedLogin,
@@ -4012,6 +4109,8 @@ export async function syncInovafarmaProductsToSupabase(
       httpStatus = fetched.httpStatus;
       cnpjSent = fetched.cnpjSent || effectiveCnpj;
       rawResponsePreview = fetched.rawPreview;
+      partial = fetched.partial;
+      nextOffset = fetched.nextOffset;
       if (fetched.highestUpdatedAt) {
         highestUpdatedAtWatermark = fetched.highestUpdatedAt;
       }
@@ -4068,12 +4167,19 @@ export async function syncInovafarmaProductsToSupabase(
     const finalWatermark = highestUpdatedAtWatermark || syncedAt;
 
     if (validProducts.length === 0) {
-      await saveTenantInovafarmaState(supabaseClient, tenantId, {
-        last_product_sync: finalWatermark,
-      });
+      if (!partial) {
+        await saveTenantInovafarmaState(supabaseClient, tenantId, {
+          last_product_sync: finalWatermark,
+        });
+      }
 
       const emptyResult: InovafarmaSyncResult = {
         success: true,
+        partial: false,
+        nextOffset: null,
+        receivedCount: rawProducts.length,
+        createdCount: 0,
+        updatedCount: 0,
         tenantId,
         endpointUsed,
         httpStatus,
@@ -4082,12 +4188,11 @@ export async function syncInovafarmaProductsToSupabase(
         totalFetched: rawProducts.length,
         totalValid: 0,
         insertedCount: 0,
-        updatedCount: 0,
         skippedCount,
         ignoreErpPrices,
         syncedAt,
         lastProductSync: finalWatermark,
-        message: `A API do Inovafarma respondeu com HTTP ${httpStatus} (Header cnpj enviado: ${cnpjSent}), mas nenhum produto novo/alterado foi retornado no período.`,
+        message: `A API do Inovafarma respondeu com HTTP ${httpStatus} (Header cnpj enviado: ${cnpjSent}), mas nenhum produto novo/alterado foi retornado neste lote.`,
       };
 
       await supabaseClient.from("integration_logs").insert({
@@ -4098,6 +4203,7 @@ export async function syncInovafarmaProductsToSupabase(
           httpStatus,
           routeId: effectiveRouteId,
           cnpj: cnpjSent,
+          offset: effectiveOffset,
           inicial: options.inicial,
           final: options.final,
           totalFetched: rawProducts.length,
@@ -4111,44 +4217,75 @@ export async function syncInovafarmaProductsToSupabase(
       return emptyResult;
     }
 
-    // 4. Busca produtos existentes da farmácia no Supabase para preservar IDs, fotos e enriquecimento
+    // 4. Busca rápida no Supabase APENAS dos códigos/EANs presentes neste lote (sem varredura sequencial da tabela inteira!)
     const existingByBarcode = new Map<string, any>();
     const existingByInternalCode = new Map<string, any>();
 
-    let from = 0;
-    const step = 1000;
-    while (true) {
-      const { data: existingBatch, error: fetchErr } = await supabaseClient
-        .from("products")
-        .select(
-          "id, barcode, internal_code, name, price, original_price, promotional_price, stock, category, department, subcategory, presentation, image, images, description, is_featured, is_ai_enriched",
-        )
-        .eq("tenant_id", tenantId)
-        .range(from, from + step - 1);
+    const batchBarcodes = Array.from(
+      new Set(
+        validProducts
+          .map((p) => p.barcode)
+          .filter((b): b is string => Boolean(b && b.trim())),
+      ),
+    );
+    const batchInternalCodes = Array.from(
+      new Set(
+        validProducts
+          .map((p) => p.erpProductId || p.internalCode)
+          .filter((c): c is string => Boolean(c && c.trim())),
+      ),
+    );
 
-      if (fetchErr) {
-        throw new Error(`Erro ao consultar catálogo atual da farmácia: ${fetchErr.message}`);
-      }
-      if (!existingBatch || existingBatch.length === 0) break;
-
-      for (const prod of existingBatch) {
+    const registerExistingRows = (rows: any[] | null) => {
+      if (!rows) return;
+      for (const prod of rows) {
         const cleanBc = sanitizeInovafarmaEan(prod.barcode);
-        if (cleanBc) {
-          existingByBarcode.set(cleanBc, prod);
-        }
-        if (prod.barcode) {
-          existingByBarcode.set(String(prod.barcode).trim(), prod);
-        }
+        if (cleanBc) existingByBarcode.set(cleanBc, prod);
+        if (prod.barcode) existingByBarcode.set(String(prod.barcode).trim(), prod);
         if (prod.internal_code) {
           existingByInternalCode.set(String(prod.internal_code).trim(), prod);
         }
       }
+    };
 
-      if (existingBatch.length < step) break;
-      from += step;
+    const LOOKUP_CHUNK = 300;
+    const lookupPromises: Promise<void>[] = [];
+
+    for (let i = 0; i < batchBarcodes.length; i += LOOKUP_CHUNK) {
+      const codeSlice = batchBarcodes.slice(i, i + LOOKUP_CHUNK);
+      lookupPromises.push(
+        (async () => {
+          const { data } = await supabaseClient
+            .from("products")
+            .select(
+              "id, barcode, internal_code, name, price, original_price, promotional_price, stock, category, department, subcategory, presentation, is_featured, is_ai_enriched",
+            )
+            .eq("tenant_id", tenantId)
+            .in("barcode", codeSlice);
+          registerExistingRows(data);
+        })(),
+      );
     }
 
-    // 5. Prepara lote para upsert salvando CODIGOPRODUTO (internal_code) e UNIDADEMEDIDA (presentation)
+    for (let i = 0; i < batchInternalCodes.length; i += LOOKUP_CHUNK) {
+      const internalSlice = batchInternalCodes.slice(i, i + LOOKUP_CHUNK);
+      lookupPromises.push(
+        (async () => {
+          const { data } = await supabaseClient
+            .from("products")
+            .select(
+              "id, barcode, internal_code, name, price, original_price, promotional_price, stock, category, department, subcategory, presentation, is_featured, is_ai_enriched",
+            )
+            .eq("tenant_id", tenantId)
+            .in("internal_code", internalSlice);
+          registerExistingRows(data);
+        })(),
+      );
+    }
+
+    await Promise.all(lookupPromises);
+
+    // 5. Prepara lote para batch upsert rápido (sem busca síncrona de fotos por EAN)
     let insertedCount = 0;
     let updatedCount = 0;
     const upsertPayloads: any[] = [];
@@ -4156,6 +4293,7 @@ export async function syncInovafarmaProductsToSupabase(
     for (const item of validProducts) {
       const existing =
         (item.internalCode && existingByInternalCode.get(item.internalCode)) ||
+        (item.erpProductId && existingByInternalCode.get(item.erpProductId)) ||
         (item.barcode && existingByBarcode.get(item.barcode));
 
       if (existing) {
@@ -4164,7 +4302,11 @@ export async function syncInovafarmaProductsToSupabase(
           id: existing.id,
           tenant_id: tenantId,
           barcode: item.barcode || existing.barcode,
-          internal_code: item.erpProductId || item.internalCode || existing.internal_code || item.barcode,
+          internal_code:
+            item.erpProductId ||
+            item.internalCode ||
+            existing.internal_code ||
+            item.barcode,
           name: existing.name || item.name,
           stock: item.stock,
           category: existing.category || item.category || "Geral",
@@ -4229,8 +4371,8 @@ export async function syncInovafarmaProductsToSupabase(
       }
     }
 
-    // 6. Executa upsert em lotes de 250 registros no Supabase
-    const BATCH_SIZE = 250;
+    // 6. Executa batch upsert em lotes de 500 registros no Supabase
+    const BATCH_SIZE = 500;
     for (let i = 0; i < upsertPayloads.length; i += BATCH_SIZE) {
       const chunk = upsertPayloads.slice(i, i + BATCH_SIZE);
       const { error: upsertErr } = await supabaseClient
@@ -4252,13 +4394,20 @@ export async function syncInovafarmaProductsToSupabase(
       }
     }
 
-    // 7. Salva o watermark last_product_sync
-    await saveTenantInovafarmaState(supabaseClient, tenantId, {
-      last_product_sync: finalWatermark,
-    });
+    // 7. Salva o watermark last_product_sync ao concluir (ou no último lote)
+    if (!partial) {
+      await saveTenantInovafarmaState(supabaseClient, tenantId, {
+        last_product_sync: finalWatermark,
+      });
+    }
 
     const result: InovafarmaSyncResult = {
       success: true,
+      partial,
+      nextOffset: partial ? nextOffset : null,
+      receivedCount: rawProducts.length,
+      createdCount: insertedCount,
+      updatedCount,
       tenantId,
       endpointUsed,
       httpStatus,
@@ -4267,12 +4416,13 @@ export async function syncInovafarmaProductsToSupabase(
       totalFetched: rawProducts.length,
       totalValid: validProducts.length,
       insertedCount,
-      updatedCount,
       skippedCount,
       ignoreErpPrices,
       syncedAt,
       lastProductSync: finalWatermark,
-      message: `Sincronização Inovafarma concluída (HTTP ${httpStatus} | Header cnpj: ${cnpjSent}): ${validProducts.length} produtos processados (${insertedCount} novos, ${updatedCount} atualizados).`,
+      message: partial
+        ? `Lote sincronizado (offset ${effectiveOffset} -> próximo ${nextOffset}): ${validProducts.length} produtos processados (${insertedCount} novos, ${updatedCount} atualizados).`
+        : `Sincronização Inovafarma concluída (HTTP ${httpStatus} | Header cnpj: ${cnpjSent}): ${validProducts.length} produtos processados (${insertedCount} novos, ${updatedCount} atualizados).`,
     };
 
     await supabaseClient.from("integration_logs").insert({
@@ -4283,8 +4433,13 @@ export async function syncInovafarmaProductsToSupabase(
         httpStatus,
         routeId: effectiveRouteId,
         cnpj: cnpjSent,
+        offset: effectiveOffset,
+        partial,
+        nextOffset: partial ? nextOffset : null,
         inicial: options.inicial,
         final: options.final,
+        receivedCount: rawProducts.length,
+        createdCount: insertedCount,
         totalFetched: rawProducts.length,
         totalValid: validProducts.length,
         insertedCount,
@@ -4335,6 +4490,7 @@ export async function triggerInovafarmaSync(params: {
   final?: string;
   offset?: number;
   limit?: number;
+  maxPages?: number;
 }): Promise<InovafarmaSyncResult> {
   const response = await fetch("/api/integration/inovafarma/sync", {
     method: "POST",

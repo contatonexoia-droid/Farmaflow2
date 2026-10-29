@@ -216,6 +216,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
 
   // Estados da Integração Inovafarma (Portal PS)
   const [isSyncingInovafarma, setIsSyncingInovafarma] = useState(false);
+  const [inovafarmaSyncProgressText, setInovafarmaSyncProgressText] = useState<string>('');
   const [inovafarmaFeedback, setInovafarmaFeedback] = useState<{
     type: 'success' | 'error';
     message: string;
@@ -429,7 +430,13 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
   const handleSyncInovafarmaNow = async () => {
     if (!config.id) return;
     setIsSyncingInovafarma(true);
+    setInovafarmaSyncProgressText('Sincronizando... 0 produtos processados');
     setInovafarmaFeedback(null);
+
+    let totalReceived = 0;
+    let totalCreated = 0;
+    let totalUpdated = 0;
+    let totalSkipped = 0;
 
     try {
       const tokenToUse = (formData.integrationToken || config.integrationToken || '').trim();
@@ -481,82 +488,137 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
         ''
       ).trim();
 
-      const result = await triggerInovafarmaSync({
-        tenantId: config.id,
-        erpUrl: parsedRoute.origin,
-        erpRouteId: parsedRoute.slug,
-        apiToken: tokenToUse,
-        apiLogin: loginToUse || undefined,
-        apiPassword: passwordToUse || undefined,
-        apiKey: apiKeyToUse || undefined,
-        cnpj: cnpjToUse,
-        mode: inovafarmaSyncMode,
-        inicial: inovafarmaSyncMode === 'delta' ? inovafarmaDateInicial : undefined,
-        final: inovafarmaSyncMode === 'delta' ? inovafarmaDateFinal : undefined,
-        offset: 1,
-        limit: 500,
-        ignoreErpPrices: Boolean(formData.ignore_erp_prices),
-      });
+      let currentOffset = 1;
+      let lastResult: any = null;
+      const MAX_BATCHES = 100;
 
-      setFormData((prev) => ({
-        ...prev,
-        erpBaseUrl: parsedRoute.origin,
-        erp_base_url: parsedRoute.origin,
-        erpUrl: parsedRoute.origin,
-        erpRouteId: parsedRoute.slug,
-        erp_route_id: parsedRoute.slug,
-        erpCnpj: result.cnpjSent || cnpjToUse,
-        erp_cnpj: result.cnpjSent || cnpjToUse,
-        ...(passwordToUse
-          ? {
-              erp_password: '',
-              erpApiPassword: '',
-              erp_api_password: '',
-              hasErpApiPassword: true,
-              has_erp_api_password: true,
-            }
-          : {}),
-        ...((result as any).lastProductSync
-          ? {
-              lastProductSync: (result as any).lastProductSync,
-              last_product_sync: (result as any).lastProductSync,
-            }
-          : {}),
-      }));
+      for (let batchIdx = 0; batchIdx < MAX_BATCHES; batchIdx++) {
+        const result = await triggerInovafarmaSync({
+          tenantId: config.id,
+          erpUrl: parsedRoute.origin,
+          erpRouteId: parsedRoute.slug,
+          apiToken: tokenToUse,
+          apiLogin: loginToUse || undefined,
+          apiPassword: batchIdx === 0 && passwordToUse ? passwordToUse : undefined,
+          apiKey: apiKeyToUse || undefined,
+          cnpj: cnpjToUse,
+          mode: inovafarmaSyncMode,
+          inicial: inovafarmaSyncMode === 'delta' ? inovafarmaDateInicial : undefined,
+          final: inovafarmaSyncMode === 'delta' ? inovafarmaDateFinal : undefined,
+          offset: currentOffset,
+          limit: 500,
+          maxPages: 3,
+          ignoreErpPrices: Boolean(formData.ignore_erp_prices),
+        });
 
-      const exactHttpStatus = result.httpStatus ?? 200;
-      const exactCnpjSent = result.cnpjSent || cnpjToUse;
+        lastResult = result;
+        const batchReceived = result.receivedCount ?? result.totalFetched ?? 0;
+        const batchCreated = result.createdCount ?? result.insertedCount ?? 0;
+        const batchUpdated = result.updatedCount ?? 0;
+        const batchSkipped = result.skippedCount ?? 0;
 
-      setInovafarmaFeedback({
-        type: 'success',
-        message:
-          result.message ||
-          `Sincronização com Inovafarma concluída (HTTP ${exactHttpStatus} | Header cnpj: ${exactCnpjSent})!`,
-        details: `Status HTTP: ${exactHttpStatus} | Header cnpj enviado: ${exactCnpjSent} | Endpoint utilizado: ${result.endpointUsed}${
-          (result as any).lastProductSync ? ` | Watermark: ${(result as any).lastProductSync}` : ''
-        }`,
-        stats: {
-          totalFetched: result.totalFetched,
-          insertedCount: result.insertedCount,
-          updatedCount: result.updatedCount,
-          skippedCount: result.skippedCount,
-        },
-      });
+        totalReceived += batchReceived;
+        totalCreated += batchCreated;
+        totalUpdated += batchUpdated;
+        totalSkipped += batchSkipped;
 
-      if (Array.isArray((result as any).logs)) {
-        setIntegrationLogs((result as any).logs.slice(0, 15));
-      } else {
-        await fetchTenantIntegrationLogs(config.id);
+        const progressMsg = `Sincronizando... ${totalReceived} produtos processados`;
+        setInovafarmaSyncProgressText(progressMsg);
+
+        if (result.partial && result.nextOffset && result.nextOffset > currentOffset) {
+          setInovafarmaFeedback({
+            type: 'success',
+            message: `${progressMsg} (Lote até offset ${result.nextOffset - 1})`,
+            details: `Processando em lotes rápidos (< 20s) para evitar timeout HTTP 524 | Próximo offset: ${result.nextOffset} | Endpoint: ${result.endpointUsed}`,
+            stats: {
+              totalFetched: totalReceived,
+              insertedCount: totalCreated,
+              updatedCount: totalUpdated,
+              skippedCount: totalSkipped,
+            },
+          });
+          currentOffset = result.nextOffset;
+        } else {
+          break;
+        }
+      }
+
+      if (lastResult) {
+        setFormData((prev) => ({
+          ...prev,
+          erpBaseUrl: parsedRoute.origin,
+          erp_base_url: parsedRoute.origin,
+          erpUrl: parsedRoute.origin,
+          erpRouteId: parsedRoute.slug,
+          erp_route_id: parsedRoute.slug,
+          erpCnpj: lastResult.cnpjSent || cnpjToUse,
+          erp_cnpj: lastResult.cnpjSent || cnpjToUse,
+          ...(passwordToUse
+            ? {
+                erp_password: '',
+                erpApiPassword: '',
+                erp_api_password: '',
+                hasErpApiPassword: true,
+                has_erp_api_password: true,
+              }
+            : {}),
+          ...(lastResult.lastProductSync
+            ? {
+                lastProductSync: lastResult.lastProductSync,
+                last_product_sync: lastResult.lastProductSync,
+              }
+            : {}),
+        }));
+
+        const exactHttpStatus = lastResult.httpStatus ?? 200;
+        const exactCnpjSent = lastResult.cnpjSent || cnpjToUse;
+
+        setInovafarmaFeedback({
+          type: 'success',
+          message:
+            totalReceived > 0
+              ? `Sincronização com Inovafarma concluída com sucesso! ${totalReceived} produtos processados (${totalCreated} novos, ${totalUpdated} atualizados).`
+              : lastResult.message ||
+                `Sincronização com Inovafarma concluída (HTTP ${exactHttpStatus} | Header cnpj: ${exactCnpjSent})!`,
+          details: `Status HTTP: ${exactHttpStatus} | Header cnpj enviado: ${exactCnpjSent} | Endpoint utilizado: ${lastResult.endpointUsed}${
+            lastResult.lastProductSync ? ` | Watermark: ${lastResult.lastProductSync}` : ''
+          }`,
+          stats: {
+            totalFetched: totalReceived,
+            insertedCount: totalCreated,
+            updatedCount: totalUpdated,
+            skippedCount: totalSkipped,
+          },
+        });
+
+        if (Array.isArray(lastResult.logs) && lastResult.logs.length > 0) {
+          setIntegrationLogs(lastResult.logs.slice(0, 15));
+        } else {
+          await fetchTenantIntegrationLogs(config.id);
+        }
       }
     } catch (err: any) {
       setInovafarmaFeedback({
         type: 'error',
         message: 'Falha ao sincronizar com Inovafarma (Portal PS)',
-        details: err?.message || 'Verifique se o Login da API, a Senha da API, a Rota {integracao}, o CNPJ da farmácia e a URL da API estão configurados corretamente.',
+        details: `${err?.message || 'Verifique se o Login da API, a Senha da API, a Rota {integracao}, o CNPJ da farmácia e a URL da API estão configurados corretamente.'}${
+          totalReceived > 0 ? ` (${totalReceived} produtos já haviam sido salvos antes da interrupção.)` : ''
+        }`,
+        ...(totalReceived > 0
+          ? {
+              stats: {
+                totalFetched: totalReceived,
+                insertedCount: totalCreated,
+                updatedCount: totalUpdated,
+                skippedCount: totalSkipped,
+              },
+            }
+          : {}),
       });
       await fetchTenantIntegrationLogs(config.id);
     } finally {
       setIsSyncingInovafarma(false);
+      setInovafarmaSyncProgressText('');
     }
   };
 
@@ -1678,12 +1740,12 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
                           {isSyncingInovafarma ? (
                               <>
                                   <Loader2 size={16} className="animate-spin" />
-                                  Sincronizando...
+                                  {inovafarmaSyncProgressText || 'Sincronizando...'}
                               </>
                           ) : (
                               <>
                                   <RefreshCw size={16} />
-                                  Sincronizar Agora com Inovafarma
+                                  SINCRONIZAR AGORA COM INOVAFARMA
                               </>
                           )}
                       </button>
@@ -1993,25 +2055,45 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
                       </div>
 
                       {inovafarmaSyncMode === 'full' && (
-                          <div className="md:col-span-2 flex flex-wrap items-center gap-3 bg-white p-3 rounded-2xl border border-gray-100 text-xs text-gray-600">
-                              <div className="flex items-center gap-1.5">
-                                  <Clock size={14} className="text-emerald-600" />
-                                  <span className="font-bold">Último Sync Produtos:</span>
-                                  <span className="font-mono">
-                                      {formData.lastProductSync || formData.last_product_sync
-                                          ? new Date(formData.lastProductSync || formData.last_product_sync || '').toLocaleString('pt-BR')
-                                          : 'Aguardando 1ª carga'}
-                                  </span>
-                              </div>
-                              {(formData.erpTokenExpiration || formData.erp_token_expiration) && (
-                                  <div className="flex items-center gap-1.5 pl-3 border-l border-gray-200">
-                                      <ShieldCheck size={14} className="text-blue-600" />
-                                      <span className="font-bold">Token Cache válido até:</span>
+                          <div className="md:col-span-2 flex flex-wrap items-center justify-between gap-3 bg-white p-3 rounded-2xl border border-gray-100 text-xs text-gray-600">
+                              <div className="flex flex-wrap items-center gap-3">
+                                  <div className="flex items-center gap-1.5">
+                                      <Clock size={14} className="text-emerald-600" />
+                                      <span className="font-bold">Último Sync Produtos:</span>
                                       <span className="font-mono">
-                                          {new Date(formData.erpTokenExpiration || formData.erp_token_expiration || '').toLocaleDateString('pt-BR')}
+                                          {formData.lastProductSync || formData.last_product_sync
+                                              ? new Date(formData.lastProductSync || formData.last_product_sync || '').toLocaleString('pt-BR')
+                                              : 'Aguardando 1ª carga'}
                                       </span>
                                   </div>
-                              )}
+                                  {(formData.erpTokenExpiration || formData.erp_token_expiration) && (
+                                      <div className="flex items-center gap-1.5 pl-3 border-l border-gray-200">
+                                          <ShieldCheck size={14} className="text-blue-600" />
+                                          <span className="font-bold">Token Cache válido até:</span>
+                                          <span className="font-mono">
+                                              {new Date(formData.erpTokenExpiration || formData.erp_token_expiration || '').toLocaleDateString('pt-BR')}
+                                          </span>
+                                      </div>
+                                  )}
+                              </div>
+                              <button
+                                  type="button"
+                                  onClick={handleSyncInovafarmaNow}
+                                  disabled={isSyncingInovafarma}
+                                  className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white font-black text-[11px] uppercase tracking-wider flex items-center gap-2 shadow-md shadow-emerald-600/20 transition-all cursor-pointer shrink-0"
+                              >
+                                  {isSyncingInovafarma ? (
+                                      <>
+                                          <Loader2 size={14} className="animate-spin" />
+                                          {inovafarmaSyncProgressText || 'Sincronizando...'}
+                                      </>
+                                  ) : (
+                                      <>
+                                          <RefreshCw size={14} />
+                                          SINCRONIZAR AGORA COM INOVAFARMA
+                                      </>
+                                  )}
+                              </button>
                           </div>
                       )}
 
