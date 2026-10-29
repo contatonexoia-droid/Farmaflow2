@@ -8,10 +8,12 @@ export const INOVAFARMA_MIN_OFFSET = 1;
 export const INOVAFARMA_MAX_DATE_WINDOW_DAYS = 31;
 export const INOVAFARMA_TOKEN_VALIDITY_DAYS = 30;
 
+export const INOVAFARMA_HOMOLOGACAO_CNPJ = "02433981097173";
+
 export const INOVAFARMA_HOMOLOGACAO_PRESET = {
   erp_base_url: "https://integracao.portalps.app",
   erp_route_id: "homologacao",
-  erp_cnpj: "02433981097173",
+  erp_cnpj: INOVAFARMA_HOMOLOGACAO_CNPJ,
   erp_login: "homologacao@inovafarma.com.br",
 } as const;
 
@@ -65,6 +67,7 @@ export function parseInovafarmaUrlAndRoute(
 ): {
   origin: string;
   slug: string;
+  routeId: string;
   loginUrl: string;
   v1BaseUrl: string;
 } {
@@ -172,6 +175,7 @@ export function parseInovafarmaUrlAndRoute(
   return {
     origin,
     slug: finalSlug,
+    routeId: finalSlug,
     loginUrl: `${origin}/api/login`,
     v1BaseUrl: `${origin}/api/v1/${finalSlug}`,
   };
@@ -335,6 +339,9 @@ export interface InovafarmaSyncResult {
   success: boolean;
   tenantId: string;
   endpointUsed: string;
+  httpStatus?: number;
+  cnpjSent?: string;
+  rawResponsePreview?: string;
   totalFetched: number;
   totalValid: number;
   insertedCount: number;
@@ -487,6 +494,26 @@ export function roundCurrency(value: number): number {
 export function sanitizeCnpj(rawCnpj: unknown): string {
   if (!rawCnpj) return "";
   return String(rawCnpj).replace(/\D+/g, "").trim();
+}
+
+/**
+ * Resolve o CNPJ efetivo (apenas dígitos numéricos limpos, sem pontuação) para o header `cnpj` do Inovafarma.
+ * Regra crítica de Homologação: Quando o slug for `homologacao`, o Inovafarma retorna HTTP 204 (vazio)
+ * caso o header `cnpj` seja diferente de `02433981097173`. Portanto, se o slug for `homologacao` e o `erp_cnpj`
+ * estiver vazio ou com outro CNPJ, força o fallback para `02433981097173`.
+ */
+export function resolveEffectiveInovafarmaCnpj(
+  rawCnpj?: unknown,
+  routeSlug?: unknown,
+): string {
+  const cleanSlug = String(routeSlug || INOVAFARMA_DEFAULT_ROUTE_ID)
+    .trim()
+    .toLowerCase();
+  const cleanCnpj = sanitizeCnpj(rawCnpj);
+  if (cleanSlug === "homologacao") {
+    return INOVAFARMA_HOMOLOGACAO_CNPJ;
+  }
+  return cleanCnpj || INOVAFARMA_HOMOLOGACAO_CNPJ;
 }
 
 /**
@@ -730,13 +757,20 @@ export function extractTenantErpConfig(tenant: any): InovafarmaTenantConfig {
   const normalizedBaseUrl = parsedUrlAndRoute.origin;
   const routeId = parsedUrlAndRoute.slug;
 
-  const erpCnpj = sanitizeCnpj(
+  const explicitErpCnpj = sanitizeCnpj(
     tenant.erp_cnpj ||
       tenant.erpCnpj ||
       creds.erp_cnpj ||
-      tenant.cnpj ||
+      "",
+  );
+  const storeFallbackCnpj = sanitizeCnpj(
+    tenant.cnpj ||
       regData.cnpj ||
       "",
+  );
+  const erpCnpj = resolveEffectiveInovafarmaCnpj(
+    explicitErpCnpj || storeFallbackCnpj,
+    routeId,
   );
 
   const erpLogin = extractTenantErpLogin(tenant);
@@ -1184,10 +1218,11 @@ export async function authenticateInovafarma(params: {
   // Extrai SEMPRE apenas a origem (ex: https://integracao.portalps.app) para o POST /api/login,
   // mesmo que o usuário tenha digitado https://integracao.portalps.app/api/v1/homologacao (ou com colchetes),
   // evitando o erro HTTP 405 Method Not Allowed.
-  const { origin, loginUrl } = parseInovafarmaUrlAndRoute(
+  const { origin, slug: parsedSlug, loginUrl } = parseInovafarmaUrlAndRoute(
     effectiveBaseUrl || INOVAFARMA_DEFAULT_API_URL,
     effectiveRouteId || INOVAFARMA_DEFAULT_ROUTE_ID,
   );
+  effectiveCnpj = resolveEffectiveInovafarmaCnpj(effectiveCnpj, parsedSlug);
 
   const candidateUrls: string[] = [loginUrl];
   if (!candidateUrls.includes(`${origin}/api/login`)) {
@@ -1373,7 +1408,10 @@ export async function resolveTenantInovafarmaToken(params: {
   );
   const baseUrl = parsedUrlAndRoute.origin;
   const routeId = parsedUrlAndRoute.slug;
-  const cnpj = sanitizeCnpj(params.cnpjOverride || cfg.erp_cnpj || "");
+  const cnpj = resolveEffectiveInovafarmaCnpj(
+    params.cnpjOverride || cfg.erp_cnpj || "",
+    routeId,
+  );
   const apiKey = (params.apiKeyOverride ?? cfg.erp_api_key ?? "").trim();
 
   const loginToUse = (params.loginOverride || cfg.erp_login).trim();
@@ -1634,37 +1672,78 @@ export function parseInovafarmaNumber(raw: unknown, fallback = 0): number {
  * - Usa `MENORPRECOVENDA` como preço final de venda (`price`) e `PRECOVENDA` como preço "De" (`originalPrice`) quando maior
  * - Copia `UNIDADEMEDIDA` (2 ou 3 caracteres: `UN`, `CX`, etc.)
  */
+/**
+ * Busca um campo em um objeto de forma case-insensitive (suportando UPPERCASE, PascalCase, camelCase e snake_case)
+ */
+function getProductFieldCI(raw: Record<string, any>, candidateNames: string[]): any {
+  for (const name of candidateNames) {
+    if (raw[name] !== undefined && raw[name] !== null && raw[name] !== "") {
+      return raw[name];
+    }
+  }
+  const lowerMap = new Map<string, any>();
+  for (const [k, v] of Object.entries(raw)) {
+    if (v !== undefined && v !== null && v !== "") {
+      lowerMap.set(k.toLowerCase().replace(/[^a-z0-9]/g, ""), v);
+    }
+  }
+  for (const name of candidateNames) {
+    const cleanKey = name.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (lowerMap.has(cleanKey)) {
+      return lowerMap.get(cleanKey);
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Normaliza um item bruto retornado pela API Pública de E-commerce v1 do Inovafarma (Portal PS):
+ * - Salva obrigatoriamente o `CODIGOPRODUTO` (`internalCode` / `erpProductId`)
+ * - Trata `EANADICIONAL` preservando o `CODIGOPRODUTO`
+ * - Usa `MENORPRECOVENDA` como preço final de venda (`price`) e `PRECOVENDA` como preço "De" (`originalPrice`) quando maior
+ * - Copia `UNIDADEMEDIDA` (2 ou 3 caracteres: `UN`, `CX`, etc.)
+ */
 export function normalizeInovafarmaProduct(
   raw: InovafarmaRawProduct,
 ): NormalizedInovafarmaProduct | null {
   if (!raw || typeof raw !== "object") return null;
 
   const rawEan =
-    raw.CODIGOBARRAS ??
-    raw.ean ??
-    raw.codigoBarras ??
-    raw.codBarras ??
-    raw.codigo_barras ??
-    raw.gtin ??
-    raw.barcode ??
-    raw.ean13 ??
-    "";
+    getProductFieldCI(raw as any, [
+      "CODIGOBARRAS",
+      "CodigoBarras",
+      "codigoBarras",
+      "codigo_barras",
+      "codBarras",
+      "ean",
+      "EAN",
+      "gtin",
+      "barcode",
+      "ean13",
+    ]) ?? "";
 
   const rawCodigoProduto =
-    raw.CODIGOPRODUTO ??
-    raw.codigoProduto ??
-    raw.codigo_produto ??
-    raw.codProduto ??
-    raw.codigoInterno ??
-    raw.codigo_interno ??
-    raw.codigo ??
-    raw.idProduto ??
-    raw.sku ??
-    raw.id ??
-    "";
+    getProductFieldCI(raw as any, [
+      "CODIGOPRODUTO",
+      "CodigoProduto",
+      "codigoProduto",
+      "codigo_produto",
+      "codProduto",
+      "codigoInterno",
+      "codigo_interno",
+      "codigo",
+      "idProduto",
+      "sku",
+      "id",
+    ]) ?? "";
 
   const rawEanAdicional =
-    raw.EANADICIONAL ?? raw.eanAdicional ?? raw.ean_adicional ?? null;
+    getProductFieldCI(raw as any, [
+      "EANADICIONAL",
+      "EanAdicional",
+      "eanAdicional",
+      "ean_adicional",
+    ]) ?? null;
 
   const additionalEans: string[] = [];
   if (Array.isArray(rawEanAdicional)) {
@@ -1693,70 +1772,88 @@ export function normalizeInovafarmaProduct(
   }
 
   const rawName =
-    raw.DESCRICAO ??
-    raw.NOME ??
-    raw.nome ??
-    raw.descricao ??
-    raw.nomeProduto ??
-    raw.descricaoProduto ??
-    raw.produto ??
-    raw.name ??
-    raw.title ??
-    "";
+    getProductFieldCI(raw as any, [
+      "DESCRICAO",
+      "Descricao",
+      "NOME",
+      "Nome",
+      "nome",
+      "descricao",
+      "nomeProduto",
+      "descricaoProduto",
+      "produto",
+      "name",
+      "title",
+    ]) ?? "";
 
   const name = String(rawName ?? "").trim();
   const finalName = name || `Produto (${primaryBarcode || internalCode})`;
 
   const unitMeasure = normalizeUnidadeMedida(
-    raw.UNIDADEMEDIDA ??
-      raw.unidadeMedida ??
-      raw.unidade_medida ??
-      raw.unidade ??
-      "UN",
+    getProductFieldCI(raw as any, [
+      "UNIDADEMEDIDA",
+      "UnidadeMedida",
+      "unidadeMedida",
+      "unidade_medida",
+      "unidade",
+      "APRESENTACAO",
+      "apresentacao",
+    ]) ?? "UN",
   );
 
-  const rawPrecoVenda =
-    raw.PRECOVENDA ??
-    raw.precoVenda ??
-    raw.preco_venda ??
-    raw.valorVenda ??
-    raw.preco ??
-    raw.valor ??
-    raw.price ??
-    raw.salePrice;
+  const rawPrecoVenda = getProductFieldCI(raw as any, [
+    "PRECOVENDA",
+    "PrecoVenda",
+    "precoVenda",
+    "preco_venda",
+    "valorVenda",
+    "preco",
+    "valor",
+    "price",
+    "salePrice",
+  ]);
 
-  const rawMenorPrecoVenda =
-    raw.MENORPRECOVENDA ??
-    raw.menorPrecoVenda ??
-    raw.menor_preco_venda;
+  const rawMenorPrecoVenda = getProductFieldCI(raw as any, [
+    "MENORPRECOVENDA",
+    "MenorPrecoVenda",
+    "menorPrecoVenda",
+    "menor_preco_venda",
+  ]);
 
-  const rawPromo =
-    raw.PRECOPROMOCIONAL ??
-    raw.precoPromocional ??
-    raw.preco_promocional ??
-    raw.valorPromocao ??
-    raw.precoOferta ??
-    raw.promotionalPrice;
+  const rawPromo = getProductFieldCI(raw as any, [
+    "PRECOPROMOCIONAL",
+    "PrecoPromocional",
+    "precoPromocional",
+    "preco_promocional",
+    "valorPromocao",
+    "precoOferta",
+    "promotionalPrice",
+  ]);
 
-  const rawCost =
-    raw.PRECOCUSTO ??
-    raw.precoCusto ??
-    raw.preco_custo ??
-    raw.valorCusto ??
-    raw.custo ??
-    raw.costPrice;
+  const rawCost = getProductFieldCI(raw as any, [
+    "PRECOCUSTO",
+    "PrecoCusto",
+    "precoCusto",
+    "preco_custo",
+    "valorCusto",
+    "custo",
+    "costPrice",
+  ]);
 
-  const rawStock =
-    raw.ESTOQUE ??
-    raw.SALDOESTOQUE ??
-    raw.estoque ??
-    raw.saldo ??
-    raw.saldoEstoque ??
-    raw.qtdEstoque ??
-    raw.quantidade ??
-    raw.estoqueAtual ??
-    raw.stock ??
-    raw.qty;
+  const rawStock = getProductFieldCI(raw as any, [
+    "ESTOQUE",
+    "Estoque",
+    "SALDOESTOQUE",
+    "SaldoEstoque",
+    "estoque",
+    "saldo",
+    "saldoEstoque",
+    "qtdEstoque",
+    "quantidade",
+    "estoqueAtual",
+    "stock",
+    "qty",
+  ]);
 
   const precoVendaVal = Math.max(0, roundCurrency(parseInovafarmaNumber(rawPrecoVenda, 0)));
   const menorPrecoVal = Math.max(0, roundCurrency(parseInovafarmaNumber(rawMenorPrecoVenda, 0)));
@@ -1786,39 +1883,50 @@ export function normalizeInovafarmaProduct(
 
   const category =
     String(
-      raw.CATEGORIA ??
-        raw.GRUPO ??
-        raw.SECAO ??
-        raw.categoria ??
-        raw.departamento ??
-        raw.grupo ??
-        raw.secao ??
-        raw.category ??
-        "Geral",
+      getProductFieldCI(raw as any, [
+        "CATEGORIA",
+        "Categoria",
+        "GRUPO",
+        "Grupo",
+        "SECAO",
+        "Secao",
+        "categoria",
+        "departamento",
+        "grupo",
+        "secao",
+        "category",
+      ]) ?? "Geral",
     ).trim() || "Geral";
 
   const manufacturer = String(
-    raw.FABRICANTE ??
-      raw.LABORATORIO ??
-      raw.fabricante ??
-      raw.laboratorio ??
-      raw.marca ??
-      "",
+    getProductFieldCI(raw as any, [
+      "FABRICANTE",
+      "Fabricante",
+      "LABORATORIO",
+      "Laboratorio",
+      "fabricante",
+      "laboratorio",
+      "marca",
+    ]) ?? "",
   ).trim();
 
   const activeIngredient = String(
-    raw.PRINCIPIOATIVO ??
-      raw.principioAtivo ??
-      raw.principio_ativo ??
-      raw.substancia ??
-      "",
+    getProductFieldCI(raw as any, [
+      "PRINCIPIOATIVO",
+      "PrincipioAtivo",
+      "principioAtivo",
+      "principio_ativo",
+      "substancia",
+    ]) ?? "",
   ).trim();
 
   const updatedAtErp = String(
-    raw.DATAATUALIZACAOPRODUTO ??
-      raw.dataAtualizacaoProduto ??
-      raw.data_atualizacao_produto ??
-      "",
+    getProductFieldCI(raw as any, [
+      "DATAATUALIZACAOPRODUTO",
+      "DataAtualizacaoProduto",
+      "dataAtualizacaoProduto",
+      "data_atualizacao_produto",
+    ]) ?? "",
   ).trim();
 
   return {
@@ -1841,52 +1949,78 @@ export function normalizeInovafarmaProduct(
 }
 
 /**
- * Extrai um array de registros de qualquer envelope JSON retornado pelo Inovafarma / Portal PS
+ * Extrai um array de registros de qualquer formato retornado pelo Inovafarma / Portal PS:
+ * - Array direto `[...]`
+ * - String JSON serializada contendo array ou objeto
+ * - Objeto envelopado (`{ data: [...] }`, `{ dados: [...] }`, `{ produtos: [...] }`, `{ items: [...] }`, etc., case-insensitive)
  */
-function extractArrayFromInovafarmaResponse<T = any>(payload: any): T[] | null {
-  if (!payload) return null;
+export function extractArrayFromInovafarmaResponse<T = any>(payload: any): T[] | null {
+  if (payload === null || payload === undefined) return null;
   if (Array.isArray(payload)) return payload;
+
+  if (typeof payload === "string") {
+    const trimmed = payload.trim();
+    if (
+      (trimmed.startsWith("[") && trimmed.endsWith("]")) ||
+      (trimmed.startsWith("{") && trimmed.endsWith("}"))
+    ) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        return extractArrayFromInovafarmaResponse<T>(parsed);
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
   if (typeof payload === "object") {
     const candidateKeys = [
       "produtos",
       "products",
-      "clientes",
-      "funcionarios",
-      "vendedores",
-      "metodosPagamentos",
-      "metodospagamentos",
-      "formasPagamento",
+      "dados",
       "data",
       "items",
       "itens",
       "results",
       "result",
+      "resultado",
+      "retorno",
       "content",
       "registros",
       "lista",
+      "value",
+      "values",
+      "objeto",
+      "clientes",
+      "funcionarios",
+      "vendedores",
+      "metodospagamentos",
+      "formaspagamento",
     ];
-    for (const key of candidateKeys) {
-      if (Array.isArray(payload[key])) {
-        return payload[key];
+
+    const keys = Object.keys(payload);
+    // 1. Busca case-insensitive nas chaves conhecidas de envelope
+    for (const candidate of candidateKeys) {
+      const matchedKey = keys.find(
+        (k) => k.toLowerCase() === candidate.toLowerCase(),
+      );
+      if (matchedKey !== undefined) {
+        const val = payload[matchedKey];
+        if (Array.isArray(val)) {
+          return val;
+        }
+        if (val && typeof val === "object") {
+          const nested = extractArrayFromInovafarmaResponse<T>(val);
+          if (nested) return nested;
+        }
       }
-      if (
-        payload[key] &&
-        typeof payload[key] === "object" &&
-        Array.isArray(
-          payload[key].items ||
-            payload[key].produtos ||
-            payload[key].clientes ||
-            payload[key].funcionarios ||
-            payload[key].data,
-        )
-      ) {
-        return (
-          payload[key].items ||
-          payload[key].produtos ||
-          payload[key].clientes ||
-          payload[key].funcionarios ||
-          payload[key].data
-        );
+    }
+
+    // 2. Fallback genérico: se qualquer propriedade do objeto for um Array
+    for (const k of keys) {
+      if (Array.isArray(payload[k])) {
+        return payload[k];
       }
     }
   }
@@ -1975,13 +2109,16 @@ export async function inovafarmaHttpRequest<T = any>(params: {
   data: T | null;
   empty: boolean;
   endpointUsed: string;
+  cnpjSent: string;
+  rawPreview?: string;
   refreshedToken?: string;
 }> {
   let currentToken = (params.token || "").trim();
-  const cleanCnpj = sanitizeCnpj(params.cnpj);
+  const parsedRoute = parseInovafarmaUrlAndRoute(params.baseUrl, params.routeId);
+  const cleanCnpj = resolveEffectiveInovafarmaCnpj(params.cnpj, parsedRoute.slug);
   const candidateEndpoints = buildInovafarmaCandidateUrls({
-    baseUrl: params.baseUrl,
-    routeId: params.routeId,
+    baseUrl: parsedRoute.origin,
+    routeId: parsedRoute.slug,
     resourcePaths: params.resourcePaths,
   });
 
@@ -2042,8 +2179,8 @@ export async function inovafarmaHttpRequest<T = any>(params: {
           const reAuth = await authenticateInovafarma({
             supabaseClient: params.supabaseClient,
             tenantId: params.tenantId,
-            baseUrl: params.baseUrl,
-            routeId: params.routeId,
+            baseUrl: parsedRoute.origin,
+            routeId: parsedRoute.slug,
             cnpj: cleanCnpj,
             login: params.login,
             password: params.password,
@@ -2062,11 +2199,16 @@ export async function inovafarmaHttpRequest<T = any>(params: {
 
       // Tratamento de HTTP 204 (No Content): significa "Sem resultados", NUNCA um erro
       if (response.status === 204) {
+        console.log(
+          `[Inovafarma HTTP] ${params.method} ${fullUrl} | Header cnpj=${cleanCnpj} -> HTTP 204 (No Content / Sem registros)`,
+        );
         return {
           status: 204,
           data: null,
           empty: true,
           endpointUsed: fullUrl,
+          cnpjSent: cleanCnpj,
+          rawPreview: "",
           refreshedToken,
         };
       }
@@ -2074,6 +2216,9 @@ export async function inovafarmaHttpRequest<T = any>(params: {
       const contentType = response.headers.get("content-type") || "";
       if (!response.ok) {
         const errText = await response.text().catch(() => "");
+        console.warn(
+          `[Inovafarma HTTP] ${params.method} ${fullUrl} | Header cnpj=${cleanCnpj} -> HTTP ${response.status} (${errText.slice(0, 200)})`,
+        );
         errors.push(
           `${fullUrl} -> HTTP ${response.status}${errText ? ` (${errText.slice(0, 140)})` : ""}`,
         );
@@ -2086,12 +2231,19 @@ export async function inovafarmaHttpRequest<T = any>(params: {
       }
 
       const rawText = await response.text();
+      const rawPreview = rawText ? rawText.slice(0, 500) : "";
+      console.log(
+        `[Inovafarma HTTP] ${params.method} ${fullUrl} | Header cnpj=${cleanCnpj} -> HTTP ${response.status} | Body (${rawText.length} bytes): ${rawPreview.slice(0, 250)}`,
+      );
+
       if (!rawText || !rawText.trim()) {
         return {
-          status: 204,
+          status: response.status,
           data: null,
           empty: true,
           endpointUsed: fullUrl,
+          cnpjSent: cleanCnpj,
+          rawPreview: "",
           refreshedToken,
         };
       }
@@ -2100,8 +2252,8 @@ export async function inovafarmaHttpRequest<T = any>(params: {
       try {
         data = JSON.parse(rawText);
       } catch {
-        errors.push(`${fullUrl} -> Resposta não é um JSON válido`);
-        continue;
+        // Rotas como GET /api/v1/{integracao}/server podem retornar texto puro ou status simples com HTTP 200
+        data = { statusText: rawText.trim() };
       }
 
       // Regra Crítica do Inovafarma: HTTP 200 NÃO significa sucesso garantido!
@@ -2127,6 +2279,7 @@ export async function inovafarmaHttpRequest<T = any>(params: {
               endpoint: fullUrl,
               payload: {
                 method: params.method,
+                cnpjSent: cleanCnpj,
                 queryParams: params.queryParams,
                 requestBody: params.body,
                 erpResponse: data,
@@ -2145,6 +2298,8 @@ export async function inovafarmaHttpRequest<T = any>(params: {
         data: data as T,
         empty: false,
         endpointUsed: fullUrl,
+        cnpjSent: cleanCnpj,
+        rawPreview,
         refreshedToken,
       };
     } catch (err: any) {
@@ -2163,6 +2318,7 @@ export async function inovafarmaHttpRequest<T = any>(params: {
         endpoint: params.resourcePaths[0] || "/inovafarma",
         payload: {
           method: params.method,
+          cnpjSent: cleanCnpj,
           queryParams: params.queryParams,
           errors: errors.slice(0, 5),
         },
@@ -2176,7 +2332,7 @@ export async function inovafarmaHttpRequest<T = any>(params: {
 
 /**
  * Executa requisição GET autenticada para endpoints de listagem do Inovafarma,
- * tratando HTTP 204 como lista vazia `[]`.
+ * tratando HTTP 204 como lista vazia `[]` e preservando o HTTP status exato (200 ou 204) e o CNPJ enviado.
  */
 async function performInovafarmaGet<T = any>(params: {
   baseUrl?: string;
@@ -2191,7 +2347,14 @@ async function performInovafarmaGet<T = any>(params: {
   login?: string;
   password?: string;
   rateLimitWaitMs?: number;
-}): Promise<{ items: T[]; endpointUsed: string; status: number; refreshedToken?: string }> {
+}): Promise<{
+  items: T[];
+  endpointUsed: string;
+  status: number;
+  cnpjSent: string;
+  rawPreview?: string;
+  refreshedToken?: string;
+}> {
   const res = await inovafarmaHttpRequest<any>({
     method: "GET",
     baseUrl: params.baseUrl,
@@ -2212,7 +2375,9 @@ async function performInovafarmaGet<T = any>(params: {
     return {
       items: [],
       endpointUsed: res.endpointUsed,
-      status: 204,
+      status: res.status,
+      cnpjSent: res.cnpjSent,
+      rawPreview: res.rawPreview,
       refreshedToken: res.refreshedToken,
     };
   }
@@ -2223,6 +2388,8 @@ async function performInovafarmaGet<T = any>(params: {
       items: extracted,
       endpointUsed: res.endpointUsed,
       status: res.status,
+      cnpjSent: res.cnpjSent,
+      rawPreview: res.rawPreview,
       refreshedToken: res.refreshedToken,
     };
   }
@@ -2232,6 +2399,8 @@ async function performInovafarmaGet<T = any>(params: {
       items: [res.data as T],
       endpointUsed: res.endpointUsed,
       status: res.status,
+      cnpjSent: res.cnpjSent,
+      rawPreview: res.rawPreview,
       refreshedToken: res.refreshedToken,
     };
   }
@@ -2240,13 +2409,16 @@ async function performInovafarmaGet<T = any>(params: {
     items: [],
     endpointUsed: res.endpointUsed,
     status: res.status,
+    cnpjSent: res.cnpjSent,
+    rawPreview: res.rawPreview,
     refreshedToken: res.refreshedToken,
   };
 }
 
 /**
  * Testa a conectividade oficial com o servidor do Inovafarma (`GET /api/v1/{integracao}/server`):
- * Deve retornar HTTP 200 com array.
+ * Trata qualquer retorno HTTP 200 ou 204 de `/server` como sucesso (conectado),
+ * sem exigir um array de produtos nem acessar `.length` em propriedades indefinidas.
  */
 export async function checkInovafarmaServerConnectivity(params: {
   baseUrl?: string;
@@ -2259,34 +2431,52 @@ export async function checkInovafarmaServerConnectivity(params: {
   login?: string;
   password?: string;
 }): Promise<{
+  success: boolean;
   connected: boolean;
   status: number;
+  httpStatus: number;
+  cnpjSent: string;
   endpointUsed: string;
   serverInfo: any[];
+  servers: any[];
+  rawResponse?: any;
   message: string;
 }> {
-  const { items, endpointUsed, status } = await performInovafarmaGet<any>({
+  const res = await inovafarmaHttpRequest<any>({
+    method: "GET",
     baseUrl: params.baseUrl,
     routeId: params.routeId,
     token: params.token,
     cnpj: params.cnpj,
     apiKey: params.apiKey,
-    paths: ["server"],
+    resourcePaths: ["server"],
     supabaseClient: params.supabaseClient,
     tenantId: params.tenantId,
     login: params.login,
     password: params.password,
   });
 
-  const isConnected = status === 200 && Array.isArray(items);
+  const extracted = extractArrayFromInovafarmaResponse<any>(res.data);
+  const safeServers: any[] = Array.isArray(extracted)
+    ? extracted
+    : res.data !== null && res.data !== undefined
+      ? [res.data]
+      : [];
+
+  const isConnected = res.status === 200 || res.status === 204;
   return {
+    success: isConnected,
     connected: isConnected,
-    status,
-    endpointUsed,
-    serverInfo: items || [],
+    status: res.status,
+    httpStatus: res.status,
+    cnpjSent: res.cnpjSent,
+    endpointUsed: res.endpointUsed,
+    serverInfo: safeServers,
+    servers: safeServers,
+    rawResponse: res.data,
     message: isConnected
-      ? `Conectividade com Inovafarma (/server) validada com sucesso (HTTP ${status}).`
-      : `Servidor respondeu com HTTP ${status} sem array ativo.`,
+      ? `Conectividade com Inovafarma (/server) validada com sucesso (HTTP ${res.status} | Header cnpj: ${res.cnpjSent}).`
+      : `Servidor respondeu com HTTP ${res.status} (Header cnpj: ${res.cnpjSent}).`,
   };
 }
 
@@ -2310,6 +2500,9 @@ export async function fetchInovafarmaProducts(params: {
 }): Promise<{
   products: InovafarmaRawProduct[];
   endpointUsed: string;
+  httpStatus: number;
+  cnpjSent: string;
+  rawPreview?: string;
   highestUpdatedAt?: string;
 }> {
   const { offset: initialOffset, limit } = normalizeInovafarmaPagination(
@@ -2321,31 +2514,45 @@ export async function fetchInovafarmaProducts(params: {
   const allProducts: InovafarmaRawProduct[] = [];
   let currentOffset = initialOffset;
   let lastEndpointUsed = "";
+  let firstHttpStatus = 200;
+  let cnpjSent = resolveEffectiveInovafarmaCnpj(params.cnpj, params.routeId);
+  let firstRawPreview = "";
   let currentToken = params.token;
   let highestUpdatedAt = "";
   const MAX_PAGES = 50; // Até 25.000 itens com limit=500
 
   for (let page = 0; page < MAX_PAGES; page++) {
-    const { items, endpointUsed, status, refreshedToken } =
-      await performInovafarmaGet<InovafarmaRawProduct>({
-        baseUrl: params.baseUrl,
-        routeId: params.routeId,
-        token: currentToken,
-        cnpj: params.cnpj,
-        apiKey: params.apiKey,
-        paths: ["produtos"],
-        queryParams: {
-          offset: currentOffset,
-          limit,
-        },
-        supabaseClient: params.supabaseClient,
-        tenantId: params.tenantId,
-        login: params.login,
-        password: params.password,
-      });
+    const {
+      items,
+      endpointUsed,
+      status,
+      cnpjSent: pageCnpj,
+      rawPreview,
+      refreshedToken,
+    } = await performInovafarmaGet<InovafarmaRawProduct>({
+      baseUrl: params.baseUrl,
+      routeId: params.routeId,
+      token: currentToken,
+      cnpj: params.cnpj,
+      apiKey: params.apiKey,
+      paths: ["produtos"],
+      queryParams: {
+        offset: currentOffset,
+        limit,
+      },
+      supabaseClient: params.supabaseClient,
+      tenantId: params.tenantId,
+      login: params.login,
+      password: params.password,
+    });
 
     if (refreshedToken) currentToken = refreshedToken;
     lastEndpointUsed = endpointUsed;
+    if (page === 0) {
+      firstHttpStatus = status;
+      cnpjSent = pageCnpj;
+      firstRawPreview = rawPreview || "";
+    }
 
     // Para a paginação ao receber HTTP 204 ou array vazio
     if (status === 204 || !items || items.length === 0) {
@@ -2376,6 +2583,9 @@ export async function fetchInovafarmaProducts(params: {
   return {
     products: allProducts,
     endpointUsed: lastEndpointUsed,
+    httpStatus: firstHttpStatus,
+    cnpjSent,
+    rawPreview: firstRawPreview || undefined,
     highestUpdatedAt: highestUpdatedAt || undefined,
   };
 }
@@ -2404,6 +2614,9 @@ export async function fetchInovafarmaProdutosAlterados(params: {
 }): Promise<{
   products: InovafarmaRawProduct[];
   endpointUsed: string;
+  httpStatus: number;
+  cnpjSent: string;
+  rawPreview?: string;
   inicialUsed: string;
   finalUsed: string;
   highestUpdatedAt?: string;
@@ -2430,33 +2643,47 @@ export async function fetchInovafarmaProdutosAlterados(params: {
   const allProducts: InovafarmaRawProduct[] = [];
   let currentOffset = initialOffset;
   let lastEndpointUsed = "";
+  let firstHttpStatus = 200;
+  let cnpjSent = resolveEffectiveInovafarmaCnpj(params.cnpj, params.routeId);
+  let firstRawPreview = "";
   let currentToken = params.token;
   let highestUpdatedAt = "";
   const MAX_PAGES = 50;
 
   for (let page = 0; page < MAX_PAGES; page++) {
-    const { items, endpointUsed, status, refreshedToken } =
-      await performInovafarmaGet<InovafarmaRawProduct>({
-        baseUrl: params.baseUrl,
-        routeId: params.routeId,
-        token: currentToken,
-        cnpj: params.cnpj,
-        apiKey: params.apiKey,
-        paths: ["produtosalterados"],
-        queryParams: {
-          offset: currentOffset,
-          limit,
-          inicial,
-          final,
-        },
-        supabaseClient: params.supabaseClient,
-        tenantId: params.tenantId,
-        login: params.login,
-        password: params.password,
-      });
+    const {
+      items,
+      endpointUsed,
+      status,
+      cnpjSent: pageCnpj,
+      rawPreview,
+      refreshedToken,
+    } = await performInovafarmaGet<InovafarmaRawProduct>({
+      baseUrl: params.baseUrl,
+      routeId: params.routeId,
+      token: currentToken,
+      cnpj: params.cnpj,
+      apiKey: params.apiKey,
+      paths: ["produtosalterados"],
+      queryParams: {
+        offset: currentOffset,
+        limit,
+        inicial,
+        final,
+      },
+      supabaseClient: params.supabaseClient,
+      tenantId: params.tenantId,
+      login: params.login,
+      password: params.password,
+    });
 
     if (refreshedToken) currentToken = refreshedToken;
     lastEndpointUsed = endpointUsed;
+    if (page === 0) {
+      firstHttpStatus = status;
+      cnpjSent = pageCnpj;
+      firstRawPreview = rawPreview || "";
+    }
 
     if (status === 204 || !items || items.length === 0) {
       break;
@@ -2485,6 +2712,9 @@ export async function fetchInovafarmaProdutosAlterados(params: {
   return {
     products: allProducts,
     endpointUsed: lastEndpointUsed,
+    httpStatus: firstHttpStatus,
+    cnpjSent,
+    rawPreview: firstRawPreview || undefined,
     inicialUsed: inicial,
     finalUsed: final,
     highestUpdatedAt: highestUpdatedAt || undefined,
@@ -3684,7 +3914,10 @@ export async function syncInovafarmaProductsToSupabase(
   );
   const effectiveUrl = parsedUrlAndRoute.origin;
   const effectiveRouteId = parsedUrlAndRoute.slug;
-  const effectiveCnpj = sanitizeCnpj(options.cnpj || cfg.erp_cnpj || "");
+  const effectiveCnpj = resolveEffectiveInovafarmaCnpj(
+    options.cnpj || cfg.erp_cnpj || "",
+    effectiveRouteId,
+  );
   const effectiveApiKey = (options.apiKey ?? cfg.erp_api_key ?? "").trim();
   const ignoreErpPrices =
     options.ignoreErpPrices !== undefined
@@ -3706,6 +3939,9 @@ export async function syncInovafarmaProductsToSupabase(
 
   let rawProducts: InovafarmaRawProduct[] = [];
   let endpointUsed = "payload_direto";
+  let httpStatus = 200;
+  let cnpjSent = effectiveCnpj;
+  let rawResponsePreview: string | undefined;
   let highestUpdatedAtWatermark = "";
 
   try {
@@ -3731,6 +3967,7 @@ export async function syncInovafarmaProductsToSupabase(
     if (Array.isArray(options.productsOverride) && options.productsOverride.length > 0) {
       rawProducts = options.productsOverride;
       endpointUsed = "push_payload";
+      httpStatus = 200;
     } else if (options.mode === "delta" || (options.inicial && options.final)) {
       const fetched = await fetchInovafarmaProdutosAlterados({
         baseUrl: effectiveUrl,
@@ -3750,6 +3987,9 @@ export async function syncInovafarmaProductsToSupabase(
       });
       rawProducts = fetched.products;
       endpointUsed = fetched.endpointUsed;
+      httpStatus = fetched.httpStatus;
+      cnpjSent = fetched.cnpjSent || effectiveCnpj;
+      rawResponsePreview = fetched.rawPreview;
       if (fetched.highestUpdatedAt) {
         highestUpdatedAtWatermark = fetched.highestUpdatedAt;
       }
@@ -3769,6 +4009,9 @@ export async function syncInovafarmaProductsToSupabase(
       });
       rawProducts = fetched.products;
       endpointUsed = fetched.endpointUsed;
+      httpStatus = fetched.httpStatus;
+      cnpjSent = fetched.cnpjSent || effectiveCnpj;
+      rawResponsePreview = fetched.rawPreview;
       if (fetched.highestUpdatedAt) {
         highestUpdatedAtWatermark = fetched.highestUpdatedAt;
       }
@@ -3833,6 +4076,9 @@ export async function syncInovafarmaProductsToSupabase(
         success: true,
         tenantId,
         endpointUsed,
+        httpStatus,
+        cnpjSent,
+        rawResponsePreview,
         totalFetched: rawProducts.length,
         totalValid: 0,
         insertedCount: 0,
@@ -3841,8 +4087,7 @@ export async function syncInovafarmaProductsToSupabase(
         ignoreErpPrices,
         syncedAt,
         lastProductSync: finalWatermark,
-        message:
-          "A API do Inovafarma respondeu com sucesso (HTTP 200/204), mas nenhum produto novo/alterado foi retornado no período.",
+        message: `A API do Inovafarma respondeu com HTTP ${httpStatus} (Header cnpj enviado: ${cnpjSent}), mas nenhum produto novo/alterado foi retornado no período.`,
       };
 
       await supabaseClient.from("integration_logs").insert({
@@ -3850,13 +4095,15 @@ export async function syncInovafarmaProductsToSupabase(
         endpoint: options.mode === "delta" ? "/inovafarma/produtosalterados" : "/inovafarma/sync",
         payload: {
           endpointUsed,
+          httpStatus,
           routeId: effectiveRouteId,
-          cnpj: effectiveCnpj,
+          cnpj: cnpjSent,
           inicial: options.inicial,
           final: options.final,
           totalFetched: rawProducts.length,
           totalValid: 0,
           skippedCount,
+          rawResponsePreview,
         },
         status: "SUCCESS",
       });
@@ -4014,6 +4261,9 @@ export async function syncInovafarmaProductsToSupabase(
       success: true,
       tenantId,
       endpointUsed,
+      httpStatus,
+      cnpjSent,
+      rawResponsePreview,
       totalFetched: rawProducts.length,
       totalValid: validProducts.length,
       insertedCount,
@@ -4022,7 +4272,7 @@ export async function syncInovafarmaProductsToSupabase(
       ignoreErpPrices,
       syncedAt,
       lastProductSync: finalWatermark,
-      message: `Sincronização Inovafarma concluída: ${validProducts.length} produtos processados (${insertedCount} novos, ${updatedCount} atualizados).`,
+      message: `Sincronização Inovafarma concluída (HTTP ${httpStatus} | Header cnpj: ${cnpjSent}): ${validProducts.length} produtos processados (${insertedCount} novos, ${updatedCount} atualizados).`,
     };
 
     await supabaseClient.from("integration_logs").insert({
@@ -4030,8 +4280,9 @@ export async function syncInovafarmaProductsToSupabase(
       endpoint: options.mode === "delta" ? "/inovafarma/produtosalterados" : "/inovafarma/sync",
       payload: {
         endpointUsed,
+        httpStatus,
         routeId: effectiveRouteId,
-        cnpj: effectiveCnpj,
+        cnpj: cnpjSent,
         inicial: options.inicial,
         final: options.final,
         totalFetched: rawProducts.length,
@@ -4118,9 +4369,14 @@ export async function triggerInovafarmaConnectivityTest(params: {
 }): Promise<{
   success: boolean;
   connected: boolean;
+  status?: number;
+  httpStatus?: number;
+  cnpjSent?: string;
   endpointUsed: string;
   message: string;
   serverInfo?: any[];
+  servers?: any[];
+  rawResponse?: any;
   tokenExpiration?: string;
 }> {
   const response = await fetch("/api/integration/inovafarma/server", {

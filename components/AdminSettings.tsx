@@ -22,6 +22,7 @@ import {
   triggerInovafarmaConnectivityTest,
   triggerInovafarmaReconciliation,
   parseInovafarmaUrlAndRoute,
+  resolveEffectiveInovafarmaCnpj,
   INOVAFARMA_DEFAULT_API_URL,
   INOVAFARMA_DEFAULT_ROUTE_ID,
   INOVAFARMA_HOMOLOGACAO_PRESET,
@@ -315,14 +316,16 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
         config.erp_route_id ||
         INOVAFARMA_DEFAULT_ROUTE_ID
       ).trim();
-      const cnpjToUse = (
+      const parsedRoute = parseInovafarmaUrlAndRoute(urlToUse, routeIdToUse);
+      const cnpjToUse = resolveEffectiveInovafarmaCnpj(
         formData.erpCnpj ||
-        formData.erp_cnpj ||
-        formData.cnpj ||
-        config.erpCnpj ||
-        config.cnpj ||
-        ''
-      ).replace(/\D+/g, '');
+          formData.erp_cnpj ||
+          config.erpCnpj ||
+          formData.cnpj ||
+          config.cnpj ||
+          '',
+        parsedRoute.slug,
+      );
       const loginToUse = (
         formData.erp_login ||
         formData.erpApiLogin ||
@@ -347,29 +350,40 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
 
       const res = await triggerInovafarmaConnectivityTest({
         tenantId: config.id,
-        erpUrl: urlToUse,
-        erpRouteId: routeIdToUse,
+        erpUrl: parsedRoute.origin,
+        erpRouteId: parsedRoute.slug,
         cnpj: cnpjToUse,
         apiLogin: loginToUse || undefined,
         apiPassword: passwordToUse || undefined,
         apiKey: apiKeyToUse || undefined,
       });
 
-      if (passwordToUse) {
-        setFormData((prev) => ({
-          ...prev,
-          erp_password: '',
-          erpApiPassword: '',
-          erp_api_password: '',
-          hasErpApiPassword: true,
-          has_erp_api_password: true,
-        }));
-      }
+      setFormData((prev) => ({
+        ...prev,
+        erpBaseUrl: parsedRoute.origin,
+        erp_base_url: parsedRoute.origin,
+        erpUrl: parsedRoute.origin,
+        erpRouteId: parsedRoute.slug,
+        erp_route_id: parsedRoute.slug,
+        erpCnpj: res.cnpjSent || cnpjToUse,
+        erp_cnpj: res.cnpjSent || cnpjToUse,
+        ...(passwordToUse
+          ? {
+              erp_password: '',
+              erpApiPassword: '',
+              erp_api_password: '',
+              hasErpApiPassword: true,
+              has_erp_api_password: true,
+            }
+          : {}),
+      }));
 
       setInovafarmaFeedback({
         type: 'success',
-        message: 'Conectividade com o servidor Inovafarma validada com sucesso!',
-        details: `Endpoint: ${res.endpointUsed} | Status HTTP: ${res.status} | Servidores online retornados: ${res.servers?.length || 0}`,
+        message:
+          res.message ||
+          `Conectividade com o servidor Inovafarma (/server) validada com sucesso (HTTP ${res.httpStatus ?? res.status ?? 200})!`,
+        details: `Status HTTP: ${res.httpStatus ?? res.status ?? 200} | Header cnpj enviado: ${res.cnpjSent || cnpjToUse} | Endpoint: ${res.endpointUsed}`,
       });
       await fetchTenantIntegrationLogs(config.id);
     } catch (err: any) {
@@ -434,14 +448,16 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
         config.erp_route_id ||
         INOVAFARMA_DEFAULT_ROUTE_ID
       ).trim();
-      const cnpjToUse = (
+      const parsedRoute = parseInovafarmaUrlAndRoute(urlToUse, routeIdToUse);
+      const cnpjToUse = resolveEffectiveInovafarmaCnpj(
         formData.erpCnpj ||
-        formData.erp_cnpj ||
-        formData.cnpj ||
-        config.erpCnpj ||
-        config.cnpj ||
-        ''
-      ).replace(/\D+/g, '');
+          formData.erp_cnpj ||
+          config.erpCnpj ||
+          formData.cnpj ||
+          config.cnpj ||
+          '',
+        parsedRoute.slug,
+      );
       const loginToUse = (
         formData.erp_login ||
         formData.erpApiLogin ||
@@ -467,8 +483,8 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
 
       const result = await triggerInovafarmaSync({
         tenantId: config.id,
-        erpUrl: urlToUse,
-        erpRouteId: routeIdToUse,
+        erpUrl: parsedRoute.origin,
+        erpRouteId: parsedRoute.slug,
         apiToken: tokenToUse,
         apiLogin: loginToUse || undefined,
         apiPassword: passwordToUse || undefined,
@@ -482,29 +498,41 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
         ignoreErpPrices: Boolean(formData.ignore_erp_prices),
       });
 
-      if (passwordToUse) {
-        setFormData((prev) => ({
-          ...prev,
-          erp_password: '',
-          erpApiPassword: '',
-          erp_api_password: '',
-          hasErpApiPassword: true,
-          has_erp_api_password: true,
-        }));
-      }
+      setFormData((prev) => ({
+        ...prev,
+        erpBaseUrl: parsedRoute.origin,
+        erp_base_url: parsedRoute.origin,
+        erpUrl: parsedRoute.origin,
+        erpRouteId: parsedRoute.slug,
+        erp_route_id: parsedRoute.slug,
+        erpCnpj: result.cnpjSent || cnpjToUse,
+        erp_cnpj: result.cnpjSent || cnpjToUse,
+        ...(passwordToUse
+          ? {
+              erp_password: '',
+              erpApiPassword: '',
+              erp_api_password: '',
+              hasErpApiPassword: true,
+              has_erp_api_password: true,
+            }
+          : {}),
+        ...((result as any).lastProductSync
+          ? {
+              lastProductSync: (result as any).lastProductSync,
+              last_product_sync: (result as any).lastProductSync,
+            }
+          : {}),
+      }));
 
-      if ((result as any).lastProductSync) {
-        setFormData((prev) => ({
-          ...prev,
-          lastProductSync: (result as any).lastProductSync,
-          last_product_sync: (result as any).lastProductSync,
-        }));
-      }
+      const exactHttpStatus = result.httpStatus ?? 200;
+      const exactCnpjSent = result.cnpjSent || cnpjToUse;
 
       setInovafarmaFeedback({
         type: 'success',
-        message: result.message || 'Sincronização com Inovafarma concluída com sucesso!',
-        details: `Endpoint utilizado: ${result.endpointUsed}${
+        message:
+          result.message ||
+          `Sincronização com Inovafarma concluída (HTTP ${exactHttpStatus} | Header cnpj: ${exactCnpjSent})!`,
+        details: `Status HTTP: ${exactHttpStatus} | Header cnpj enviado: ${exactCnpjSent} | Endpoint utilizado: ${result.endpointUsed}${
           (result as any).lastProductSync ? ` | Watermark: ${(result as any).lastProductSync}` : ''
         }`,
         stats: {

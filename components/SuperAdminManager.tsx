@@ -10,6 +10,7 @@ import { StatusMonitor } from './StatusMonitor';
 import {
   triggerInovafarmaSync,
   parseInovafarmaUrlAndRoute,
+  resolveEffectiveInovafarmaCnpj,
   INOVAFARMA_DEFAULT_API_URL,
   INOVAFARMA_DEFAULT_ROUTE_ID,
 } from '../services/inovafarma';
@@ -74,18 +75,28 @@ export const SuperAdminManager: React.FC<SuperAdminManagerProps> = ({ session, o
     setIsSyncingInovafarma(true);
     setInovafarmaSyncFeedback(null);
     try {
+      const parsedRoute = parseInovafarmaUrlAndRoute(
+        selectedTenantForIntegration.erpBaseUrl || selectedTenantForIntegration.erpUrl || INOVAFARMA_DEFAULT_API_URL,
+        selectedTenantForIntegration.erpRouteId || selectedTenantForIntegration.erp_route_id || 'homologacao',
+      );
+      const effectiveCnpj = resolveEffectiveInovafarmaCnpj(
+        selectedTenantForIntegration.erpCnpj || selectedTenantForIntegration.erp_cnpj || selectedTenantForIntegration.cnpj || '',
+        parsedRoute.slug,
+      );
       const result = await triggerInovafarmaSync({
         tenantId: selectedTenantForIntegration.id,
-        erpUrl: selectedTenantForIntegration.erpBaseUrl || selectedTenantForIntegration.erpUrl || INOVAFARMA_DEFAULT_API_URL,
-        erpRouteId: selectedTenantForIntegration.erpRouteId || selectedTenantForIntegration.erp_route_id || 'homologacao',
-        cnpj: selectedTenantForIntegration.erpCnpj || selectedTenantForIntegration.erp_cnpj || selectedTenantForIntegration.cnpj || '',
+        erpUrl: parsedRoute.origin,
+        erpRouteId: parsedRoute.slug,
+        cnpj: effectiveCnpj,
         apiToken: selectedTenantForIntegration.integrationToken || '',
         ignoreErpPrices: Boolean(selectedTenantForIntegration.ignore_erp_prices),
       });
+      const exactStatus = result.httpStatus ?? 200;
+      const exactCnpj = result.cnpjSent || effectiveCnpj;
       setInovafarmaSyncFeedback({
         type: 'success',
-        message: result.message || 'Sincronização com Inovafarma concluída!',
-        details: `Endpoint: ${result.endpointUsed} | Recebidos: ${result.totalFetched} | Novos: ${result.insertedCount} | Atualizados: ${result.updatedCount}`,
+        message: result.message || `Sincronização com Inovafarma concluída (HTTP ${exactStatus} | Header cnpj: ${exactCnpj})!`,
+        details: `Status HTTP: ${exactStatus} | Header cnpj enviado: ${exactCnpj} | Endpoint: ${result.endpointUsed} | Recebidos: ${result.totalFetched} | Novos: ${result.insertedCount} | Atualizados: ${result.updatedCount}`,
       });
       if (Array.isArray((result as any).logs)) {
         setIntegrationLogs((result as any).logs);

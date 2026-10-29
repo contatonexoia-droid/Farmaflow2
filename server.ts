@@ -51,6 +51,7 @@ import {
   buildInovafarmaVendaPayload,
   sendInovafarmaVenda,
   sanitizeCnpj,
+  resolveEffectiveInovafarmaCnpj,
   roundCurrency,
   authenticateInovafarma,
   resolveTenantInovafarmaToken,
@@ -5745,6 +5746,11 @@ app.all(
       let token =
         (body.apiToken || body.token || (req.headers["authorization"] as string | undefined)?.replace(/^Bearer\s+/i, "") || "").toString().trim();
 
+      const parsedServerErp = parseInovafarmaUrlAndRoute(baseUrl, routeId);
+      baseUrl = parsedServerErp.origin;
+      routeId = parsedServerErp.slug;
+      cnpj = resolveEffectiveInovafarmaCnpj(cnpj, routeId);
+
       if (tenantId) {
         if (baseUrl || routeId || cnpj || apiKey || apiLogin || apiPassword) {
           await saveTenantInovafarmaState(supabaseAdmin, tenantId, {
@@ -5771,7 +5777,7 @@ app.all(
         token = resolved.token;
         baseUrl = resolved.baseUrl;
         routeId = resolved.routeId;
-        cnpj = resolved.cnpj;
+        cnpj = resolveEffectiveInovafarmaCnpj(resolved.cnpj, routeId);
         apiKey = resolved.apiKey;
       }
 
@@ -5788,7 +5794,12 @@ app.all(
       await logIntegration(
         tenantId || "homologacao",
         connectivity.endpointUsed,
-        { routeId: routeId || INOVAFARMA_DEFAULT_ROUTE_ID, cnpj, serversCount: connectivity.servers.length },
+        {
+          routeId: routeId || INOVAFARMA_DEFAULT_ROUTE_ID,
+          cnpj: connectivity.cnpjSent || cnpj,
+          httpStatus: connectivity.httpStatus ?? connectivity.status,
+          serversCount: connectivity.servers?.length ?? connectivity.serverInfo?.length ?? 0,
+        },
         "SUCCESS",
       );
 
@@ -5896,12 +5907,16 @@ app.post(
       }
 
       const parsedSyncErp = parseInovafarmaUrlAndRoute(erpUrl, erpRouteId);
+      const effectiveSyncCnpj = resolveEffectiveInovafarmaCnpj(
+        cnpj,
+        parsedSyncErp.slug,
+      );
 
       // Persiste atualizações de erp_base_url, erp_route_id, erp_cnpj, credenciais da API ou integration_token se enviadas pelo painel
       await saveTenantInovafarmaState(supabaseAdmin, tenantId, {
         erp_base_url: erpUrl ? parsedSyncErp.origin : undefined,
         erp_route_id: erpRouteId || erpUrl ? parsedSyncErp.slug : undefined,
-        erp_cnpj: cnpj || undefined,
+        erp_cnpj: effectiveSyncCnpj || undefined,
         erp_login: apiLogin || undefined,
         erp_password_plain: apiPassword || undefined,
         erp_api_key: apiKey || undefined,
@@ -5923,13 +5938,13 @@ app.post(
         supabaseAdmin,
         {
           tenantId,
-          erpUrl: erpUrl || undefined,
-          erpRouteId: erpRouteId || undefined,
+          erpUrl: parsedSyncErp.origin || undefined,
+          erpRouteId: parsedSyncErp.slug || undefined,
           apiToken: apiToken || undefined,
           apiLogin: apiLogin || undefined,
           apiPassword: apiPassword || undefined,
           apiKey: apiKey || undefined,
-          cnpj: cnpj || undefined,
+          cnpj: effectiveSyncCnpj || undefined,
           mode: body.mode === "delta" ? "delta" : "full",
           inicial: body.inicial ? String(body.inicial).trim() : undefined,
           final: body.final ? String(body.final).trim() : undefined,
