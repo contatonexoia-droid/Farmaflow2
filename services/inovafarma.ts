@@ -860,12 +860,20 @@ export function extractTenantErpConfig(tenant: any): InovafarmaTenantConfig {
       "",
   ).trim();
 
-  const lastProductSync = String(
+  const rawLastProductSync = String(
     tenant.last_product_sync ||
       tenant.lastProductSync ||
       creds.last_product_sync ||
       "",
   ).trim();
+  const lastProductSync = rawLastProductSync
+    ? (() => {
+        const parsed = new Date(rawLastProductSync);
+        if (Number.isNaN(parsed.getTime())) return "";
+        if (parsed.getTime() > Date.now()) return new Date().toISOString();
+        return parsed.toISOString();
+      })()
+    : "";
 
   const lastCustomerSync = String(
     tenant.last_customer_sync ||
@@ -988,6 +996,43 @@ export function sanitizeTenantErpCredentialsForClient<T extends Record<string, a
 }
 
 /**
+ * Normaliza qualquer timestamp para UTC real (`new Date().toISOString()` com sufixo `Z`).
+ * Se o valor informado for inválido ou estiver no futuro (`new Date(ts) > new Date()`),
+ * retorna imediatamente `new Date().toISOString()`.
+ */
+export function ensureRealUtcIsoTimestamp(candidate?: string | null): string {
+  const now = new Date();
+  if (!candidate || !String(candidate).trim()) {
+    return now.toISOString();
+  }
+  let raw = String(candidate).trim();
+  if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}/.test(raw)) {
+    raw = raw.replace(/\s+/, "T");
+  }
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(raw) && !/(Z|[+-]\d{2}:?\d{2})$/i.test(raw)) {
+    raw = `${raw}Z`;
+  }
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime()) || parsed.getTime() > now.getTime()) {
+    return now.toISOString();
+  }
+  return parsed.toISOString();
+}
+
+function isTimestampInFuture(candidate?: string | null): boolean {
+  if (!candidate || !String(candidate).trim()) return false;
+  let raw = String(candidate).trim();
+  if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}/.test(raw)) {
+    raw = raw.replace(/\s+/, "T");
+  }
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(raw) && !/(Z|[+-]\d{2}:?\d{2})$/i.test(raw)) {
+    raw = `${raw}Z`;
+  }
+  const parsed = new Date(raw);
+  return !Number.isNaN(parsed.getTime()) && parsed.getTime() > Date.now();
+}
+
+/**
  * Persiste estado/credenciais do Inovafarma (token em cache de 30 dias, watermarks de sync, etc.)
  * com fallback resiliente em `smart_banners._erpCredentials` caso alguma coluna ainda não exista no banco SQL.
  */
@@ -1017,6 +1062,7 @@ export async function saveTenantInovafarmaState(
 ): Promise<void> {
   if (!tenantId) return;
   try {
+    const nowUtcIso = new Date().toISOString();
     const { data: currentTenant } = await supabaseClient
       .from("tenants")
       .select("*")
@@ -1102,22 +1148,45 @@ export async function saveTenantInovafarmaState(
       existingCreds.erp_token_expiration = stateUpdates.erp_token_expiration;
       topLevelUpdates.erp_token_expiration = stateUpdates.erp_token_expiration || null;
     }
-    if (stateUpdates.last_product_sync !== undefined) {
-      existingCreds.last_product_sync = stateUpdates.last_product_sync;
-      topLevelUpdates.last_product_sync = stateUpdates.last_product_sync || null;
+
+    // Se last_product_sync foi enviado OU se o valor atual no banco está no futuro, sobrescreve com UTC real (new Date().toISOString())
+    if (
+      stateUpdates.last_product_sync !== undefined ||
+      isTimestampInFuture(existingCreds.last_product_sync) ||
+      isTimestampInFuture(currentTenant?.last_product_sync)
+    ) {
+      const safeProdSync = stateUpdates.last_product_sync
+        ? ensureRealUtcIsoTimestamp(stateUpdates.last_product_sync)
+        : nowUtcIso;
+      existingCreds.last_product_sync = safeProdSync;
+      topLevelUpdates.last_product_sync = safeProdSync;
     }
+
     if (stateUpdates.last_customer_sync !== undefined) {
-      existingCreds.last_customer_sync = stateUpdates.last_customer_sync;
-      topLevelUpdates.last_customer_sync = stateUpdates.last_customer_sync || null;
+      const safeCustSync = stateUpdates.last_customer_sync
+        ? ensureRealUtcIsoTimestamp(stateUpdates.last_customer_sync)
+        : null;
+      existingCreds.last_customer_sync = safeCustSync;
+      topLevelUpdates.last_customer_sync = safeCustSync;
     }
-    if (stateUpdates.last_seen !== undefined || stateUpdates.agent_last_seen !== undefined) {
-      const seenIso = stateUpdates.last_seen || stateUpdates.agent_last_seen || new Date().toISOString();
+
+    // Se last_seen / agent_last_seen foi enviado OU se o valor atual no banco está no futuro, sobrescreve com UTC real (new Date().toISOString())
+    if (
+      stateUpdates.last_seen !== undefined ||
+      stateUpdates.agent_last_seen !== undefined ||
+      isTimestampInFuture(existingCreds.last_seen) ||
+      isTimestampInFuture(currentTenant?.last_seen) ||
+      isTimestampInFuture(currentTenant?.agent_last_seen)
+    ) {
+      const seenIso = ensureRealUtcIsoTimestamp(
+        stateUpdates.last_seen || stateUpdates.agent_last_seen || nowUtcIso,
+      );
       existingCreds.last_seen = seenIso;
       topLevelUpdates.last_seen = seenIso;
       topLevelUpdates.agent_last_seen = seenIso;
     }
 
-    existingCreds.updated_at = new Date().toISOString();
+    existingCreds.updated_at = nowUtcIso;
     existingBanners._erpCredentials = existingCreds;
     topLevelUpdates.smart_banners = existingBanners;
 
@@ -1156,8 +1225,8 @@ export async function saveTenantInovafarmaState(
 }
 
 /**
- * Atualiza o sinal de atividade (heartbeat) da loja Inovafarma no banco de dados:
- * - Registra `machine_id = "API Cloud (Inovafarma)"` e `last_seen = now` na tabela `agent_integrations`
+ * Atualiza o sinal de atividade (heartbeat) da loja Inovafarma no banco de dados sempre em UTC real (`new Date().toISOString()`):
+ * - Registra `machine_id = "API Cloud (Inovafarma)"` e `last_seen = new Date().toISOString()` na tabela `agent_integrations`
  * - Atualiza `last_seen` / `agent_last_seen` (e opcionalmente `last_product_sync`) na tabela `tenants` e em `smart_banners._erpCredentials`
  */
 export async function touchInovafarmaHeartbeat(
@@ -1200,8 +1269,8 @@ export async function touchInovafarmaHeartbeat(
     await saveTenantInovafarmaState(supabaseClient, cleanTenantId, {
       last_seen: nowIso,
       agent_last_seen: nowIso,
-      ...(options?.lastProductSync
-        ? { last_product_sync: options.lastProductSync }
+      ...(options?.lastProductSync !== undefined
+        ? { last_product_sync: nowIso }
         : {}),
     });
   } catch (e) {
@@ -5383,7 +5452,8 @@ export async function syncInovafarmaProductsToSupabase(
     }
 
     const validProducts = Array.from(normalizedMap.values());
-    const finalWatermark = highestUpdatedAtWatermark || syncedAt;
+    // Grava SEMPRE em UTC real (new Date().toISOString()) sem usar data futura retornada pelo ERP
+    const finalWatermark = new Date().toISOString();
 
     if (validProducts.length === 0) {
       await touchInovafarmaHeartbeat(supabaseClient, tenantId, {

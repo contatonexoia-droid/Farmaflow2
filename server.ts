@@ -8483,6 +8483,21 @@ const handleAgentStatus = async (req: express.Request, res: express.Response) =>
     const finalIntegrations: any[] = [];
     const processedTenantIds = new Set<string>();
 
+    const parseDbTimeMs = (val: any): number => {
+      if (!val || !String(val).trim()) return NaN;
+      let s = String(val).trim();
+      if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}/.test(s)) {
+        s = s.replace(/\s+/, 'T');
+      }
+      if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(s) && !/(Z|[+-]\d{2}:?\d{2})$/i.test(s)) {
+        s = `${s}Z`;
+      }
+      return new Date(s).getTime();
+    };
+
+    const nowMs = Date.now();
+    const nowUtcIso = new Date(nowMs).toISOString();
+
     if (tenantsList && tenantsList.length > 0) {
       for (const t of tenantsList) {
         processedTenantIds.add(t.id);
@@ -8493,8 +8508,7 @@ const handleAgentStatus = async (req: express.Request, res: express.Response) =>
           String(agent?.machine_id || '').includes('Inovafarma');
         const erpCfg = isInovafarma ? extractTenantErpConfig(t) : null;
 
-        // Encontra o timestamp mais recente entre agent_integrations, tenants e sincronização Inovafarma
-        const candidateDates = [
+        const rawCandidateStrings = [
           agent?.last_seen,
           t.agent_last_seen,
           t.last_seen,
@@ -8502,18 +8516,53 @@ const handleAgentStatus = async (req: express.Request, res: express.Response) =>
           ...(isInovafarma
             ? [
                 t.smart_banners?._erpCredentials?.last_seen,
+                t.smart_banners?._erpCredentials?.last_product_sync,
+                t.last_product_sync,
                 erpCfg?.last_product_sync,
                 t.smart_banners?._erpCredentials?.updated_at,
               ]
             : []),
-        ]
-          .filter(Boolean)
-          .map((d: any) => new Date(d).getTime())
+        ].filter(Boolean);
+
+        const parsedTimestamps = rawCandidateStrings
+          .map((d: any) => parseDbTimeMs(d))
           .filter((n) => !isNaN(n) && n > 0);
 
+        const hasFutureStoredTimestamp = parsedTimestamps.some(
+          (n) => n > nowMs + 60000,
+        );
+
+        // Ignora timestamps que estejam no futuro (> Date.now() + 60000) para que um registro com fuso errado não esconda o heartbeat real
+        const validPastDates = parsedTimestamps.filter((n) => n <= nowMs + 60000);
+
+        // Se havia valor no futuro salvo no banco, corrige imediatamente no banco com new Date().toISOString()
+        if (hasFutureStoredTimestamp) {
+          if (isInovafarma) {
+            touchInovafarmaHeartbeat(supabaseAdmin, t.id, {
+              lastProductSync: nowUtcIso,
+            }).catch(() => {});
+          } else {
+            touchAgentHeartbeat(t.id, agent?.machine_id, agent?.activation_token).catch(() => {});
+          }
+        }
+
         const latestTimestamp =
-          candidateDates.length > 0
-            ? new Date(Math.max(...candidateDates)).toISOString()
+          validPastDates.length > 0
+            ? new Date(Math.max(...validPastDates)).toISOString()
+            : hasFutureStoredTimestamp
+              ? nowUtcIso
+              : null;
+
+        const rawProdSyncMs = parseDbTimeMs(
+          t.smart_banners?._erpCredentials?.last_product_sync ||
+            t.last_product_sync ||
+            erpCfg?.last_product_sync,
+        );
+        const safeLastProductSync =
+          !isNaN(rawProdSyncMs) && rawProdSyncMs > 0
+            ? rawProdSyncMs > nowMs
+              ? nowUtcIso
+              : new Date(rawProdSyncMs).toISOString()
             : null;
 
         const hasActiveToken = isInovafarma && erpCfg
@@ -8537,14 +8586,14 @@ const handleAgentStatus = async (req: express.Request, res: express.Response) =>
           is_active: agent?.is_active ?? true,
           has_active_token: hasActiveToken,
           last_seen: latestTimestamp,
-          last_product_sync: erpCfg?.last_product_sync || t.last_product_sync || null,
+          last_product_sync: safeLastProductSync,
           activation_token: agent?.activation_token || t.integration_token || null,
           tenants: {
             id: t.id,
             name: t.name,
             slug: t.slug,
             erp_type: isInovafarma ? 'inovafarma' : erpTypeNorm || undefined,
-            last_product_sync: erpCfg?.last_product_sync || t.last_product_sync || undefined,
+            last_product_sync: safeLastProductSync || undefined,
           },
         });
       }
@@ -12533,6 +12582,26 @@ async function runInovafarmaAutoSyncScheduler(triggerSource = "cron_15m"): Promi
     for (const tenant of inovafarmaTenants) {
       const tenantId = String(tenant.id);
       const tenantName = tenant.name || tenant.slug || tenantId;
+      const rawStoredSync =
+        tenant.smart_banners?._erpCredentials?.last_product_sync ||
+        tenant.last_product_sync ||
+        "";
+      const rawStoredSeen =
+        tenant.smart_banners?._erpCredentials?.last_seen ||
+        tenant.agent_last_seen ||
+        tenant.last_seen ||
+        "";
+
+      // Se o valor atual de last_product_sync ou last_seen no banco estiver no futuro, sobrescreve imediatamente com new Date().toISOString()
+      if (
+        (rawStoredSync && new Date(rawStoredSync).getTime() > Date.now()) ||
+        (rawStoredSeen && new Date(rawStoredSeen).getTime() > Date.now())
+      ) {
+        await touchInovafarmaHeartbeat(supabaseAdmin, tenantId, {
+          lastProductSync: new Date().toISOString(),
+        });
+      }
+
       const cfg = extractTenantErpConfig(tenant);
 
       try {

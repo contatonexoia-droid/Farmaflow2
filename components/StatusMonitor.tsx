@@ -37,13 +37,56 @@ export const StatusMonitor: React.FC<StatusMonitorProps> = ({ tenantId }) => {
     return erp === 'inovafarma' || machine.includes('inovafarma');
   };
 
+  const parseSafeTimestamp = (raw?: string | null): Date | null => {
+    if (!raw || !String(raw).trim()) return null;
+    let str = String(raw).trim();
+    if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}/.test(str)) {
+      str = str.replace(/\s+/, 'T');
+    }
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(str) && !/(Z|[+-]\d{2}:?\d{2})$/i.test(str)) {
+      str = `${str}Z`;
+    }
+    const parsed = new Date(str);
+    return isNaN(parsed.getTime()) ? null : parsed;
+  };
+
+  const pickBestNonFutureIso = (candidates: Array<string | null | undefined>): string | null => {
+    const nowMs = Date.now();
+    const validPastMs: number[] = [];
+    let hadAnyValidDate = false;
+
+    for (const c of candidates) {
+      const parsed = parseSafeTimestamp(c);
+      if (!parsed) continue;
+      hadAnyValidDate = true;
+      const ms = parsed.getTime();
+      // Ignora timestamps no futuro (> Date.now() + 60000) para não esconder o heartbeat real
+      if (ms <= nowMs + 60000) {
+        validPastMs.push(ms);
+      }
+    }
+
+    if (validPastMs.length > 0) {
+      return new Date(Math.max(...validPastMs)).toISOString();
+    }
+    if (hadAnyValidDate) {
+      return new Date(nowMs).toISOString();
+    }
+    return null;
+  };
+
   const getEffectiveLastSeen = (item: Integration): string | null => {
-    return (
-      item.last_seen ||
-      item.last_product_sync ||
-      item.tenants?.last_product_sync ||
-      null
-    );
+    return pickBestNonFutureIso([
+      item.last_seen,
+      item.last_product_sync,
+      item.tenants?.last_product_sync,
+    ]);
+  };
+
+  const formatSaoPauloDateTime = (raw?: string | null): string => {
+    const parsed = parseSafeTimestamp(raw);
+    if (!parsed) return 'Nunca';
+    return parsed.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
   };
 
   const fetchStatus = useCallback(async () => {
@@ -100,15 +143,17 @@ export const StatusMonitor: React.FC<StatusMonitorProps> = ({ tenantId }) => {
                 erpType === 'inovafarma' ||
                 String(agentRow?.machine_id || '').toLowerCase().includes('inovafarma');
               const creds = t.smart_banners?._erpCredentials || {};
-              const lastProdSync =
-                t.last_product_sync || creds.last_product_sync || null;
-              const bestLastSeen =
-                agentRow?.last_seen ||
-                t.agent_last_seen ||
-                t.last_seen ||
-                creds.last_seen ||
-                lastProdSync ||
-                null;
+              const lastProdSync = pickBestNonFutureIso([
+                t.last_product_sync,
+                creds.last_product_sync,
+              ]);
+              const bestLastSeen = pickBestNonFutureIso([
+                agentRow?.last_seen,
+                t.agent_last_seen,
+                t.last_seen,
+                creds.last_seen,
+                lastProdSync,
+              ]);
 
               fallbackList.push({
                 id: agentRow?.id || t.id,
@@ -139,6 +184,12 @@ export const StatusMonitor: React.FC<StatusMonitorProps> = ({ tenantId }) => {
               const isInova =
                 String(t?.erp_type || '').toLowerCase().trim() === 'inovafarma' ||
                 String(row.machine_id || '').toLowerCase().includes('inovafarma');
+              const bestRowSeen = pickBestNonFutureIso([
+                row.last_seen,
+                t?.agent_last_seen,
+                t?.last_seen,
+                t?.last_product_sync,
+              ]);
               fallbackList.push({
                 id: row.id,
                 tenant_id: row.tenant_id,
@@ -147,20 +198,15 @@ export const StatusMonitor: React.FC<StatusMonitorProps> = ({ tenantId }) => {
                   ? 'API Cloud (Inovafarma)'
                   : row.machine_id || 'Servidor Local',
                 is_active: row.is_active ?? true,
-                last_seen:
-                  row.last_seen ||
-                  t?.agent_last_seen ||
-                  t?.last_seen ||
-                  t?.last_product_sync ||
-                  null,
-                last_product_sync: t?.last_product_sync || null,
+                last_seen: bestRowSeen,
+                last_product_sync: pickBestNonFutureIso([t?.last_product_sync]),
                 tenants: t
                   ? {
                       id: t.id,
                       name: t.name,
                       slug: t.slug,
                       erp_type: t.erp_type,
-                      last_product_sync: t.last_product_sync,
+                      last_product_sync: pickBestNonFutureIso([t?.last_product_sync]) || undefined,
                     }
                   : undefined,
               });
@@ -194,8 +240,8 @@ export const StatusMonitor: React.FC<StatusMonitorProps> = ({ tenantId }) => {
   }, [fetchStatus]);
 
   const formatRelativeTime = (lastSeen: string | null): string => {
-    if (!lastSeen) return 'Sem sinal registrado';
-    const lastSeenDate = new Date(lastSeen);
+    const lastSeenDate = parseSafeTimestamp(lastSeen);
+    if (!lastSeenDate) return 'Sem sinal registrado';
     const diffMs = Date.now() - lastSeenDate.getTime();
     if (isNaN(diffMs) || diffMs < 0) return 'Agora mesmo';
 
@@ -215,10 +261,10 @@ export const StatusMonitor: React.FC<StatusMonitorProps> = ({ tenantId }) => {
   const getStatus = (integration: Integration) => {
     const isInova = isInovafarmaIntegration(integration);
     const effectiveLastSeen = getEffectiveLastSeen(integration);
+    const lastSeenDate = parseSafeTimestamp(effectiveLastSeen);
 
     if (isInova) {
-      if (effectiveLastSeen) {
-        const lastSeenDate = new Date(effectiveLastSeen);
+      if (lastSeenDate) {
         const diffInMinutes = (Date.now() - lastSeenDate.getTime()) / (1000 * 60);
         // Lojas Inovafarma (API Cloud): exibe badge verde "Online (API)" se houve sinal nas últimas 2 horas (120 min)
         if (!isNaN(diffInMinutes) && diffInMinutes <= 120) {
@@ -241,7 +287,7 @@ export const StatusMonitor: React.FC<StatusMonitorProps> = ({ tenantId }) => {
       }
     }
 
-    if (!effectiveLastSeen) {
+    if (!lastSeenDate) {
       return { 
         label: 'Desconectado', 
         color: 'bg-gray-100 text-gray-600', 
@@ -250,7 +296,6 @@ export const StatusMonitor: React.FC<StatusMonitorProps> = ({ tenantId }) => {
       };
     }
     
-    const lastSeenDate = new Date(effectiveLastSeen);
     const diffInMinutes = (Date.now() - lastSeenDate.getTime()) / (1000 * 60);
 
     // Online: ping recente em até 5 minutos (intervalo normal do agente local)
@@ -413,7 +458,7 @@ export const StatusMonitor: React.FC<StatusMonitorProps> = ({ tenantId }) => {
                 const effectiveLastSeen = getEffectiveLastSeen(integration);
                 const status = getStatus(integration);
                 const relativeTime = formatRelativeTime(effectiveLastSeen);
-                const fullDate = effectiveLastSeen ? new Date(effectiveLastSeen).toLocaleString('pt-BR') : 'Nunca';
+                const fullDate = formatSaoPauloDateTime(effectiveLastSeen);
                 const displayMachineId = isInova
                   ? 'API Cloud (Inovafarma)'
                   : (integration.machine_id || 'Servidor Local');
