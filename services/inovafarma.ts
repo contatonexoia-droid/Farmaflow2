@@ -337,6 +337,13 @@ export interface InovafarmaSyncOptions {
   productsOverride?: InovafarmaRawProduct[];
 }
 
+export interface InovafarmaAuditItem {
+  name: string;
+  code: string;
+  status: "updated" | "created" | "no-change";
+  details: string;
+}
+
 export interface InovafarmaSyncResult {
   success: boolean;
   partial?: boolean;
@@ -356,6 +363,7 @@ export interface InovafarmaSyncResult {
   ignoreErpPrices: boolean;
   syncedAt: string;
   lastProductSync?: string;
+  auditItems?: InovafarmaAuditItem[];
   message: string;
   error?: string;
 }
@@ -4231,8 +4239,9 @@ export async function syncInovafarmaProductsToSupabase(
     const batchInternalCodes = Array.from(
       new Set(
         validProducts
-          .map((p) => p.erpProductId || p.internalCode)
-          .filter((c): c is string => Boolean(c && c.trim())),
+          .flatMap((p) => [p.erpProductId, p.internalCode, p.barcode])
+          .filter((c): c is string => Boolean(c && String(c).trim()))
+          .map((c) => String(c).trim()),
       ),
     );
 
@@ -4285,32 +4294,44 @@ export async function syncInovafarmaProductsToSupabase(
 
     await Promise.all(lookupPromises);
 
-    // 5. Prepara lote para batch upsert rápido (sem busca síncrona de fotos por EAN)
+    // 5. Prepara lote para batch upsert rápido e monta itens de auditoria para o "Histórico 24h"
     let insertedCount = 0;
     let updatedCount = 0;
     const upsertPayloads: any[] = [];
+    const batchAuditItems: InovafarmaAuditItem[] = [];
 
     for (const item of validProducts) {
+      const resolvedInternalCode = String(
+        item.erpProductId || item.internalCode || item.barcode || "",
+      ).trim();
+
+      // Prioriza correspondência por internal_code para respeitar a constraint unique_product_internal_code_per_tenant
       const existing =
+        (resolvedInternalCode && existingByInternalCode.get(resolvedInternalCode)) ||
         (item.internalCode && existingByInternalCode.get(item.internalCode)) ||
         (item.erpProductId && existingByInternalCode.get(item.erpProductId)) ||
         (item.barcode && existingByBarcode.get(item.barcode));
 
       if (existing) {
         updatedCount++;
+        const finalInternalCode = String(
+          item.erpProductId ||
+            item.internalCode ||
+            existing.internal_code ||
+            item.barcode ||
+            "",
+        ).trim();
+
         const updatedRow: any = {
           id: existing.id,
           tenant_id: tenantId,
           barcode: item.barcode || existing.barcode,
-          internal_code:
-            item.erpProductId ||
-            item.internalCode ||
-            existing.internal_code ||
-            item.barcode,
+          internal_code: finalInternalCode,
           name: existing.name || item.name,
           stock: item.stock,
           category: existing.category || item.category || "Geral",
           presentation: item.unitMeasure || existing.presentation || "UN",
+          updated_at: syncedAt,
         };
 
         if (item.stock === 0 && existing.is_featured) {
@@ -4335,6 +4356,27 @@ export async function syncInovafarmaProductsToSupabase(
         }
 
         upsertPayloads.push(updatedRow);
+
+        if (batchAuditItems.length < 400) {
+          const oldPrice = Number(existing.price ?? 0);
+          const newPrice = Number(updatedRow.price ?? 0);
+          const oldStock = Number(existing.stock ?? 0);
+          const newStock = Number(item.stock ?? 0);
+          const priceTxt =
+            oldPrice !== newPrice
+              ? `Preço: R$ ${oldPrice.toFixed(2)} -> R$ ${newPrice.toFixed(2)}`
+              : `Preço: R$ ${newPrice.toFixed(2)}`;
+          const stockTxt =
+            oldStock !== newStock
+              ? `Estoque: ${oldStock} -> ${newStock} un.`
+              : `Estoque: ${newStock} un.`;
+          batchAuditItems.push({
+            name: String(updatedRow.name || item.name),
+            code: String(finalInternalCode || updatedRow.barcode || ""),
+            status: "updated",
+            details: `Origem: API Inovafarma | ${priceTxt} | ${stockTxt}`,
+          });
+        }
       } else {
         insertedCount++;
         let taxonomy: { department?: string; category?: string; subcategory?: string } = {};
@@ -4346,11 +4388,15 @@ export async function syncInovafarmaProductsToSupabase(
           }
         }
 
+        const finalInternalCode = String(
+          item.erpProductId || item.internalCode || item.barcode || "",
+        ).trim();
+
         const newRow: any = {
           id: crypto.randomUUID(),
           tenant_id: tenantId,
           barcode: item.barcode,
-          internal_code: item.erpProductId || item.internalCode || item.barcode,
+          internal_code: finalInternalCode,
           name: item.name,
           presentation: item.unitMeasure || "UN",
           description: item.activeIngredient
@@ -4365,31 +4411,70 @@ export async function syncInovafarmaProductsToSupabase(
           subcategory: taxonomy.subcategory || "Outros",
           is_featured: false,
           is_ai_enriched: false,
+          updated_at: syncedAt,
         };
 
         upsertPayloads.push(newRow);
+
+        if (batchAuditItems.length < 400) {
+          batchAuditItems.push({
+            name: String(newRow.name || item.name),
+            code: String(finalInternalCode || newRow.barcode || ""),
+            status: "created",
+            details: `Origem: API Inovafarma | Novo item cadastrado | Preço: R$ ${Number(newRow.price ?? 0).toFixed(2)} | Estoque: ${Number(item.stock ?? 0)} un.`,
+          });
+        }
       }
     }
 
-    // 6. Executa batch upsert em lotes de 500 registros no Supabase
+    // 6. Deduplica o lote pelo par (tenant_id, internal_code) mantendo o último item,
+    // evitando conflito interno no comando ON CONFLICT (tenant_id, internal_code) DO UPDATE do PostgreSQL
+    const dedupByTenantAndInternalCode = new Map<string, any>();
+    for (const row of upsertPayloads) {
+      const cleanCode = String(row.internal_code ?? "").trim();
+      const dedupKey = `${row.tenant_id}::${cleanCode || row.barcode || row.id}`;
+      const prevRow = dedupByTenantAndInternalCode.get(dedupKey);
+      if (prevRow && prevRow.id && existingByInternalCode.has(cleanCode)) {
+        row.id = prevRow.id;
+      }
+      dedupByTenantAndInternalCode.set(dedupKey, row);
+    }
+    const deduplicatedPayloads = Array.from(dedupByTenantAndInternalCode.values());
+
+    // Executa batch upsert em lotes de 500 registros usando onConflict: 'tenant_id,internal_code'
     const BATCH_SIZE = 500;
-    for (let i = 0; i < upsertPayloads.length; i += BATCH_SIZE) {
-      const chunk = upsertPayloads.slice(i, i + BATCH_SIZE);
+    for (let i = 0; i < deduplicatedPayloads.length; i += BATCH_SIZE) {
+      const chunk = deduplicatedPayloads.slice(i, i + BATCH_SIZE);
       const { error: upsertErr } = await supabaseClient
         .from("products")
-        .upsert(chunk, { onConflict: "id" });
+        .upsert(chunk, { onConflict: "tenant_id,internal_code" });
 
       if (upsertErr) {
         const minimalChunk = chunk.map((row) => {
-          const { department, subcategory, original_price, presentation, ...rest } = row;
+          const {
+            department,
+            subcategory,
+            original_price,
+            presentation,
+            updated_at,
+            ...rest
+          } = row;
           return rest;
         });
         const { error: retryErr } = await supabaseClient
           .from("products")
-          .upsert(minimalChunk, { onConflict: "id" });
+          .upsert(minimalChunk, { onConflict: "tenant_id,internal_code" });
 
         if (retryErr) {
-          throw new Error(`Falha ao gravar lote de produtos no Supabase: ${retryErr.message}`);
+          const { error: fallbackIdErr } = await supabaseClient
+            .from("products")
+            .upsert(minimalChunk, { onConflict: "id" });
+
+          if (fallbackIdErr) {
+            throw new Error(
+              `Falha ao gravar lote de produtos no Supabase: ${retryErr.message}`,
+            );
+          }
         }
       }
     }
@@ -4399,6 +4484,117 @@ export async function syncInovafarmaProductsToSupabase(
       await saveTenantInovafarmaState(supabaseClient, tenantId, {
         last_product_sync: finalWatermark,
       });
+    }
+
+    // 8. Registra/consolida a sessão na tabela/formato da aba "Histórico 24h" (endpoint = 'spreadsheet_import')
+    // sempre que houver produtos criados ou atualizados (insertedCount > 0 || updatedCount > 0)
+    if (insertedCount > 0 || updatedCount > 0) {
+      try {
+        const tenMinutesAgoIso = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+        let existingHistoryRow: any = null;
+
+        if (effectiveOffset > 1) {
+          const { data: recentHistoryRows } = await supabaseClient
+            .from("integration_logs")
+            .select("id, payload, created_at")
+            .eq("tenant_id", tenantId)
+            .eq("endpoint", "spreadsheet_import")
+            .gte("created_at", tenMinutesAgoIso)
+            .order("created_at", { ascending: false })
+            .limit(5);
+
+          existingHistoryRow = (recentHistoryRows || []).find(
+            (r: any) =>
+              r?.payload?.source === "API Inovafarma" ||
+              r?.payload?.origin === "API Inovafarma",
+          );
+        }
+
+        if (existingHistoryRow && existingHistoryRow.payload) {
+          const prevPayload = existingHistoryRow.payload;
+          const mergedReceived =
+            Number(prevPayload.totalProcessed || 0) + rawProducts.length;
+          const mergedNew = Number(prevPayload.newItems || 0) + insertedCount;
+          const mergedUpdated =
+            Number(prevPayload.updatedItems || 0) + updatedCount;
+          const mergedSkipped =
+            Number(prevPayload.skippedCount || 0) + skippedCount;
+          const mergedSaved = mergedNew + mergedUpdated;
+
+          const prevItems: InovafarmaAuditItem[] = Array.isArray(prevPayload.items)
+            ? prevPayload.items.filter(
+                (it: any) =>
+                  !String(it?.name || "").startsWith("RESUMO DA SINCRONIZAÇÃO") &&
+                  !String(it?.name || "").startsWith("ORIGEM: API INOVAFARMA"),
+              )
+            : [];
+          const combinedAuditItems = [...prevItems, ...batchAuditItems].slice(
+            0,
+            600,
+          );
+
+          const summaryItem: InovafarmaAuditItem = {
+            name: "RESUMO DA SINCRONIZAÇÃO (ORIGEM: API INOVAFARMA)",
+            code: cnpjSent || "INOVAFARMA",
+            status: "updated",
+            details: `Origem: API Inovafarma | Total recebidos: ${mergedReceived} | Novos cadastrados: ${mergedNew} | Atualizados: ${mergedUpdated}${mergedSkipped > 0 ? ` | Ignorados: ${mergedSkipped}` : ""}`,
+          };
+
+          const updatedSessionPayload = {
+            ...prevPayload,
+            source: "API Inovafarma",
+            origin: "API Inovafarma",
+            timestamp: Date.now(),
+            totalProcessed: mergedReceived,
+            totalSaved: mergedSaved,
+            newItems: mergedNew,
+            updatedItems: mergedUpdated,
+            skippedCount: mergedSkipped,
+            items: [summaryItem, ...combinedAuditItems],
+          };
+
+          await supabaseClient
+            .from("integration_logs")
+            .update({
+              payload: updatedSessionPayload,
+              status: "SUCCESS",
+            })
+            .eq("id", existingHistoryRow.id);
+        } else {
+          const summaryItem: InovafarmaAuditItem = {
+            name: "RESUMO DA SINCRONIZAÇÃO (ORIGEM: API INOVAFARMA)",
+            code: cnpjSent || "INOVAFARMA",
+            status: "updated",
+            details: `Origem: API Inovafarma | Total recebidos: ${rawProducts.length} | Novos cadastrados: ${insertedCount} | Atualizados: ${updatedCount}${skippedCount > 0 ? ` | Ignorados: ${skippedCount}` : ""}`,
+          };
+
+          const sessionLogPayload = {
+            id: `INOVA_${Date.now().toString(36).toUpperCase()}`,
+            tenantId,
+            source: "API Inovafarma",
+            origin: "API Inovafarma",
+            timestamp: Date.now(),
+            totalProcessed: rawProducts.length,
+            totalSaved: insertedCount + updatedCount,
+            newItems: insertedCount,
+            updatedItems: updatedCount,
+            skippedCount,
+            items: [summaryItem, ...batchAuditItems.slice(0, 500)],
+          };
+
+          await supabaseClient.from("integration_logs").insert({
+            tenant_id: tenantId,
+            endpoint: "spreadsheet_import",
+            payload: sessionLogPayload,
+            status: "SUCCESS",
+          });
+        }
+      } catch (histErr) {
+        console.warn(
+          "[Inovafarma Sync] Aviso ao gravar sessão no Histórico 24h:",
+          histErr,
+        );
+      }
     }
 
     const result: InovafarmaSyncResult = {
@@ -4420,6 +4616,7 @@ export async function syncInovafarmaProductsToSupabase(
       ignoreErpPrices,
       syncedAt,
       lastProductSync: finalWatermark,
+      auditItems: batchAuditItems.slice(0, 150),
       message: partial
         ? `Lote sincronizado (offset ${effectiveOffset} -> próximo ${nextOffset}): ${validProducts.length} produtos processados (${insertedCount} novos, ${updatedCount} atualizados).`
         : `Sincronização Inovafarma concluída (HTTP ${httpStatus} | Header cnpj: ${cnpjSent}): ${validProducts.length} produtos processados (${insertedCount} novos, ${updatedCount} atualizados).`,
@@ -4429,6 +4626,7 @@ export async function syncInovafarmaProductsToSupabase(
       tenant_id: tenantId,
       endpoint: options.mode === "delta" ? "/inovafarma/produtosalterados" : "/inovafarma/sync",
       payload: {
+        source: "API Inovafarma",
         endpointUsed,
         httpStatus,
         routeId: effectiveRouteId,

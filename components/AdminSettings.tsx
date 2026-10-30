@@ -490,6 +490,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
 
       let currentOffset = 1;
       let lastResult: any = null;
+      const collectedAuditItems: Array<{ code: string; name: string; status: 'created' | 'updated' | 'skipped'; details: string }> = [];
       const MAX_BATCHES = 100;
 
       for (let batchIdx = 0; batchIdx < MAX_BATCHES; batchIdx++) {
@@ -522,6 +523,13 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
         totalUpdated += batchUpdated;
         totalSkipped += batchSkipped;
 
+        if (Array.isArray((result as any).auditItems) && collectedAuditItems.length < 300) {
+          for (const item of (result as any).auditItems) {
+            if (collectedAuditItems.length >= 300) break;
+            collectedAuditItems.push(item);
+          }
+        }
+
         const progressMsg = `Sincronizando... ${totalReceived} produtos processados`;
         setInovafarmaSyncProgressText(progressMsg);
 
@@ -544,6 +552,41 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
       }
 
       if (lastResult) {
+        if (totalCreated > 0 || totalUpdated > 0) {
+          try {
+            const historyRaw = localStorage.getItem('ff_import_history');
+            const history = historyRaw ? JSON.parse(historyRaw) : [];
+            const nowMs = Date.now();
+            const summaryRow = {
+              code: String(lastResult.cnpjSent || cnpjToUse || 'INOVAFARMA'),
+              name: `Resumo da Carga (${inovafarmaSyncMode === 'delta' ? 'Delta /produtosalterados' : 'Catálogo /produtos'})`,
+              status: (totalCreated > 0 ? 'created' : 'updated') as 'created' | 'updated',
+              details: `Origem: API Inovafarma | Recebidos: ${totalReceived} | Novos cadastrados: ${totalCreated} | Atualizados: ${totalUpdated} | Sem alteração: ${totalSkipped}`,
+            };
+            const newSession = {
+              id: Math.random().toString(36).substr(2, 9),
+              tenantId: config.id,
+              timestamp: nowMs,
+              source: 'API Inovafarma',
+              totalProcessed: totalReceived,
+              newItems: totalCreated,
+              updatedItems: totalUpdated,
+              unchangedItems: totalSkipped,
+              items: [summaryRow, ...collectedAuditItems],
+            };
+            const oneDayAgo = nowMs - 24 * 60 * 60 * 1000;
+            const filteredHistory = [
+              newSession,
+              ...(Array.isArray(history)
+                ? history.filter((h: any) => h.timestamp > oneDayAgo && !(h.tenantId === config.id && h.source === 'API Inovafarma' && nowMs - h.timestamp < 5 * 60 * 1000))
+                : []),
+            ].slice(0, 15);
+            localStorage.setItem('ff_import_history', JSON.stringify(filteredHistory));
+          } catch (storageErr) {
+            console.warn('Aviso ao salvar sessão Inovafarma no localStorage:', storageErr);
+          }
+        }
+
         setFormData((prev) => ({
           ...prev,
           erpBaseUrl: parsedRoute.origin,
