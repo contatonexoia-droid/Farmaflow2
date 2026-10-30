@@ -209,15 +209,17 @@ export const classifyProductTaxonomy = (
   // 2. MAMÃE E BEBÊ
   if (
     has([
-      "fralda infantil", "fralda bebe", "pampers", "huggies", "babysec", "cremer", "mamadeira", "chupeta", 
-      "mordedor", "bico silicone", "leite infantil", "formula infantil", "aptamil", "nan", "enfamil", "nestogeno", 
-      "mucilon", "lenco umedecido", "lenço umedecido", "toalha umedecida", "bepantol baby", "hipoglos", "desitin", 
-      "mustela bebe", "johnson baby", "shampoo bebe", "sabonete bebe", "colonia bebe", "amamentacao", 
-      "absorvente seios", "concha amamentacao", "bomba tira leite", "antiestrias gestante", "materna"
+      "fralda infantil", "fralda bebe", "pampers", "huggies", "babysec", "cremer", "pompom", "personal baby",
+      "turma da monica baby", "mamadeira", "chupeta", "mordedor", "bico silicone", "leite infantil",
+      "formula infantil", "aptamil", "nan", "enfamil", "nestogeno", "mucilon", "lenco umedecido", "lenço umedecido",
+      "toalha umedecida", "bepantol baby", "hipoglos", "desitin", "mustela bebe", "johnson baby", "granado bebe",
+      "shampoo bebe", "sabonete bebe", "colonia bebe", "amamentacao", "absorvente seios", "concha amamentacao",
+      "bomba tira leite", "antiestrias gestante", "materna", "cuidado infantil", "linha infantil",
+      "higiene infantil", "mamae e bebe", "puericultura"
     ]) ||
-    (has(["fralda"]) && !has(["geriatrica", "adulto", "plenitud", "bigfral", "roupa intima"]))
+    (has(["fralda", "fraldas"]) && !has(["geriatrica", "adulto", "plenitud", "bigfral", "roupa intima", "cotidian", "tena"]))
   ) {
-    if (has(["fralda", "pants infantil", "fraldas"])) {
+    if (has(["fralda", "pants infantil", "fraldas", "huggies", "pampers", "babysec", "pompom", "personal baby"])) {
       return { department: "Mamãe e Bebê", subcategory: "Fraldas" };
     }
     if (has(["amamentacao", "absorvente seios", "concha amamentacao", "bomba tira leite", "pomada mamilo", "lansinoh"])) {
@@ -232,96 +234,117 @@ export const classifyProductTaxonomy = (
     return { department: "Mamãe e Bebê", subcategory: "Higiene do Bebê" };
   }
 
-  // 3. DERMOCOSMÉTICOS E BELEZA
+  // 3. HIGIENE E CUIDADOS PESSOAIS (Prioriza itens claros de higiene bucal, sabonetes, desodorantes, absorventes antes de perfumaria genérica)
   if (
     has([
-      "protetor solar", "bloqueador solar", "fps", "anthelios", "minesol", "sundown", "vichy", "isdin", "laroche", 
-      "agua micelar", "hidratante facial", "antirrugas", "anti-idade", "acido hialuronico", "vitamina c facial", 
-      "retinol", "shampoo", "condicionador", "mascara capilar", "tintura", "coloracao", "esmalte", "acetona", 
-      "maquiagem", "base facial", "batom", "rímel", "rimel", "corretivo", "perfume", "eau de parfum", "colonia", 
-      "hidratante corporal", "creme corporal", "oleo corporal", "depilatorio", "veet", "cera depilatoria", "barba", 
-      "espuma de barbear", "locao pos barba", "skincare", "dermocosmetico", "cosmetico"
+      "higiene", "higiene pessoal", "cuidados pessoais", "higiene bucal",
+      "creme dental", "gel dental", "pasta de dente", "escova dental", "escova de dente", "fio dental",
+      "fita dental", "enxaguante bucal", "antisseptico bucal", "listerine", "colgate", "oral b", "oral-b",
+      "sorriso", "closeup", "close up", "sensodyne", "corega", "parodontax", "elmex", "curaprox",
+      "desodorante", "antitranspirante", "rexona", "dove", "nivea", "above", "monange", "suave", "herbissimo",
+      "old spice", "axe", "gillette", "bozzano", "roll on", "roll-on", "aerosol desodorante",
+      "sabonete", "sabonete liquido", "sabonete em barra", "gel de banho", "protex", "lux", "palmolive",
+      "phebo", "granado", "francis", "ypê", "absorvente", "sempre livre", "intimus", "kotex", "sym",
+      "carefree", "ob", "protetor diario", "absorvente interno", "tampao", "coletor menstrual",
+      "sabonete intimo", "dermacyd", "lucretin", "kronel", "hastes flexiveis", "cotonete", "algodao",
+      "lenco de papel", "papel higienico", "lamina de barbear", "prestobarba", "mach3", "venus",
+      "aparelho de barbear", "carga barbear"
     ]) &&
-    !has(["dipirona", "antibiotico", "anti-inflamatorio", "pressao", "diabetes"])
+    !has(["shampoo", "condicionador", "tintura", "esmalte", "protetor solar", "maquiagem"])
   ) {
-    if (has(["protetor solar", "bloqueador solar", "fps", "anthelios", "minesol", "sundown", "pos sol", "bronzeador", "gel pos sol"])) {
-      return { department: "Dermocosméticos e Beleza", subcategory: "Proteção Solar" };
-    }
-    if (has(["shampoo", "condicionador", "mascara capilar", "tintura", "coloracao", "cabelo", "cabelos", "leave in", "ampola capilar", "oleo capilar", "reparador pontas", "tonico capilar"])) {
-      return { department: "Dermocosméticos e Beleza", subcategory: "Cabelos" };
-    }
-    if (has(["rosto", "facial", "antirrugas", "anti idade", "anti-idade", "acido hialuronico", "vitamina c facial", "retinol", "agua micelar", "sabonete facial", "gel de limpeza facial", "serum facial", "olhos creme"])) {
-      return { department: "Dermocosméticos e Beleza", subcategory: "Cuidados com o Rosto" };
-    }
-    if (has(["maquiagem", "base", "batom", "rimel", "sombra", "delineador", "po compacto", "blush", "gloss", "corretivo facial"])) {
-      return { department: "Dermocosméticos e Beleza", subcategory: "Maquiagem" };
-    }
-    if (has(["perfume", "eau de parfum", "eau de toilette", "desodorante colonia", "colonia feminina", "colonia masculina", "fragrancia"])) {
-      return { department: "Dermocosméticos e Beleza", subcategory: "Perfumes" };
-    }
-    if (has(["esmalte", "acetona", "removedor esmalte", "alicate unha", "lixa unha", "cuticula", "unhas", "base unhas"])) {
-      return { department: "Dermocosméticos e Beleza", subcategory: "Cuidados com as Unhas" };
-    }
-    if (has(["barba", "espuma barbear", "locao pos barba", "pos barba", "oleo barba", "shampoo barba", "bozzano"])) {
-      return { department: "Dermocosméticos e Beleza", subcategory: "Beleza Masculina" };
-    }
-    return { department: "Dermocosméticos e Beleza", subcategory: "Cuidados com o Corpo" };
-  }
-
-  // 4. HIGIENE E CUIDADOS PESSOAIS
-  if (
-    has([
-      "creme dental", "pasta de dente", "escova dental", "escova de dente", "fio dental", "enxaguante bucal", 
-      "listerine", "colgate", "oral b", "oral-b", "sensodyne", "corega", "desodorante", "antitranspirante", 
-      "rexona", "dove", "nivea", "roll on", "aerosol desodorante", "sabonete", "sabonete liquido", "gel de banho", 
-      "absorvente", "sempre livre", "intimus", "kotex", "protetor diario", "absorvente interno", "tampao", 
-      "sabonete intimo", "dermacyd", "lucretin", "hastes flexiveis", "cotonete", "algodao", "lenco de papel", 
-      "papel higienico", "lamina de barbear", "prestobarba", "mach3", "aparelho de barbear"
-    ])
-  ) {
-    if (has(["creme dental", "pasta de dente", "escova dental", "escova dente", "fio dental", "enxaguante bucal", "listerine", "colgate", "oral b", "sensodyne", "corega", "dentadura", "afta spray", "bucal"])) {
+    if (has(["creme dental", "gel dental", "pasta de dente", "escova dental", "escova dente", "fio dental", "fita dental", "enxaguante bucal", "listerine", "colgate", "oral b", "sorriso", "closeup", "close up", "sensodyne", "corega", "parodontax", "elmex", "curaprox", "dentadura", "bucal"])) {
       return { department: "Higiene e Cuidados Pessoais", subcategory: "Higiene Bucal" };
     }
-    if (has(["desodorante", "antitranspirante", "roll on", "aerosol", "body spray"])) {
+    if (has(["desodorante", "antitranspirante", "roll on", "roll-on", "rexona", "above", "old spice", "axe", "herbissimo", "body spray"])) {
       return { department: "Higiene e Cuidados Pessoais", subcategory: "Desodorantes" };
     }
     if (has(["sabonete intimo", "intima", "dermacyd", "lucretin", "higiene intima"])) {
       return { department: "Higiene e Cuidados Pessoais", subcategory: "Higiene Íntima" };
     }
-    if (has(["absorvente", "sempre livre", "intimus", "kotex", "protetor diario", "coletor menstrual", "absorventes"])) {
+    if (has(["absorvente", "sempre livre", "intimus", "kotex", "sym", "carefree", "protetor diario", "coletor menstrual", "absorventes"])) {
       return { department: "Higiene e Cuidados Pessoais", subcategory: "Absorventes e Cuidados Femininos" };
     }
-    if (has(["prestobarba", "mach3", "lamina barbear", "aparelho barbear", "gillette"])) {
+    if (has(["prestobarba", "mach3", "lamina barbear", "aparelho barbear", "gillette", "bozzano", "carga barbear"])) {
       return { department: "Higiene e Cuidados Pessoais", subcategory: "Cuidados Masculinos" };
     }
-    if (has(["algodao", "cotonete", "hastes flexiveis", "lenco papel", "lencos"])) {
+    if (has(["algodao", "cotonete", "hastes flexiveis", "lenco papel", "lencos", "papel higienico"])) {
       return { department: "Higiene e Cuidados Pessoais", subcategory: "Lenços e Algodão" };
     }
     return { department: "Higiene e Cuidados Pessoais", subcategory: "Banho e Corpo" };
   }
 
+  // 4. DERMOCOSMÉTICOS E BELEZA (Inclui seção/grupo PERFUMARIA do ERP)
+  if (
+    has([
+      "perfumaria", "beleza", "dermocosmetico", "dermocosmeticos", "cosmetico", "cosmeticos", "skincare",
+      "protetor solar", "bloqueador solar", "fps", "anthelios", "minesol", "sundown", "episol", "anasol",
+      "vichy", "isdin", "laroche", "la roche", "cerave", "cetaphil", "neutrogena", "bioderma", "avene",
+      "mantecorp", "principia", "sallve", "cicatricure", "asepxia", "agua micelar", "hidratante facial",
+      "antirrugas", "anti-idade", "acido hialuronico", "vitamina c facial", "retinol", "serum",
+      "shampoo", "condicionador", "mascara capilar", "creme de pentear", "creme para pentear", "tintura",
+      "coloracao", "tonalizante", "agua oxigenada cremosa", "descolorante", "elseve", "pantene", "seda",
+      "tresemme", "clear", "head shoulders", "salon line", "skala", "novex", "garnier", "koleston", "cor ton",
+      "biocolor", "imédia", "imedia", "esmalte", "acetona", "removedor de esmalte", "risque", "impala",
+      "colorama", "dailus", "anita esmalte", "alicate de unha", "lixa de unha", "cuticula", "maquiagem",
+      "base facial", "batom", "rímel", "rimel", "mascara de cilios", "corretivo", "po compacto", "blush",
+      "delineador", "sombra", "gloss", "hidratante labial", "manteiga de cacau", "nivea lip", "carmex",
+      "perfume", "eau de parfum", "eau de toilette", "colonia", "deo colonia", "body splash",
+      "hidratante corporal", "creme corporal", "locao hidratante", "locao corporal", "oleo corporal",
+      "paixao", "monange hidratante", "depilatorio", "veet", "depil bella", "cera depilatoria", "barba",
+      "espuma de barbear", "locao pos barba", "escova de cabelo", "pente", "pinca", "touca"
+    ]) &&
+    !has(["dipirona", "antibiotico", "anti-inflamatorio", "pressao", "diabetes", "comprimido", "capsula", "mg/ml"])
+  ) {
+    if (has(["protetor solar", "bloqueador solar", "fps", "anthelios", "minesol", "sundown", "episol", "anasol", "pos sol", "bronzeador", "gel pos sol"])) {
+      return { department: "Dermocosméticos e Beleza", subcategory: "Proteção Solar" };
+    }
+    if (has(["shampoo", "condicionador", "mascara capilar", "creme de pentear", "creme para pentear", "tintura", "coloracao", "tonalizante", "cabelo", "cabelos", "capilar", "leave in", "ampola capilar", "oleo capilar", "reparador pontas", "tonico capilar", "elseve", "pantene", "seda", "tresemme", "salon line", "skala", "novex", "koleston", "biocolor", "escova de cabelo", "pente"])) {
+      return { department: "Dermocosméticos e Beleza", subcategory: "Cabelos" };
+    }
+    if (has(["rosto", "facial", "antirrugas", "anti idade", "anti-idade", "acido hialuronico", "vitamina c facial", "retinol", "agua micelar", "sabonete facial", "gel de limpeza facial", "serum", "olhos creme", "cerave", "cetaphil", "la roche", "laroche", "vichy", "bioderma", "avene", "principia", "sallve", "asepxia", "cicatricure"])) {
+      return { department: "Dermocosméticos e Beleza", subcategory: "Cuidados com o Rosto" };
+    }
+    if (has(["maquiagem", "base facial", "batom", "rimel", "mascara de cilios", "sombra", "delineador", "po compacto", "blush", "gloss", "corretivo", "hidratante labial", "manteiga de cacau", "pinca"])) {
+      return { department: "Dermocosméticos e Beleza", subcategory: "Maquiagem" };
+    }
+    if (has(["perfume", "eau de parfum", "eau de toilette", "desodorante colonia", "deo colonia", "colonia", "body splash", "fragrancia"])) {
+      return { department: "Dermocosméticos e Beleza", subcategory: "Perfumes" };
+    }
+    if (has(["esmalte", "acetona", "removedor", "alicate", "lixa", "cuticula", "unha", "unhas", "risque", "impala", "colorama", "dailus"])) {
+      return { department: "Dermocosméticos e Beleza", subcategory: "Cuidados com as Unhas" };
+    }
+    if (has(["barba", "espuma de barbear", "espuma barbear", "locao pos barba", "pos barba", "oleo barba", "shampoo barba"])) {
+      return { department: "Dermocosméticos e Beleza", subcategory: "Beleza Masculina" };
+    }
+    return { department: "Dermocosméticos e Beleza", subcategory: "Cuidados com o Corpo" };
+  }
+
   // 5. SAÚDE, ORTOPEDIA E PRIMEIROS SOCORROS
   if (
     has([
-      "curativo", "band aid", "band-aid", "esparadrapo", "gaze", "atadura", "antisseptico", "merthiolate", 
-      "timerosal", "alcool 70", "povidine", "clorexidina", "agua oxigenada", "aparelho de pressao", 
-      "esfigmomanometro", "termometro", "nebulizador", "inalador", "oximetro", "glicosimetro", "tiras reagentes", 
-      "lancetas", "joelheira", "tornozeleira", "munhequeira", "tipoia", "cinta lombar", "colar cervical", 
-      "bengala", "muleta", "cadeira de rodas", "fralda geriatrica", "plenitud", "bigfral", "roupa intima descartavel", 
-      "preservativo", "camisinha", "jontex", "prudence", "blowtex", "lubrificante intimo", "teste de gravidez", 
-      "clearblue", "seringa", "agulha", "coletor"
+      "primeiros socorros", "ortopedia", "ortopedico", "ortopedicos", "hospitalar", "aparelhos de saude",
+      "acessorios de saude", "artigos medicos", "geriatria", "incontinencia",
+      "curativo", "band aid", "band-aid", "esparadrapo", "fita micropore", "micropore", "gaze", "atadura",
+      "antisseptico", "merthiolate", "timerosal", "alcool 70", "povidine", "clorexidina", "agua oxigenada",
+      "soro fisiologico", "aparelho de pressao", "esfigmomanometro", "termometro", "nebulizador", "inalador",
+      "oximetro", "glicosimetro", "tiras reagentes", "lancetas", "joelheira", "tornozeleira", "munhequeira",
+      "tipoia", "cinta lombar", "colar cervical", "meia de compressao", "kendall", "sigvaris", "bengala",
+      "muleta", "cadeira de rodas", "fralda geriatrica", "fralda adulto", "plenitud", "bigfral", "cotidian",
+      "tena", "roupa intima descartavel", "preservativo", "camisinha", "jontex", "prudence", "blowtex",
+      "olla", "lubrificante intimo", "ky", "k-med", "teste de gravidez", "clearblue", "confirme", "seringa",
+      "agulha", "coletor universal", "luva descartavel", "mascara descartavel", "bolsa termica"
     ])
   ) {
-    if (has(["curativo", "band aid", "esparadrapo", "gaze", "atadura", "antisseptico", "merthiolate", "alcool 70", "agua oxigenada", "primeiros socorros"])) {
+    if (has(["curativo", "band aid", "esparadrapo", "micropore", "gaze", "atadura", "antisseptico", "merthiolate", "alcool 70", "agua oxigenada", "soro fisiologico", "primeiros socorros"])) {
       return { department: "Saúde, Ortopedia e Primeiros Socorros", subcategory: "Primeiros Socorros" };
     }
     if (has(["aparelho de pressao", "termometro", "nebulizador", "inalador", "oximetro", "glicosimetro", "tiras reagentes", "lanceta", "balanca"])) {
       return { department: "Saúde, Ortopedia e Primeiros Socorros", subcategory: "Aparelhos de Saúde" };
     }
-    if (has(["joelheira", "tornozeleira", "munhequeira", "tipoia", "cinta lombar", "colar cervical", "bengala", "muleta", "palmilha ortopedica", "ortopedico"])) {
+    if (has(["joelheira", "tornozeleira", "munhequeira", "tipoia", "cinta lombar", "colar cervical", "meia de compressao", "kendall", "sigvaris", "bengala", "muleta", "palmilha ortopedica", "ortopedico", "ortopedia"])) {
       return { department: "Saúde, Ortopedia e Primeiros Socorros", subcategory: "Ortopédicos" };
     }
-    if (has(["fralda geriatrica", "geriatrica", "plenitud", "bigfral", "roupa intima descartavel", "incontinencia", "lenco adulto"])) {
+    if (has(["fralda geriatrica", "fralda adulto", "geriatrica", "geriatria", "plenitud", "bigfral", "cotidian", "tena", "roupa intima descartavel", "incontinencia", "lenco adulto"])) {
       return { department: "Saúde, Ortopedia e Primeiros Socorros", subcategory: "Cuidados para Idosos" };
     }
     return { department: "Saúde, Ortopedia e Primeiros Socorros", subcategory: "Outros Acessórios de Saúde" };
@@ -330,17 +353,19 @@ export const classifyProductTaxonomy = (
   // 6. CONVENIÊNCIA
   if (
     has([
-      "snack", "salgadinho", "batata frita", "doritos", "ruffles", "castanha", "amendoim", "bala", "chiclete", 
-      "trident", "halls", "drops", "chocolate", "bombom", "bis", "kitkat", "refrigerante", "coca cola", "suco", 
-      "energetico", "red bull", "monster", "agua mineral", "pilha", "bateria", "carregador", "guarda chuva", 
-      "isqueiro", "adocante", "barra de cereal"
+      "conveniencia", "bomboniere", "mercearia", "alimentos", "bebidas", "bazar",
+      "snack", "salgadinho", "batata frita", "doritos", "ruffles", "castanha", "amendoim", "bala", "chiclete",
+      "trident", "halls", "mentos", "tic tac", "drops", "pirulito", "chocolate", "bombom", "bis", "kitkat",
+      "refrigerante", "coca cola", "suco", "energetico", "red bull", "monster", "gatorade", "agua mineral",
+      "agua de coco", "pilha", "bateria", "carregador", "guarda chuva", "isqueiro", "adocante", "zero cal",
+      "linea", "barra de cereal", "repelente", "off", "exposis", "sbp", "inseticida"
     ]) &&
     !has(["vitamina", "suplemento", "dipirona", "medicamento"])
   ) {
-    if (has(["snack", "salgadinho", "batata", "doritos", "ruffles", "castanha", "amendoim", "barra de cereal", "chocolate", "bombom", "bis", "kitkat", "bala", "chiclete", "trident", "halls", "doce"])) {
+    if (has(["snack", "salgadinho", "batata", "doritos", "ruffles", "castanha", "amendoim", "barra de cereal", "chocolate", "bombom", "bis", "kitkat", "bala", "chiclete", "trident", "halls", "mentos", "tic tac", "doce", "bomboniere"])) {
       return { department: "Conveniência", subcategory: "Snacks" };
     }
-    if (has(["refrigerante", "coca cola", "suco", "energetico", "red bull", "monster", "agua mineral", "cha pronto", "bebida"])) {
+    if (has(["refrigerante", "coca cola", "suco", "energetico", "red bull", "monster", "gatorade", "agua mineral", "agua de coco", "cha pronto", "bebida", "adocante", "zero cal"])) {
       return { department: "Conveniência", subcategory: "Alimentos e Bebidas" };
     }
     if (has(["pilha", "bateria", "carregador", "fone", "cabo usb", "adaptador"])) {
@@ -355,12 +380,14 @@ export const classifyProductTaxonomy = (
   // 7. SAÚDE E BEM-ESTAR (Vitaminas, Suplementos, Nutracêuticos)
   if (
     has([
-      "vitamina", "multivitaminico", "polivitaminico", "lavitan", "centrum", "pharmaton", "vitamina c", "vitamina d", 
-      "vitamina b12", "zinco", "ferro", "calcio", "magnesio", "suplemento", "whey", "creatina", "bcaa", "glutamina", 
-      "colageno", "omega 3", "probiotico", "propolis", "echinacea", "melatonina", "passiflora", "valeriana", 
-      "calmante natural", "emagrecimento", "quitosana", "faseolamina", "spirulina", "shake", "termogenico", 
-      "pre treino", "pos treino", "isotonico", "barra de proteina", "amora miura", "oleo de primula", "acido folico", 
-      "maca peruana", "tribulus"
+      "saude e bem estar", "bem estar", "suplementos", "vitaminas", "nutraceuticos", "fitoterapicos", "naturais",
+      "vitamina", "multivitaminico", "polivitaminico", "lavitan", "centrum", "pharmaton", "supradyn", "targifor",
+      "vitamina c", "vitamina d", "vitamina b12", "vitamina e", "zinco", "ferro", "calcio", "magnesio",
+      "cloreto de magnesio", "suplemento", "whey", "creatina", "bcaa", "glutamina", "colageno", "omega 3",
+      "probiotico", "propolis", "echinacea", "melatonina", "passiflora", "valeriana", "maracuja",
+      "calmante natural", "emagrecimento", "quitosana", "faseolamina", "spirulina", "psyllium", "shake",
+      "termogenico", "pre treino", "pos treino", "isotonico", "barra de proteina", "amora miura",
+      "oleo de primula", "acido folico", "maca peruana", "tribulus", "coenzima q10", "biotina"
     ]) &&
     !has(["dipirona", "amoxicilina", "losartana", "atenolol", "metformina", "omeprazol"])
   ) {

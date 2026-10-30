@@ -5993,12 +5993,25 @@ app.post(
         },
         (name, category) => {
           try {
-            return classifyProductTaxonomy(name, category || "Geral");
+            const classified = classifyProductTaxonomy({
+              name,
+              rawCategory: category || "",
+            });
+            const isGenericCat =
+              !category ||
+              ["geral", "outros", "diversos", "sem grupo"].includes(
+                String(category).trim().toLowerCase(),
+              );
+            return {
+              department: classified.department,
+              category: !isGenericCat ? category : classified.subcategory,
+              subcategory: classified.subcategory,
+            };
           } catch {
             return {
-              department: "Outros",
+              department: "Medicamentos",
               category: category || "Geral",
-              subcategory: "Outros",
+              subcategory: "Outros Medicamentos",
             };
           }
         },

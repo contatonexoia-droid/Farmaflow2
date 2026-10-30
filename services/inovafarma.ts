@@ -1880,10 +1880,17 @@ export function normalizeInovafarmaProduct(
   ]);
 
   const rawPromo = getProductFieldCI(raw as any, [
+    "PRECOPROMOCAO",
+    "PrecoPromocao",
+    "precoPromocao",
+    "preco_promocao",
     "PRECOPROMOCIONAL",
     "PrecoPromocional",
     "precoPromocional",
     "preco_promocional",
+    "PRECOVITRINE",
+    "PrecoVitrine",
+    "precoVitrine",
     "valorPromocao",
     "precoOferta",
     "promotionalPrice",
@@ -1940,25 +1947,12 @@ export function normalizeInovafarmaProduct(
 
   const stock = Math.max(0, Math.floor(parseInovafarmaNumber(rawStock, 0)));
 
-  const category =
-    String(
-      getProductFieldCI(raw as any, [
-        "CATEGORIA",
-        "Categoria",
-        "GRUPO",
-        "Grupo",
-        "SECAO",
-        "Secao",
-        "categoria",
-        "departamento",
-        "grupo",
-        "secao",
-        "category",
-      ]) ?? "Geral",
-    ).trim() || "Geral";
-
   const manufacturer = String(
     getProductFieldCI(raw as any, [
+      "NOMEFABRICANTE",
+      "NomeFabricante",
+      "nomeFabricante",
+      "nome_fabricante",
       "FABRICANTE",
       "Fabricante",
       "LABORATORIO",
@@ -1978,6 +1972,409 @@ export function normalizeInovafarmaProduct(
       "substancia",
     ]) ?? "",
   ).trim();
+
+  // Extrai todas as propriedades possíveis enviadas pelo ERP para indicar grupo, seção, departamento ou categoria
+  const erpCategoryCandidateKeys = [
+    "grupo",
+    "secao",
+    "departamento",
+    "categoria",
+    "grupoProduto",
+    "nomeGrupo",
+    "family",
+    "subgrupo",
+    "NOMEGRUPO",
+    "NomeGrupo",
+    "nome_grupo",
+    "GRUPOPRODUTO",
+    "GrupoProduto",
+    "grupo_produto",
+    "NOMESECAO",
+    "NomeSecao",
+    "nomeSecao",
+    "nome_secao",
+    "NOMEDEPARTAMENTO",
+    "NomeDepartamento",
+    "nomeDepartamento",
+    "NOMESUBGRUPO",
+    "NomeSubgrupo",
+    "nomeSubgrupo",
+    "GRUPO",
+    "Grupo",
+    "SECAO",
+    "Secao",
+    "DEPARTAMENTO",
+    "Departamento",
+    "CATEGORIA",
+    "Categoria",
+    "SUBGRUPO",
+    "Subgrupo",
+    "FAMILIA",
+    "Familia",
+    "familia",
+    "FAMILY",
+    "category",
+    "department",
+    "section",
+  ];
+
+  const isGenericErpCategory = (val: string): boolean => {
+    const clean = val
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .trim();
+    return (
+      !clean ||
+      clean === "geral" ||
+      clean === "outros" ||
+      clean === "outro" ||
+      clean === "diversos" ||
+      clean === "sem grupo" ||
+      clean === "sem secao" ||
+      clean === "sem categoria" ||
+      clean === "padrao" ||
+      clean === "nao informado" ||
+      clean === "n/a" ||
+      clean === "null" ||
+      clean === "undefined" ||
+      /^\d+$/.test(clean)
+    );
+  };
+
+  let erpProvidedCategory = "";
+  for (const key of erpCategoryCandidateKeys) {
+    const val = getProductFieldCI(raw as any, [key]);
+    if (val !== undefined && val !== null) {
+      const strVal = String(val).trim();
+      if (strVal && !isGenericErpCategory(strVal)) {
+        erpProvidedCategory = strVal;
+        break;
+      }
+    }
+  }
+
+  // Heurística inteligente baseada no nome do produto caso o ERP não envie grupo/categoria (ou envie vazio/genérico)
+  const inferCategoryByHeuristic = (
+    productName: string,
+    activePrinciple: string,
+  ): string => {
+    const norm = `${productName} ${activePrinciple}`
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9\s-]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    const hasAny = (keywords: string[]): boolean =>
+      keywords.some((kw) => {
+        const cleanKw = kw
+          .toLowerCase()
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .trim();
+        if (!cleanKw) return false;
+        const regex = new RegExp(`(^|\\s)${cleanKw}(\\s|$)`, "i");
+        return regex.test(norm) || norm.includes(cleanKw);
+      });
+
+    // 1. Higiene Pessoal, Bucal, Sabonetes, Desodorantes, Absorventes e Fraldas
+    if (
+      hasAny([
+        "fralda",
+        "huggies",
+        "pampers",
+        "babysec",
+        "personal baby",
+        "pompom",
+        "mamadeira",
+        "chupeta",
+        "mordedor",
+        "lenco umedecido",
+        "toalha umedecida",
+        "sabonete",
+        "desodorante",
+        "antitranspirante",
+        "roll on",
+        "roll-on",
+        "rexona",
+        "dove",
+        "nivea",
+        "above",
+        "monange",
+        "suave",
+        "herbissimo",
+        "old spice",
+        "axe",
+        "protex",
+        "lux",
+        "palmolive",
+        "phebo",
+        "granado",
+        "colgate",
+        "oral-b",
+        "oral b",
+        "sorriso",
+        "closeup",
+        "close up",
+        "sensodyne",
+        "parodontax",
+        "elmex",
+        "curaprox",
+        "listerine",
+        "corega",
+        "creme dental",
+        "gel dental",
+        "pasta de dente",
+        "escova dental",
+        "escova de dente",
+        "fio dental",
+        "fita dental",
+        "enxaguante bucal",
+        "antisseptico bucal",
+        "absorvente",
+        "intimus",
+        "sempre livre",
+        "kotex",
+        "sym",
+        "carefree",
+        "protetor diario",
+        "sabonete intimo",
+        "dermacyd",
+        "lucretin",
+        "cotonete",
+        "hastes flexiveis",
+        "algodao",
+        "papel higienico",
+        "lenco de papel",
+        "prestobarba",
+        "gillette",
+        "mach3",
+        "aparelho de barbear",
+        "lamina de barbear",
+        "plenitud",
+        "bigfral",
+        "cotidian",
+        "tena",
+      ])
+    ) {
+      return "Higiene";
+    }
+
+    // 2. Perfumaria, Cabelos, Dermocosméticos, Beleza e Cuidados com a Pele
+    if (
+      hasAny([
+        "shampoo",
+        "condicionador",
+        "mascara capilar",
+        "creme de pentear",
+        "creme para pentear",
+        "leave in",
+        "leave-in",
+        "oleo capilar",
+        "reparador de pontas",
+        "tonico capilar",
+        "tintura",
+        "coloracao",
+        "tonalizante",
+        "descolorante",
+        "agua oxigenada cremosa",
+        "elseve",
+        "pantene",
+        "seda",
+        "tresemme",
+        "clear anticaspa",
+        "head shoulders",
+        "salon line",
+        "skala",
+        "novex",
+        "garnier",
+        "koleston",
+        "biocolor",
+        "cor ton",
+        "imedia",
+        "esmalte",
+        "acetona",
+        "removedor de esmalte",
+        "risque",
+        "impala",
+        "colorama",
+        "dailus",
+        "alicate de unha",
+        "lixa de unha",
+        "cuticula",
+        "protetor solar",
+        "bloqueador solar",
+        "fps",
+        "sundown",
+        "anthelios",
+        "minesol",
+        "episol",
+        "anasol",
+        "isdin",
+        "vichy",
+        "la roche",
+        "laroche",
+        "cerave",
+        "cetaphil",
+        "neutrogena",
+        "bioderma",
+        "avene",
+        "mantecorp",
+        "principia",
+        "sallve",
+        "cicatricure",
+        "asepxia",
+        "agua micelar",
+        "hidratante",
+        "locao corporal",
+        "locao hidratante",
+        "creme corporal",
+        "creme facial",
+        "oleo corporal",
+        "paixao",
+        "antirrugas",
+        "anti-idade",
+        "acido hialuronico",
+        "retinol",
+        "serum",
+        "perfume",
+        "colonia",
+        "deo colonia",
+        "body splash",
+        "eau de parfum",
+        "eau de toilette",
+        "maquiagem",
+        "batom",
+        "rimel",
+        "mascara de cilios",
+        "base facial",
+        "corretivo",
+        "po compacto",
+        "blush",
+        "delineador",
+        "gloss",
+        "manteiga de cacau",
+        "hidratante labial",
+        "depilatorio",
+        "veet",
+        "depil bella",
+        "espuma de barbear",
+        "pos barba",
+        "bozzano",
+        "escova de cabelo",
+        "pente",
+        "pinca",
+        "touca",
+      ])
+    ) {
+      return "Perfumaria";
+    }
+
+    // 3. Vitaminas e Suplementos
+    if (
+      hasAny([
+        "vitamina",
+        "polivitaminico",
+        "multivitaminico",
+        "lavitan",
+        "centrum",
+        "pharmaton",
+        "supradyn",
+        "targifor",
+        "suplemento",
+        "whey",
+        "creatina",
+        "bcaa",
+        "glutamina",
+        "colageno",
+        "omega 3",
+        "melatonina",
+        "propolis",
+        "coenzima q10",
+        "biotina",
+      ]) &&
+      !hasAny(["dipirona", "paracetamol", "amoxicilina", "losartana", "omeprazol"])
+    ) {
+      return "Suplementos";
+    }
+
+    // 4. Primeiros Socorros, Ortopedia e Aparelhos
+    if (
+      hasAny([
+        "curativo",
+        "band-aid",
+        "band aid",
+        "esparadrapo",
+        "micropore",
+        "gaze",
+        "atadura",
+        "merthiolate",
+        "alcool 70",
+        "aparelho de pressao",
+        "termometro",
+        "nebulizador",
+        "inalador",
+        "oximetro",
+        "glicosimetro",
+        "tiras reagentes",
+        "lanceta",
+        "joelheira",
+        "tornozeleira",
+        "munhequeira",
+        "tipoia",
+        "cinta lombar",
+        "meia de compressao",
+        "preservativo",
+        "camisinha",
+        "jontex",
+        "prudence",
+        "blowtex",
+        "olla",
+        "lubrificante",
+        "teste de gravidez",
+        "clearblue",
+        "seringa",
+        "agulha",
+      ])
+    ) {
+      return "Primeiros Socorros";
+    }
+
+    // 5. Conveniência
+    if (
+      hasAny([
+        "bala",
+        "chiclete",
+        "halls",
+        "trident",
+        "mentos",
+        "tic tac",
+        "chocolate",
+        "bombom",
+        "barra de cereal",
+        "refrigerante",
+        "energetico",
+        "red bull",
+        "monster",
+        "agua mineral",
+        "pilha",
+        "bateria",
+        "adocante",
+        "zero cal",
+        "repelente",
+        "exposis",
+      ])
+    ) {
+      return "Conveniência";
+    }
+
+    return "Medicamentos";
+  };
+
+  const category =
+    erpProvidedCategory || inferCategoryByHeuristic(finalName, activeIngredient);
 
   const updatedAtErp = String(
     getProductFieldCI(raw as any, [
@@ -5027,6 +5424,30 @@ export async function syncInovafarmaProductsToSupabase(
         (item.erpProductId && existingByInternalCode.get(item.erpProductId)) ||
         (item.barcode && existingByBarcode.get(item.barcode));
 
+      let taxonomy: { department?: string; category?: string; subcategory?: string } = {};
+      if (classifyTaxonomyFn) {
+        try {
+          taxonomy = classifyTaxonomyFn(item.name, item.category);
+        } catch {
+          taxonomy = {};
+        }
+      }
+
+      // Usa exatamente a categoria enviada pelo ERP (ou inferida pela heurística de nome: Perfumaria, Higiene, etc.)
+      const resolvedCategory =
+        item.category && item.category !== "Geral"
+          ? item.category
+          : taxonomy.category || taxonomy.subcategory || "Medicamentos";
+      const resolvedDepartment =
+        taxonomy.department ||
+        (resolvedCategory === "Perfumaria"
+          ? "Dermocosméticos e Beleza"
+          : resolvedCategory === "Higiene"
+            ? "Higiene e Cuidados Pessoais"
+            : "Medicamentos");
+      const resolvedSubcategory =
+        taxonomy.subcategory || resolvedCategory || "Outros Medicamentos";
+
       if (existing) {
         updatedCount++;
         const finalInternalCode = String(
@@ -5037,6 +5458,19 @@ export async function syncInovafarmaProductsToSupabase(
             "",
         ).trim();
 
+        const existingCatNorm = String(existing.category || "")
+          .toLowerCase()
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .trim();
+        const shouldRefreshCategory =
+          !existing.is_ai_enriched ||
+          !existingCatNorm ||
+          existingCatNorm === "geral" ||
+          existingCatNorm === "outros" ||
+          existingCatNorm === "outros medicamentos" ||
+          existingCatNorm === "medicamentos";
+
         const updatedRow: any = {
           id: existing.id,
           tenant_id: tenantId,
@@ -5044,7 +5478,18 @@ export async function syncInovafarmaProductsToSupabase(
           internal_code: finalInternalCode,
           name: existing.name || item.name,
           stock: item.stock,
-          category: existing.category || item.category || "Geral",
+          category: shouldRefreshCategory
+            ? resolvedCategory
+            : existing.category || resolvedCategory,
+          department: shouldRefreshCategory
+            ? resolvedDepartment
+            : existing.department || resolvedDepartment,
+          subcategory: shouldRefreshCategory
+            ? resolvedSubcategory
+            : existing.subcategory || resolvedSubcategory,
+          ...(item.manufacturer && (!existing.manufacturer || existing.manufacturer === "Outros")
+            ? { manufacturer: item.manufacturer }
+            : {}),
           presentation: item.unitMeasure || existing.presentation || "UN",
           updated_at: syncedAt,
         };
@@ -5089,19 +5534,11 @@ export async function syncInovafarmaProductsToSupabase(
             name: String(updatedRow.name || item.name),
             code: String(finalInternalCode || updatedRow.barcode || ""),
             status: "updated",
-            details: `Origem: API Inovafarma | ${priceTxt} | ${stockTxt}`,
+            details: `Origem: API Inovafarma | Categoria: ${updatedRow.category} | ${priceTxt} | ${stockTxt}`,
           });
         }
       } else {
         insertedCount++;
-        let taxonomy: { department?: string; category?: string; subcategory?: string } = {};
-        if (classifyTaxonomyFn) {
-          try {
-            taxonomy = classifyTaxonomyFn(item.name, item.category);
-          } catch {
-            taxonomy = {};
-          }
-        }
 
         const finalInternalCode = String(
           item.erpProductId || item.internalCode || item.barcode || "",
@@ -5121,9 +5558,10 @@ export async function syncInovafarmaProductsToSupabase(
           ...(item.originalPrice !== null ? { original_price: item.originalPrice } : {}),
           promotional_price: item.promotionalPrice,
           stock: item.stock,
-          category: taxonomy.category || item.category || "Geral",
-          department: taxonomy.department || "Outros",
-          subcategory: taxonomy.subcategory || "Outros",
+          category: resolvedCategory,
+          department: resolvedDepartment,
+          subcategory: resolvedSubcategory,
+          ...(item.manufacturer ? { manufacturer: item.manufacturer } : {}),
           is_featured: false,
           is_ai_enriched: false,
           updated_at: syncedAt,

@@ -10,6 +10,7 @@ import {
   FlashDealsScheduleConfig,
 } from "../types";
 import { parseOperatingHoursFromText, resolveTenantOperatingHours } from "../utils/operatingHours";
+import { classifyProductTaxonomy } from "../lib/departments";
 
 /**
  * SQL DEFINITIVO PARA CORREÇÃO DO BANCO (Execute no SQL Editor do Supabase):
@@ -848,23 +849,41 @@ export const deleteTenant = async (id: string) => {
   }
 };
 
-export const mapDbProductToApp = (p: any): Product => ({
-  id: p.id,
-  tenantId: p.tenant_id || p.tenantid,
-  internalCode: p.internal_code || p.internalcode || "",
-  barcode: p.barcode || "",
-  name: p.name || "Produto Sem Nome",
-  activePrinciple: p.active_principle || p.activeprinciple || "",
-  drugType: p.drug_type || p.drugtype || "",
-  manufacturer: p.manufacturer || "Outros",
-  price: Number(p.price) || 0,
-  stock: Number(p.stock) || 0,
-  category: p.category || "Geral",
-  groupingSlug: p.grouping_slug || p.groupingslug || "",
-  variantAttribute: p.variant_attribute || p.variantattribute || "",
-  image: p.image,
-  description: p.description || "",
-  indications: p.indications || "",
+export const mapDbProductToApp = (p: any): Product => {
+  const rawCategory = String(p.category || "").trim();
+  const normCategory = rawCategory.toLowerCase();
+  const isGenericCategory =
+    !rawCategory ||
+    normCategory === "geral" ||
+    normCategory === "outros" ||
+    normCategory === "outros medicamentos" ||
+    normCategory === "diversos";
+
+  const resolvedCategory = isGenericCategory
+    ? classifyProductTaxonomy({
+        name: p.name || "",
+        activePrinciple: p.active_principle || p.activeprinciple || "",
+        description: p.description || "",
+      }).subcategory || "Geral"
+    : rawCategory;
+
+  return {
+    id: p.id,
+    tenantId: p.tenant_id || p.tenantid,
+    internalCode: p.internal_code || p.internalcode || "",
+    barcode: p.barcode || "",
+    name: p.name || "Produto Sem Nome",
+    activePrinciple: p.active_principle || p.activeprinciple || "",
+    drugType: p.drug_type || p.drugtype || "",
+    manufacturer: p.manufacturer || "Outros",
+    price: Number(p.price) || 0,
+    stock: Number(p.stock) || 0,
+    category: resolvedCategory,
+    groupingSlug: p.grouping_slug || p.groupingslug || "",
+    variantAttribute: p.variant_attribute || p.variantattribute || "",
+    image: p.image,
+    description: p.description || "",
+    indications: p.indications || "",
   presentation: p.presentation || "",
   usage: p.usage || "",
   sideEffects: p.side_effects || p.sideeffects || "",
@@ -914,8 +933,9 @@ export const mapDbProductToApp = (p: any): Product => ({
       : p.internal_code && /^\d+$/.test(String(p.internal_code))
         ? Number(p.internal_code)
         : undefined,
-  unitMeasure: p.unit_measure || p.unidade_medida || undefined,
-});
+    unitMeasure: p.unit_measure || p.unidade_medida || undefined,
+  };
+};
 
 export const mapDbOrderToApp = (o: any): Order => ({
   id: o.id,
