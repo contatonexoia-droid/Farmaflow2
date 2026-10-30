@@ -509,6 +509,10 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
           offset: currentOffset,
           limit: 500,
           maxPages: 3,
+          cumulativeReceived: totalReceived,
+          cumulativeCreated: totalCreated,
+          cumulativeUpdated: totalUpdated,
+          cumulativeSkipped: totalSkipped,
           ignoreErpPrices: Boolean(formData.ignore_erp_prices),
         });
 

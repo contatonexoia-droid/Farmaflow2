@@ -116,51 +116,124 @@ export const AdminImportHistory: React.FC<AdminImportHistoryProps> = ({ tenant }
                     });
                 }
 
-                // Caso existam logs diretos de sincronização do Inovafarma (/inovafarma/sync) nas últimas 24h
-                // que ainda não possuam sessão consolidada em spreadsheet_import, agrupa e exibe no Histórico 24h
-                const inovaSyncLogs = rawLogs.filter(
-                    (l: any) =>
-                        (l.endpoint === '/inovafarma/sync' || l.endpoint === '/inovafarma/produtosalterados') &&
-                        l.status === 'SUCCESS' &&
-                        (Number(l.payload?.insertedCount || l.payload?.createdCount || 0) > 0 ||
-                            Number(l.payload?.updatedCount || 0) > 0)
-                );
+                // Agrupa e consolida lotes de sincronização do Inovafarma (/inovafarma/sync) nas últimas 24h
+                // somando todos os lotes da mesma execução multi-lote (ex: 1500 + 1395 = 2895)
+                const inovaSyncLogs = rawLogs
+                    .filter(
+                        (l: any) =>
+                            (l.endpoint === '/inovafarma/sync' || l.endpoint === '/inovafarma/produtosalterados') &&
+                            l.status === 'SUCCESS'
+                    )
+                    .sort((a: any, b: any) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+
+                interface ConsolidatedSyncRun {
+                    id: string;
+                    tenantId: string;
+                    timestamp: number;
+                    cnpj: string;
+                    received: number;
+                    created: number;
+                    updated: number;
+                    skipped: number;
+                }
+
+                const consolidatedRuns: ConsolidatedSyncRun[] = [];
+                let activeRun: ConsolidatedSyncRun | null = null;
 
                 for (const syncLog of inovaSyncLogs) {
                     const logTs = new Date(syncLog.created_at).getTime();
                     if (now - logTs >= oneDay) continue;
 
-                    const alreadyCovered = dbSessions.some(
-                        s => s.source === 'API Inovafarma' && Math.abs(s.timestamp - logTs) < 20 * 60 * 1000
-                    );
-                    if (alreadyCovered) continue;
-
                     const pay = syncLog.payload || {};
-                    const received = Number(pay.receivedCount ?? pay.totalFetched ?? 0);
-                    const created = Number(pay.createdCount ?? pay.insertedCount ?? 0);
-                    const updated = Number(pay.updatedCount ?? 0);
-                    const skipped = Number(pay.skippedCount ?? 0);
+                    const offset = Number(pay.offset || 1);
+                    const batchReceived = Number(pay.batchReceivedCount ?? pay.receivedCount ?? pay.totalFetched ?? 0);
+                    const batchCreated = Number(pay.batchCreatedCount ?? pay.createdCount ?? pay.insertedCount ?? 0);
+                    const batchUpdated = Number(pay.batchUpdatedCount ?? pay.updatedCount ?? 0);
+                    const batchSkipped = Number(pay.batchSkippedCount ?? pay.skippedCount ?? 0);
+
+                    const isContinuation =
+                        activeRun !== null &&
+                        offset > 1 &&
+                        Math.abs(logTs - activeRun.timestamp) < 15 * 60 * 1000;
+
+                    if (!isContinuation || !activeRun) {
+                        activeRun = {
+                            id: syncLog.id,
+                            tenantId: syncLog.tenant_id,
+                            timestamp: logTs,
+                            cnpj: String(pay.cnpj || 'INOVAFARMA'),
+                            received: batchReceived,
+                            created: batchCreated,
+                            updated: batchUpdated,
+                            skipped: batchSkipped
+                        };
+                        consolidatedRuns.push(activeRun);
+                    } else {
+                        activeRun.id = syncLog.id;
+                        activeRun.timestamp = logTs;
+                        if (pay.totalReceivedConsolidated !== undefined) {
+                            activeRun.received = Math.max(activeRun.received + batchReceived, Number(pay.totalReceivedConsolidated));
+                            activeRun.created = Math.max(activeRun.created + batchCreated, Number(pay.totalCreatedConsolidated ?? 0));
+                            activeRun.updated = Math.max(activeRun.updated + batchUpdated, Number(pay.totalUpdatedConsolidated ?? 0));
+                            activeRun.skipped = activeRun.skipped + batchSkipped;
+                        } else {
+                            activeRun.received += batchReceived;
+                            activeRun.created += batchCreated;
+                            activeRun.updated += batchUpdated;
+                            activeRun.skipped += batchSkipped;
+                        }
+                    }
+                }
+
+                for (const run of consolidatedRuns) {
+                    if (run.created <= 0 && run.updated <= 0) continue;
+
+                    const summaryText = `Origem: API Inovafarma | Total recebidos: ${run.received} | Novos cadastrados: ${run.created} | Atualizados: ${run.updated}${run.skipped > 0 ? ` | Ignorados: ${run.skipped}` : ''}`;
+
+                    // Verifica se já existe sessão em dbSessions ou loadedSessions desta mesma execução;
+                    // se existir mas estiver com contador parcial de apenas um lote (ex: 1500 < 2895), atualiza para o consolidado!
+                    const matchingDbSession = dbSessions.find(
+                        s => s.source === 'API Inovafarma' && Math.abs(s.timestamp - run.timestamp) < 15 * 60 * 1000
+                    );
+
+                    if (matchingDbSession) {
+                        if ((matchingDbSession.totalProcessed || 0) < run.received) {
+                            matchingDbSession.totalProcessed = run.received;
+                            matchingDbSession.newItems = Math.max(matchingDbSession.newItems || 0, run.created);
+                            matchingDbSession.updatedItems = Math.max(matchingDbSession.updatedItems || 0, run.updated);
+                            if (Array.isArray(matchingDbSession.items) && matchingDbSession.items.length > 0) {
+                                const firstItem = matchingDbSession.items[0];
+                                if (
+                                    firstItem.name.startsWith('RESUMO') ||
+                                    firstItem.name.startsWith('Resumo')
+                                ) {
+                                    firstItem.details = summaryText;
+                                }
+                            }
+                        }
+                        continue;
+                    }
 
                     dbSessions.push({
-                        id: syncLog.id,
-                        tenantId: syncLog.tenant_id,
-                        timestamp: logTs,
+                        id: run.id,
+                        tenantId: run.tenantId,
+                        timestamp: run.timestamp,
                         source: 'API Inovafarma',
-                        totalProcessed: received,
-                        newItems: created,
-                        updatedItems: updated,
+                        totalProcessed: run.received,
+                        newItems: run.created,
+                        updatedItems: run.updated,
                         items: [
                             {
                                 name: 'RESUMO DA SINCRONIZAÇÃO (ORIGEM: API INOVAFARMA)',
-                                code: String(pay.cnpj || 'INOVAFARMA'),
-                                status: 'updated',
-                                details: `Origem: API Inovafarma | Total recebidos: ${received} | Novos cadastrados: ${created} | Atualizados: ${updated}${skipped > 0 ? ` | Ignorados: ${skipped}` : ''}`
+                                code: run.cnpj,
+                                status: run.created > 0 ? 'created' : 'updated',
+                                details: summaryText
                             }
                         ]
                     });
                 }
 
-                // Mescla banco e localStorage evitando duplicados por id ou proximidade de timestamp
+                // Mescla banco e localStorage evitando duplicados e mantendo sempre a sessão com maior total consolidado
                 const mergedMap = new Map<string, ImportSession>();
 
                 dbSessions.forEach(s => {
@@ -168,11 +241,21 @@ export const AdminImportHistory: React.FC<AdminImportHistoryProps> = ({ tenant }
                 });
 
                 loadedSessions.forEach(s => {
-                    const hasSimilar = Array.from(mergedMap.values()).some(existing =>
-                        Math.abs(existing.timestamp - s.timestamp) < 15000 &&
-                        (existing.source || 'Planilha CSV/Excel') === (s.source || 'Planilha CSV/Excel')
+                    const similarExisting = Array.from(mergedMap.values()).find(
+                        existing =>
+                            Math.abs(existing.timestamp - s.timestamp) < 15 * 60 * 1000 &&
+                            (existing.source || 'Planilha CSV/Excel') === (s.source || 'Planilha CSV/Excel')
                     );
-                    if (!mergedMap.has(s.id) && !hasSimilar) {
+                    if (similarExisting) {
+                        if ((s.totalProcessed || 0) > (similarExisting.totalProcessed || 0)) {
+                            similarExisting.totalProcessed = s.totalProcessed;
+                            similarExisting.newItems = s.newItems;
+                            similarExisting.updatedItems = s.updatedItems;
+                            if (s.items && s.items.length > (similarExisting.items?.length || 0)) {
+                                similarExisting.items = s.items;
+                            }
+                        }
+                    } else if (!mergedMap.has(s.id)) {
                         mergedMap.set(s.id, s);
                     }
                 });

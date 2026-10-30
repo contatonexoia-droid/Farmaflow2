@@ -80,6 +80,8 @@ export const SuperAdminManager: React.FC<SuperAdminManagerProps> = ({ session, o
     let totalReceived = 0;
     let totalCreated = 0;
     let totalUpdated = 0;
+    let totalSkipped = 0;
+    const collectedAuditItems: Array<{ code: string; name: string; status: 'created' | 'updated' | 'skipped'; details: string }> = [];
 
     try {
       const parsedRoute = parseInovafarmaUrlAndRoute(
@@ -105,6 +107,10 @@ export const SuperAdminManager: React.FC<SuperAdminManagerProps> = ({ session, o
           offset: currentOffset,
           limit: 500,
           maxPages: 3,
+          cumulativeReceived: totalReceived,
+          cumulativeCreated: totalCreated,
+          cumulativeUpdated: totalUpdated,
+          cumulativeSkipped: totalSkipped,
           ignoreErpPrices: Boolean(selectedTenantForIntegration.ignore_erp_prices),
         });
 
@@ -112,6 +118,14 @@ export const SuperAdminManager: React.FC<SuperAdminManagerProps> = ({ session, o
         totalReceived += result.receivedCount ?? result.totalFetched ?? 0;
         totalCreated += result.createdCount ?? result.insertedCount ?? 0;
         totalUpdated += result.updatedCount ?? 0;
+        totalSkipped += result.skippedCount ?? 0;
+
+        if (Array.isArray((result as any).auditItems) && collectedAuditItems.length < 300) {
+          for (const item of (result as any).auditItems) {
+            if (collectedAuditItems.length >= 300) break;
+            collectedAuditItems.push(item);
+          }
+        }
 
         const progressMsg = `Sincronizando... ${totalReceived} produtos processados`;
         setInovafarmaSyncProgressText(progressMsg);
@@ -129,6 +143,49 @@ export const SuperAdminManager: React.FC<SuperAdminManagerProps> = ({ session, o
       }
 
       if (lastResult) {
+        if (totalCreated > 0 || totalUpdated > 0) {
+          try {
+            const historyRaw = localStorage.getItem('ff_import_history');
+            const history = historyRaw ? JSON.parse(historyRaw) : [];
+            const nowMs = Date.now();
+            const summaryRow = {
+              code: String(lastResult.cnpjSent || effectiveCnpj || 'INOVAFARMA'),
+              name: 'RESUMO DA SINCRONIZAÇÃO (ORIGEM: API INOVAFARMA)',
+              status: (totalCreated > 0 ? 'created' : 'updated') as 'created' | 'updated',
+              details: `Origem: API Inovafarma | Total recebidos: ${totalReceived} | Novos cadastrados: ${totalCreated} | Atualizados: ${totalUpdated}${totalSkipped > 0 ? ` | Ignorados: ${totalSkipped}` : ''}`,
+            };
+            const newSession = {
+              id: `INOVA_${nowMs.toString(36).toUpperCase()}`,
+              tenantId: selectedTenantForIntegration.id,
+              timestamp: nowMs,
+              source: 'API Inovafarma',
+              totalProcessed: totalReceived,
+              newItems: totalCreated,
+              updatedItems: totalUpdated,
+              unchangedItems: totalSkipped,
+              items: [summaryRow, ...collectedAuditItems],
+            };
+            const oneDayAgo = nowMs - 24 * 60 * 60 * 1000;
+            const filteredHistory = [
+              newSession,
+              ...(Array.isArray(history)
+                ? history.filter(
+                    (h: any) =>
+                      h.timestamp > oneDayAgo &&
+                      !(
+                        h.tenantId === selectedTenantForIntegration.id &&
+                        h.source === 'API Inovafarma' &&
+                        nowMs - h.timestamp < 15 * 60 * 1000
+                      ),
+                  )
+                : []),
+            ].slice(0, 15);
+            localStorage.setItem('ff_import_history', JSON.stringify(filteredHistory));
+          } catch (storageErr) {
+            console.warn('Aviso ao salvar sessão Inovafarma no localStorage:', storageErr);
+          }
+        }
+
         const exactStatus = lastResult.httpStatus ?? 200;
         const exactCnpj = lastResult.cnpjSent || effectiveCnpj;
         setInovafarmaSyncFeedback({

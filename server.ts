@@ -5965,6 +5965,22 @@ app.post(
           offset: requestedOffset,
           limit: requestedLimit,
           maxPages: requestedMaxPages,
+          cumulativeReceived:
+            body.cumulativeReceived !== undefined
+              ? Number(body.cumulativeReceived)
+              : undefined,
+          cumulativeCreated:
+            body.cumulativeCreated !== undefined
+              ? Number(body.cumulativeCreated)
+              : undefined,
+          cumulativeUpdated:
+            body.cumulativeUpdated !== undefined
+              ? Number(body.cumulativeUpdated)
+              : undefined,
+          cumulativeSkipped:
+            body.cumulativeSkipped !== undefined
+              ? Number(body.cumulativeSkipped)
+              : undefined,
           ignoreErpPrices:
             typeof body.ignoreErpPrices === "boolean"
               ? body.ignoreErpPrices

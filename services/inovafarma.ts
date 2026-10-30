@@ -333,6 +333,11 @@ export interface InovafarmaSyncOptions {
   limit?: number;
   /** Máximo de páginas de 500 itens por chamada HTTP (padrão: 3 páginas = 1.500 produtos, < 20s) */
   maxPages?: number;
+  /** Acumulado de lotes anteriores (para consolidar histórico multi-lote) */
+  cumulativeReceived?: number;
+  cumulativeCreated?: number;
+  cumulativeUpdated?: number;
+  cumulativeSkipped?: number;
   /** Permite enviar uma lista de produtos diretamente caso o agente local / ponte envie via push */
   productsOverride?: InovafarmaRawProduct[];
 }
@@ -2233,10 +2238,16 @@ export async function inovafarmaHttpRequest<T = any>(params: {
       if (!response.ok) {
         const errText = await response.text().catch(() => "");
         console.warn(
-          `[Inovafarma HTTP] ${params.method} ${fullUrl} | Header cnpj=${cleanCnpj} -> HTTP ${response.status} (${errText.slice(0, 200)})`,
+          `[Inovafarma HTTP] ${params.method} ${fullUrl} | Header cnpj=${cleanCnpj} -> HTTP ${response.status} (${errText.slice(0, 500)})`,
         );
+        if (params.method === "POST" && params.body !== undefined) {
+          console.error(
+            `[Inovafarma HTTP POST Error Payload] URL=${fullUrl} | Status=${response.status} | Payload enviado:`,
+            JSON.stringify(params.body),
+          );
+        }
         errors.push(
-          `${fullUrl} -> HTTP ${response.status}${errText ? ` (${errText.slice(0, 140)})` : ""}`,
+          `${fullUrl} -> HTTP ${response.status}${errText ? ` (${errText.slice(0, 300)})` : ""}`,
         );
         continue;
       }
@@ -2336,6 +2347,7 @@ export async function inovafarmaHttpRequest<T = any>(params: {
           method: params.method,
           cnpjSent: cleanCnpj,
           queryParams: params.queryParams,
+          ...(params.body !== undefined ? { requestBody: params.body } : {}),
           errors: errors.slice(0, 5),
         },
         status: "FAILED",
@@ -3761,7 +3773,29 @@ export async function sendInovafarmaVenda(params: {
     }
   }
 
-  // 3. Dispara POST /api/v1/{integracao}/Venda (rota case-sensitive oficial com V maiúsculo)
+  // 3. Garante explicitamente a propriedade `ent` na raiz do JSON e registra console.log para depuração antes do POST /Venda
+  const explicitRootPayload: InovafarmaVendaPayload = {
+    ent:
+      payloadEnviado.ent !== undefined &&
+      payloadEnviado.ent !== null &&
+      String(payloadEnviado.ent).trim() !== ""
+        ? payloadEnviado.ent
+        : effectiveCnpj || "1",
+    ...payloadEnviado,
+  };
+  explicitRootPayload.ent =
+    payloadEnviado.ent !== undefined &&
+    payloadEnviado.ent !== null &&
+    String(payloadEnviado.ent).trim() !== ""
+      ? payloadEnviado.ent
+      : effectiveCnpj || "1";
+
+  console.log(
+    `[Inovafarma Venda] Payload exato antes do envio (POST /api/v1/${params.routeId || INOVAFARMA_DEFAULT_ROUTE_ID}/Venda):`,
+    JSON.stringify(explicitRootPayload, null, 2),
+  );
+
+  // Dispara POST /api/v1/{integracao}/Venda (rota case-sensitive oficial com V maiúsculo)
   const res = await inovafarmaHttpRequest<any>({
     method: "POST",
     baseUrl: params.baseUrl,
@@ -3770,7 +3804,7 @@ export async function sendInovafarmaVenda(params: {
     cnpj: effectiveCnpj,
     apiKey: params.apiKey,
     resourcePaths: ["Venda"],
-    body: payloadEnviado,
+    body: explicitRootPayload,
     supabaseClient: params.supabaseClient,
     tenantId: params.tenantId,
   });
@@ -3786,9 +3820,9 @@ export async function sendInovafarmaVenda(params: {
     success: true,
     alreadyExistsInErp: false,
     endpointUsed: res.endpointUsed,
-    codigoVendaOnLine: payloadEnviado.codigoVendaOnLine,
+    codigoVendaOnLine: explicitRootPayload.codigoVendaOnLine,
     codigoVendaInova: codigoVendaInova ? String(codigoVendaInova) : null,
-    payloadEnviado,
+    payloadEnviado: explicitRootPayload,
     response: res.data ?? { ok: true },
   };
 }
@@ -4500,112 +4534,175 @@ export async function syncInovafarmaProductsToSupabase(
       });
     }
 
-    // 8. Registra/consolida a sessão na tabela/formato da aba "Histórico 24h" (endpoint = 'spreadsheet_import')
-    // sempre que houver produtos criados ou atualizados (insertedCount > 0 || updatedCount > 0)
-    if (insertedCount > 0 || updatedCount > 0) {
+    // 8. Consolida os contadores de todos os lotes quando a sincronização rodar em múltiplos lotes (offset > 1)
+    let consolidatedReceived = rawProducts.length;
+    let consolidatedCreated = insertedCount;
+    let consolidatedUpdated = updatedCount;
+    let consolidatedSkipped = skippedCount;
+    let previousAuditItems: InovafarmaAuditItem[] = [];
+    const existingHistoryRowIdsToDelete: string[] = [];
+
+    const fifteenMinutesAgoIso = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+
+    if (effectiveOffset > 1) {
+      const hasFrontendCumulatives =
+        options.cumulativeReceived !== undefined &&
+        Number(options.cumulativeReceived) > 0;
+
+      if (hasFrontendCumulatives) {
+        consolidatedReceived =
+          Math.max(0, Number(options.cumulativeReceived || 0)) + rawProducts.length;
+        consolidatedCreated =
+          Math.max(0, Number(options.cumulativeCreated || 0)) + insertedCount;
+        consolidatedUpdated =
+          Math.max(0, Number(options.cumulativeUpdated || 0)) + updatedCount;
+        consolidatedSkipped =
+          Math.max(0, Number(options.cumulativeSkipped || 0)) + skippedCount;
+      }
+
       try {
-        const tenMinutesAgoIso = new Date(Date.now() - 15 * 60 * 1000).toISOString();
-        let existingHistoryRow: any = null;
+        const { data: recentLogsForConsolidation } = await supabaseClient
+          .from("integration_logs")
+          .select("id, endpoint, payload, created_at")
+          .eq("tenant_id", tenantId)
+          .in("endpoint", [
+            "spreadsheet_import",
+            "/inovafarma/sync",
+            "/inovafarma/produtosalterados",
+          ])
+          .gte("created_at", fifteenMinutesAgoIso)
+          .order("created_at", { ascending: false })
+          .limit(30);
 
-        if (effectiveOffset > 1) {
-          const { data: recentHistoryRows } = await supabaseClient
-            .from("integration_logs")
-            .select("id, payload, created_at")
-            .eq("tenant_id", tenantId)
-            .eq("endpoint", "spreadsheet_import")
-            .gte("created_at", tenMinutesAgoIso)
-            .order("created_at", { ascending: false })
-            .limit(5);
+        const recentRows = recentLogsForConsolidation || [];
 
-          existingHistoryRow = (recentHistoryRows || []).find(
-            (r: any) =>
-              r?.payload?.source === "API Inovafarma" ||
-              r?.payload?.origin === "API Inovafarma",
-          );
+        // Coleta sessões anteriores de spreadsheet_import desta mesma execução multi-lote para substituir pela consolidada
+        const prevSpreadsheetRows = recentRows.filter(
+          (r: any) =>
+            r.endpoint === "spreadsheet_import" &&
+            (r?.payload?.source === "API Inovafarma" ||
+              r?.payload?.origin === "API Inovafarma" ||
+              String(r?.payload?.id || "").startsWith("INOVA_")),
+        );
+
+        for (const row of prevSpreadsheetRows) {
+          if (row.id) existingHistoryRowIdsToDelete.push(row.id);
+          if (previousAuditItems.length === 0 && Array.isArray(row?.payload?.items)) {
+            previousAuditItems = row.payload.items.filter(
+              (it: any) =>
+                !String(it?.name || "").startsWith("RESUMO DA SINCRONIZAÇÃO") &&
+                !String(it?.name || "").startsWith("Resumo da Carga") &&
+                !String(it?.name || "").startsWith("ORIGEM: API INOVAFARMA"),
+            );
+          }
         }
 
-        if (existingHistoryRow && existingHistoryRow.payload) {
-          const prevPayload = existingHistoryRow.payload;
-          const mergedReceived =
-            Number(prevPayload.totalProcessed || 0) + rawProducts.length;
-          const mergedNew = Number(prevPayload.newItems || 0) + insertedCount;
-          const mergedUpdated =
-            Number(prevPayload.updatedItems || 0) + updatedCount;
-          const mergedSkipped =
-            Number(prevPayload.skippedCount || 0) + skippedCount;
-          const mergedSaved = mergedNew + mergedUpdated;
-
-          const prevItems: InovafarmaAuditItem[] = Array.isArray(prevPayload.items)
-            ? prevPayload.items.filter(
-                (it: any) =>
-                  !String(it?.name || "").startsWith("RESUMO DA SINCRONIZAÇÃO") &&
-                  !String(it?.name || "").startsWith("ORIGEM: API INOVAFARMA"),
-              )
-            : [];
-          const combinedAuditItems = [...prevItems, ...batchAuditItems].slice(
-            0,
-            600,
+        // Se o chamador não enviou os acumulados dos lotes anteriores, soma a partir dos logs dos lotes da execução atual (desde offset = 1)
+        if (!hasFrontendCumulatives) {
+          const syncBatchRows = recentRows.filter(
+            (r: any) =>
+              r.endpoint === "/inovafarma/sync" ||
+              r.endpoint === "/inovafarma/produtosalterados",
           );
+          let sumPrevReceived = 0;
+          let sumPrevCreated = 0;
+          let sumPrevUpdated = 0;
+          let sumPrevSkipped = 0;
 
-          const summaryItem: InovafarmaAuditItem = {
-            name: "RESUMO DA SINCRONIZAÇÃO (ORIGEM: API INOVAFARMA)",
-            code: cnpjSent || "INOVAFARMA",
-            status: "updated",
-            details: `Origem: API Inovafarma | Total recebidos: ${mergedReceived} | Novos cadastrados: ${mergedNew} | Atualizados: ${mergedUpdated}${mergedSkipped > 0 ? ` | Ignorados: ${mergedSkipped}` : ""}`,
-          };
+          for (const bRow of syncBatchRows) {
+            const bPay = bRow.payload || {};
+            const bOffset = Number(bPay.offset || 1);
+            const bRec = Number(
+              bPay.batchReceivedCount ?? bPay.receivedCount ?? bPay.totalFetched ?? 0,
+            );
+            const bCre = Number(
+              bPay.batchCreatedCount ?? bPay.createdCount ?? bPay.insertedCount ?? 0,
+            );
+            const bUpd = Number(bPay.batchUpdatedCount ?? bPay.updatedCount ?? 0);
+            const bSkp = Number(bPay.batchSkippedCount ?? bPay.skippedCount ?? 0);
 
-          const updatedSessionPayload = {
-            ...prevPayload,
-            source: "API Inovafarma",
-            origin: "API Inovafarma",
-            timestamp: Date.now(),
-            totalProcessed: mergedReceived,
-            totalSaved: mergedSaved,
-            newItems: mergedNew,
-            updatedItems: mergedUpdated,
-            skippedCount: mergedSkipped,
-            items: [summaryItem, ...combinedAuditItems],
-          };
+            if (bOffset < effectiveOffset) {
+              sumPrevReceived += bRec;
+              sumPrevCreated += bCre;
+              sumPrevUpdated += bUpd;
+              sumPrevSkipped += bSkp;
+            }
+            if (bOffset <= 1) {
+              break;
+            }
+          }
 
+          if (sumPrevReceived > 0 || sumPrevCreated > 0 || sumPrevUpdated > 0) {
+            consolidatedReceived = sumPrevReceived + rawProducts.length;
+            consolidatedCreated = sumPrevCreated + insertedCount;
+            consolidatedUpdated = sumPrevUpdated + updatedCount;
+            consolidatedSkipped = sumPrevSkipped + skippedCount;
+          } else if (prevSpreadsheetRows.length > 0) {
+            const latestPrevPay = prevSpreadsheetRows[0].payload || {};
+            consolidatedReceived =
+              Number(latestPrevPay.totalProcessed || 0) + rawProducts.length;
+            consolidatedCreated =
+              Number(latestPrevPay.newItems || 0) + insertedCount;
+            consolidatedUpdated =
+              Number(latestPrevPay.updatedItems || 0) + updatedCount;
+            consolidatedSkipped =
+              Number(latestPrevPay.skippedCount || 0) + skippedCount;
+          }
+        }
+      } catch (consErr) {
+        console.warn(
+          "[Inovafarma Sync] Aviso ao consultar lotes anteriores para consolidação:",
+          consErr,
+        );
+      }
+    }
+
+    // Registra a sessão consolidada em integration_logs (endpoint = 'spreadsheet_import')
+    if (consolidatedCreated > 0 || consolidatedUpdated > 0) {
+      try {
+        if (existingHistoryRowIdsToDelete.length > 0) {
           await supabaseClient
             .from("integration_logs")
-            .update({
-              payload: updatedSessionPayload,
-              status: "SUCCESS",
-            })
-            .eq("id", existingHistoryRow.id);
-        } else {
-          const summaryItem: InovafarmaAuditItem = {
-            name: "RESUMO DA SINCRONIZAÇÃO (ORIGEM: API INOVAFARMA)",
-            code: cnpjSent || "INOVAFARMA",
-            status: "updated",
-            details: `Origem: API Inovafarma | Total recebidos: ${rawProducts.length} | Novos cadastrados: ${insertedCount} | Atualizados: ${updatedCount}${skippedCount > 0 ? ` | Ignorados: ${skippedCount}` : ""}`,
-          };
-
-          const sessionLogPayload = {
-            id: `INOVA_${Date.now().toString(36).toUpperCase()}`,
-            tenantId,
-            source: "API Inovafarma",
-            origin: "API Inovafarma",
-            timestamp: Date.now(),
-            totalProcessed: rawProducts.length,
-            totalSaved: insertedCount + updatedCount,
-            newItems: insertedCount,
-            updatedItems: updatedCount,
-            skippedCount,
-            items: [summaryItem, ...batchAuditItems.slice(0, 500)],
-          };
-
-          await supabaseClient.from("integration_logs").insert({
-            tenant_id: tenantId,
-            endpoint: "spreadsheet_import",
-            payload: sessionLogPayload,
-            status: "SUCCESS",
-          });
+            .delete()
+            .in("id", existingHistoryRowIdsToDelete);
         }
+
+        const combinedAuditItems = [...previousAuditItems, ...batchAuditItems].slice(
+          0,
+          600,
+        );
+
+        const summaryItem: InovafarmaAuditItem = {
+          name: "RESUMO DA SINCRONIZAÇÃO (ORIGEM: API INOVAFARMA)",
+          code: cnpjSent || "INOVAFARMA",
+          status: consolidatedCreated > 0 ? "created" : "updated",
+          details: `Origem: API Inovafarma | Total recebidos: ${consolidatedReceived} | Novos cadastrados: ${consolidatedCreated} | Atualizados: ${consolidatedUpdated}${consolidatedSkipped > 0 ? ` | Ignorados: ${consolidatedSkipped}` : ""}`,
+        };
+
+        const sessionLogPayload = {
+          id: `INOVA_${Date.now().toString(36).toUpperCase()}`,
+          tenantId,
+          source: "API Inovafarma",
+          origin: "API Inovafarma",
+          timestamp: Date.now(),
+          totalProcessed: consolidatedReceived,
+          totalSaved: consolidatedCreated + consolidatedUpdated,
+          newItems: consolidatedCreated,
+          updatedItems: consolidatedUpdated,
+          skippedCount: consolidatedSkipped,
+          partial,
+          items: [summaryItem, ...combinedAuditItems],
+        };
+
+        await supabaseClient.from("integration_logs").insert({
+          tenant_id: tenantId,
+          endpoint: "spreadsheet_import",
+          payload: sessionLogPayload,
+          status: "SUCCESS",
+        });
       } catch (histErr) {
         console.warn(
-          "[Inovafarma Sync] Aviso ao gravar sessão no Histórico 24h:",
+          "[Inovafarma Sync] Aviso ao gravar sessão consolidada no Histórico 24h:",
           histErr,
         );
       }
@@ -4632,8 +4729,8 @@ export async function syncInovafarmaProductsToSupabase(
       lastProductSync: finalWatermark,
       auditItems: batchAuditItems.slice(0, 150),
       message: partial
-        ? `Lote sincronizado (offset ${effectiveOffset} -> próximo ${nextOffset}): ${validProducts.length} produtos processados (${insertedCount} novos, ${updatedCount} atualizados).`
-        : `Sincronização Inovafarma concluída (HTTP ${httpStatus} | Header cnpj: ${cnpjSent}): ${validProducts.length} produtos processados (${insertedCount} novos, ${updatedCount} atualizados).`,
+        ? `Lote sincronizado (offset ${effectiveOffset} -> próximo ${nextOffset}): ${consolidatedReceived} produtos acumulados (${consolidatedCreated} novos, ${consolidatedUpdated} atualizados).`
+        : `Sincronização Inovafarma concluída (HTTP ${httpStatus} | Header cnpj: ${cnpjSent}): ${consolidatedReceived} produtos processados (${consolidatedCreated} novos, ${consolidatedUpdated} atualizados).`,
     };
 
     await supabaseClient.from("integration_logs").insert({
@@ -4650,13 +4747,20 @@ export async function syncInovafarmaProductsToSupabase(
         nextOffset: partial ? nextOffset : null,
         inicial: options.inicial,
         final: options.final,
-        receivedCount: rawProducts.length,
-        createdCount: insertedCount,
-        totalFetched: rawProducts.length,
-        totalValid: validProducts.length,
-        insertedCount,
-        updatedCount,
-        skippedCount,
+        batchReceivedCount: rawProducts.length,
+        batchCreatedCount: insertedCount,
+        batchUpdatedCount: updatedCount,
+        batchSkippedCount: skippedCount,
+        receivedCount: !partial ? consolidatedReceived : rawProducts.length,
+        createdCount: !partial ? consolidatedCreated : insertedCount,
+        totalFetched: !partial ? consolidatedReceived : rawProducts.length,
+        totalValid: !partial ? consolidatedCreated + consolidatedUpdated : validProducts.length,
+        insertedCount: !partial ? consolidatedCreated : insertedCount,
+        updatedCount: !partial ? consolidatedUpdated : updatedCount,
+        skippedCount: !partial ? consolidatedSkipped : skippedCount,
+        totalReceivedConsolidated: consolidatedReceived,
+        totalCreatedConsolidated: consolidatedCreated,
+        totalUpdatedConsolidated: consolidatedUpdated,
         ignoreErpPrices,
         lastProductSync: finalWatermark,
       },
@@ -4703,6 +4807,10 @@ export async function triggerInovafarmaSync(params: {
   offset?: number;
   limit?: number;
   maxPages?: number;
+  cumulativeReceived?: number;
+  cumulativeCreated?: number;
+  cumulativeUpdated?: number;
+  cumulativeSkipped?: number;
 }): Promise<InovafarmaSyncResult> {
   const response = await fetch("/api/integration/inovafarma/sync", {
     method: "POST",
