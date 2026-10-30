@@ -1745,9 +1745,15 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
           <div className="border-t border-gray-50 pt-8 mb-8 mt-8">
               <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 mb-6">
                   <div>
-                      <h3 className="text-lg font-black text-gray-900 flex items-center gap-2">
-                          <Store size={20} className="text-brand" /> Integração com ERP / PDV (Inovafarma - Portal PS)
-                      </h3>
+                      <div className="flex flex-wrap items-center gap-2.5 mb-1">
+                          <h3 className="text-lg font-black text-gray-900 flex items-center gap-2">
+                              <Store size={20} className="text-brand" /> Integração com ERP / PDV (Inovafarma - Portal PS)
+                          </h3>
+                          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-extrabold">
+                              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                              Sincronização Automática Ativa (a cada 15 min)
+                          </span>
+                      </div>
                       <p className="text-sm text-gray-500">
                           Arquitetura oficial 100% via consultas ativas (<span className="font-mono text-xs">GET /api/v1/&#123;integracao&#125;/...</span>) e envio/conciliação de pedidos (<span className="font-mono text-xs">POST /Venda</span> &amp; <span className="font-mono text-xs">GET /vendaporid</span>).
                       </p>

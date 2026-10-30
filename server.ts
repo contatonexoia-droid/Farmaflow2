@@ -64,6 +64,9 @@ import {
   extractTenantErpPassword,
   hasTenantErpPassword,
   saveTenantInovafarmaState,
+  touchInovafarmaHeartbeat,
+  isCachedInovafarmaTokenValid,
+  deriveInovafarmaDateRange,
   sanitizeTenantErpCredentialsForClient,
 } from "./services/inovafarma.js";
 
@@ -8433,12 +8436,12 @@ const handleAgentStatus = async (req: express.Request, res: express.Response) =>
   try {
     const filterTenantId = (req.query.tenantId || req.query.tenant_id || req.query.store_id || req.headers['x-tenant-id'] || req.headers['x-store-id']) as string;
 
-    // 1. Busca todos os tenants (ou tenant filtrado) com os campos reais da tabela
+    // 1. Busca todos os tenants (ou tenant filtrado) com todos os campos para inspecionar erp_type, smart_banners e last_product_sync
     let tenantsList: any[] = [];
     try {
       let tenantQuery = supabaseAdmin
         .from('tenants')
-        .select('id, name, slug, erp_type, last_seen, agent_last_seen, created_at, integration_token');
+        .select('*');
 
       if (filterTenantId) {
         const cleanFilter = filterTenantId.replace(/^store_/, '').replace(/^tenant_/, '').trim();
@@ -8484,30 +8487,65 @@ const handleAgentStatus = async (req: express.Request, res: express.Response) =>
       for (const t of tenantsList) {
         processedTenantIds.add(t.id);
         const agent = agentMap.get(t.id);
+        const erpTypeNorm = String(t.erp_type || '').toLowerCase().trim();
+        const isInovafarma =
+          erpTypeNorm === 'inovafarma' ||
+          String(agent?.machine_id || '').includes('Inovafarma');
+        const erpCfg = isInovafarma ? extractTenantErpConfig(t) : null;
 
-        // Encontra o timestamp mais recente entre agent_integrations e tenants
+        // Encontra o timestamp mais recente entre agent_integrations, tenants e sincronização Inovafarma
         const candidateDates = [
           agent?.last_seen,
           t.agent_last_seen,
-          t.last_seen
-        ].filter(Boolean).map((d: any) => new Date(d).getTime()).filter(n => !isNaN(n) && n > 0);
+          t.last_seen,
+          t.last_ping_at,
+          ...(isInovafarma
+            ? [
+                t.smart_banners?._erpCredentials?.last_seen,
+                erpCfg?.last_product_sync,
+                t.smart_banners?._erpCredentials?.updated_at,
+              ]
+            : []),
+        ]
+          .filter(Boolean)
+          .map((d: any) => new Date(d).getTime())
+          .filter((n) => !isNaN(n) && n > 0);
 
-        const latestTimestamp = candidateDates.length > 0
-          ? new Date(Math.max(...candidateDates)).toISOString()
-          : null;
+        const latestTimestamp =
+          candidateDates.length > 0
+            ? new Date(Math.max(...candidateDates)).toISOString()
+            : null;
+
+        const hasActiveToken = isInovafarma && erpCfg
+          ? Boolean(
+              (erpCfg.erp_access_token &&
+                isCachedInovafarmaTokenValid(
+                  erpCfg.erp_access_token,
+                  erpCfg.erp_token_expiration,
+                )) ||
+                (erpCfg.erp_login && erpCfg.has_erp_password),
+            )
+          : false;
 
         finalIntegrations.push({
           id: agent?.id || t.id,
           tenant_id: t.id,
-          machine_id: agent?.machine_id || 'Servidor Local',
+          erp_type: isInovafarma ? 'inovafarma' : erpTypeNorm || null,
+          machine_id: isInovafarma
+            ? 'API Cloud (Inovafarma)'
+            : agent?.machine_id || 'Servidor Local',
           is_active: agent?.is_active ?? true,
+          has_active_token: hasActiveToken,
           last_seen: latestTimestamp,
+          last_product_sync: erpCfg?.last_product_sync || t.last_product_sync || null,
           activation_token: agent?.activation_token || t.integration_token || null,
           tenants: {
             id: t.id,
             name: t.name,
-            slug: t.slug
-          }
+            slug: t.slug,
+            erp_type: isInovafarma ? 'inovafarma' : erpTypeNorm || undefined,
+            last_product_sync: erpCfg?.last_product_sync || t.last_product_sync || undefined,
+          },
         });
       }
     }
@@ -8516,17 +8554,22 @@ const handleAgentStatus = async (req: express.Request, res: express.Response) =>
     if (agentRows) {
       for (const agent of agentRows) {
         if (agent.tenant_id && !processedTenantIds.has(agent.tenant_id)) {
+          const isInovaAgent = String(agent.machine_id || '').includes('Inovafarma');
           finalIntegrations.push({
             id: agent.id,
             tenant_id: agent.tenant_id,
-            machine_id: agent.machine_id || 'Servidor Local',
+            erp_type: isInovaAgent ? 'inovafarma' : null,
+            machine_id: isInovaAgent
+              ? 'API Cloud (Inovafarma)'
+              : agent.machine_id || 'Servidor Local',
             is_active: agent.is_active ?? true,
             last_seen: agent.last_seen || null,
             activation_token: agent.activation_token || null,
             tenants: {
               id: agent.tenant_id,
-              name: 'Farmácia'
-            }
+              name: 'Farmácia',
+              ...(isInovaAgent ? { erp_type: 'inovafarma' } : {}),
+            },
           });
         }
       }
@@ -12443,6 +12486,186 @@ const handleTransferConversation = async (req: express.Request, res: express.Res
 app.post("/api/v1/chat/conversations/:id/transfer", handleTransferConversation);
 app.post("/api/v1/chat/transfer", handleTransferConversation);
 
+// ==============================================================================
+// AGENDADOR AUTOMÁTICO EM BACKGROUND DO INOVAFARMA (POLLING A CADA 15 MINUTOS)
+// ==============================================================================
+let isInovafarmaCronRunning = false;
+
+async function runInovafarmaAutoSyncScheduler(triggerSource = "cron_15m"): Promise<void> {
+  if (isInovafarmaCronRunning) {
+    console.log(
+      `[INOVAFARMA CRON] Execução anterior ainda em andamento. Ignorando disparo (${triggerSource}) para evitar sobreposição.`,
+    );
+    return;
+  }
+
+  isInovafarmaCronRunning = true;
+  try {
+    const { data: allTenants, error: tenantsErr } = await supabaseAdmin
+      .from("tenants")
+      .select("*");
+
+    if (tenantsErr || !allTenants || allTenants.length === 0) {
+      return;
+    }
+
+    const inovafarmaTenants = allTenants.filter((t: any) => {
+      if (t.is_blocked) return false;
+      const erpType = String(t.erp_type || "").toLowerCase().trim();
+      if (erpType !== "inovafarma") return false;
+      const cfg = extractTenantErpConfig(t);
+      const hasCreds = Boolean(
+        (cfg.erp_login && cfg.has_erp_password) ||
+          cfg.erp_access_token ||
+          t.integration_token,
+      );
+      return hasCreds;
+    });
+
+    if (inovafarmaTenants.length === 0) {
+      return;
+    }
+
+    console.log(
+      `[INOVAFARMA CRON] Iniciando ciclo automático (${triggerSource}) para ${inovafarmaTenants.length} farmácia(s) Inovafarma...`,
+    );
+
+    for (const tenant of inovafarmaTenants) {
+      const tenantId = String(tenant.id);
+      const tenantName = tenant.name || tenant.slug || tenantId;
+      const cfg = extractTenantErpConfig(tenant);
+
+      try {
+        // a) Conectividade e Heartbeat (/api/v1/{slug}/server)
+        const resolved = await resolveTenantInovafarmaToken({
+          supabaseClient: supabaseAdmin,
+          tenantId,
+        });
+
+        try {
+          const serverRes = await checkInovafarmaServerConnectivity({
+            baseUrl: resolved.baseUrl,
+            routeId: resolved.routeId,
+            token: resolved.token,
+            cnpj: resolved.cnpj,
+            apiKey: resolved.apiKey || undefined,
+            supabaseClient: supabaseAdmin,
+            tenantId,
+          });
+          if (serverRes.connected) {
+            await touchInovafarmaHeartbeat(supabaseAdmin, tenantId);
+          }
+        } catch (connErr: any) {
+          console.warn(
+            `[INOVAFARMA CRON] Aviso no teste /server para ${tenantName} (${tenantId}):`,
+            connErr?.message,
+          );
+        }
+
+        // b) Sincronização Incremental (/produtosalterados) ou Carga Inicial em Lotes (/produtos)
+        const hasInitialSync = Boolean(
+          cfg.last_product_sync && String(cfg.last_product_sync).trim().length > 0,
+        );
+
+        let syncOffset = 1;
+        let hasMoreBatches = true;
+        let batchIteration = 0;
+        const maxBatchesPerCycle = hasInitialSync ? 10 : 25;
+        let cumReceived = 0;
+        let cumCreated = 0;
+        let cumUpdated = 0;
+        let cumSkipped = 0;
+
+        const dateRange = hasInitialSync
+          ? deriveInovafarmaDateRange(undefined, undefined, cfg.last_product_sync)
+          : undefined;
+
+        while (hasMoreBatches && batchIteration < maxBatchesPerCycle) {
+          batchIteration++;
+          const batchResult = await syncInovafarmaProductsToSupabase(
+            supabaseAdmin,
+            {
+              tenantId,
+              erpUrl: resolved.baseUrl,
+              erpRouteId: resolved.routeId,
+              apiToken: resolved.token,
+              apiKey: resolved.apiKey || undefined,
+              cnpj: resolved.cnpj,
+              ignoreErpPrices: cfg.ignore_erp_prices,
+              mode: hasInitialSync ? "delta" : "full",
+              ...(dateRange
+                ? { inicial: dateRange.inicial, final: dateRange.final }
+                : {}),
+              offset: syncOffset,
+              limit: 500,
+              maxPages: 3,
+              cumulativeReceived: cumReceived,
+              cumulativeCreated: cumCreated,
+              cumulativeUpdated: cumUpdated,
+              cumulativeSkipped: cumSkipped,
+            },
+            classifyProductTaxonomy,
+          );
+
+          cumReceived += Number(batchResult.receivedCount ?? batchResult.totalFetched ?? 0);
+          cumCreated += Number(batchResult.createdCount ?? batchResult.insertedCount ?? 0);
+          cumUpdated += Number(batchResult.updatedCount ?? 0);
+          cumSkipped += Number(batchResult.skippedCount ?? 0);
+
+          if (
+            batchResult.partial &&
+            batchResult.nextOffset &&
+            batchResult.nextOffset > syncOffset
+          ) {
+            syncOffset = batchResult.nextOffset;
+          } else {
+            hasMoreBatches = false;
+          }
+        }
+
+        if (cumCreated > 0 || cumUpdated > 0) {
+          console.log(
+            `[INOVAFARMA CRON] Produtos sincronizados para ${tenantName}: ${cumReceived} recebidos (${cumCreated} novos, ${cumUpdated} atualizados).`,
+          );
+        }
+
+        // c) Conciliação Automática de Pedidos (POST /Venda pendentes + GET /vendaporid)
+        try {
+          const reconcileRes = await reconcilePendingInovafarmaOrders(
+            supabaseAdmin,
+            {
+              tenantId,
+              baseUrl: resolved.baseUrl,
+              routeId: resolved.routeId,
+              cnpj: resolved.cnpj,
+              apiKey: resolved.apiKey || undefined,
+            },
+          );
+          if (reconcileRes.sentPendingCount > 0 || reconcileRes.reconciledCount > 0) {
+            console.log(
+              `[INOVAFARMA CRON] Conciliação de vendas para ${tenantName}: ${reconcileRes.sentPendingCount} enviada(s), ${reconcileRes.reconciledCount} conciliada(s).`,
+            );
+          }
+        } catch (recErr: any) {
+          console.warn(
+            `[INOVAFARMA CRON] Aviso ao conciliar pedidos para ${tenantName} (${tenantId}):`,
+            recErr?.message,
+          );
+        }
+      } catch (tenantErr: any) {
+        console.error(
+          `[INOVAFARMA CRON] Erro ao processar farmácia ${tenantName} (${tenantId}):`,
+          tenantErr?.message || tenantErr,
+        );
+      }
+    }
+  } catch (err: any) {
+    console.error("[INOVAFARMA CRON] Erro inesperado no agendador:", err?.message || err);
+  } finally {
+    isInovafarmaCronRunning = false;
+  }
+}
+
 async function startServer() {
   const listenPort = Number(process.env.PORT) || 3000;
 
@@ -12505,6 +12728,21 @@ async function startServer() {
 
   app.listen(listenPort, "0.0.0.0", () => {
     console.log(`Server running on http://0.0.0.0:${listenPort}`);
+
+    // Inicia o agendador automático do Inovafarma a cada 15 minutos (900.000 ms)
+    const INOVAFARMA_POLL_INTERVAL_MS = 15 * 60 * 1000;
+    setInterval(() => {
+      runInovafarmaAutoSyncScheduler("interval_15m").catch((err) =>
+        console.error("[INOVAFARMA CRON INTERVAL ERROR]:", err),
+      );
+    }, INOVAFARMA_POLL_INTERVAL_MS);
+
+    // Dispara uma verificação inicial rápida após o boot do servidor (15 segundos)
+    setTimeout(() => {
+      runInovafarmaAutoSyncScheduler("startup_initial_check").catch((err) =>
+        console.error("[INOVAFARMA CRON STARTUP ERROR]:", err),
+      );
+    }, 15 * 1000);
   });
 }
 

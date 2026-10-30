@@ -974,6 +974,12 @@ export function sanitizeTenantErpCredentialsForClient<T extends Record<string, a
         erp_token_expiration: cfg.erp_token_expiration,
         last_product_sync: cfg.last_product_sync,
         last_customer_sync: cfg.last_customer_sync,
+        last_seen:
+          tenant.smart_banners?._erpCredentials?.last_seen ||
+          tenant.agent_last_seen ||
+          tenant.last_seen ||
+          cfg.last_product_sync ||
+          null,
       };
     }
   }
@@ -1005,6 +1011,8 @@ export async function saveTenantInovafarmaState(
     erp_token_expiration: string;
     last_product_sync: string;
     last_customer_sync: string;
+    last_seen: string;
+    agent_last_seen: string;
   }>,
 ): Promise<void> {
   if (!tenantId) return;
@@ -1102,6 +1110,12 @@ export async function saveTenantInovafarmaState(
       existingCreds.last_customer_sync = stateUpdates.last_customer_sync;
       topLevelUpdates.last_customer_sync = stateUpdates.last_customer_sync || null;
     }
+    if (stateUpdates.last_seen !== undefined || stateUpdates.agent_last_seen !== undefined) {
+      const seenIso = stateUpdates.last_seen || stateUpdates.agent_last_seen || new Date().toISOString();
+      existingCreds.last_seen = seenIso;
+      topLevelUpdates.last_seen = seenIso;
+      topLevelUpdates.agent_last_seen = seenIso;
+    }
 
     existingCreds.updated_at = new Date().toISOString();
     existingBanners._erpCredentials = existingCreds;
@@ -1118,6 +1132,19 @@ export async function saveTenantInovafarmaState(
       };
       if (topLevelUpdates.erp_url) safeFallbackUpdates.erp_url = topLevelUpdates.erp_url;
       if (topLevelUpdates.cnpj) safeFallbackUpdates.cnpj = topLevelUpdates.cnpj;
+      if (topLevelUpdates.last_seen) {
+        try {
+          await supabaseClient
+            .from("tenants")
+            .update({
+              ...safeFallbackUpdates,
+              last_seen: topLevelUpdates.last_seen,
+              agent_last_seen: topLevelUpdates.last_seen,
+            })
+            .eq("id", tenantId);
+          return;
+        } catch {}
+      }
       await supabaseClient
         .from("tenants")
         .update(safeFallbackUpdates)
@@ -1126,6 +1153,62 @@ export async function saveTenantInovafarmaState(
   } catch (err) {
     console.warn("[Inovafarma] Aviso ao persistir estado do ERP no tenant:", err);
   }
+}
+
+/**
+ * Atualiza o sinal de atividade (heartbeat) da loja Inovafarma no banco de dados:
+ * - Registra `machine_id = "API Cloud (Inovafarma)"` e `last_seen = now` na tabela `agent_integrations`
+ * - Atualiza `last_seen` / `agent_last_seen` (e opcionalmente `last_product_sync`) na tabela `tenants` e em `smart_banners._erpCredentials`
+ */
+export async function touchInovafarmaHeartbeat(
+  supabaseClient?: SupabaseClient,
+  tenantId?: string,
+  options?: { lastProductSync?: string },
+): Promise<string> {
+  const nowIso = new Date().toISOString();
+  if (!supabaseClient || !tenantId) return nowIso;
+  const cleanTenantId = String(tenantId).trim();
+  if (!cleanTenantId) return nowIso;
+
+  try {
+    const agentPayload: Record<string, any> = {
+      tenant_id: cleanTenantId,
+      machine_id: "API Cloud (Inovafarma)",
+      last_seen: nowIso,
+      is_active: true,
+    };
+
+    const { data: updatedRows, error: updateErr } = await supabaseClient
+      .from("agent_integrations")
+      .update(agentPayload)
+      .eq("tenant_id", cleanTenantId)
+      .select();
+
+    if (updateErr || !updatedRows || updatedRows.length === 0) {
+      const { error: upsertErr } = await supabaseClient
+        .from("agent_integrations")
+        .upsert(agentPayload, { onConflict: "tenant_id" });
+      if (upsertErr) {
+        await supabaseClient.from("agent_integrations").insert(agentPayload);
+      }
+    }
+  } catch (e) {
+    console.warn("[Inovafarma Heartbeat] Aviso ao atualizar agent_integrations:", e);
+  }
+
+  try {
+    await saveTenantInovafarmaState(supabaseClient, cleanTenantId, {
+      last_seen: nowIso,
+      agent_last_seen: nowIso,
+      ...(options?.lastProductSync
+        ? { last_product_sync: options.lastProductSync }
+        : {}),
+    });
+  } catch (e) {
+    console.warn("[Inovafarma Heartbeat] Aviso ao atualizar estado no tenant:", e);
+  }
+
+  return nowIso;
 }
 
 /**
@@ -1399,6 +1482,7 @@ export async function authenticateInovafarma(params: {
               erp_access_token: cleanAccessToken,
               erp_token_expiration: expirationIso,
             });
+            await touchInovafarmaHeartbeat(params.supabaseClient, params.tenantId);
           }
 
           return {
@@ -2658,6 +2742,9 @@ export async function inovafarmaHttpRequest<T = any>(params: {
         console.log(
           `[Inovafarma HTTP] ${params.method} ${fullUrl} | Header cnpj=${cleanCnpj} -> HTTP 204 (No Content / Sem registros)`,
         );
+        if (params.supabaseClient && params.tenantId) {
+          touchInovafarmaHeartbeat(params.supabaseClient, params.tenantId).catch(() => {});
+        }
         return {
           status: 204,
           data: null,
@@ -2700,6 +2787,9 @@ export async function inovafarmaHttpRequest<T = any>(params: {
       );
 
       if (!rawText || !rawText.trim()) {
+        if (params.supabaseClient && params.tenantId) {
+          touchInovafarmaHeartbeat(params.supabaseClient, params.tenantId).catch(() => {});
+        }
         return {
           status: response.status,
           data: null,
@@ -2757,6 +2847,10 @@ export async function inovafarmaHttpRequest<T = any>(params: {
         }
 
         throw new Error(`Erro retornado pelo Inovafarma: ${apiErrorMessage}`);
+      }
+
+      if (params.supabaseClient && params.tenantId) {
+        touchInovafarmaHeartbeat(params.supabaseClient, params.tenantId).catch(() => {});
       }
 
       return {
@@ -2934,6 +3028,9 @@ export async function checkInovafarmaServerConnectivity(params: {
       : [];
 
   const isConnected = res.status === 200 || res.status === 204;
+  if (isConnected && params.supabaseClient && params.tenantId) {
+    await touchInovafarmaHeartbeat(params.supabaseClient, params.tenantId);
+  }
   return {
     success: isConnected,
     connected: isConnected,
@@ -5048,6 +5145,8 @@ export async function reconcilePendingInovafarmaOrders(
     summaryParts.push(`Erros reportados pela API: ${sendErrors.join(" | ")}`);
   }
 
+  await touchInovafarmaHeartbeat(supabaseClient, tenantId);
+
   return {
     success: true,
     tenantId,
@@ -5287,6 +5386,9 @@ export async function syncInovafarmaProductsToSupabase(
     const finalWatermark = highestUpdatedAtWatermark || syncedAt;
 
     if (validProducts.length === 0) {
+      await touchInovafarmaHeartbeat(supabaseClient, tenantId, {
+        ...(!partial ? { lastProductSync: finalWatermark } : {}),
+      });
       if (!partial) {
         await saveTenantInovafarmaState(supabaseClient, tenantId, {
           last_product_sync: finalWatermark,
@@ -5632,7 +5734,10 @@ export async function syncInovafarmaProductsToSupabase(
       }
     }
 
-    // 7. Salva o watermark last_product_sync ao concluir (ou no último lote)
+    // 7. Salva o watermark last_product_sync e atualiza o heartbeat da loja ao concluir (ou a cada lote)
+    await touchInovafarmaHeartbeat(supabaseClient, tenantId, {
+      ...(!partial ? { lastProductSync: finalWatermark } : {}),
+    });
     if (!partial) {
       await saveTenantInovafarmaState(supabaseClient, tenantId, {
         last_product_sync: finalWatermark,
@@ -5672,6 +5777,7 @@ export async function syncInovafarmaProductsToSupabase(
           .eq("tenant_id", tenantId)
           .in("endpoint", [
             "spreadsheet_import",
+            "inovafarma_sync",
             "/inovafarma/sync",
             "/inovafarma/produtosalterados",
           ])
@@ -5681,10 +5787,10 @@ export async function syncInovafarmaProductsToSupabase(
 
         const recentRows = recentLogsForConsolidation || [];
 
-        // Coleta sessões anteriores de spreadsheet_import desta mesma execução multi-lote para substituir pela consolidada
+        // Coleta sessões anteriores de spreadsheet_import ou inovafarma_sync desta mesma execução multi-lote para substituir pela consolidada
         const prevSpreadsheetRows = recentRows.filter(
           (r: any) =>
-            r.endpoint === "spreadsheet_import" &&
+            (r.endpoint === "spreadsheet_import" || r.endpoint === "inovafarma_sync") &&
             (r?.payload?.source === "API Inovafarma" ||
               r?.payload?.origin === "API Inovafarma" ||
               String(r?.payload?.id || "").startsWith("INOVA_")),
@@ -5799,12 +5905,20 @@ export async function syncInovafarmaProductsToSupabase(
           items: [summaryItem, ...combinedAuditItems],
         };
 
-        await supabaseClient.from("integration_logs").insert({
-          tenant_id: tenantId,
-          endpoint: "spreadsheet_import",
-          payload: sessionLogPayload,
-          status: "SUCCESS",
-        });
+        await supabaseClient.from("integration_logs").insert([
+          {
+            tenant_id: tenantId,
+            endpoint: "spreadsheet_import",
+            payload: sessionLogPayload,
+            status: "SUCCESS",
+          },
+          {
+            tenant_id: tenantId,
+            endpoint: "inovafarma_sync",
+            payload: sessionLogPayload,
+            status: "SUCCESS",
+          },
+        ]);
       } catch (histErr) {
         console.warn(
           "[Inovafarma Sync] Aviso ao gravar sessão consolidada no Histórico 24h:",

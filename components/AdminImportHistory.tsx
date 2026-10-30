@@ -80,9 +80,9 @@ export const AdminImportHistory: React.FC<AdminImportHistoryProps> = ({ tenant }
                 .from('integration_logs')
                 .select('*')
                 .eq('tenant_id', tenant.id)
-                .in('endpoint', ['spreadsheet_import', '/inovafarma/sync', '/inovafarma/produtosalterados'])
+                .in('endpoint', ['spreadsheet_import', 'inovafarma_sync', '/inovafarma/sync', '/inovafarma/produtosalterados'])
                 .order('created_at', { ascending: false })
-                .limit(40);
+                .limit(50);
 
             if (sbData && !error) {
                 const seenIds = new Set(rawLogs.map((l: any) => l.id));
@@ -95,17 +95,25 @@ export const AdminImportHistory: React.FC<AdminImportHistoryProps> = ({ tenant }
 
             if (rawLogs.length > 0) {
                 const dbSessions: ImportSession[] = [];
-                const spreadsheetLogs = rawLogs.filter((l: any) => l.endpoint === 'spreadsheet_import');
+                const seenSessionPayloadIds = new Set<string>();
+                const spreadsheetLogs = rawLogs.filter(
+                    (l: any) => l.endpoint === 'spreadsheet_import' || l.endpoint === 'inovafarma_sync'
+                );
 
                 for (const log of spreadsheetLogs) {
                     const pay = log.payload || {};
+                    const sessionKey = String(pay.id || log.id);
+                    if (seenSessionPayloadIds.has(sessionKey)) continue;
+                    seenSessionPayloadIds.add(sessionKey);
+
                     const ts = pay.timestamp || new Date(log.created_at).getTime();
                     const isInova =
+                        log.endpoint === 'inovafarma_sync' ||
                         pay.source === 'API Inovafarma' ||
                         pay.origin === 'API Inovafarma' ||
                         String(pay.id || '').startsWith('INOVA_');
                     dbSessions.push({
-                        id: log.id,
+                        id: sessionKey,
                         tenantId: log.tenant_id,
                         timestamp: ts,
                         source: isInova ? 'API Inovafarma' : (pay.source || 'Planilha CSV/Excel'),

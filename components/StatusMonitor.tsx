@@ -5,13 +5,18 @@ import { supabase } from '../services/supabase';
 interface Integration {
   id: string;
   tenant_id: string;
+  erp_type?: string | null;
   machine_id: string;
   is_active: boolean;
+  has_active_token?: boolean;
   last_seen: string | null;
+  last_product_sync?: string | null;
   tenants?: {
     id?: string;
     name?: string;
     slug?: string;
+    erp_type?: string;
+    last_product_sync?: string;
   };
 }
 
@@ -25,6 +30,21 @@ export const StatusMonitor: React.FC<StatusMonitorProps> = ({ tenantId }) => {
   const [refreshing, setRefreshing] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
+
+  const isInovafarmaIntegration = (item: Integration): boolean => {
+    const erp = String(item.erp_type || item.tenants?.erp_type || '').toLowerCase().trim();
+    const machine = String(item.machine_id || '').toLowerCase();
+    return erp === 'inovafarma' || machine.includes('inovafarma');
+  };
+
+  const getEffectiveLastSeen = (item: Integration): string | null => {
+    return (
+      item.last_seen ||
+      item.last_product_sync ||
+      item.tenants?.last_product_sync ||
+      null
+    );
+  };
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -53,9 +73,9 @@ export const StatusMonitor: React.FC<StatusMonitorProps> = ({ tenantId }) => {
           if (tenantId) {
             query = query.eq('tenant_id', tenantId);
           }
-          const { data: agentRows, error: agentErr } = await query;
+          const { data: agentRows } = await query;
           
-          let tenantQuery = supabase.from('tenants').select('id, name, slug, last_seen, agent_last_seen');
+          let tenantQuery = supabase.from('tenants').select('*');
           if (tenantId) {
             tenantQuery = tenantQuery.eq('id', tenantId);
           }
@@ -69,27 +89,80 @@ export const StatusMonitor: React.FC<StatusMonitorProps> = ({ tenantId }) => {
           }
 
           const fallbackList: Integration[] = [];
-          if (agentRows && agentRows.length > 0) {
+          const processedTenantIds = new Set<string>();
+
+          if (tenantRows && tenantRows.length > 0) {
+            for (const t of tenantRows) {
+              processedTenantIds.add(t.id);
+              const agentRow = (agentRows || []).find((r: any) => r.tenant_id === t.id);
+              const erpType = String(t.erp_type || '').toLowerCase().trim();
+              const isInova =
+                erpType === 'inovafarma' ||
+                String(agentRow?.machine_id || '').toLowerCase().includes('inovafarma');
+              const creds = t.smart_banners?._erpCredentials || {};
+              const lastProdSync =
+                t.last_product_sync || creds.last_product_sync || null;
+              const bestLastSeen =
+                agentRow?.last_seen ||
+                t.agent_last_seen ||
+                t.last_seen ||
+                creds.last_seen ||
+                lastProdSync ||
+                null;
+
+              fallbackList.push({
+                id: agentRow?.id || t.id,
+                tenant_id: t.id,
+                erp_type: isInova ? 'inovafarma' : erpType || null,
+                machine_id: isInova
+                  ? 'API Cloud (Inovafarma)'
+                  : agentRow?.machine_id || 'Servidor Local',
+                is_active: agentRow?.is_active ?? true,
+                has_active_token: isInova
+                  ? Boolean(creds.erp_login || creds.has_erp_access_token || creds.erp_access_token_enc)
+                  : false,
+                last_seen: bestLastSeen,
+                last_product_sync: lastProdSync,
+                tenants: {
+                  id: t.id,
+                  name: t.name,
+                  slug: t.slug,
+                  erp_type: isInova ? 'inovafarma' : erpType || undefined,
+                  last_product_sync: lastProdSync || undefined,
+                },
+              });
+            }
+          } else if (agentRows && agentRows.length > 0) {
             for (const row of agentRows) {
+              if (processedTenantIds.has(row.tenant_id)) continue;
               const t = tenantMap.get(row.tenant_id);
+              const isInova =
+                String(t?.erp_type || '').toLowerCase().trim() === 'inovafarma' ||
+                String(row.machine_id || '').toLowerCase().includes('inovafarma');
               fallbackList.push({
                 id: row.id,
                 tenant_id: row.tenant_id,
-                machine_id: row.machine_id || 'Servidor Local',
+                erp_type: isInova ? 'inovafarma' : t?.erp_type || null,
+                machine_id: isInova
+                  ? 'API Cloud (Inovafarma)'
+                  : row.machine_id || 'Servidor Local',
                 is_active: row.is_active ?? true,
-                last_seen: row.last_seen || t?.agent_last_seen || t?.last_seen || null,
-                tenants: t ? { id: t.id, name: t.name, slug: t.slug } : undefined
-              });
-            }
-          } else if (tenantRows && tenantRows.length > 0) {
-            for (const t of tenantRows) {
-              fallbackList.push({
-                id: t.id,
-                tenant_id: t.id,
-                machine_id: 'Servidor Local',
-                is_active: true,
-                last_seen: t.agent_last_seen || t.last_seen || null,
-                tenants: { id: t.id, name: t.name, slug: t.slug }
+                last_seen:
+                  row.last_seen ||
+                  t?.agent_last_seen ||
+                  t?.last_seen ||
+                  t?.last_product_sync ||
+                  null,
+                last_product_sync: t?.last_product_sync || null,
+                tenants: t
+                  ? {
+                      id: t.id,
+                      name: t.name,
+                      slug: t.slug,
+                      erp_type: t.erp_type,
+                      last_product_sync: t.last_product_sync,
+                    }
+                  : undefined,
               });
             }
           }
@@ -139,8 +212,36 @@ export const StatusMonitor: React.FC<StatusMonitorProps> = ({ tenantId }) => {
     return `Há ${diffDays}d`;
   };
 
-  const getStatus = (lastSeen: string | null) => {
-    if (!lastSeen) {
+  const getStatus = (integration: Integration) => {
+    const isInova = isInovafarmaIntegration(integration);
+    const effectiveLastSeen = getEffectiveLastSeen(integration);
+
+    if (isInova) {
+      if (effectiveLastSeen) {
+        const lastSeenDate = new Date(effectiveLastSeen);
+        const diffInMinutes = (Date.now() - lastSeenDate.getTime()) / (1000 * 60);
+        // Lojas Inovafarma (API Cloud): exibe badge verde "Online (API)" se houve sinal nas últimas 2 horas (120 min)
+        if (!isNaN(diffInMinutes) && diffInMinutes <= 120) {
+          return {
+            label: 'Online (API)',
+            color: 'bg-emerald-50 text-emerald-700 border border-emerald-200/60',
+            dot: 'bg-emerald-500 animate-pulse',
+            icon: <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />,
+          };
+        }
+      }
+
+      if (integration.has_active_token) {
+        return {
+          label: 'Online (API)',
+          color: 'bg-emerald-50 text-emerald-700 border border-emerald-200/60',
+          dot: 'bg-emerald-500 animate-pulse',
+          icon: <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />,
+        };
+      }
+    }
+
+    if (!effectiveLastSeen) {
       return { 
         label: 'Desconectado', 
         color: 'bg-gray-100 text-gray-600', 
@@ -149,13 +250,13 @@ export const StatusMonitor: React.FC<StatusMonitorProps> = ({ tenantId }) => {
       };
     }
     
-    const lastSeenDate = new Date(lastSeen);
+    const lastSeenDate = new Date(effectiveLastSeen);
     const diffInMinutes = (Date.now() - lastSeenDate.getTime()) / (1000 * 60);
 
-    // Online: ping recente em até 5 minutos (intervalo normal do agente)
+    // Online: ping recente em até 5 minutos (intervalo normal do agente local)
     if (diffInMinutes < 5) {
       return { 
-        label: 'Online', 
+        label: isInova ? 'Online (API)' : 'Online', 
         color: 'bg-emerald-50 text-emerald-700 border border-emerald-200/60', 
         dot: 'bg-emerald-500 animate-pulse',
         icon: <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" /> 
@@ -172,7 +273,7 @@ export const StatusMonitor: React.FC<StatusMonitorProps> = ({ tenantId }) => {
       };
     }
 
-    // Offline: sem sinal há mais de 15 minutos
+    // Offline: sem sinal há mais de 15 minutos (ou > 2h para API Cloud sem token ativo)
     return { 
       label: 'Offline', 
       color: 'bg-red-50 text-red-700 border border-red-200/60', 
@@ -186,15 +287,14 @@ export const StatusMonitor: React.FC<StatusMonitorProps> = ({ tenantId }) => {
     const term = searchTerm.toLowerCase();
     const name = (item.tenants?.name || '').toLowerCase();
     const slug = (item.tenants?.slug || '').toLowerCase();
-    const machine = (item.machine_id || '').toLowerCase();
+    const machine = (isInovafarmaIntegration(item) ? 'api cloud (inovafarma)' : (item.machine_id || '')).toLowerCase();
     const tenantIdStr = (item.tenant_id || '').toLowerCase();
     return name.includes(term) || slug.includes(term) || machine.includes(term) || tenantIdStr.includes(term);
   });
 
   const onlineCount = integrations.filter(i => {
-    if (!i.last_seen) return false;
-    const diffMin = (Date.now() - new Date(i.last_seen).getTime()) / (1000 * 60);
-    return diffMin < 5;
+    const st = getStatus(i);
+    return st.label.startsWith('Online');
   }).length;
 
   const offlineCount = integrations.length - onlineCount;
@@ -219,7 +319,7 @@ export const StatusMonitor: React.FC<StatusMonitorProps> = ({ tenantId }) => {
           <div>
             <h2 className="text-xl font-black text-gray-900">Monitor do Agente Desktop</h2>
             <p className="text-sm font-medium text-gray-500">
-              Acompanhe o status de conexão dos servidores locais com ERP em tempo real
+              Acompanhe o status de conexão dos servidores locais e integrações API Cloud (Inovafarma) em tempo real
             </p>
           </div>
         </div>
@@ -309,9 +409,14 @@ export const StatusMonitor: React.FC<StatusMonitorProps> = ({ tenantId }) => {
               </tr>
             ) : (
               filteredIntegrations.map((integration) => {
-                const status = getStatus(integration.last_seen);
-                const relativeTime = formatRelativeTime(integration.last_seen);
-                const fullDate = integration.last_seen ? new Date(integration.last_seen).toLocaleString('pt-BR') : 'Nunca';
+                const isInova = isInovafarmaIntegration(integration);
+                const effectiveLastSeen = getEffectiveLastSeen(integration);
+                const status = getStatus(integration);
+                const relativeTime = formatRelativeTime(effectiveLastSeen);
+                const fullDate = effectiveLastSeen ? new Date(effectiveLastSeen).toLocaleString('pt-BR') : 'Nunca';
+                const displayMachineId = isInova
+                  ? 'API Cloud (Inovafarma)'
+                  : (integration.machine_id || 'Servidor Local');
 
                 return (
                   <tr key={integration.id} className="hover:bg-gray-50/60 transition-colors">
@@ -324,12 +429,18 @@ export const StatusMonitor: React.FC<StatusMonitorProps> = ({ tenantId }) => {
                       </div>
                     </td>
                     <td className="py-4 px-4">
-                      <span className="inline-flex items-center px-2 py-1 bg-gray-100 rounded-md text-xs font-mono text-gray-700">
-                        {integration.machine_id || 'Servidor Local'}
+                      <span
+                        className={`inline-flex items-center px-2.5 py-1 rounded-md text-xs font-mono ${
+                          isInova
+                            ? 'bg-emerald-50 text-emerald-800 border border-emerald-200 font-semibold'
+                            : 'bg-gray-100 text-gray-700'
+                        }`}
+                      >
+                        {displayMachineId}
                       </span>
                     </td>
                     <td className="py-4 px-4">
-                      {integration.last_seen ? (
+                      {effectiveLastSeen ? (
                         <div className="flex flex-col gap-0.5">
                           <div className="flex items-center gap-1.5 text-xs font-bold text-gray-800">
                             <Clock className="w-3.5 h-3.5 text-gray-400" />
@@ -338,7 +449,9 @@ export const StatusMonitor: React.FC<StatusMonitorProps> = ({ tenantId }) => {
                           <span className="text-[11px] text-gray-400">{fullDate}</span>
                         </div>
                       ) : (
-                        <span className="text-xs font-medium text-gray-400">Aguardando 1º sinal</span>
+                        <span className="text-xs font-medium text-gray-400">
+                          {isInova ? 'Sincronização Automática Ativa (a cada 15 min)' : 'Aguardando 1º sinal'}
+                        </span>
                       )}
                     </td>
                     <td className="py-4 px-4 text-right">
