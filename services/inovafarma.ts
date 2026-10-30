@@ -391,6 +391,7 @@ export interface InovafarmaVendaPagamentoInput {
 }
 
 export interface InovafarmaVendaInput {
+  ent?: string | number | any;
   pedidoId?: string;
   codigoVendaOnLine?: string;
   cnpj?: string;
@@ -434,6 +435,7 @@ export interface InovafarmaVendaItemPayload {
 }
 
 export interface InovafarmaVendaPayload {
+  ent: string | number | any;
   cnpj?: string;
   codigoVendaOnLine: string;
   numeroPedido?: string;
@@ -3425,8 +3427,15 @@ export async function buildInovafarmaVendaPayload(
     input.codigoVendaOnLine || input.pedidoId,
   );
   const cleanCnpj = sanitizeCnpj(input.cnpj || authContext?.cnpj || "");
+  const resolvedEnt =
+    input.ent !== undefined &&
+    input.ent !== null &&
+    String(input.ent).trim() !== ""
+      ? input.ent
+      : cleanCnpj || "1";
 
   const payload: InovafarmaVendaPayload = {
+    ent: resolvedEnt,
     ...(cleanCnpj ? { cnpj: cleanCnpj } : {}),
     codigoVendaOnLine,
     ...(input.pedidoId ? { numeroPedido: String(input.pedidoId) } : { numeroPedido: codigoVendaOnLine }),
@@ -3660,7 +3669,7 @@ export async function fetchInovafarmaVendaPorId(params: {
  * Executa o checklist completo e envia uma venda (`POST /api/v1/{integracao}/Venda`) para o Inovafarma:
  * 1. Verifica conectividade em `GET /api/v1/{integracao}/server` (quando `checkServerConnectivity !== false`).
  * 2. Deduplicação: consulta `GET /api/v1/{integracao}/vendaporid/{codigoVendaOnLine}` antes de enviar/reenviar.
- * 3. Envia `POST /api/v1/{integracao}/Venda` passando pelo wrapper global (que valida `{ sucesso: false }`).
+ * 3. Envia `POST /api/v1/{integracao}/Venda` (case-sensitive oficial com V maiúsculo) passando pelo wrapper global (que valida `{ sucesso: false }`).
  */
 export async function sendInovafarmaVenda(params: {
   baseUrl?: string;
@@ -3682,16 +3691,21 @@ export async function sendInovafarmaVenda(params: {
   payloadEnviado: InovafarmaVendaPayload;
   response: any;
 }> {
+  const effectiveCnpj = resolveEffectiveInovafarmaCnpj(
+    params.venda.cnpj || params.cnpj,
+    params.routeId,
+  );
   const payloadEnviado = await buildInovafarmaVendaPayload(
     {
       ...params.venda,
-      cnpj: params.venda.cnpj || params.cnpj,
+      cnpj: effectiveCnpj,
+      ent: params.venda.ent ?? effectiveCnpj ?? "1",
     },
     {
       baseUrl: params.baseUrl,
       routeId: params.routeId,
       token: params.token,
-      cnpj: params.cnpj,
+      cnpj: effectiveCnpj,
       apiKey: params.apiKey,
     },
   );
@@ -3703,7 +3717,7 @@ export async function sendInovafarmaVenda(params: {
         baseUrl: params.baseUrl,
         routeId: params.routeId,
         token: params.token,
-        cnpj: params.cnpj,
+        cnpj: effectiveCnpj,
         apiKey: params.apiKey,
         supabaseClient: params.supabaseClient,
         tenantId: params.tenantId,
@@ -3723,7 +3737,7 @@ export async function sendInovafarmaVenda(params: {
         baseUrl: params.baseUrl,
         routeId: params.routeId,
         token: params.token,
-        cnpj: params.cnpj,
+        cnpj: effectiveCnpj,
         apiKey: params.apiKey,
         codigoVendaOnLine: payloadEnviado.codigoVendaOnLine,
         valorPedidoFarmaFlow: payloadEnviado.valorTotalVenda,
@@ -3747,15 +3761,15 @@ export async function sendInovafarmaVenda(params: {
     }
   }
 
-  // 3. Dispara POST /api/v1/{integracao}/Venda via wrapper global (valida HTTP 200 com { sucesso: false })
+  // 3. Dispara POST /api/v1/{integracao}/Venda (rota case-sensitive oficial com V maiúsculo)
   const res = await inovafarmaHttpRequest<any>({
     method: "POST",
     baseUrl: params.baseUrl,
     routeId: params.routeId,
     token: params.token,
-    cnpj: params.cnpj,
+    cnpj: effectiveCnpj,
     apiKey: params.apiKey,
-    resourcePaths: ["Venda", "venda"],
+    resourcePaths: ["Venda"],
     body: payloadEnviado,
     supabaseClient: params.supabaseClient,
     tenantId: params.tenantId,

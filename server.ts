@@ -6405,6 +6405,8 @@ app.post(
       if (!order_id && Array.isArray(body.itens) && body.itens.length > 0) {
         const vendaPayload = await buildInovafarmaVendaPayload(
           {
+            ent: body.ent ?? body.entidade ?? body.codigoEmpresa ?? effectiveErpCnpj ?? "1",
+            cnpj: effectiveErpCnpj,
             pedidoId: body.codigoVendaOnLine || body.numeroPedido || body.pedidoId,
             codigoVendaOnLine: body.codigoVendaOnLine || body.numeroPedido || body.pedidoId,
             vendedor: body.vendedor,
@@ -6423,8 +6425,6 @@ app.post(
             token: effectiveErpToken,
             cnpj: effectiveErpCnpj,
             apiKey: effectiveErpApiKey || undefined,
-            tenantId: tenant_id,
-            supabaseClient: supabaseAdmin,
           },
         );
 
@@ -6438,6 +6438,8 @@ app.post(
             tenantId: tenant_id,
             supabaseClient: supabaseAdmin,
             venda: {
+              ent: vendaPayload.ent,
+              cnpj: vendaPayload.cnpj,
               pedidoId: vendaPayload.codigoVendaOnLine,
               codigoVendaOnLine: vendaPayload.codigoVendaOnLine,
               vendedor: vendaPayload.vendedor,
@@ -6457,10 +6459,10 @@ app.post(
           );
           return res.json({
             success: true,
-            message: sent.alreadyExists
+            message: sent.alreadyExistsInErp
               ? "Venda já constava registrada no PDV Inovafarma (idempotência /vendaporid)."
               : "Venda enviada com sucesso ao PDV Inovafarma.",
-            alreadyExists: sent.alreadyExists,
+            alreadyExists: sent.alreadyExistsInErp,
             codigoVendaOnLine: sent.codigoVendaOnLine,
             codigoVendaInova: sent.codigoVendaInova,
             payload_enviado: vendaPayload,
@@ -6636,6 +6638,8 @@ app.post(
 
       const vendaPayload = await buildInovafarmaVendaPayload(
         {
+          ent: body.ent ?? body.entidade ?? body.codigoEmpresa ?? effectiveErpCnpj ?? "1",
+          cnpj: effectiveErpCnpj,
           pedidoId: codigoVendaOnLine,
           codigoVendaOnLine,
           vendedor: rawVendedor,
@@ -6704,13 +6708,11 @@ app.post(
           token: effectiveErpToken,
           cnpj: effectiveErpCnpj,
           apiKey: effectiveErpApiKey || undefined,
-          tenantId: tenant_id,
-          supabaseClient: supabaseAdmin,
         },
       );
 
       let erpResponseData: any = null;
-      let codigoVendaInova: number | null = null;
+      let codigoVendaInova: string | null = null;
       if (
         effectiveErpToken &&
         effectiveErpCnpj &&
@@ -6726,6 +6728,8 @@ app.post(
             tenantId: tenant_id,
             supabaseClient: supabaseAdmin,
             venda: {
+              ent: vendaPayload.ent,
+              cnpj: vendaPayload.cnpj,
               pedidoId: vendaPayload.codigoVendaOnLine,
               codigoVendaOnLine: vendaPayload.codigoVendaOnLine,
               vendedor: vendaPayload.vendedor,
@@ -6738,7 +6742,7 @@ app.post(
             },
           });
           erpResponseData = sent.response;
-          codigoVendaInova = sent.codigoVendaInova;
+          codigoVendaInova = sent.codigoVendaInova || null;
           await logIntegration(
             targetOrder.tenant_id,
             sent.endpointUsed,
