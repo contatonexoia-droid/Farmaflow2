@@ -428,8 +428,10 @@ export interface InovafarmaVendaInput {
 
 export interface InovafarmaVendaItemPayload {
   codigoBarras?: string;
-  ean?: string;
+  ean?: string | null;
   codigoProduto: string;
+  nomeProduto: string;
+  unidade: string;
   unidadeMedida: string;
   quantidade: number;
   valorUnitario: number;
@@ -437,27 +439,46 @@ export interface InovafarmaVendaItemPayload {
   descontoUnitario: number;
   valorLiquidoUnitario: number;
   subtotalLiquido: number;
+  imagem?: string | null;
+}
+
+export interface InovafarmaVendaEnderecoEntregaPayload {
+  endereco: string;
+  numero: string;
+  complemento?: string;
+  cep: string;
+  referencia?: string;
+  bairro: string;
+  cidade: string;
+  estado: string;
+  destinatario: string;
 }
 
 export interface InovafarmaVendaPayload {
   ent: string | number | any;
   cnpj?: string;
+  cnpjEmpresa: string;
   codigoVendaOnLine: string;
   numeroPedido?: string;
-  vendedor: string;
+  dataVenda: string;
   dataHora: string;
+  dataAdicionaVendaPendente?: string;
+  nomeCliente: string;
+  cpfCnpj: string;
+  vendedor: string;
   retirarNaLoja: boolean;
+  mensagem?: string;
   taxaEntrega: number;
   entrega: {
-    retirarNaLoja: boolean;
+    dataAgendamento: string;
+    contato: string;
+    trocoPara: number;
     taxa: number;
-    endereco?: string;
-    numero?: string;
-    complemento?: string;
-    bairro?: string;
-    cidade?: string;
-    uf?: string;
-    cep?: string;
+    telefone: string;
+    celular: string;
+    permitirEnvioMensagemWhatsApp: boolean;
+    retirarNaLoja?: boolean;
+    endereco: InovafarmaVendaEnderecoEntregaPayload;
   };
   cliente?: {
     nome: string;
@@ -474,12 +495,27 @@ export interface InovafarmaVendaPayload {
       cep?: string;
     };
   };
+  produtos: Array<{
+    codigoProduto: string;
+    nomeProduto: string;
+    quantidade: number;
+    valorUnitario: number;
+    descontoUnitario: number;
+    unidade: string;
+    ean: string | null;
+    imagem: string | null;
+  }>;
   itens: InovafarmaVendaItemPayload[];
   pagamentos: Array<{
     tipo: "D" | "C";
+    nsu?: string;
+    bandeiraCartao?: string;
+    receberNaEntrega?: boolean;
+    observacao?: string;
     formaPagamento: string;
     valor: number;
     parcelas: number;
+    dataVencimento?: string;
   }>;
   valorTotalItens: number;
   valorTotalVenda: number;
@@ -492,6 +528,8 @@ export interface InovafarmaVendaReconciliationResult {
   httpStatus: number;
   codigoVendaOnLine: string;
   codigoVendaInova: string | null;
+  sentInThisRun?: boolean;
+  sendError?: string | null;
   numeroNotaFiscal: string | null;
   chaveAcessoNotaFiscal: string | null;
   valorNotaFiscal: number | null;
@@ -1297,7 +1335,7 @@ export async function authenticateInovafarma(params: {
         if (!response.ok) {
           const errText = await response.text().catch(() => "");
           errors.push(
-            `${endpoint} -> HTTP ${response.status}${errText ? ` (${errText.slice(0, 120)})` : ""}`,
+            `${endpoint} -> HTTP ${response.status}${errText ? ` (${errText.slice(0, 2000)})` : ""}`,
           );
           if (response.status === 401 || response.status === 403) {
             break;
@@ -2237,17 +2275,18 @@ export async function inovafarmaHttpRequest<T = any>(params: {
       const contentType = response.headers.get("content-type") || "";
       if (!response.ok) {
         const errText = await response.text().catch(() => "");
+        const fullErrSlice = errText ? errText.slice(0, 2000) : "";
         console.warn(
-          `[Inovafarma HTTP] ${params.method} ${fullUrl} | Header cnpj=${cleanCnpj} -> HTTP ${response.status} (${errText.slice(0, 500)})`,
+          `[Inovafarma HTTP] ${params.method} ${fullUrl} | Header cnpj=${cleanCnpj} -> HTTP ${response.status} (${fullErrSlice})`,
         );
         if (params.method === "POST" && params.body !== undefined) {
           console.error(
-            `[Inovafarma HTTP POST Error Payload] URL=${fullUrl} | Status=${response.status} | Payload enviado:`,
+            `[Inovafarma HTTP POST Error Payload] URL=${fullUrl} | Status=${response.status} | Resposta=${fullErrSlice} | Payload enviado:`,
             JSON.stringify(params.body),
           );
         }
         errors.push(
-          `${fullUrl} -> HTTP ${response.status}${errText ? ` (${errText.slice(0, 300)})` : ""}`,
+          `${fullUrl} -> HTTP ${response.status}${fullErrSlice ? ` (${fullErrSlice})` : ""}`,
         );
         continue;
       }
@@ -2258,9 +2297,9 @@ export async function inovafarmaHttpRequest<T = any>(params: {
       }
 
       const rawText = await response.text();
-      const rawPreview = rawText ? rawText.slice(0, 500) : "";
+      const rawPreview = rawText ? rawText.slice(0, 2000) : "";
       console.log(
-        `[Inovafarma HTTP] ${params.method} ${fullUrl} | Header cnpj=${cleanCnpj} -> HTTP ${response.status} | Body (${rawText.length} bytes): ${rawPreview.slice(0, 250)}`,
+        `[Inovafarma HTTP] ${params.method} ${fullUrl} | Header cnpj=${cleanCnpj} -> HTTP ${response.status} | Body (${rawText.length} bytes): ${rawPreview.slice(0, 500)}`,
       );
 
       if (!rawText || !rawText.trim()) {
@@ -2296,8 +2335,11 @@ export async function inovafarmaHttpRequest<T = any>(params: {
             data.Mensagem ||
             data.erro ||
             data.message ||
+            JSON.stringify(data).slice(0, 2000) ||
             "A API do Inovafarma rejeitou a operação (sucesso: false).",
-        ).trim();
+        )
+          .trim()
+          .slice(0, 2000);
 
         if (params.supabaseClient && params.tenantId) {
           try {
@@ -2312,7 +2354,7 @@ export async function inovafarmaHttpRequest<T = any>(params: {
                 erpResponse: data,
               },
               status: "FAILED",
-              error_message: apiErrorMessage,
+              error_message: apiErrorMessage.slice(0, 2000),
             });
           } catch (_) {}
         }
@@ -2333,11 +2375,12 @@ export async function inovafarmaHttpRequest<T = any>(params: {
       if (err?.message?.startsWith("Erro retornado pelo Inovafarma:")) {
         throw err;
       }
-      errors.push(`${fullUrl} -> ${err?.message || "Falha de conexão"}`);
+      errors.push(`${fullUrl} -> ${(err?.message || "Falha de conexão").slice(0, 2000)}`);
     }
   }
 
-  const finalErrorMsg = `Não foi possível consultar a API do Inovafarma (Portal PS). Verifique se a URL Base, a Rota ({integracao}), o CNPJ (${cleanCnpj}) e as credenciais estão ativos. Detalhes: ${errors.slice(0, 3).join(" | ")}`;
+  const detailedErrorsStr = errors.slice(0, 3).join(" | ").slice(0, 2000);
+  const finalErrorMsg = `Não foi possível consultar a API do Inovafarma (Portal PS). Verifique se a URL Base, a Rota ({integracao}), o CNPJ (${cleanCnpj}) e as credenciais estão ativos. Detalhes: ${detailedErrorsStr}`;
   if (params.supabaseClient && params.tenantId) {
     try {
       await params.supabaseClient.from("integration_logs").insert({
@@ -2351,7 +2394,7 @@ export async function inovafarmaHttpRequest<T = any>(params: {
           errors: errors.slice(0, 5),
         },
         status: "FAILED",
-        error_message: finalErrorMsg,
+        error_message: finalErrorMsg.slice(0, 2000),
       });
     } catch (_) {}
   }
@@ -2995,7 +3038,9 @@ export async function fetchInovafarmaMetodosPagamentos(params: {
 
   const metodos: InovafarmaMetodoPagamento[] = (items || []).map((raw: any) => {
     const codigo = String(
-      raw.CODIGO ??
+      raw.CODIGOPLANO ??
+        raw.codigoPlano ??
+        raw.CODIGO ??
         raw.codigo ??
         raw.CODIGOMETODOPAGAMENTO ??
         raw.formaPagamento ??
@@ -3003,10 +3048,16 @@ export async function fetchInovafarmaMetodosPagamentos(params: {
         "",
     ).trim();
     const descricao = String(
-      raw.DESCRICAO ?? raw.descricao ?? raw.NOME ?? raw.nome ?? codigo,
+      raw.NOMEPLANO ??
+        raw.nomePlano ??
+        raw.DESCRICAO ??
+        raw.descricao ??
+        raw.NOME ??
+        raw.nome ??
+        codigo,
     ).trim();
     const isPixOrCard =
-      /pix|cartao|cartão|credito|crédito|debito|débito/i.test(descricao) ||
+      /pix|cartao|cartão|credito|crédito|debito|débito|carteira/i.test(descricao) ||
       String(raw.TIPO ?? raw.tipo ?? "").toUpperCase() === "C";
     const tipo = String(raw.TIPO ?? raw.tipo ?? (isPixOrCard ? "C" : "D"))
       .trim()
@@ -3016,7 +3067,7 @@ export async function fetchInovafarmaMetodosPagamentos(params: {
       codigo: codigo || descricao,
       descricao,
       tipo: tipo === "C" ? "C" : "D",
-      formaPagamento: codigo || descricao,
+      formaPagamento: descricao || codigo,
       ativo: raw.ATIVO !== undefined ? Boolean(raw.ATIVO) : true,
     };
   });
@@ -3232,7 +3283,8 @@ export async function buildInovafarmaVendaPayload(
     );
   }
 
-  const retirarNaLoja = Boolean(input.retirarNaLoja);
+  // A plataforma opera exclusivamente com entrega (delivery), portanto retirarNaLoja é sempre false no envio ao Inovafarma
+  const retirarNaLoja = false;
   const rawEndereco = input.cliente?.endereco;
   const logradouro = String(
     rawEndereco?.endereco || rawEndereco?.logradouro || "",
@@ -3240,8 +3292,8 @@ export async function buildInovafarmaVendaPayload(
   const cep = String(rawEndereco?.cep || "").replace(/\D+/g, "").trim();
   const cidade = String(rawEndereco?.cidade || "").trim();
 
-  // Regra 6: Se retirarNaLoja === false, valida obrigatoriamente que endereco, cep e cidade estão preenchidos
-  if (!retirarNaLoja && input.cliente?.endereco) {
+  // Regra 6: Valida que endereco, cep e cidade estão preenchidos quando cliente.endereco é fornecido
+  if (input.cliente?.endereco) {
     if (!logradouro || !cep || !cidade) {
       throw new Error(
         `Para pedidos de entrega (retirarNaLoja: false), os campos 'endereco' (${logradouro || "vazio"}), 'cep' (${cep || "vazio"}) e 'cidade' (${cidade || "vazio"}) são obrigatórios para evitar que o Inovafarma sobrescreva com o endereço da própria farmácia.`,
@@ -3282,6 +3334,9 @@ export async function buildInovafarmaVendaPayload(
     const codigoProduto = String(
       raw.codigoProduto ?? raw.codigoInterno ?? ean ?? idx + 1,
     ).trim();
+    const nomeProduto = String(
+      raw.nome || `PRODUTO ${codigoProduto}`,
+    ).trim();
     const unidadeMedida = normalizeUnidadeMedida(raw.unidadeMedida || "UN");
 
     if (!codigoProduto) {
@@ -3294,6 +3349,7 @@ export async function buildInovafarmaVendaPayload(
       ean: ean || undefined,
       codigoBarras: ean || undefined,
       codigoProduto,
+      nomeProduto,
       unidadeMedida,
       quantidade,
       valorUnitario,
@@ -3346,8 +3402,10 @@ export async function buildInovafarmaVendaPayload(
     const subtotalLiquido = roundCurrency(it.quantidade * valorLiquidoUnitario);
 
     return {
-      ...(it.codigoBarras ? { codigoBarras: it.codigoBarras, ean: it.ean } : {}),
+      ...(it.codigoBarras ? { codigoBarras: it.codigoBarras, ean: it.ean } : { ean: null }),
       codigoProduto: it.codigoProduto,
+      nomeProduto: it.nomeProduto,
+      unidade: it.unidadeMedida,
       unidadeMedida: it.unidadeMedida,
       quantidade: it.quantidade,
       valorUnitario: it.valorUnitario,
@@ -3355,6 +3413,7 @@ export async function buildInovafarmaVendaPayload(
       descontoUnitario,
       valorLiquidoUnitario,
       subtotalLiquido,
+      imagem: null,
     };
   });
 
@@ -3394,6 +3453,8 @@ export async function buildInovafarmaVendaPayload(
     }
   }
 
+  const nowIso = new Date().toISOString();
+
   const rawPagamentos =
     Array.isArray(input.pagamentos) && input.pagamentos.length > 0
       ? input.pagamentos.map((p) => {
@@ -3404,9 +3465,16 @@ export async function buildInovafarmaVendaPayload(
           );
           return {
             tipo: resolved.tipo,
+            nsu: String(p.codigoAutorizacao || "").trim(),
+            bandeiraCartao: String(
+              p.bandeira || (resolved.tipo === "D" ? "DINHEIRO" : "VISA"),
+            ).trim(),
+            receberNaEntrega: resolved.tipo === "D",
+            observacao: "",
             formaPagamento: resolved.formaPagamento,
             valor: roundCurrency(parseInovafarmaNumber(p.valor, 0)),
             parcelas: Math.max(1, Math.floor(parseInovafarmaNumber(p.parcelas, 1))),
+            dataVencimento: nowIso,
           };
         })
       : (() => {
@@ -3417,9 +3485,14 @@ export async function buildInovafarmaVendaPayload(
           return [
             {
               tipo: resolved.tipo,
+              nsu: "",
+              bandeiraCartao: resolved.tipo === "D" ? "DINHEIRO" : "VISA",
+              receberNaEntrega: resolved.tipo === "D",
+              observacao: "",
               formaPagamento: resolved.formaPagamento,
               valor: valorTotalVenda,
               parcelas: 1,
+              dataVencimento: nowIso,
             },
           ];
         })();
@@ -3438,7 +3511,10 @@ export async function buildInovafarmaVendaPayload(
   const codigoVendaOnLine = buildImmutableCodigoVendaOnLine(
     input.codigoVendaOnLine || input.pedidoId,
   );
-  const cleanCnpj = sanitizeCnpj(input.cnpj || authContext?.cnpj || "");
+  const cleanCnpj = resolveEffectiveInovafarmaCnpj(
+    input.cnpj || authContext?.cnpj || "",
+    authContext?.routeId,
+  );
   const resolvedEnt =
     input.ent !== undefined &&
     input.ent !== null &&
@@ -3446,54 +3522,100 @@ export async function buildInovafarmaVendaPayload(
       ? input.ent
       : cleanCnpj || "1";
 
+  const customerName = String(
+    input.cliente?.nome || "Cliente Consumidor",
+  ).trim();
+  const customerCpf = sanitizeCpf(input.cliente?.cpf) || "0";
+  const customerPhone = String(input.cliente?.telefone || "")
+    .replace(/\D+/g, "")
+    .trim();
+
+  const numeroEndereco = String(rawEndereco?.numero || "S/N").trim();
+  const complementoEndereco = rawEndereco?.complemento
+    ? String(rawEndereco.complemento).trim()
+    : "";
+  const bairroEndereco = String(rawEndereco?.bairro || "CENTRO").trim();
+  const ufEndereco = String(rawEndereco?.uf || "SP")
+    .trim()
+    .toUpperCase();
+  const cepFinal = cep && cep.length >= 8 ? cep : "00000000";
+  const logradouroFinal = logradouro || "ENDERECO DE ENTREGA";
+  const cidadeFinal = cidade || "CIDADE";
+  const mensagemPedido = String(
+    input.observacao || `Pedido FarmaFlow #${codigoVendaOnLine}`,
+  ).trim();
+
+  // Monta produtos[] exatamente no formato AdicionarVendaPendenteProdutoCommand do Portal PS
+  const produtosOficiais = finalItems.map((it) => ({
+    codigoProduto: it.codigoProduto,
+    nomeProduto: it.nomeProduto,
+    quantidade: it.quantidade,
+    valorUnitario: it.valorUnitario,
+    descontoUnitario: it.descontoUnitario,
+    unidade: it.unidadeMedida,
+    ean: it.ean || null,
+    imagem: null,
+  }));
+
+  // Monta entrega.endereco como objeto AdicionarVendaPendenteEntregaEnderecoCommand (nunca string solta!)
+  const enderecoEntregaObj: InovafarmaVendaEnderecoEntregaPayload = {
+    endereco: logradouroFinal,
+    numero: numeroEndereco,
+    complemento: complementoEndereco,
+    cep: cepFinal,
+    referencia: "",
+    bairro: bairroEndereco,
+    cidade: cidadeFinal,
+    estado: ufEndereco,
+    destinatario: customerName,
+  };
+
   const payload: InovafarmaVendaPayload = {
     ent: resolvedEnt,
     ...(cleanCnpj ? { cnpj: cleanCnpj } : {}),
+    cnpjEmpresa: cleanCnpj,
     codigoVendaOnLine,
-    ...(input.pedidoId ? { numeroPedido: String(input.pedidoId) } : { numeroPedido: codigoVendaOnLine }),
+    ...(input.pedidoId
+      ? { numeroPedido: String(input.pedidoId) }
+      : { numeroPedido: codigoVendaOnLine }),
+    dataVenda: nowIso,
+    dataHora: nowIso,
+    dataAdicionaVendaPendente: nowIso,
+    nomeCliente: customerName,
+    cpfCnpj: customerCpf,
     vendedor: vendedorCodigoOuCpf,
-    dataHora: new Date().toISOString(),
-    retirarNaLoja,
+    retirarNaLoja: false,
+    mensagem: mensagemPedido,
     taxaEntrega,
     entrega: {
-      retirarNaLoja,
+      dataAgendamento: nowIso,
+      contato: customerName,
+      trocoPara: 0,
       taxa: taxaEntrega,
-      ...(rawEndereco
-        ? {
-            endereco: logradouro,
-            numero: String(rawEndereco.numero || "S/N").trim(),
-            ...(rawEndereco.complemento
-              ? { complemento: String(rawEndereco.complemento).trim() }
-              : {}),
-            bairro: String(rawEndereco.bairro || "").trim(),
-            cidade,
-            ...(rawEndereco.uf
-              ? { uf: String(rawEndereco.uf).trim().toUpperCase() }
-              : {}),
-            ...(cep ? { cep } : {}),
-          }
-        : {}),
+      telefone: customerPhone,
+      celular: customerPhone,
+      permitirEnvioMensagemWhatsApp: true,
+      retirarNaLoja: false,
+      endereco: enderecoEntregaObj,
     },
     ...(input.cliente
       ? {
           cliente: {
-            nome: String(input.cliente.nome || "Cliente Consumidor").trim(),
+            nome: customerName,
             cpf: sanitizeCpf(input.cliente.cpf),
-            telefone: String(input.cliente.telefone || "").replace(/\D+/g, ""),
+            telefone: customerPhone,
             ...(rawEndereco
               ? {
                   endereco: {
-                    logradouro,
-                    endereco: logradouro,
-                    numero: String(rawEndereco.numero || "S/N").trim(),
-                    ...(rawEndereco.complemento
-                      ? { complemento: String(rawEndereco.complemento).trim() }
+                    logradouro: logradouroFinal,
+                    endereco: logradouroFinal,
+                    numero: numeroEndereco,
+                    ...(complementoEndereco
+                      ? { complemento: complementoEndereco }
                       : {}),
-                    bairro: String(rawEndereco.bairro || "").trim(),
-                    cidade,
-                    ...(rawEndereco.uf
-                      ? { uf: String(rawEndereco.uf).trim().toUpperCase() }
-                      : {}),
+                    bairro: bairroEndereco,
+                    cidade: cidadeFinal,
+                    ...(ufEndereco ? { uf: ufEndereco } : {}),
                     ...(cep ? { cep } : {}),
                   },
                 }
@@ -3501,6 +3623,7 @@ export async function buildInovafarmaVendaPayload(
           },
         }
       : {}),
+    produtos: produtosOficiais,
     itens: finalItems,
     pagamentos: rawPagamentos,
     valorTotalItens,
@@ -3513,7 +3636,7 @@ export async function buildInovafarmaVendaPayload(
 }
 
 /**
- * Consulta uma venda pelo `codigoVendaOnLine` no Inovafarma (`GET /api/v1/{integracao}/vendaporid/{codigoVendaOnLine}`):
+ * Consulta uma venda pelo `codigoVendaOnLine` (ou `erpOrderId`) no Inovafarma (`GET /api/v1/{integracao}/vendaporid/{codigoVendaOnLine}`):
  * - HTTP 204 = venda ainda não registrada no ERP (`found: false`)
  * - HTTP 200 = venda localizada no ERP (`found: true`), extraindo `CODIGOVENDAINOVA`, NF-e, entrega e cancelamento
  */
@@ -3524,26 +3647,76 @@ export async function fetchInovafarmaVendaPorId(params: {
   cnpj: string;
   apiKey?: string;
   codigoVendaOnLine: string;
+  erpOrderId?: string | number | null;
   valorPedidoFarmaFlow?: number;
   supabaseClient?: SupabaseClient;
   tenantId?: string;
 }): Promise<InovafarmaVendaReconciliationResult> {
-  const cleanCodigo = String(params.codigoVendaOnLine || "").trim();
+  const cleanCodigo = String(
+    params.codigoVendaOnLine || params.erpOrderId || "",
+  ).trim();
   if (!cleanCodigo) {
     throw new Error("codigoVendaOnLine é obrigatório para consultar /vendaporid.");
   }
 
-  const res = await inovafarmaHttpRequest<any>({
-    method: "GET",
-    baseUrl: params.baseUrl,
-    routeId: params.routeId,
-    token: params.token,
-    cnpj: params.cnpj,
-    apiKey: params.apiKey,
-    resourcePaths: [`vendaporid/${encodeURIComponent(cleanCodigo)}`],
-    supabaseClient: params.supabaseClient,
-    tenantId: params.tenantId,
-  });
+  const effectiveCnpj = resolveEffectiveInovafarmaCnpj(
+    params.cnpj,
+    params.routeId,
+  );
+
+  const candidatePaths: string[] = [
+    `vendaporid/${encodeURIComponent(cleanCodigo)}`,
+  ];
+  const cleanErpId = String(params.erpOrderId || "").trim();
+  if (cleanErpId && cleanErpId !== "0" && cleanErpId !== cleanCodigo) {
+    candidatePaths.push(`vendaporid/${encodeURIComponent(cleanErpId)}`);
+  }
+
+  let res: {
+    status: number;
+    data: any;
+    empty: boolean;
+    endpointUsed: string;
+    cnpjSent: string;
+    rawPreview?: string;
+  };
+
+  try {
+    res = await inovafarmaHttpRequest<any>({
+      method: "GET",
+      baseUrl: params.baseUrl,
+      routeId: params.routeId,
+      token: params.token,
+      cnpj: effectiveCnpj,
+      apiKey: params.apiKey,
+      resourcePaths: candidatePaths,
+      supabaseClient: params.supabaseClient,
+      tenantId: params.tenantId,
+    });
+  } catch (firstErr: any) {
+    // Fallback com query string (?id=... / ?codigoVendaOnLine=...) caso o endpoint customizado exija query params
+    try {
+      res = await inovafarmaHttpRequest<any>({
+        method: "GET",
+        baseUrl: params.baseUrl,
+        routeId: params.routeId,
+        token: params.token,
+        cnpj: effectiveCnpj,
+        apiKey: params.apiKey,
+        resourcePaths: ["vendaporid"],
+        queryParams: {
+          ...(cleanErpId && /^\d+$/.test(cleanErpId)
+            ? { id: Number(cleanErpId) }
+            : {}),
+          codigoVendaOnLine: cleanCodigo,
+        },
+        supabaseClient: params.supabaseClient,
+        tenantId: params.tenantId,
+      });
+    } catch {
+      throw firstErr;
+    }
+  }
 
   if (res.empty || res.status === 204 || !res.data) {
     return {
@@ -3590,15 +3763,18 @@ export async function fetchInovafarmaVendaPorId(params: {
     };
   }
 
+  const rawCodigoVendaInova = String(
+    record.CODIGOVENDAINOVA ??
+      record.codigoVendaInova ??
+      record.codigo_venda_inova ??
+      record.CODIGOVENDA ??
+      record.codigoVenda ??
+      "",
+  ).trim();
   const codigoVendaInova =
-    String(
-      record.CODIGOVENDAINOVA ??
-        record.codigoVendaInova ??
-        record.codigo_venda_inova ??
-        record.CODIGOVENDA ??
-        record.codigoVenda ??
-        "",
-    ).trim() || null;
+    rawCodigoVendaInova && rawCodigoVendaInova !== "0"
+      ? rawCodigoVendaInova
+      : null;
 
   const numeroNotaFiscal =
     String(
@@ -3773,7 +3949,7 @@ export async function sendInovafarmaVenda(params: {
     }
   }
 
-  // 3. Garante explicitamente a propriedade `ent` na raiz do JSON e registra console.log para depuração antes do POST /Venda
+  // 3. Garante explicitamente a propriedade `ent` e `cnpjEmpresa` na raiz do JSON e registra console.log para depuração antes do POST /Venda
   const explicitRootPayload: InovafarmaVendaPayload = {
     ent:
       payloadEnviado.ent !== undefined &&
@@ -3782,6 +3958,7 @@ export async function sendInovafarmaVenda(params: {
         ? payloadEnviado.ent
         : effectiveCnpj || "1",
     ...payloadEnviado,
+    cnpjEmpresa: effectiveCnpj,
   };
   explicitRootPayload.ent =
     payloadEnviado.ent !== undefined &&
@@ -3809,47 +3986,424 @@ export async function sendInovafarmaVenda(params: {
     tenantId: params.tenantId,
   });
 
-  const codigoVendaInova =
+  const rawCodigoVendaInova = String(
     res.data?.CODIGOVENDAINOVA ??
-    res.data?.codigoVendaInova ??
-    res.data?.codigo_venda_inova ??
-    res.data?.codigoVenda ??
-    null;
+      res.data?.codigoVendaInova ??
+      res.data?.codigo_venda_inova ??
+      res.data?.codigoVenda ??
+      "",
+  ).trim();
+  const codigoVendaInova =
+    rawCodigoVendaInova && rawCodigoVendaInova !== "0"
+      ? rawCodigoVendaInova
+      : null;
 
   return {
     success: true,
     alreadyExistsInErp: false,
     endpointUsed: res.endpointUsed,
     codigoVendaOnLine: explicitRootPayload.codigoVendaOnLine,
-    codigoVendaInova: codigoVendaInova ? String(codigoVendaInova) : null,
+    codigoVendaInova,
     payloadEnviado: explicitRootPayload,
     response: res.data ?? { ok: true },
   };
 }
 
 /**
- * Concilia os pedidos enviados de uma farmácia (`GET /api/v1/{integracao}/vendaporid/{codigoVendaOnLine}`):
- * - Atualiza o pedido no FarmaFlow com `CODIGOVENDAINOVA`, dados da Nota Fiscal (`NUMERONOTAFISCAL`, `CHAVEACESSONOTAFISCAL`),
- *   status de entrega (`ENVIADOPARAENTREGA`, `ENTREGAFINALIZADA`) e verifica se a venda foi cancelada (`VENDAELIMINADA: true`).
- * - Compara `VALORNOTAFISCAL` com o total do pedido e sinaliza divergências.
+ * Converte um registro de pedido (`orders`) do banco Supabase em `InovafarmaVendaInput` e envia para `POST /api/v1/{integracao}/Venda`.
+ * Usado tanto pela rota `/api/integration/inovafarma/venda` quanto pela conciliação `/reconcile` para pedidos pendentes sem `codigo_venda_inova`.
  */
-export async function reconcilePendingInovafarmaOrders(params: {
+export async function sendDatabaseOrderToInovafarma(params: {
   supabaseClient: SupabaseClient;
   tenantId: string;
-  orderId?: string;
-  codigoVendaOnLine?: string;
+  order: any;
+  tenantSettings?: any;
+  baseUrl: string;
+  routeId: string;
+  token: string;
+  cnpj: string;
+  apiKey?: string;
 }): Promise<{
+  success: boolean;
+  codigoVendaOnLine: string;
+  codigoVendaInova: string | null;
+  endpointUsed?: string;
+  error?: string;
+}> {
+  const { supabaseClient, tenantId, order, tenantSettings } = params;
+  const effectiveCnpj = resolveEffectiveInovafarmaCnpj(
+    params.cnpj,
+    params.routeId,
+  );
+
+  // Carrega order_items + products se ainda não vieram no objeto order
+  let targetOrder = order;
+  if (
+    !Array.isArray(targetOrder.order_items) &&
+    !Array.isArray(targetOrder.items)
+  ) {
+    const { data: fullOrder } = await supabaseClient
+      .from("orders")
+      .select(
+        `
+        *,
+        order_items (
+          quantity,
+          unit_price,
+          products (
+            name,
+            barcode,
+            internal_code
+          )
+        ),
+        customers (
+          name,
+          phone,
+          cpf,
+          address,
+          address_number,
+          neighborhood,
+          city,
+          cep
+        )
+      `,
+      )
+      .eq("id", order.id)
+      .eq("tenant_id", tenantId)
+      .maybeSingle();
+    if (fullOrder) {
+      targetOrder = fullOrder;
+    }
+  }
+
+  const customer = targetOrder.customers || targetOrder.customer || {};
+  const items = targetOrder.order_items || targetOrder.items || [];
+
+  if (!Array.isArray(items) || items.length === 0) {
+    return {
+      success: false,
+      codigoVendaOnLine: buildImmutableCodigoVendaOnLine(
+        targetOrder.codigo_venda_online ||
+          targetOrder.codigoVendaOnLine ||
+          targetOrder.id,
+      ),
+      codigoVendaInova: null,
+      error: `Pedido #${targetOrder.id} não possui itens para envio ao Inovafarma.`,
+    };
+  }
+
+  const rawItemsForVenda: InovafarmaVendaItemInput[] = items.map(
+    (item: any, idx: number) => {
+      const barcode =
+        item.products?.barcode ||
+        item.barcode ||
+        item.product?.barcode ||
+        item.ean ||
+        "";
+      const internalCode =
+        item.products?.internal_code ||
+        item.internal_code ||
+        item.internalCode ||
+        item.product?.internalCode ||
+        item.erpProductId ||
+        barcode ||
+        String(idx + 1);
+      const nomeItem =
+        item.products?.name ||
+        item.name ||
+        item.productName ||
+        item.product?.name ||
+        `PRODUTO ${internalCode}`;
+      const unidadeMedida =
+        item.unidadeMedida ||
+        item.unitMeasure ||
+        item.unit_measure ||
+        item.product?.unitMeasure ||
+        "UN";
+      const quantidade = Math.max(
+        1,
+        Number(item.quantity || item.quantidade || 1),
+      );
+      const precoUnitario = Math.max(
+        0.01,
+        Number(item.unit_price ?? item.price ?? item.preco_unitario ?? 0.01),
+      );
+      const descontoUnitario = Math.max(
+        0,
+        Number(
+          item.descontoUnitario ??
+            item.unit_discount ??
+            item.discount_per_unit ??
+            0,
+        ),
+      );
+      return {
+        ean: sanitizeInovafarmaEan(barcode),
+        codigoProduto: String(internalCode || barcode || idx + 1).trim(),
+        nome: String(nomeItem).trim(),
+        unidadeMedida,
+        quantidade,
+        precoUnitario,
+        descontoUnitario,
+      };
+    },
+  );
+
+  const taxaEntrega = roundCurrency(
+    Math.max(
+      0,
+      Number(
+        targetOrder.deliveryFee ??
+          targetOrder.delivery_fee ??
+          targetOrder.taxa_entrega ??
+          0,
+      ),
+    ),
+  );
+
+  const somaBrutaItens = roundCurrency(
+    rawItemsForVenda.reduce(
+      (acc: number, it) =>
+        acc +
+        roundCurrency(
+          (it.precoUnitario - (it.descontoUnitario || 0)) * it.quantidade,
+        ),
+      0,
+    ),
+  );
+
+  const valorTotalPedido = roundCurrency(
+    Number(
+      targetOrder.total ??
+        targetOrder.total_amount ??
+        targetOrder.valor_total ??
+        somaBrutaItens + taxaEntrega,
+    ),
+  );
+
+  const explicitOrderDiscount = roundCurrency(
+    Number(
+      targetOrder.discount ??
+        targetOrder.discount_amount ??
+        targetOrder.coupon_discount ??
+        targetOrder.desconto ??
+        0,
+    ),
+  );
+  const implicitDiscount = roundCurrency(
+    Math.max(0, somaBrutaItens + taxaEntrega - valorTotalPedido),
+  );
+  const descontoGlobalParaDistribuir =
+    explicitOrderDiscount > 0 ? explicitOrderDiscount : implicitDiscount;
+
+  const codigoVendaOnLine = buildImmutableCodigoVendaOnLine(
+    targetOrder.codigo_venda_online ||
+      targetOrder.codigoVendaOnLine ||
+      targetOrder.id,
+  );
+
+  const formaPagamento = String(
+    targetOrder.paymentMethod ||
+      targetOrder.payment_method ||
+      targetOrder.forma_pagamento ||
+      customer.paymentMethod ||
+      "PIX",
+  ).trim();
+
+  const rawAddress =
+    customer.address ||
+    customer.street ||
+    customer.rua ||
+    targetOrder.address ||
+    tenantSettings?.street ||
+    tenantSettings?.full_address ||
+    "ENDERECO DE ENTREGA";
+
+  const rawCep =
+    String(
+      customer.cep ||
+        customer.zipCode ||
+        tenantSettings?.cep ||
+        "00000000",
+    )
+      .replace(/\D+/g, "")
+      .trim() || "00000000";
+
+  const rawCity =
+    customer.city ||
+    customer.cidade ||
+    tenantSettings?.city ||
+    "CIDADE";
+
+  const vendaInput: InovafarmaVendaInput = {
+    ent: effectiveCnpj || "1",
+    cnpj: effectiveCnpj,
+    pedidoId: codigoVendaOnLine,
+    codigoVendaOnLine,
+    vendedor:
+      targetOrder.seller_code ??
+      targetOrder.seller_cpf ??
+      targetOrder.vendedor_codigo ??
+      targetOrder.vendedor_cpf ??
+      targetOrder.vendedor,
+    retirarNaLoja: false,
+    cliente: {
+      nome:
+        customer.name ||
+        customer.nome ||
+        targetOrder.customer_name ||
+        "Cliente Consumidor",
+      cpf: customer.cpf || targetOrder.customer_cpf || "",
+      telefone:
+        customer.phone ||
+        customer.telefone ||
+        targetOrder.customer_phone ||
+        "",
+      endereco: {
+        logradouro: rawAddress,
+        endereco: rawAddress,
+        numero:
+          customer.address_number ||
+          customer.addressNumber ||
+          customer.number ||
+          customer.numero ||
+          "S/N",
+        bairro:
+          customer.neighborhood ||
+          customer.bairro ||
+          tenantSettings?.neighborhood ||
+          "CENTRO",
+        cidade: rawCity,
+        uf:
+          customer.state ||
+          customer.uf ||
+          tenantSettings?.state ||
+          "SP",
+        cep: rawCep,
+      },
+    },
+    itens: rawItemsForVenda,
+    descontoGlobal: descontoGlobalParaDistribuir,
+    taxaEntrega,
+    formaPagamentoPadrao: formaPagamento,
+    observacao:
+      targetOrder.observation ||
+      targetOrder.notes ||
+      targetOrder.observacao ||
+      `Pedido FarmaFlow #${codigoVendaOnLine}`,
+  };
+
+  try {
+    const sent = await sendInovafarmaVenda({
+      baseUrl: params.baseUrl,
+      routeId: params.routeId,
+      token: params.token,
+      cnpj: effectiveCnpj,
+      apiKey: params.apiKey,
+      tenantId,
+      supabaseClient,
+      venda: vendaInput,
+    });
+
+    const updatePayload: Record<string, any> = {
+      codigo_venda_online: sent.codigoVendaOnLine,
+    };
+    if (sent.codigoVendaInova) {
+      updatePayload.codigo_venda_inova = sent.codigoVendaInova;
+    }
+
+    await supabaseClient
+      .from("orders")
+      .update(updatePayload)
+      .eq("id", targetOrder.id)
+      .eq("tenant_id", tenantId);
+
+    return {
+      success: true,
+      codigoVendaOnLine: sent.codigoVendaOnLine,
+      codigoVendaInova: sent.codigoVendaInova || null,
+      endpointUsed: sent.endpointUsed,
+    };
+  } catch (err: any) {
+    const errMsg = String(err?.message || "Erro ao enviar POST /Venda").slice(
+      0,
+      2000,
+    );
+    return {
+      success: false,
+      codigoVendaOnLine,
+      codigoVendaInova: null,
+      error: errMsg,
+    };
+  }
+}
+
+export interface ReconcileInovafarmaParams {
+  supabaseClient?: SupabaseClient;
+  tenantId: string;
+  orderId?: string;
+  orderIds?: string[];
+  codigoVendaOnLine?: string;
+  baseUrl?: string;
+  routeId?: string;
+  cnpj?: string;
+  apiKey?: string;
+}
+
+/**
+ * Concilia os pedidos enviados de uma farmácia (`GET /api/v1/{integracao}/vendaporid/{codigoVendaOnLine}`):
+ * - Se um pedido com status `enviado_ao_pdv` (ou `confirmed`/`dispatched`) ainda não possuir `codigo_venda_inova` / `erp_order_id`,
+ *   tenta PRIMEIRO enviar o pedido pendente via `POST /api/v1/{integracao}/Venda`!
+ * - Em seguida, consulta `GET /api/v1/{integracao}/vendaporid/{codigoVendaOnLine}` para atualizar `CODIGOVENDAINOVA`,
+ *   dados da Nota Fiscal (`NUMERONOTAFISCAL`, `CHAVEACESSONOTAFISCAL`), status de entrega (`ENVIADOPARAENTREGA`, `ENTREGAFINALIZADA`)
+ *   e cancelamento (`VENDAELIMINADA: true`).
+ * - Aceita tanto `reconcilePendingInovafarmaOrders(params)` quanto `reconcilePendingInovafarmaOrders(supabaseClient, params)`.
+ */
+export async function reconcilePendingInovafarmaOrders(
+  firstArg:
+    | SupabaseClient
+    | (ReconcileInovafarmaParams & { supabaseClient: SupabaseClient }),
+  secondArg?: ReconcileInovafarmaParams,
+): Promise<{
   success: boolean;
   tenantId: string;
   totalChecked: number;
+  sentPendingCount: number;
   reconciledCount: number;
   cancelledInErpCount: number;
+  eliminatedCount: number;
   divergentInvoicesCount: number;
+  divergenceCount: number;
+  sendErrors: string[];
+  details: string;
   results: Array<InovafarmaVendaReconciliationResult & { orderId?: string }>;
 }> {
+  const params: ReconcileInovafarmaParams & { supabaseClient: SupabaseClient } =
+    secondArg
+      ? {
+          ...secondArg,
+          supabaseClient: firstArg as SupabaseClient,
+        }
+      : (firstArg as ReconcileInovafarmaParams & {
+          supabaseClient: SupabaseClient;
+        });
+
+  const supabaseClient = params.supabaseClient;
+  const tenantId = String(params.tenantId || "").trim();
+
+  if (!supabaseClient || !tenantId) {
+    throw new Error(
+      "O identificador da farmácia (tenantId) é obrigatório para conciliar vendas no Inovafarma.",
+    );
+  }
+
   const resolved = await resolveTenantInovafarmaToken({
-    supabaseClient: params.supabaseClient,
-    tenantId: params.tenantId,
+    supabaseClient,
+    tenantId,
+    baseUrlOverride: params.baseUrl,
+    routeIdOverride: params.routeId,
+    cnpjOverride: params.cnpj,
+    apiKeyOverride: params.apiKey,
   });
 
   if (!resolved.token || !resolved.cnpj) {
@@ -3858,16 +4412,7 @@ export async function reconcilePendingInovafarmaOrders(params: {
     );
   }
 
-  let ordersToReconcile: any[] = [];
-  if (params.orderId) {
-    const { data: singleOrder } = await params.supabaseClient
-      .from("orders")
-      .select("*")
-      .eq("id", params.orderId)
-      .eq("tenant_id", params.tenantId)
-      .maybeSingle();
-    if (singleOrder) ordersToReconcile = [singleOrder];
-  } else if (params.codigoVendaOnLine) {
+  if (params.codigoVendaOnLine && !params.orderId) {
     const singleCheck = await fetchInovafarmaVendaPorId({
       baseUrl: resolved.baseUrl,
       routeId: resolved.routeId,
@@ -3875,127 +4420,249 @@ export async function reconcilePendingInovafarmaOrders(params: {
       cnpj: resolved.cnpj,
       apiKey: resolved.apiKey,
       codigoVendaOnLine: params.codigoVendaOnLine,
-      supabaseClient: params.supabaseClient,
-      tenantId: params.tenantId,
+      supabaseClient,
+      tenantId,
     });
     return {
       success: true,
-      tenantId: params.tenantId,
+      tenantId,
       totalChecked: 1,
+      sentPendingCount: 0,
       reconciledCount: singleCheck.found ? 1 : 0,
       cancelledInErpCount: singleCheck.vendaEliminada ? 1 : 0,
+      eliminatedCount: singleCheck.vendaEliminada ? 1 : 0,
       divergentInvoicesCount: singleCheck.divergenciaNotaFiscal ? 1 : 0,
+      divergenceCount: singleCheck.divergenciaNotaFiscal ? 1 : 0,
+      sendErrors: [],
+      details: singleCheck.found
+        ? `Venda ${params.codigoVendaOnLine} localizada no Inovafarma (CODIGOVENDAINOVA: ${singleCheck.codigoVendaInova || "processando"}).`
+        : `Venda ${params.codigoVendaOnLine} ainda em processamento na fila do Inovafarma (HTTP 204).`,
       results: [singleCheck],
     };
-  } else {
-    const { data: candidateOrders } = await params.supabaseClient
+  }
+
+  let ordersToReconcile: any[] = [];
+  if (params.orderId) {
+    const { data: singleOrder } = await supabaseClient
       .from("orders")
       .select("*")
-      .eq("tenant_id", params.tenantId)
-      .in("status", ["enviado_ao_pdv", "impresso_no_pdv", "confirmed", "dispatched"])
+      .eq("id", params.orderId)
+      .eq("tenant_id", tenantId)
+      .maybeSingle();
+    if (singleOrder) ordersToReconcile = [singleOrder];
+  } else if (Array.isArray(params.orderIds) && params.orderIds.length > 0) {
+    const { data: selectedOrders } = await supabaseClient
+      .from("orders")
+      .select("*")
+      .eq("tenant_id", tenantId)
+      .in("id", params.orderIds);
+    ordersToReconcile = selectedOrders || [];
+  } else {
+    const { data: candidateOrders } = await supabaseClient
+      .from("orders")
+      .select("*")
+      .eq("tenant_id", tenantId)
+      .in("status", [
+        "enviado_ao_pdv",
+        "impresso_no_pdv",
+        "confirmed",
+        "dispatched",
+      ])
       .order("created_at", { ascending: false })
       .limit(30);
 
     ordersToReconcile = (candidateOrders || []).filter((o: any) => {
-      const hasDefinitiveInovaCode = Boolean(
-        o.codigo_venda_inova || o.codigoVendaInova,
-      );
-      const isFinalized = o.status === "concluido_no_pdv" || o.status === "cancelled";
-      return !isFinalized || !hasDefinitiveInovaCode;
+      const isFinalized =
+        o.status === "concluido_no_pdv" || o.status === "cancelled";
+      return !isFinalized;
     });
   }
 
-  const results: Array<InovafarmaVendaReconciliationResult & { orderId?: string }> = [];
+  const results: Array<
+    InovafarmaVendaReconciliationResult & { orderId?: string }
+  > = [];
+  let sentPendingCount = 0;
   let reconciledCount = 0;
   let cancelledInErpCount = 0;
   let divergentInvoicesCount = 0;
+  const sendErrors: string[] = [];
 
   for (const order of ordersToReconcile) {
-    const codigoOnline = buildImmutableCodigoVendaOnLine(
+    let codigoOnline = buildImmutableCodigoVendaOnLine(
       order.codigo_venda_online || order.codigoVendaOnLine || order.id,
     );
+    let currentErpOrderId = String(
+      order.codigo_venda_inova ??
+        order.codigoVendaInova ??
+        order.erp_order_id ??
+        order.erpOrderId ??
+        "",
+    ).trim();
+    if (currentErpOrderId === "0") {
+      currentErpOrderId = "";
+    }
+
+    let sentInThisRun = false;
+    let sendErrorForOrder: string | null = null;
+
+    // Se o pedido ainda não possui ID definitivo do ERP (codigo_venda_inova / erp_order_id),
+    // tenta PRIMEIRO enviar o pedido pendente via POST /api/v1/{integracao}/Venda!
+    if (!currentErpOrderId) {
+      const sendAttempt = await sendDatabaseOrderToInovafarma({
+        supabaseClient,
+        tenantId,
+        order,
+        tenantSettings: resolved.tenant,
+        baseUrl: resolved.baseUrl,
+        routeId: resolved.routeId,
+        token: resolved.token,
+        cnpj: resolved.cnpj,
+        apiKey: resolved.apiKey,
+      });
+
+      codigoOnline = sendAttempt.codigoVendaOnLine || codigoOnline;
+      if (sendAttempt.success) {
+        sentPendingCount++;
+        sentInThisRun = true;
+        if (sendAttempt.codigoVendaInova) {
+          currentErpOrderId = sendAttempt.codigoVendaInova;
+        }
+      } else if (sendAttempt.error) {
+        sendErrorForOrder = sendAttempt.error;
+        sendErrors.push(`Pedido #${order.id}: ${sendAttempt.error}`);
+      }
+    }
+
     const orderTotal = roundCurrency(
       Number(order.total ?? order.total_amount ?? order.valor_total ?? 0),
     );
 
-    const check = await fetchInovafarmaVendaPorId({
-      baseUrl: resolved.baseUrl,
-      routeId: resolved.routeId,
-      token: resolved.token,
-      cnpj: resolved.cnpj,
-      apiKey: resolved.apiKey,
-      codigoVendaOnLine: codigoOnline,
-      valorPedidoFarmaFlow: orderTotal,
-      supabaseClient: params.supabaseClient,
-      tenantId: params.tenantId,
-    });
+    try {
+      const check = await fetchInovafarmaVendaPorId({
+        baseUrl: resolved.baseUrl,
+        routeId: resolved.routeId,
+        token: resolved.token,
+        cnpj: resolved.cnpj,
+        apiKey: resolved.apiKey,
+        codigoVendaOnLine: codigoOnline,
+        erpOrderId: currentErpOrderId || undefined,
+        valorPedidoFarmaFlow: orderTotal,
+        supabaseClient,
+        tenantId,
+      });
 
-    if (check.found) {
-      reconciledCount++;
-      if (check.vendaEliminada) cancelledInErpCount++;
-      if (check.divergenciaNotaFiscal) divergentInvoicesCount++;
+      if (check.found) {
+        reconciledCount++;
+        if (check.vendaEliminada) cancelledInErpCount++;
+        if (check.divergenciaNotaFiscal) divergentInvoicesCount++;
 
-      const updateFields: Record<string, any> = {
-        status: check.statusFarmaFlowSugerido,
-        codigo_venda_online: codigoOnline,
-        codigo_venda_inova: check.codigoVendaInova,
-        numero_nota_fiscal: check.numeroNotaFiscal,
-        chave_acesso_nota_fiscal: check.chaveAcessoNotaFiscal,
-        valor_nota_fiscal: check.valorNotaFiscal,
-        divergencia_nota_fiscal: check.divergenciaNotaFiscal,
-      };
+        const updateFields: Record<string, any> = {
+          status: check.statusFarmaFlowSugerido,
+          codigo_venda_online: codigoOnline,
+          codigo_venda_inova: check.codigoVendaInova || currentErpOrderId || null,
+          numero_nota_fiscal: check.numeroNotaFiscal,
+          chave_acesso_nota_fiscal: check.chaveAcessoNotaFiscal,
+          valor_nota_fiscal: check.valorNotaFiscal,
+          divergencia_nota_fiscal: check.divergenciaNotaFiscal,
+        };
 
-      const { error: updErr } = await params.supabaseClient
-        .from("orders")
-        .update(updateFields)
-        .eq("id", order.id)
-        .eq("tenant_id", params.tenantId);
-
-      // Fallback caso as colunas opcionais de NF/Inova ainda não existam na tabela orders
-      if (updErr) {
-        await params.supabaseClient
+        const { error: updErr } = await supabaseClient
           .from("orders")
-          .update({ status: check.statusFarmaFlowSugerido })
+          .update(updateFields)
           .eq("id", order.id)
-          .eq("tenant_id", params.tenantId);
+          .eq("tenant_id", tenantId);
+
+        if (updErr) {
+          await supabaseClient
+            .from("orders")
+            .update({ status: check.statusFarmaFlowSugerido })
+            .eq("id", order.id)
+            .eq("tenant_id", tenantId);
+        }
+
+        await supabaseClient.from("integration_logs").insert({
+          tenant_id: tenantId,
+          endpoint: `/vendaporid/${codigoOnline}`,
+          payload: {
+            orderId: order.id,
+            codigoVendaOnLine: codigoOnline,
+            codigoVendaInova: check.codigoVendaInova,
+            sentInThisRun,
+            numeroNotaFiscal: check.numeroNotaFiscal,
+            chaveAcessoNotaFiscal: check.chaveAcessoNotaFiscal,
+            valorNotaFiscal: check.valorNotaFiscal,
+            valorPedidoFarmaFlow: orderTotal,
+            divergenciaNotaFiscal: check.divergenciaNotaFiscal,
+            diferencaValorNotaFiscal: check.diferencaValorNotaFiscal,
+            enviadoParaEntrega: check.enviadoParaEntrega,
+            entregaFinalizada: check.entregaFinalizada,
+            vendaEliminada: check.vendaEliminada,
+          },
+          status: check.divergenciaNotaFiscal ? "FAILED" : "SUCCESS",
+          error_message: check.divergenciaNotaFiscal
+            ? `Divergência financeira na Nota Fiscal: Pedido R$ ${orderTotal.toFixed(2)} vs NF-e R$ ${(check.valorNotaFiscal || 0).toFixed(2)}`
+            : check.vendaEliminada
+              ? "Venda eliminada/cancelada no balcão do PDV Inovafarma (VENDAELIMINADA: true)."
+              : undefined,
+        });
       }
 
-      await params.supabaseClient.from("integration_logs").insert({
-        tenant_id: params.tenantId,
-        endpoint: `/vendaporid/${codigoOnline}`,
-        payload: {
-          orderId: order.id,
-          codigoVendaOnLine: codigoOnline,
-          codigoVendaInova: check.codigoVendaInova,
-          numeroNotaFiscal: check.numeroNotaFiscal,
-          chaveAcessoNotaFiscal: check.chaveAcessoNotaFiscal,
-          valorNotaFiscal: check.valorNotaFiscal,
-          valorPedidoFarmaFlow: orderTotal,
-          divergenciaNotaFiscal: check.divergenciaNotaFiscal,
-          diferencaValorNotaFiscal: check.diferencaValorNotaFiscal,
-          enviadoParaEntrega: check.enviadoParaEntrega,
-          entregaFinalizada: check.entregaFinalizada,
-          vendaEliminada: check.vendaEliminada,
-        },
-        status: check.divergenciaNotaFiscal ? "FAILED" : "SUCCESS",
-        error_message: check.divergenciaNotaFiscal
-          ? `Divergência financeira na Nota Fiscal: Pedido R$ ${orderTotal.toFixed(2)} vs NF-e R$ ${(check.valorNotaFiscal || 0).toFixed(2)}`
-          : check.vendaEliminada
-            ? "Venda eliminada/cancelada no balcão do PDV Inovafarma (VENDAELIMINADA: true)."
-            : undefined,
+      results.push({
+        ...check,
+        orderId: order.id,
+        sentInThisRun,
+        sendError: sendErrorForOrder,
+      });
+    } catch (reconcileErr: any) {
+      const errDetail = String(
+        reconcileErr?.message || "Erro ao consultar /vendaporid",
+      ).slice(0, 2000);
+      sendErrors.push(`Pedido #${order.id} (/vendaporid): ${errDetail}`);
+      results.push({
+        found: false,
+        httpStatus: 400,
+        codigoVendaOnLine: codigoOnline,
+        codigoVendaInova: currentErpOrderId || null,
+        sentInThisRun,
+        sendError: sendErrorForOrder || errDetail,
+        numeroNotaFiscal: null,
+        chaveAcessoNotaFiscal: null,
+        valorNotaFiscal: null,
+        valorPedidoFarmaFlow: orderTotal,
+        divergenciaNotaFiscal: false,
+        diferencaValorNotaFiscal: 0,
+        enviadoParaEntrega: false,
+        entregaFinalizada: false,
+        vendaEliminada: false,
+        statusFarmaFlowSugerido: order.status || "enviado_ao_pdv",
+        orderId: order.id,
       });
     }
+  }
 
-    results.push({ ...check, orderId: order.id });
+  const summaryParts = [
+    `Pedidos verificados: ${ordersToReconcile.length}`,
+    `Enviados agora (POST /Venda): ${sentPendingCount}`,
+    `Confirmados no PDV (/vendaporid): ${reconciledCount}`,
+    `Cancelados (VENDAELIMINADA): ${cancelledInErpCount}`,
+    `Divergência de NF-e: ${divergentInvoicesCount}`,
+  ];
+  if (sendErrors.length > 0) {
+    summaryParts.push(`Erros reportados pela API: ${sendErrors.join(" | ")}`);
   }
 
   return {
     success: true,
-    tenantId: params.tenantId,
+    tenantId,
     totalChecked: ordersToReconcile.length,
+    sentPendingCount,
     reconciledCount,
     cancelledInErpCount,
+    eliminatedCount: cancelledInErpCount,
     divergentInvoicesCount,
+    divergenceCount: divergentInvoicesCount,
+    sendErrors,
+    details: summaryParts.join(" | ").slice(0, 2000),
     results,
   };
 }
@@ -4873,34 +5540,59 @@ export async function triggerInovafarmaConnectivityTest(params: {
 }
 
 /**
- * Helper cliente (Frontend) para acionar a conciliação de vendas enviadas ao Inovafarma (`GET /api/v1/{integracao}/vendaporid/{codigoVendaOnLine}`)
+ * Helper cliente (Frontend) para acionar a conciliação de vendas enviadas ao Inovafarma (`GET /api/v1/{integracao}/vendaporid/{codigoVendaOnLine}`).
+ * Aceita tanto uma string `tenantId` quanto o objeto `{ tenantId, orderId, codigoVendaOnLine, ... }`.
  */
-export async function triggerInovafarmaReconciliation(params: {
-  tenantId: string;
-  orderId?: string;
-  codigoVendaOnLine?: string;
-}): Promise<{
+export async function triggerInovafarmaReconciliation(
+  paramsOrTenantId:
+    | string
+    | {
+        tenantId: string;
+        orderId?: string;
+        orderIds?: string[];
+        codigoVendaOnLine?: string;
+        erpBaseUrl?: string;
+        erpRouteId?: string;
+        erpCnpj?: string;
+        apiKey?: string;
+      },
+): Promise<{
   success: boolean;
   tenantId: string;
   totalChecked: number;
+  sentPendingCount?: number;
   reconciledCount: number;
   cancelledInErpCount: number;
+  eliminatedCount: number;
   divergentInvoicesCount: number;
+  divergenceCount: number;
+  sendErrors?: string[];
+  details?: string;
+  logs?: any[];
   results: Array<InovafarmaVendaReconciliationResult & { orderId?: string }>;
 }> {
+  const bodyPayload =
+    typeof paramsOrTenantId === "string"
+      ? { tenantId: paramsOrTenantId }
+      : paramsOrTenantId;
+
   const response = await fetch("/api/integration/inovafarma/reconcile", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(params),
+    body: JSON.stringify(bodyPayload),
   });
 
   const data = await response.json().catch(() => ({}));
   if (!response.ok || data.error) {
-    throw new Error(
-      data.error || data.details || `Falha ao conciliar vendas no Inovafarma (HTTP ${response.status})`,
-    );
+    const fullError =
+      data.details && data.error && !String(data.error).includes(String(data.details))
+        ? `${data.error} — Detalhes: ${data.details}`
+        : data.details ||
+          data.error ||
+          `Falha ao conciliar vendas no Inovafarma (HTTP ${response.status})`;
+    throw new Error(String(fullError).slice(0, 2000));
   }
   return data;
 }

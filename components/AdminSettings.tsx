@@ -405,11 +405,21 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
     setInovafarmaFeedback(null);
 
     try {
-      const res = await triggerInovafarmaReconciliation(config.id);
+      const res = await triggerInovafarmaReconciliation({ tenantId: config.id });
+      const hasSendErrors = Array.isArray(res.sendErrors) && res.sendErrors.length > 0;
+      const sentNow = Number(res.sentPendingCount ?? 0);
+      const confirmedCount = Number(res.reconciledCount ?? 0);
+      const cancelledCount = Number(res.eliminatedCount ?? res.cancelledInErpCount ?? 0);
+      const divCount = Number(res.divergenceCount ?? res.divergentInvoicesCount ?? 0);
+
       setInovafarmaFeedback({
-        type: 'success',
-        message: `Conciliação concluída! ${res.totalChecked} pedido(s) verificado(s) via /vendaporid.`,
-        details: `Confirmados no PDV: ${res.reconciledCount} | Cancelados (VENDAELIMINADA): ${res.eliminatedCount} | Divergência de Nota Fiscal: ${res.divergenceCount}`,
+        type: hasSendErrors ? 'error' : 'success',
+        message: hasSendErrors
+          ? `Conciliação executada com alertas (${res.totalChecked} pedido(s) verificado(s)).`
+          : `Conciliação concluída! ${res.totalChecked} pedido(s) verificado(s) via /vendaporid.`,
+        details:
+          res.details ||
+          `Enviados agora (POST /Venda): ${sentNow} | Confirmados no PDV: ${confirmedCount} | Cancelados (VENDAELIMINADA): ${cancelledCount} | Divergência de Nota Fiscal: ${divCount}`,
       });
       if (Array.isArray(res.logs)) {
         setIntegrationLogs(res.logs.slice(0, 15));
@@ -420,8 +430,9 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
       setInovafarmaFeedback({
         type: 'error',
         message: 'Falha ao conciliar vendas no Inovafarma (/vendaporid)',
-        details: err?.message || 'Erro ao consultar status dos pedidos enviados ao PDV.',
+        details: String(err?.message || 'Erro ao consultar status dos pedidos enviados ao PDV.').slice(0, 2000),
       });
+      await fetchTenantIntegrationLogs(config.id);
     } finally {
       setIsReconcilingInovafarma(false);
     }

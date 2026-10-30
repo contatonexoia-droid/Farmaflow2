@@ -6047,17 +6047,35 @@ app.post(
   ],
   async (req, res) => {
     try {
-      const body = req.body || {};
-      const tenantId = (body.tenantId || body.tenant_id || "").toString().trim();
+      const body =
+        typeof req.body === "string"
+          ? { tenantId: req.body }
+          : req.body || {};
+      const tenantId = (
+        body.tenantId ||
+        body.tenant_id ||
+        req.query?.tenantId ||
+        req.query?.tenant_id ||
+        ""
+      )
+        .toString()
+        .trim();
+
       if (!tenantId) {
+        const msg =
+          "O identificador da farmácia (tenantId) é obrigatório para conciliar vendas no Inovafarma.";
         return res.status(400).json({
-          error: "O identificador da farmácia (tenantId) é obrigatório para conciliar vendas.",
+          success: false,
+          error: msg,
+          details: msg,
         });
       }
 
       const result = await reconcilePendingInovafarmaOrders(supabaseAdmin, {
         tenantId,
+        orderId: body.orderId || body.order_id || undefined,
         orderIds: Array.isArray(body.orderIds) ? body.orderIds : undefined,
+        codigoVendaOnLine: body.codigoVendaOnLine || body.codigo_venda_online || undefined,
         baseUrl: body.erpBaseUrl || body.erpUrl || undefined,
         routeId: body.erpRouteId || body.routeId || undefined,
         cnpj: body.erpCnpj || body.cnpj || undefined,
@@ -6076,9 +6094,13 @@ app.post(
         logs: recentLogs || [],
       });
     } catch (error: any) {
-      return res.status(500).json({
+      const errDetail = String(
+        error?.message || "Erro ao conciliar vendas no Inovafarma (/vendaporid).",
+      ).slice(0, 2000);
+      return res.status(400).json({
         success: false,
-        error: error?.message || "Erro ao conciliar vendas no Inovafarma (/vendaporid).",
+        error: errDetail,
+        details: errDetail,
       });
     }
   },
@@ -6505,6 +6527,7 @@ app.post(
             quantity,
             unit_price,
             products (
+              name,
               barcode,
               internal_code
             )
@@ -6545,7 +6568,7 @@ app.post(
       const customer = targetOrder.customers || targetOrder.customer || {};
       const items = targetOrder.order_items || targetOrder.items || [];
 
-      const rawItemsForVenda = items.map((item: any) => {
+      const rawItemsForVenda = items.map((item: any, idx: number) => {
         const barcode =
           item.products?.barcode ||
           item.barcode ||
@@ -6558,7 +6581,14 @@ app.post(
           item.internalCode ||
           item.product?.internalCode ||
           item.erpProductId ||
-          barcode;
+          barcode ||
+          String(idx + 1);
+        const nomeProduto =
+          item.products?.name ||
+          item.name ||
+          item.productName ||
+          item.product?.name ||
+          `PRODUTO ${internalCode}`;
         const unidadeMedida =
           item.unidadeMedida ||
           item.unitMeasure ||
@@ -6574,7 +6604,8 @@ app.post(
         );
         return {
           ean: sanitizeInovafarmaEan(barcode),
-          codigoProduto: String(internalCode || barcode || "").trim(),
+          codigoProduto: String(internalCode || barcode || idx + 1).trim(),
+          nome: String(nomeProduto).trim(),
           unidadeMedida,
           quantidade,
           precoUnitario,
@@ -6582,21 +6613,20 @@ app.post(
         };
       });
 
-      const retirarNaLoja =
-        targetOrder.delivery_mode === "pickup" ||
-        targetOrder.deliveryMode === "pickup" ||
-        Boolean(body.retirarNaLoja);
+      // Plataforma opera exclusivamente com entrega (delivery)
+      const retirarNaLoja = false;
 
-      const taxaEntrega = retirarNaLoja
-        ? 0
-        : roundCurrency(
-            Number(
-              targetOrder.deliveryFee ??
-                targetOrder.delivery_fee ??
-                targetOrder.taxa_entrega ??
-                0,
-            ),
-          );
+      const taxaEntrega = roundCurrency(
+        Math.max(
+          0,
+          Number(
+            targetOrder.deliveryFee ??
+              targetOrder.delivery_fee ??
+              targetOrder.taxa_entrega ??
+              0,
+          ),
+        ),
+      );
 
       const somaBrutaItens = roundCurrency(
         rawItemsForVenda.reduce(
@@ -6659,7 +6689,7 @@ app.post(
           pedidoId: codigoVendaOnLine,
           codigoVendaOnLine,
           vendedor: rawVendedor,
-          retirarNaLoja,
+          retirarNaLoja: false,
           cliente: {
             nome:
               customer.name ||
@@ -6680,7 +6710,7 @@ app.post(
                 targetOrder.address ||
                 tenantSettings?.street ||
                 tenantSettings?.full_address ||
-                "Balcão",
+                "ENDERECO DE ENTREGA",
               numero:
                 customer.address_number ||
                 customer.addressNumber ||
@@ -6691,12 +6721,12 @@ app.post(
                 customer.neighborhood ||
                 customer.bairro ||
                 tenantSettings?.neighborhood ||
-                "Centro",
+                "CENTRO",
               cidade:
                 customer.city ||
                 customer.cidade ||
                 tenantSettings?.city ||
-                "Cidade",
+                "CIDADE",
               uf:
                 customer.state ||
                 customer.uf ||
@@ -6729,6 +6759,7 @@ app.post(
 
       let erpResponseData: any = null;
       let codigoVendaInova: string | null = null;
+      let erpErrorDetails: string | null = null;
       if (
         effectiveErpToken &&
         effectiveErpCnpj &&
@@ -6749,7 +6780,7 @@ app.post(
               pedidoId: vendaPayload.codigoVendaOnLine,
               codigoVendaOnLine: vendaPayload.codigoVendaOnLine,
               vendedor: vendaPayload.vendedor,
-              retirarNaLoja: vendaPayload.entrega.retirarNaLoja,
+              retirarNaLoja: false,
               cliente: vendaPayload.cliente,
               itens: vendaPayload.itens,
               taxaEntrega: vendaPayload.taxaEntrega,
@@ -6766,14 +6797,15 @@ app.post(
             "SUCCESS",
           );
         } catch (erpErr: any) {
+          erpErrorDetails = String(erpErr?.message || "Erro ao transmitir POST /Venda ao Inovafarma").slice(0, 2000);
           await logIntegration(
             targetOrder.tenant_id,
             `/api/v1/${effectiveErpRouteId}/Venda`,
             vendaPayload,
             "FAILED",
-            erpErr?.message,
+            erpErrorDetails,
           );
-          console.warn("Aviso ao transmitir POST /Venda ao Inovafarma:", erpErr?.message);
+          console.warn("Aviso ao transmitir POST /Venda ao Inovafarma:", erpErrorDetails);
         }
       }
 
@@ -6838,18 +6870,23 @@ app.post(
       }
 
       return res.json({
-        success: true,
-        message: "Pedido enviado ao PDV Inovafarma com sucesso",
+        success: !erpErrorDetails,
+        erpSent: !erpErrorDetails,
+        message: erpErrorDetails
+          ? `Pedido marcado como ENVIADO AO PDV, mas houve erro na resposta do Inovafarma: ${erpErrorDetails}`
+          : "Pedido enviado ao PDV Inovafarma com sucesso",
+        ...(erpErrorDetails ? { erpError: erpErrorDetails, details: erpErrorDetails } : {}),
         codigoVendaOnLine: vendaPayload.codigoVendaOnLine,
         codigoVendaInova,
         payload_enviado: vendaPayload,
         erp_response: erpResponseData,
       });
     } catch (error: any) {
-      console.error("Erro ao processar integração ERP (POST /Venda):", error);
+      const errDetail = String(error?.message || "Erro interno no servidor").slice(0, 2000);
+      console.error("Erro ao processar integração ERP (POST /Venda):", errDetail);
       return res.status(400).json({
-        error: error.message || "Erro interno no servidor",
-        details: error.message,
+        error: errDetail,
+        details: errDetail,
       });
     }
   },

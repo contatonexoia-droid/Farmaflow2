@@ -137,33 +137,57 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
     fetchPrescriptions();
   }, [tenant?.id]);
 
+  const sendOrderToInovafarmaErp = async (order: Order, showUiAlert = false) => {
+    const resolvedTenantId = order.tenantId || tenant?.id;
+    if (!resolvedTenantId) return null;
+
+    console.log(
+      `[FarmaFlow Debug]: Enviando pedido ${order.id} para o PDV / Inovafarma (POST /api/integration/inovafarma/venda)...`,
+    );
+
+    const response = await fetch('/api/integration/inovafarma/venda', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ order_id: order.id, tenant_id: resolvedTenantId }),
+    });
+
+    const data = await response.json().catch(() => ({}));
+    console.log(
+      `[FarmaFlow Debug]: Resultado do envio ao ERP Inovafarma (pedido ${order.id} | HTTP ${response.status}):`,
+      data,
+    );
+
+    if (!response.ok || data.success === false) {
+      const detailedError = String(
+        data.details || data.erpError || data.error || response.statusText || 'Falha ao enviar pedido ao ERP',
+      ).slice(0, 2000);
+      console.error(
+        `[FarmaFlow ERP Inovafarma Error] Pedido ${order.id}:`,
+        detailedError,
+      );
+      if (showUiAlert) {
+        throw new Error(detailedError);
+      }
+    }
+
+    return data;
+  };
+
   const handleSendToPDV = async (order: Order) => {
     try {
       setSendingToPDV(order.id);
-      const response = await fetch('/api/integrations/erp/send-order', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ order_id: order.id, tenant_id: order.tenantId }),
-      });
-
-      if (!response.ok) {
-        let errorMessage = response.statusText;
-        try {
-          const errData = await response.json();
-          if (errData.error) errorMessage = errData.error;
-        } catch(e) {}
-        throw new Error(`Erro: ${errorMessage}`);
-      }
-
-      const data = await response.json();
-      
+      const data = await sendOrderToInovafarmaErp(order, true);
       onUpdateOrderStatus(order.id, 'enviado_ao_pdv' as OrderStatus);
-      alert('Pedido enviado para a fila do caixa!');
+      alert(
+        data?.codigoVendaInova
+          ? `Pedido enviado para a fila do caixa! (Código Inovafarma: ${data.codigoVendaInova})`
+          : 'Pedido enviado para a fila do caixa!',
+      );
     } catch (error: any) {
       console.error(error);
-      alert(`Falha ao enviar para o PDV. ${error.message || ''}`);
+      alert(`Falha ao enviar para o PDV:\n${String(error.message || '').slice(0, 2000)}`);
     } finally {
       setSendingToPDV(null);
     }
@@ -265,7 +289,15 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
 
   const handleStatusChangeWrapper = (order: Order, newStatus: OrderStatus) => {
     onUpdateOrderStatus(order.id, newStatus);
-    if (newStatus === "dispatched" && order.status !== "dispatched") {
+    if (newStatus === "enviado_ao_pdv") {
+      sendOrderToInovafarmaErp(order, false).catch((err) => {
+        console.error("[FarmaFlow ERP Inovafarma Error]:", err);
+      });
+      executeWhatsAppTrigger(order);
+    } else if (newStatus === "dispatched" && order.status !== "dispatched") {
+      sendOrderToInovafarmaErp(order, false).catch((err) => {
+        console.error("[FarmaFlow ERP Inovafarma Error]:", err);
+      });
       executeWhatsAppTrigger(order);
     }
   };
@@ -1014,9 +1046,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                           >
                             <option value="pending">Marcar: Pendente</option>
                             <option value="confirmed">Confirmar Pedido</option>
-                            {order.status === "enviado_ao_pdv" && (
-                              <option value="enviado_ao_pdv">Enviado ao PDV</option>
-                            )}
+                            <option value="enviado_ao_pdv">Enviado ao PDV</option>
                             {order.status === "impresso_no_pdv" && (
                               <option value="impresso_no_pdv">Impresso no PDV</option>
                             )}
