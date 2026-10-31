@@ -31,7 +31,14 @@ import { evolutionApiService } from "./services/evolutionApiService.js";
 import { transcribeAudio } from "./services/audioAiService.js";
 import ogHandler, { buildCrawlerHtml, isCrawlerRequest } from "./api/og-handler.js";
 import QRCode from "qrcode";
-import { fetchAndStoreProductImageByEan, syncEanImagesBatch, validateAndCleanEan } from "./services/eanImageService.js";
+import {
+  fetchAndStoreProductImageByEan,
+  syncEanImagesBatch,
+  validateAndCleanEan,
+  cleanupCorruptedEanImages,
+  isGenericMedicationProduct,
+  isPlaceholderImageUrl,
+} from "./services/eanImageService.js";
 import {
   syncInovafarmaProductsToSupabase,
   sanitizeInovafarmaEan,
@@ -3753,6 +3760,21 @@ app.post("/api/products/save-external-image", async (req, res) => {
     return res.status(500).json({
       success: false,
       error: error?.message || "Erro ao salvar imagem externa no Supabase Storage."
+    });
+  }
+});
+
+// Endpoint para limpar imagens inválidas (banners Meli+, ícones gavel/flaticon e genéricos sobrescritos)
+app.post("/api/products/cleanup-corrupted-images", async (req, res) => {
+  try {
+    const tenantId = (req.body?.tenantId || req.body?.tenant_id || req.query?.tenantId || "").toString().trim() || undefined;
+    const summary = await cleanupCorruptedEanImages(supabaseAdmin, tenantId);
+    return res.json(summary);
+  } catch (error: any) {
+    console.error("[API cleanup-corrupted-images] Erro inesperado:", error);
+    return res.status(500).json({
+      success: false,
+      error: error?.message || "Erro ao limpar imagens inválidas do catálogo.",
     });
   }
 });
@@ -8927,7 +8949,12 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
 
           if (siblingProducts && siblingProducts.length > 0) {
             siblingProducts.forEach((sp: any) => {
-              if (sp.barcode && sp.image && !crossStoreImageMap.has(sp.barcode)) {
+              if (
+                sp.barcode &&
+                sp.image &&
+                !isPlaceholderImageUrl(sp.image) &&
+                !crossStoreImageMap.has(sp.barcode)
+              ) {
                 crossStoreImageMap.set(sp.barcode, sp.image);
               }
             });
@@ -9014,10 +9041,11 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
                image: finalImage
             });
          } else {
-            // Novo produto: se não veio foto do ERP, aproveita foto do barcode encontrada em outra farmácia do sistema
-            const finalImage = (item.image && typeof item.image === 'string' && item.image.trim().length > 0)
+            // Novo produto: se não veio foto do ERP e NÃO for medicamento Genérico, aproveita foto do barcode encontrada em outra farmácia
+            const isGenItem = isGenericMedicationProduct(item);
+            const finalImage = (item.image && typeof item.image === 'string' && item.image.trim().length > 0 && !isPlaceholderImageUrl(item.image))
               ? item.image.trim()
-              : (crossStoreImageMap.get(item.barcode) || null);
+              : (!isGenItem ? (crossStoreImageMap.get(item.barcode) || null) : null);
 
             const isNewZeroPrice = Number(item.price) <= 0 || isNaN(Number(item.price));
             newProductsPayload.push({
@@ -12805,6 +12833,13 @@ async function startServer() {
         console.error("[INOVAFARMA CRON INTERVAL ERROR]:", err),
       );
     }, INOVAFARMA_POLL_INTERVAL_MS);
+
+    // Executa limpeza automática de fotos inválidas (banners Meli+, ícones gavel/flaticon e genéricos sobrescritos) no boot
+    setTimeout(() => {
+      cleanupCorruptedEanImages(supabaseAdmin).catch((err) =>
+        console.warn("[EAN IMAGE CLEANUP STARTUP WARNING]:", err?.message || err),
+      );
+    }, 5 * 1000);
 
     // Dispara uma verificação inicial rápida após o boot do servidor (15 segundos)
     setTimeout(() => {

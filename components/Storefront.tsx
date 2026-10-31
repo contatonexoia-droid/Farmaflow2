@@ -686,11 +686,32 @@ const ProductCardComponent = ({
     const [imgError, setImgError] = useState(false);
     const [isAdding, setIsAdding] = useState(false);
 
-    let displayImage = fixImageUrl(product.image, 240);
+    const isCorruptedImg = (u?: string | null) => {
+      if (!u) return true;
+      const l = String(u).toLowerCase();
+      return (
+        l.includes("flaticon") ||
+        l.includes("4668502") ||
+        l.includes("gavel") ||
+        l.includes("hammer") ||
+        l.includes("auction") ||
+        l.includes("meli+") ||
+        l.includes("meliplus") ||
+        l.includes("meli-plus") ||
+        l.includes("loyalty") ||
+        l.includes("banner") ||
+        l.includes("placeholder") ||
+        l.includes("sem-foto") ||
+        l.includes("no-image")
+      );
+    };
+
+    let displayImage = !isCorruptedImg(product.image) ? fixImageUrl(product.image, 240) : null;
     const isGeneric =
       product.drugType?.trim().toLowerCase() === "genérico" ||
-      product.drugType?.trim().toLowerCase() === "generico";
-    if (!displayImage && isGeneric) {
+      product.drugType?.trim().toLowerCase() === "generico" ||
+      /\b(generico|genérico|gen\.)\b/i.test(product.name || "");
+    if (isGeneric) {
       const mfgKey = product.manufacturer
         ? Object.keys(tenant.manufacturerLogos || {}).find(
             (k) =>
@@ -698,9 +719,10 @@ const ProductCardComponent = ({
               product.manufacturer?.trim().toLowerCase(),
           )
         : null;
-      if (mfgKey && tenant.manufacturerLogos?.[mfgKey]) {
+      const isScrapedEanImage = Boolean(product.image && String(product.image).includes("/products/ean/"));
+      if ((!displayImage || isScrapedEanImage) && mfgKey && tenant.manufacturerLogos?.[mfgKey]) {
         displayImage = fixImageUrl(tenant.manufacturerLogos[mfgKey], 240);
-      } else {
+      } else if (!displayImage || isScrapedEanImage) {
         displayImage = GENERIC_PLACEHOLDER;
       }
     }

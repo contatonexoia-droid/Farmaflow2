@@ -24,7 +24,7 @@ import { DynamicFlyerGenerator } from './DynamicFlyerGenerator';
 import { getTenants, getProductsByTenant, saveProductsByTenant } from '../services/storage';
 import { supabase } from '../services/supabase';
 
-const GENERIC_PLACEHOLDER = 'https://cdn-icons-png.flaticon.com/512/4668/4668502.png';
+const GENERIC_PLACEHOLDER = 'https://i.imgur.com/fLz8F3X.png';
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 interface AuditItem {
@@ -47,6 +47,7 @@ interface AdminProductManagerProps {
   products: Product[];
   tenant: PharmacyConfig;
   isLoading?: boolean;
+  isSuperAdmin?: boolean;
   onProductsUpdate: (products: Product[]) => Promise<void> | void;
   onProductsStateUpdate: (products: Product[]) => void;
   onProductDelete: (productId: string) => Promise<void> | void;
@@ -89,18 +90,53 @@ const parseNumberSafe = (val: any): number => {
   return isNaN(num) ? 0 : num;
 };
 
+const isCorruptedOrPlaceholderUrl = (url?: string | null): boolean => {
+    if (!url) return true;
+    const s = String(url).trim().toLowerCase();
+    return (
+        s === '' ||
+        s === 'ignore' ||
+        s === 'pendente_curadoria' ||
+        s === 'null' ||
+        s === 'undefined' ||
+        s === 'none' ||
+        s.includes('placeholder') ||
+        s.includes('sem-foto') ||
+        s.includes('sem_foto') ||
+        s.includes('no-image') ||
+        s.includes('no_image') ||
+        s.includes('flaticon.com') ||
+        s.includes('4668502') ||
+        s.includes('gavel') ||
+        s.includes('hammer') ||
+        s.includes('martelo') ||
+        s.includes('auction') ||
+        s.includes('leilao') ||
+        s.includes('meli+') ||
+        s.includes('meliplus') ||
+        s.includes('meli-plus') ||
+        s.includes('meli_plus') ||
+        s.includes('loyalty') ||
+        s.includes('level-6') ||
+        s.includes('banner') ||
+        s.includes('sprite') ||
+        s.endsWith('.svg') ||
+        s.includes('.svg?')
+    );
+};
+
 const fixImageUrl = (url?: string, width: number = 200): string | null => {
     try {
-        if (!url || url === 'IGNORE' || url === 'PENDENTE_CURADORIA') return null;
+        if (!url || isCorruptedOrPlaceholderUrl(url)) return null;
         if (url.startsWith('data:')) {
-            if (!url.includes(',') || !url.startsWith('data:image/')) {
-                return GENERIC_PLACEHOLDER;
+            if (!url.includes(',') || !url.startsWith('data:image/') || url.length < 250) {
+                return null;
             }
             return url;
         }
         
         // Bypass proxy for known CDNs that work well and might block proxies
-        if (url.includes('cdn-cosmos.bluesoft.com.br')) {
+        if (url.includes('cdn-cosmos.bluesoft.com.br') || url.includes('.supabase.co/storage/')) {
             return url;
         }
 
@@ -108,13 +144,13 @@ const fixImageUrl = (url?: string, width: number = 200): string | null => {
             if (url.startsWith('/') || url.startsWith('.')) {
                 return url;
             }
-            return GENERIC_PLACEHOLDER;
+            return null;
         }
 
         // Otimização de Imagem: Utilizamos o proxy Weserv.nl para converter para WebP e garantir HTTPS
-        return `https://wsrv.nl/?url=${encodeURIComponent(url)}&output=webp&q=80&w=${width}&we&default=${encodeURIComponent(GENERIC_PLACEHOLDER)}`;
+        return `https://wsrv.nl/?url=${encodeURIComponent(url)}&output=webp&q=80&w=${width}&we`;
     } catch (e) {
-        return GENERIC_PLACEHOLDER;
+        return null;
     }
 };
 
@@ -605,6 +641,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
   products,
   tenant,
   isLoading,
+  isSuperAdmin = false,
   onProductsUpdate,
   onProductsStateUpdate,
   onProductDelete,
@@ -612,6 +649,18 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
   onTenantUpdate,
   onNavigateToPriceTags
 }) => {
+  const effectiveIsSuperAdmin = useMemo(() => {
+    if (isSuperAdmin === true) return true;
+    try {
+      const saved = localStorage.getItem('ff_session');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return parsed?.type === 'SUPER_ADMIN';
+      }
+    } catch (_) {}
+    return false;
+  }, [isSuperAdmin]);
+  const [isCleaningCorruptedImages, setIsCleaningCorruptedImages] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
   const [filterDepartment, setFilterDepartment] = useState('Todos');
@@ -909,25 +958,65 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
       return Array.from(opts).sort();
   }, [products, editingProduct?.drugType]);
 
+  const isGenericOrManufacturerProduct = (p: Partial<Product>): boolean => {
+    const dt = String(p.drugType || '').trim().toLowerCase();
+    const cat = String(p.category || '').trim().toLowerCase();
+    const name = String(p.name || '').trim().toLowerCase();
+    const mfg = String(p.manufacturer || '').trim().toLowerCase();
+
+    if (dt === 'genérico' || dt === 'generico' || dt.includes('generico') || dt.includes('genérico')) {
+      return true;
+    }
+    if (cat === 'genéricos' || cat === 'genericos' || cat === 'medicamentos genéricos' || cat.includes('generico') || cat.includes('genérico')) {
+      return true;
+    }
+    if (/\b(generico|genérico|gen\.)\b/i.test(name)) {
+      return true;
+    }
+
+    const mfgKey = mfg
+      ? Object.keys(tenant.manufacturerLogos || {}).find(k => k.trim().toLowerCase() === mfg)
+      : null;
+
+    if (/\s+g(\s+|$)/i.test(name) && !/\b(fralda|absorvente|escova|luva| chupeta|mamadeira|creme dental)\b/i.test(name)) {
+      const hasDosage = /\b\d+\s*(mg|mcg|g|ml|ui|cp|comp|caps)\b/i.test(name);
+      if (hasDosage || mfgKey) return true;
+    }
+
+    if (p.image && mfgKey && tenant.manufacturerLogos?.[mfgKey] && p.image === tenant.manufacturerLogos[mfgKey]) {
+      return true;
+    }
+
+    return false;
+  };
+
   const getProductDisplayImage = (p: Partial<Product>) => {
     try {
       const rawImg = p.image;
-      if (rawImg) {
+      const isGeneric = isGenericOrManufacturerProduct(p);
+      const mfgKey = p.manufacturer
+        ? Object.keys(tenant.manufacturerLogos || {}).find(k => k.trim().toLowerCase() === p.manufacturer?.trim().toLowerCase())
+        : null;
+      const mfgLogoUrl = mfgKey && tenant.manufacturerLogos?.[mfgKey] ? fixImageUrl(tenant.manufacturerLogos[mfgKey]) : null;
+
+      // Se for medicamento genérico e tiver logo de laboratório configurado, prioriza a caixa do laboratório
+      // quando não há foto própria ou quando a foto atual veio de busca automática por EAN
+      if (isGeneric && mfgLogoUrl && (!rawImg || isCorruptedOrPlaceholderUrl(rawImg) || rawImg.includes('/products/ean/'))) {
+        return mfgLogoUrl;
+      }
+
+      if (rawImg && !isCorruptedOrPlaceholderUrl(rawImg)) {
         const fixed = fixImageUrl(rawImg);
         if (fixed) return fixed;
       }
-      const isGeneric = p.drugType?.trim().toLowerCase() === 'genérico' || p.drugType?.trim().toLowerCase() === 'generico';
+
       if (isGeneric) {
-          const mfgKey = p.manufacturer ? Object.keys(tenant.manufacturerLogos || {}).find(k => k.trim().toLowerCase() === p.manufacturer?.trim().toLowerCase()) : null;
-          if (mfgKey && tenant.manufacturerLogos?.[mfgKey]) {
-              const fixedMfg = fixImageUrl(tenant.manufacturerLogos[mfgKey]);
-              if (fixedMfg) return fixedMfg;
-          }
-          return GENERIC_PLACEHOLDER;
+        if (mfgLogoUrl) return mfgLogoUrl;
+        return GENERIC_PLACEHOLDER;
       }
-      return GENERIC_PLACEHOLDER;
+      return null;
     } catch (e) {
-      return GENERIC_PLACEHOLDER;
+      return null;
     }
   };
 
@@ -1291,8 +1380,19 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
   };
 
   const handleSearchEanImageForEdit = async () => {
+    if (!effectiveIsSuperAdmin) {
+      setEanEditFeedback({ type: 'error', message: 'Apenas o Super Admin pode buscar fotos por EAN.' });
+      return;
+    }
     if (!editingProduct?.barcode) {
       setEanEditFeedback({ type: 'error', message: 'Preencha o Código de Barras (EAN) primeiro.' });
+      return;
+    }
+    if (isGenericOrManufacturerProduct(editingProduct)) {
+      setEanEditFeedback({
+        type: 'error',
+        message: 'Medicamentos genéricos utilizam automaticamente a foto padrão do fabricante cadastrado.'
+      });
       return;
     }
 
@@ -1312,6 +1412,9 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
         body: JSON.stringify({
           ean: cleanEan,
           productName: editingProduct.name,
+          drugType: editingProduct.drugType,
+          category: editingProduct.category,
+          manufacturer: editingProduct.manufacturer,
           tenantId: tenant.id,
           productId: editingProduct.id
         })
@@ -1324,7 +1427,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
 
       // 3. FALLBACK DO NAVEGADOR: Se o backend (Vercel/AWS) não encontrou por bloqueio de IP,
       // consulta diretamente via navegador do lojista (IP residencial no Brasil)
-      if (!finalUrl) {
+      if (!finalUrl && data?.source !== 'skipped_generic_or_existing') {
         setEanEditFeedback({ type: 'info', message: 'Buscando foto via conexão direta do navegador (Brasil)...' });
         const clientFound = await searchImageClientSide(cleanEan);
         if (clientFound) {
@@ -1378,23 +1481,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
   };
 
   const isNoPhotoImage = (img: string | undefined | null) => {
-    if (!img) return true;
-    const s = String(img).trim().toLowerCase();
-    return (
-      s === '' ||
-      s === 'ignore' ||
-      s === 'null' ||
-      s === 'undefined' ||
-      s === 'none' ||
-      s.includes('placeholder') ||
-      s.includes('sem-foto') ||
-      s.includes('sem_foto') ||
-      s.includes('no-image') ||
-      s.includes('no_image') ||
-      s.includes('default') ||
-      s.includes('tarja-vermelha') ||
-      s.includes('generico-tarja')
-    );
+    return isCorruptedOrPlaceholderUrl(img);
   };
 
   /**
@@ -1448,14 +1535,57 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
 
 
 
+  const handleCleanupCorruptedImages = async () => {
+    if (!effectiveIsSuperAdmin || isCleaningCorruptedImages) return;
+    setIsCleaningCorruptedImages(true);
+    try {
+      const res = await fetch('/api/products/cleanup-corrupted-images', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tenantId: tenant.id })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        const cleanedIds = new Set<string>(Array.isArray(data.cleanedProductIds) ? data.cleanedProductIds : []);
+        const restoredItems: Product[] = [];
+        products.forEach(p => {
+          if (
+            cleanedIds.has(p.id) ||
+            isCorruptedOrPlaceholderUrl(p.image) ||
+            (isGenericOrManufacturerProduct(p) && p.image && p.image.includes('/products/ean/'))
+          ) {
+            restoredItems.push({ ...p, image: '' });
+          }
+        });
+        if (restoredItems.length > 0) {
+          onProductsStateUpdate(restoredItems);
+        }
+        alert(
+          `Limpeza concluída!\n` +
+          `• Produtos limpos/restaurados no banco: ${data.cleanedProducts || restoredItems.length}\n` +
+          `• Banners Meli+ / ícones removidos do Storage: ${data.deletedStorageFiles || 0}`
+        );
+      } else {
+        alert(data?.error || 'Falha ao executar limpeza de imagens inválidas.');
+      }
+    } catch (err: any) {
+      alert('Erro ao conectar com o servidor para limpar imagens inválidas.');
+    } finally {
+      setIsCleaningCorruptedImages(false);
+    }
+  };
+
   const handleStartEanBatchSync = async () => {
+    if (!effectiveIsSuperAdmin) return;
     stopBatchSyncRef.current = false;
 
-    // Identifica produtos com EAN válido e sem foto no catálogo carregado
+    // Identifica produtos com EAN válido, sem foto válida e que NÃO sejam medicamentos genéricos / com imagem automática de fabricante
     const eligibleProducts = products.filter(p => {
       const cleanEan = String(p.barcode || '').replace(/\D/g, '');
       const hasValidEan = cleanEan.length >= 8 && cleanEan.length <= 14;
-      return hasValidEan && isNoPhotoImage(p.image);
+      if (!hasValidEan) return false;
+      if (isGenericOrManufacturerProduct(p)) return false;
+      return isNoPhotoImage(p.image);
     });
 
     setIsBatchSyncModalOpen(true);
@@ -3740,19 +3870,36 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                         )}
                     </div>
                     <div className="flex items-center gap-2 flex-wrap">
-                        <button 
-                            onClick={handleStartEanBatchSync}
-                            disabled={isBatchSyncingEan}
-                            className="flex items-center gap-2 px-4 py-2.5 bg-indigo-50 border-2 border-indigo-200 text-indigo-700 rounded-xl font-black text-xs uppercase tracking-wide hover:bg-indigo-100 hover:border-indigo-300 transition-all shadow-sm disabled:opacity-50"
-                            title="Buscar fotos por código de barras em lote e salvar definitivamente no Supabase Storage"
-                        >
-                            {isBatchSyncingEan ? (
-                                <Loader2 size={16} className="animate-spin text-indigo-600" />
-                            ) : (
-                                <Barcode size={16} className="text-indigo-600" />
-                            )}
-                            Buscar Fotos por EAN
-                        </button>
+                        {effectiveIsSuperAdmin && (
+                            <>
+                                <button 
+                                    onClick={handleStartEanBatchSync}
+                                    disabled={isBatchSyncingEan}
+                                    className="flex items-center gap-2 px-4 py-2.5 bg-indigo-50 border-2 border-indigo-200 text-indigo-700 rounded-xl font-black text-xs uppercase tracking-wide hover:bg-indigo-100 hover:border-indigo-300 transition-all shadow-sm disabled:opacity-50"
+                                    title="Buscar fotos por código de barras em lote (ignora medicamentos genéricos)"
+                                >
+                                    {isBatchSyncingEan ? (
+                                        <Loader2 size={16} className="animate-spin text-indigo-600" />
+                                    ) : (
+                                        <Barcode size={16} className="text-indigo-600" />
+                                    )}
+                                    Buscar Fotos por EAN
+                                </button>
+                                <button
+                                    onClick={handleCleanupCorruptedImages}
+                                    disabled={isCleaningCorruptedImages}
+                                    className="flex items-center gap-2 px-3.5 py-2.5 bg-amber-50 border-2 border-amber-200 text-amber-800 rounded-xl font-black text-xs uppercase tracking-wide hover:bg-amber-100 hover:border-amber-300 transition-all shadow-sm disabled:opacity-50"
+                                    title="Limpar banners Meli+, ícones de martelo/placeholders e restaurar fotos de genéricos"
+                                >
+                                    {isCleaningCorruptedImages ? (
+                                        <Loader2 size={16} className="animate-spin text-amber-700" />
+                                    ) : (
+                                        <RotateCcw size={16} className="text-amber-700" />
+                                    )}
+                                    Limpar Fotos Inválidas
+                                </button>
+                            </>
+                        )}
                         <button 
                             onClick={handleExportAllProducts}
                             className="flex items-center gap-2 px-4 py-2.5 bg-emerald-50 border-2 border-emerald-200 text-emerald-700 rounded-xl font-black text-xs uppercase tracking-wide hover:bg-emerald-100 hover:border-emerald-300 transition-all shadow-sm"
@@ -4130,16 +4277,18 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                             </div>
                             <div className="space-y-3">
                                 <div className="flex gap-2">
-                                    <button 
-                                        type="button"
-                                        onClick={handleSearchEanImageForEdit} 
-                                        disabled={isSearchingEanForEdit || !editingProduct.barcode} 
-                                        className="flex-1 py-3 bg-indigo-50 text-indigo-700 rounded-xl font-black text-xs uppercase hover:bg-indigo-100 transition-all flex items-center justify-center gap-2 disabled:opacity-40"
-                                        title="Buscar foto oficial pelo código EAN e salvar no Supabase Storage"
-                                    >
-                                        {isSearchingEanForEdit ? <Loader2 className="animate-spin" size={14}/> : <Barcode size={14}/>} 
-                                        Foto via EAN
-                                    </button>
+                                    {effectiveIsSuperAdmin && (
+                                        <button 
+                                            type="button"
+                                            onClick={handleSearchEanImageForEdit} 
+                                            disabled={isSearchingEanForEdit || !editingProduct.barcode} 
+                                            className="flex-1 py-3 bg-indigo-50 text-indigo-700 rounded-xl font-black text-xs uppercase hover:bg-indigo-100 transition-all flex items-center justify-center gap-2 disabled:opacity-40"
+                                            title="Buscar foto oficial pelo código EAN e salvar no Supabase Storage"
+                                        >
+                                            {isSearchingEanForEdit ? <Loader2 className="animate-spin" size={14}/> : <Barcode size={14}/>} 
+                                            Foto via EAN
+                                        </button>
+                                    )}
                                     <button type="button" onClick={handleAiImage} disabled={isGeneratingImage || !editingProduct.name} className="flex-1 py-3 bg-purple-50 text-purple-600 rounded-xl font-black text-xs uppercase hover:bg-purple-100 transition-all flex items-center justify-center gap-2 disabled:opacity-50">{isGeneratingImage ? <Loader2 className="animate-spin" size={14}/> : <Wand2 size={14}/>} IA Imagem</button>
                                     <button type="button" onClick={() => fileInputRef.current?.click()} className="flex-1 py-3 bg-gray-50 text-gray-600 rounded-xl font-black text-xs uppercase hover:bg-gray-100 transition-all flex items-center justify-center gap-2"><Upload size={14}/> Upload</button>
                                 </div>
@@ -4173,16 +4322,18 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                                 <div className="space-y-1 col-span-2">
                                     <div className="flex justify-between items-center">
                                         <InputLabel label="Código de Barras (EAN) *" />
-                                        <button 
-                                            type="button"
-                                            onClick={handleSearchEanImageForEdit}
-                                            disabled={isSearchingEanForEdit || !editingProduct.barcode}
-                                            className="text-[11px] font-black text-indigo-600 hover:text-indigo-800 flex items-center gap-1 uppercase tracking-wider transition-colors disabled:opacity-40"
-                                            title="Buscar foto correspondente a este EAN"
-                                        >
-                                            {isSearchingEanForEdit ? <Loader2 size={12} className="animate-spin" /> : <Barcode size={12} />}
-                                            Buscar Foto pelo EAN
-                                        </button>
+                                        {effectiveIsSuperAdmin && (
+                                            <button 
+                                                type="button"
+                                                onClick={handleSearchEanImageForEdit}
+                                                disabled={isSearchingEanForEdit || !editingProduct.barcode}
+                                                className="text-[11px] font-black text-indigo-600 hover:text-indigo-800 flex items-center gap-1 uppercase tracking-wider transition-colors disabled:opacity-40"
+                                                title="Buscar foto correspondente a este EAN"
+                                            >
+                                                {isSearchingEanForEdit ? <Loader2 size={12} className="animate-spin" /> : <Barcode size={12} />}
+                                                Buscar Foto pelo EAN
+                                            </button>
+                                        )}
                                     </div>
                                     <div className="flex gap-2">
                                         <input 
@@ -4192,16 +4343,18 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                                             value={editingProduct.barcode || ''} 
                                             onChange={e => { const newEan = e.target.value; setEditingProduct({...editingProduct, barcode: newEan}); }} 
                                         />
-                                        <button
-                                            type="button"
-                                            onClick={handleSearchEanImageForEdit}
-                                            disabled={isSearchingEanForEdit || !editingProduct.barcode}
-                                            className="px-3.5 py-2 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 rounded-xl font-black text-xs uppercase flex items-center gap-1.5 transition-all border border-indigo-200 disabled:opacity-40 shrink-0"
-                                            title="Buscar foto e salvar no Supabase Storage"
-                                        >
-                                            {isSearchingEanForEdit ? <Loader2 size={14} className="animate-spin" /> : <Barcode size={14} />}
-                                            <span className="hidden sm:inline">Buscar Foto</span>
-                                        </button>
+                                        {effectiveIsSuperAdmin && (
+                                            <button
+                                                type="button"
+                                                onClick={handleSearchEanImageForEdit}
+                                                disabled={isSearchingEanForEdit || !editingProduct.barcode}
+                                                className="px-3.5 py-2 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 rounded-xl font-black text-xs uppercase flex items-center gap-1.5 transition-all border border-indigo-200 disabled:opacity-40 shrink-0"
+                                                title="Buscar foto e salvar no Supabase Storage"
+                                            >
+                                                {isSearchingEanForEdit ? <Loader2 size={14} className="animate-spin" /> : <Barcode size={14} />}
+                                                <span className="hidden sm:inline">Buscar Foto</span>
+                                            </button>
+                                        )}
                                     </div>
                                 </div>
                                 <div className="space-y-1 col-span-2"><InputLabel label="Código Interno (Ref)" /><input type="text" className="w-full bg-white p-3 rounded-xl font-bold border text-gray-900" value={editingProduct.internalCode || ''} onChange={e => setEditingProduct({...editingProduct, internalCode: e.target.value})} /></div>

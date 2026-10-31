@@ -354,20 +354,42 @@ const SuggestionCard = ({
     ? Math.max(p.originalPrice || 0, p.price)
     : p.price;
 
-  let suggestionImage = fixImageUrl(p.image);
+  const isCorruptedImageUrl = (u?: string | null) => {
+    if (!u) return true;
+    const l = String(u).toLowerCase();
+    return (
+      l.includes("flaticon") ||
+      l.includes("4668502") ||
+      l.includes("gavel") ||
+      l.includes("hammer") ||
+      l.includes("auction") ||
+      l.includes("meli+") ||
+      l.includes("meliplus") ||
+      l.includes("meli-plus") ||
+      l.includes("loyalty") ||
+      l.includes("banner") ||
+      l.includes("placeholder") ||
+      l.includes("sem-foto") ||
+      l.includes("no-image")
+    );
+  };
+
+  let suggestionImage = !isCorruptedImageUrl(p.image) ? fixImageUrl(p.image) : null;
   const isGeneric =
     p.drugType?.trim().toLowerCase() === "genérico" ||
-    p.drugType?.trim().toLowerCase() === "generico";
-  if (!suggestionImage && isGeneric) {
+    p.drugType?.trim().toLowerCase() === "generico" ||
+    /\b(generico|genérico|gen\.)\b/i.test(p.name || "");
+  if (isGeneric) {
     const mfgKey = p.manufacturer
       ? Object.keys(currentTenant?.manufacturerLogos || {}).find(
           (k) =>
             k.trim().toLowerCase() === p.manufacturer?.trim().toLowerCase(),
         )
       : null;
-    if (mfgKey && currentTenant?.manufacturerLogos?.[mfgKey]) {
+    const isScrapedEanImage = Boolean(p.image && String(p.image).includes("/products/ean/"));
+    if ((!suggestionImage || isScrapedEanImage) && mfgKey && currentTenant?.manufacturerLogos?.[mfgKey]) {
       suggestionImage = fixImageUrl(currentTenant.manufacturerLogos[mfgKey]);
-    } else {
+    } else if (!suggestionImage || isScrapedEanImage) {
       suggestionImage = GENERIC_PLACEHOLDER;
     }
   }
@@ -4493,6 +4515,7 @@ const App: React.FC = () => {
                   <AdminProductManager
                     products={products}
                     tenant={currentTenant}
+                    isSuperAdmin={session.type === "SUPER_ADMIN"}
                     isLoading={isSwitchingTenant}
                     onProductsUpdate={handleUpdateProducts}
                     onProductsStateUpdate={handleProductsStateUpdate}
