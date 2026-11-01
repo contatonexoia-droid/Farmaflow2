@@ -122,6 +122,14 @@ export interface ChatKanbanProps {
   teams?: any[];
   availableLabels?: any[];
   onRefresh?: () => void;
+  searchQuery?: string;
+  onSearchQueryChange?: (val: string) => void;
+  selectedInboxId?: string;
+  onSelectedInboxIdChange?: (val: string) => void;
+  selectedTeamId?: string;
+  onSelectedTeamIdChange?: (val: string) => void;
+  selectedTagId?: string;
+  onSelectedTagIdChange?: (val: string) => void;
 }
 
 /**
@@ -269,13 +277,31 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
   inboxes = [],
   teams = [],
   availableLabels = [],
-  onRefresh
+  onRefresh,
+  searchQuery: propSearchQuery,
+  onSearchQueryChange,
+  selectedInboxId: propSelectedInboxId,
+  onSelectedInboxIdChange,
+  selectedTeamId: propSelectedTeamId,
+  onSelectedTeamIdChange,
+  selectedTagId: propSelectedTagId,
+  onSelectedTagIdChange,
 }) => {
-  const [searchQuery, setSearchQuery] = useState('');
+  const [internalSearchQuery, setInternalSearchQuery] = useState('');
   const isOperador = (userRole || '').toLowerCase() === 'operador';
-  const [selectedInboxId, setSelectedInboxId] = useState(() => (inboxes.length === 1 ? inboxes[0].id : 'all'));
-  const [selectedTeamId, setSelectedTeamId] = useState('all');
-  const [selectedTagId, setSelectedTagId] = useState('all');
+  const [internalSelectedInboxId, setInternalSelectedInboxId] = useState(() => (inboxes.length === 1 ? inboxes[0].id : 'all'));
+  const [internalSelectedTeamId, setInternalSelectedTeamId] = useState('all');
+  const [internalSelectedTagId, setInternalSelectedTagId] = useState('all');
+
+  const searchQuery = propSearchQuery !== undefined ? propSearchQuery : internalSearchQuery;
+  const setSearchQuery = onSearchQueryChange || setInternalSearchQuery;
+  const selectedInboxId = propSelectedInboxId !== undefined ? propSelectedInboxId : internalSelectedInboxId;
+  const setSelectedInboxId = onSelectedInboxIdChange || setInternalSelectedInboxId;
+  const selectedTeamId = propSelectedTeamId !== undefined ? propSelectedTeamId : internalSelectedTeamId;
+  const setSelectedTeamId = onSelectedTeamIdChange || setInternalSelectedTeamId;
+  const selectedTagId = propSelectedTagId !== undefined ? propSelectedTagId : internalSelectedTagId;
+  const setSelectedTagId = onSelectedTagIdChange || setInternalSelectedTagId;
+
   const [activeCard, setActiveCard] = useState<any | null>(null);
   const [isUpdating, setIsUpdating] = useState(false);
 

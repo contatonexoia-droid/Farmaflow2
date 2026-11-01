@@ -620,6 +620,96 @@ export class EvolutionApiService {
   }
 
   /**
+   * Envia mídia (imagem, documento, vídeo ou áudio) via Evolution API (/message/sendMedia/{instance})
+   */
+  public async sendMediaMessage(
+    instanceName: string,
+    phoneNumber: string,
+    mediaUrlOrBase64: string,
+    mediaType: "image" | "video" | "document" | "audio" = "image",
+    caption: string = "",
+    fileName?: string
+  ): Promise<{ success: boolean; data?: any; error?: string; status?: number }> {
+    const cleanNumber = String(phoneNumber || "").replace(/\D/g, "");
+    if (!instanceName || !cleanNumber || !mediaUrlOrBase64) {
+      return { success: false, error: "Parâmetros inválidos para sendMediaMessage" };
+    }
+
+    if (mediaType === "audio") {
+      return this.sendWhatsAppAudio(instanceName, cleanNumber, mediaUrlOrBase64);
+    }
+
+    const { url, key: apiKeyToUse } = await this.getInstanceConfig(instanceName);
+    const cleanInstance = instanceName.trim();
+
+    let cleanMedia = mediaUrlOrBase64.trim();
+    let detectedMime =
+      mediaType === "image"
+        ? "image/jpeg"
+        : mediaType === "video"
+          ? "video/mp4"
+          : "application/pdf";
+
+    if (cleanMedia.startsWith("data:")) {
+      const mimeMatch = cleanMedia.match(/^data:([^;]+);base64,(.+)$/i);
+      if (mimeMatch) {
+        detectedMime = mimeMatch[1];
+        cleanMedia = mimeMatch[2].replace(/\s/g, "");
+      } else if (cleanMedia.includes(",")) {
+        cleanMedia = cleanMedia.split(",")[1].replace(/\s/g, "");
+      }
+    }
+
+    const payload = {
+      number: cleanNumber,
+      mediatype: mediaType,
+      mimetype: detectedMime,
+      caption: caption || "",
+      media: cleanMedia,
+      fileName:
+        fileName ||
+        (mediaType === "image"
+          ? "imagem.jpg"
+          : mediaType === "video"
+            ? "video.mp4"
+            : "documento.pdf"),
+      delay: 1200,
+    };
+
+    const endpoints = [
+      `${url}/message/sendMedia/${cleanInstance}`,
+      `${url}/chat/sendMedia/${cleanInstance}`,
+    ];
+
+    for (const endpoint of endpoints) {
+      try {
+        const res = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            apikey: apiKeyToUse,
+          },
+          body: JSON.stringify(payload),
+        });
+        const resText = await res.text();
+        let resJson: any = null;
+        try {
+          resJson = JSON.parse(resText);
+        } catch {
+          resJson = { raw: resText };
+        }
+        if (res.ok) {
+          return { success: true, status: res.status, data: resJson };
+        }
+      } catch (err: any) {
+        console.warn(`[EvolutionAPI] Aviso em sendMediaMessage (${endpoint}):`, err?.message);
+      }
+    }
+
+    return { success: false, error: "Falha ao enviar mídia para Evolution API" };
+  }
+
+  /**
    * Baixa a mídia da mensagem em Base64 através da Evolution API v2 (/chat/getBase64FromMediaMessage)
    * e garante o retorno de uma Data URI completa e válida (data:mime;base64,...)
    */

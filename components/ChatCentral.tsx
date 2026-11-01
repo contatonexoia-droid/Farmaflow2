@@ -30,6 +30,9 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   const [inboxes, setInboxes] = useState<any[]>([]);
   const [allowedInboxIds, setAllowedInboxIds] = useState<string[]>([]);
   const messagesEndRef = useRef<any>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const prevMessagesConvIdRef = useRef<string | null>(null);
+  const prevMessagesCountRef = useRef<number>(0);
 
   const [isConnectModalOpen, setIsConnectModalOpen] = useState(false);
   const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
@@ -37,7 +40,33 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   const [activeView, setActiveView] = useState<'LIST' | 'CHAT' | 'SIDEBAR'>('LIST');
   const [chatDisplayMode, setChatDisplayMode] = useState<'SPLIT' | 'KANBAN'>('KANBAN');
 
+  // Refs to prevent stale closures in setInterval / Realtime callbacks and stop auto-reopening closed chats
+  const selectedChatIdRef = useRef<string | null>(null);
+  const activeViewRef = useRef<'LIST' | 'CHAT' | 'SIDEBAR'>('LIST');
+  const userClosedChatRef = useRef<boolean>(false);
+  const optimisticLockRef = useRef<Record<string, { until: number; patch: any }>>({});
+
+  useEffect(() => {
+    selectedChatIdRef.current = selectedConversation?.id || null;
+  }, [selectedConversation?.id]);
+
+  useEffect(() => {
+    activeViewRef.current = activeView;
+  }, [activeView]);
+
+  const handleBackToList = () => {
+    userClosedChatRef.current = true;
+    selectedChatIdRef.current = null;
+    setSelectedConversation(null);
+    setMessages([]);
+    setActiveView('LIST');
+    setIsMenuOpen(false);
+    setIsLabelPopoverOpen(false);
+  };
+
   const handleOpenFromKanban = (conv: any) => {
+    userClosedChatRef.current = false;
+    selectedChatIdRef.current = conv?.id || null;
     setSelectedConversation(conv);
     setChatDisplayMode('SPLIT');
     setActiveView('CHAT');
@@ -217,7 +246,20 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
 
   const cleanRole = (localRole || userRole || '').toLowerCase().trim();
   const isOperador = ['operador', 'operator', 'atendente', 'balconista'].includes(cleanRole);
-  const userId = localUser?.tenant_user_id || localUser?.id || currentUser?.tenant_user_id || currentUser?.id;
+  const rawUserId = localUser?.tenant_user_id || localUser?.id || currentUser?.tenant_user_id || currentUser?.id;
+  const effectiveUserId = useMemo(() => {
+    if (rawUserId) return String(rawUserId);
+    if (localUser?.email) return String(localUser.email);
+    if (currentUser?.email) return String(currentUser.email);
+    try {
+      const savedSession = JSON.parse(localStorage.getItem('ff_session') || '{}');
+      if (savedSession?.user?.id) return String(savedSession.user.id);
+      if (savedSession?.user?.email) return String(savedSession.user.email);
+      if (savedSession?.tenantId) return `admin_${savedSession.tenantId}`;
+    } catch (_) {}
+    return `admin_${tenantId || 'default'}`;
+  }, [rawUserId, localUser?.email, currentUser?.email, tenantId]);
+  const userId = effectiveUserId;
 
   // Anti-collision state
   const [otherUserViewing, setOtherUserViewing] = useState<string | null>(null);
@@ -302,9 +344,11 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
               reactions: parsedReactions
             };
 
+            const currentOpenId = selectedChatIdRef.current;
             if (
-              selectedConversation &&
-              row.conversation_id === selectedConversation.id
+              !userClosedChatRef.current &&
+              currentOpenId &&
+              row.conversation_id === currentOpenId
             ) {
               setMessages((prev) => {
                 const existingIdx = prev.findIndex((m) => m.id === row.id || (row.remote_id && m.remote_id === row.remote_id));
@@ -338,8 +382,9 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
     // 2. Short-polling fallback seguro para ambientes sem WebSocket ou sincronização garantida
     const intervalId = setInterval(() => {
       fetchConversations();
-      if (selectedConversation?.id) {
-        fetchMessages(selectedConversation.id);
+      const currentOpenId = selectedChatIdRef.current;
+      if (currentOpenId && !userClosedChatRef.current) {
+        fetchMessages(currentOpenId);
       }
     }, 5000);
 
@@ -347,7 +392,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       supabase.removeChannel(channel);
       clearInterval(intervalId);
     };
-  }, [tenantId, selectedConversation?.id]);
+  }, [tenantId]);
 
   useEffect(() => {
     fetchInboxes();
@@ -369,22 +414,27 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       if (selectedInboxId !== 'all' && c.inbox_id !== selectedInboxId) return;
       if (selectedTeamId !== 'all' && c.team_id !== selectedTeamId) return;
 
-      const isClosed = c.status === 'CLOSED' || c.kanban_stage === 'CLOSED';
+      const isClosed = c.status === 'CLOSED' || c.status === 'finalizado' || c.kanban_stage === 'CLOSED' || c.kanban_stage === 'finalizado';
       if (isClosed) {
         finalizadas++;
       } else {
         todas++;
+        const assignedVal = String(c.assigned_user_id || c.assigned_to || '').trim();
         const isMine =
-          (userId && c.assigned_user_id === userId) ||
-          (localUser?.id && c.assigned_user_id === localUser.id) ||
-          (localUser?.email && c.assigned_user_id === localUser.email);
+          Boolean(assignedVal) && (
+            assignedVal === effectiveUserId ||
+            (rawUserId && assignedVal === String(rawUserId)) ||
+            (localUser?.id && assignedVal === String(localUser.id)) ||
+            (localUser?.email && assignedVal === String(localUser.email)) ||
+            assignedVal === 'my-user-id'
+          );
         if (isMine) minhas++;
-        if (!c.assigned_user_id || c.assigned_user_id === '') naoAtribuidas++;
+        if (!assignedVal) naoAtribuidas++;
       }
     });
 
     return { todas, minhas, naoAtribuidas, finalizadas };
-  }, [conversations, selectedInboxId, selectedTeamId, userId, localUser]);
+  }, [conversations, selectedInboxId, selectedTeamId, effectiveUserId, rawUserId, localUser]);
 
   // Contadores dinâmicos de Atendimentos Hoje e Aguardando na Fila (Dashboard rápido)
   const { atendimentosHoje, aguardandoFila } = useMemo(() => {
@@ -489,12 +539,17 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       }
 
       // 6. Filtro por Aba de Status (Todas, Minhas, Não Atribuídas, Finalizadas)
-      const isClosed = conv.status === 'CLOSED' || conv.kanban_stage === 'CLOSED';
+      const isClosed = conv.status === 'CLOSED' || conv.status === 'finalizado' || conv.kanban_stage === 'CLOSED' || conv.kanban_stage === 'finalizado';
+      const assignedVal = String(conv.assigned_user_id || conv.assigned_to || '').trim();
       const isMine =
-        (userId && conv.assigned_user_id === userId) ||
-        (localUser?.id && conv.assigned_user_id === localUser.id) ||
-        (localUser?.email && conv.assigned_user_id === localUser.email);
-      const isUnassigned = !conv.assigned_user_id || conv.assigned_user_id === '';
+        Boolean(assignedVal) && (
+          assignedVal === effectiveUserId ||
+          (rawUserId && assignedVal === String(rawUserId)) ||
+          (localUser?.id && assignedVal === String(localUser.id)) ||
+          (localUser?.email && assignedVal === String(localUser.email)) ||
+          assignedVal === 'my-user-id'
+        );
+      const isUnassigned = !assignedVal;
 
       const normalizedFilter = filter.toLowerCase().trim();
 
@@ -518,22 +573,42 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       // 'todas' exibe todas as conversas ativas (não fechadas)
       return true;
     });
-  }, [conversations, filter, searchQuery, selectedInboxId, selectedTeamId, selectedTagId, userId, localUser, isOperador, allowedInboxIds]);
+  }, [conversations, filter, searchQuery, selectedInboxId, selectedTeamId, selectedTagId, effectiveUserId, rawUserId, localUser, isOperador, allowedInboxIds]);
 
+  // Busca mensagens apenas quando o ID da conversa ativa muda (nunca força setActiveView('CHAT') em background polling)
   useEffect(() => {
-    if (selectedConversation) {
-      fetchMessages(selectedConversation.id);
-      setActiveView('CHAT');
-      
-      // Simulate real-time presence check
+    const convId = selectedConversation?.id;
+    if (convId && !userClosedChatRef.current) {
+      fetchMessages(convId);
       setOtherUserViewing(null);
-      if (selectedConversation.id === '2') {
+      if (convId === '2') {
         setTimeout(() => {
           setOtherUserViewing('Ana Silva');
         }, 3000);
       }
     }
-  }, [selectedConversation]);
+  }, [selectedConversation?.id]);
+
+  // Auto-scroll inteligente: rola para o final apenas ao abrir outra conversa ou quando chegam novas mensagens
+  useEffect(() => {
+    const convId = selectedConversation?.id || null;
+    if (!convId) {
+      prevMessagesConvIdRef.current = null;
+      prevMessagesCountRef.current = 0;
+      return;
+    }
+    const isNewConv = prevMessagesConvIdRef.current !== convId;
+    const hasNewMessages = messages.length > prevMessagesCountRef.current;
+
+    if (isNewConv || hasNewMessages) {
+      setTimeout(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: isNewConv ? 'auto' : 'smooth' });
+      }, 50);
+    }
+
+    prevMessagesConvIdRef.current = convId;
+    prevMessagesCountRef.current = messages.length;
+  }, [messages.length, selectedConversation?.id]);
 
   useEffect(() => {
     if (isOperador && inboxes.length > 0) {
@@ -661,42 +736,78 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
         headers
       });
 
+      const normalizeConvRecord = (raw: any) => {
+        let c = { ...raw };
+        if (typeof c.bot_handoff_reason === 'string' && c.bot_handoff_reason.startsWith('ASSIGNED:')) {
+          const encodedUser = c.bot_handoff_reason.slice('ASSIGNED:'.length);
+          if (!c.assigned_user_id && encodedUser) {
+            c.assigned_user_id = encodedUser;
+          }
+        }
+        const lock = optimisticLockRef.current[c.id];
+        if (lock && Date.now() < lock.until) {
+          c = { ...c, ...lock.patch };
+        } else if (lock) {
+          delete optimisticLockRef.current[c.id];
+        }
+
+        const isClosed = c.status === 'CLOSED' || c.status === 'finalizado' || c.kanban_stage === 'finalizado' || c.kanban_stage === 'CLOSED';
+        const isHuman = !isClosed && (
+          c.is_human_controlled === true ||
+          Boolean(c.assigned_user_id) ||
+          Boolean(c.assigned_to) ||
+          c.status === 'human_takeover' ||
+          c.status === 'HUMAN'
+        );
+        let stage = c.kanban_stage || c.stage;
+        if (isClosed) {
+          stage = 'finalizado';
+        } else if (!stage) {
+          if (c.status === 'PENDING' || c.status === 'WAITING' || c.bot_handoff_reason === 'STORE_REDIRECT') stage = 'aguardando_pagamento';
+          else if (c.status === 'saiu_entrega' || c.status === 'delivery') stage = 'saiu_entrega';
+          else if (isHuman) stage = 'em_atendimento';
+          else if (c.is_bot_active !== false) stage = 'ia_atendendo';
+          else stage = 'novos_triagem';
+        }
+        return {
+          ...c,
+          contact: c.contact || { name: 'Cliente sem nome', phone_number: '' },
+          is_human_controlled: isHuman,
+          is_bot_active: !isClosed && !isHuman && c.is_bot_active !== false,
+          kanban_stage: stage,
+          stage: stage
+        };
+      };
+
+      const syncSelectedConversationSafely = (list: any[]) => {
+        // NUNCA reabre nem auto-seleciona conversa se o usuário clicou em Voltar (<) ou não tem conversa aberta
+        if (userClosedChatRef.current || !selectedChatIdRef.current) {
+          return;
+        }
+        setSelectedConversation((prev: any) => {
+          if (!prev || userClosedChatRef.current || !selectedChatIdRef.current) return null;
+          const fresh = list.find((c: any) => c.id === prev.id);
+          if (!fresh) return prev;
+          return {
+            ...prev,
+            ...fresh,
+            labels: Array.isArray(fresh.labels) && fresh.labels.length > 0 ? fresh.labels : (prev.labels || [])
+          };
+        });
+      };
+
       if (res.ok) {
         const json = await res.json();
         if (json.data && Array.isArray(json.data)) {
-          const list = json.data.map((c: any) => {
-            const isHuman = c.is_human_controlled === true || Boolean(c.assigned_user_id) || Boolean(c.assigned_to) || c.is_bot_active === false || c.status === 'human_takeover' || c.status === 'HUMAN';
-            let stage = c.kanban_stage || c.stage;
-            if (!stage) {
-              if (c.status === 'CLOSED' || c.status === 'finalizado') stage = 'finalizado';
-              else if (c.status === 'PENDING' || c.status === 'WAITING' || c.bot_handoff_reason === 'STORE_REDIRECT') stage = 'aguardando_pagamento';
-              else if (c.status === 'saiu_entrega' || c.status === 'delivery') stage = 'saiu_entrega';
-              else if (isHuman) stage = 'em_atendimento';
-              else if (c.is_bot_active !== false) stage = 'ia_atendendo';
-              else stage = 'novos_triagem';
-            }
-            return {
-              ...c,
-              contact: c.contact || { name: 'Cliente sem nome', phone_number: '' },
-              is_human_controlled: isHuman,
-              is_bot_active: !isHuman && c.is_bot_active !== false,
-              kanban_stage: stage,
-              stage: stage
-            };
-          });
+          const list = json.data.map(normalizeConvRecord);
 
           if (list.length > 0) {
             setConversations(list);
-            setSelectedConversation((prev: any) => {
-              if (!prev) return null;
-              const fresh = list.find((c: any) => c.id === prev.id);
-              return fresh ? { ...prev, ...fresh } : prev;
-            });
+            syncSelectedConversationSafely(list);
             try {
               localStorage.setItem(`chat_conversations_${currentTenantId || tenantId}`, JSON.stringify(list));
             } catch (_) {}
           } else {
-            // Se veio vazio, só atualiza para vazio se as caixas já foram resolvidas, evitando limpar o cache na inicialização
             if (!isOperador || inboxes.length > 0) {
               setConversations([]);
             }
@@ -706,11 +817,10 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       }
 
       if (isOperador) {
-        // Se a chamada de backend falhar temporariamente, preserva o estado e cache local
         const saved = localStorage.getItem(`chat_conversations_${currentTenantId || tenantId}`);
         if (saved) {
           try {
-            setConversations(JSON.parse(saved));
+            setConversations(JSON.parse(saved).map(normalizeConvRecord));
           } catch (_) {}
         }
         return;
@@ -724,52 +834,16 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
 
       const { data, error } = await query;
       if (!error && data && data.length > 0) {
-        let list = data.map((c: any) => {
-          const isHuman = c.is_human_controlled === true || Boolean(c.assigned_user_id) || Boolean(c.assigned_to) || c.is_bot_active === false || c.status === 'human_takeover' || c.status === 'HUMAN';
-          let stage = c.kanban_stage || c.stage;
-          if (!stage) {
-            if (c.status === 'CLOSED' || c.status === 'finalizado') stage = 'finalizado';
-            else if (c.status === 'PENDING' || c.status === 'WAITING' || c.bot_handoff_reason === 'STORE_REDIRECT') stage = 'aguardando_pagamento';
-            else if (c.status === 'saiu_entrega' || c.status === 'delivery') stage = 'saiu_entrega';
-            else if (isHuman) stage = 'em_atendimento';
-            else if (c.is_bot_active !== false) stage = 'ia_atendendo';
-            else stage = 'novos_triagem';
-          }
-          return {
-            ...c,
-            contact: c.contact || { name: 'Cliente sem nome', phone_number: '' },
-            is_human_controlled: isHuman,
-            is_bot_active: !isHuman && c.is_bot_active !== false,
-            kanban_stage: stage,
-            stage: stage
-          };
-        });
+        const list = data.map(normalizeConvRecord);
         setConversations(list);
+        syncSelectedConversationSafely(list);
       } else {
         const saved = localStorage.getItem(`chat_conversations_${currentTenantId || tenantId}`);
         if (saved) {
           try {
-            let list = JSON.parse(saved).map((c: any) => {
-              const isHuman = c.is_human_controlled === true || Boolean(c.assigned_user_id) || Boolean(c.assigned_to) || c.is_bot_active === false || c.status === 'human_takeover' || c.status === 'HUMAN';
-              let stage = c.kanban_stage || c.stage;
-              if (!stage) {
-                if (c.status === 'CLOSED' || c.status === 'finalizado') stage = 'finalizado';
-                else if (c.status === 'PENDING' || c.status === 'WAITING' || c.bot_handoff_reason === 'STORE_REDIRECT') stage = 'aguardando_pagamento';
-                else if (c.status === 'saiu_entrega' || c.status === 'delivery') stage = 'saiu_entrega';
-                else if (isHuman) stage = 'em_atendimento';
-                else if (c.is_bot_active !== false) stage = 'ia_atendendo';
-                else stage = 'novos_triagem';
-              }
-              return {
-                ...c,
-                contact: c.contact || { name: 'Cliente sem nome', phone_number: '' },
-                is_human_controlled: isHuman,
-                is_bot_active: !isHuman && c.is_bot_active !== false,
-                kanban_stage: stage,
-                stage: stage
-              };
-            });
+            const list = JSON.parse(saved).map(normalizeConvRecord);
             setConversations(list);
+            syncSelectedConversationSafely(list);
           } catch (_) {}
         }
       }
@@ -875,7 +949,16 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
             }
             return prev.map(m => m.id === tempMsg.id ? json.data : m);
           });
-          setSelectedConversation((prev: any) => prev ? { ...prev, last_message_content: textToSend, last_message_at: new Date().toISOString() } : prev);
+          setSelectedConversation((prev: any) => prev ? {
+            ...prev,
+            last_message_content: textToSend,
+            last_message_at: new Date().toISOString(),
+            assigned_user_id: prev.assigned_user_id || effectiveUserId,
+            is_human_controlled: true,
+            is_bot_active: false,
+            status: 'human_takeover',
+            kanban_stage: 'em_atendimento'
+          } : prev);
           fetchConversations();
           return;
         }
@@ -899,6 +982,76 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
     } catch (e) {
       console.warn("Error sending message:", e);
     }
+  };
+
+  const handleFileAttachmentUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !selectedConversation) return;
+    e.target.value = '';
+
+    const isImg = file.type.startsWith('image/');
+    const isAud = file.type.startsWith('audio/');
+    const isVid = file.type.startsWith('video/');
+    const mediaType = isImg ? 'image' : isAud ? 'audio' : isVid ? 'video' : 'document';
+    const labelText = messageInput.trim() || (isImg ? '[Imagem]' : isAud ? '[Áudio]' : isVid ? '[Vídeo]' : file.name);
+    if (messageInput.trim()) setMessageInput('');
+
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const dataUrl = String(reader.result || '');
+      if (!dataUrl) return;
+
+      const tempMsg = {
+        id: `temp_media_${Date.now()}`,
+        conversation_id: selectedConversation.id,
+        sender_type: 'USER',
+        content: labelText,
+        type: mediaType,
+        mediaUrl: dataUrl,
+        media_url: dataUrl,
+        is_private: isPrivateNote,
+        created_at: new Date().toISOString()
+      };
+
+      setMessages(prev => [...prev, tempMsg]);
+
+      try {
+        const res = await fetch('/api/v1/chat/send', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-tenant-id': tenantId
+          },
+          body: JSON.stringify({
+            conversation_id: selectedConversation.id,
+            content: labelText,
+            type: mediaType,
+            mediaUrl: dataUrl,
+            is_private: isPrivateNote,
+            sender_type: 'USER',
+            userId: effectiveUserId,
+            role: cleanRole
+          })
+        });
+
+        if (res.ok) {
+          const json = await res.json();
+          if (json.data) {
+            const returnedMsg = { ...json.data, mediaUrl: json.data.mediaUrl || dataUrl, type: mediaType };
+            setMessages(prev => prev.map(m => m.id === tempMsg.id ? returnedMsg : m));
+            setSelectedConversation((prev: any) => prev ? {
+              ...prev,
+              last_message_content: labelText,
+              last_message_at: new Date().toISOString()
+            } : prev);
+            fetchConversations();
+          }
+        }
+      } catch (err) {
+        console.warn('Erro ao enviar anexo:', err);
+      }
+    };
+    reader.readAsDataURL(file);
   };
 
   const fetchCustomerContext = async () => {
@@ -988,18 +1141,64 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
     fetchCustomerContext();
   }, [selectedConversation?.contact?.phone_number]);
 
-  const handleAssumeConversation = () => {
+  const handleAssumeConversation = async () => {
     if (!selectedConversation) return;
-    const updated = { 
-      ...selectedConversation, 
-      assigned_user_id: userId || 'my-user-id', 
+    const convId = selectedConversation.id;
+    const targetUserId = effectiveUserId || 'my-user-id';
+    const currentTenantId = tenantId || localUser?.tenant_id || currentUser?.tenant_id || 'default';
+
+    const patch = {
+      assigned_user_id: targetUserId,
+      assigned_to: targetUserId,
       is_human_controlled: true,
       is_bot_active: false,
       status: 'human_takeover',
-      kanban_stage: 'em_atendimento'
+      kanban_stage: 'em_atendimento',
+      stage: 'em_atendimento'
+    };
+
+    optimisticLockRef.current[convId] = {
+      until: Date.now() + 12000,
+      patch
+    };
+
+    const updated = {
+      ...selectedConversation,
+      ...patch
     };
     setSelectedConversation(updated);
-    setConversations(conversations.map(c => c.id === updated.id ? updated : c));
+    setConversations(prev => prev.map(c => c.id === convId ? { ...c, ...patch } : c));
+
+    try {
+      await fetch(`/api/v1/chat/conversations/${convId}/stage`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-tenant-id': currentTenantId
+        },
+        body: JSON.stringify({
+          storeId: currentTenantId,
+          stage: 'em_atendimento',
+          assignedUserId: targetUserId
+        })
+      });
+    } catch (e) {
+      console.warn('Erro ao persistir assumir conversa na API:', e);
+    }
+
+    try {
+      await supabase
+        .from('chat_conversations')
+        .update({
+          is_human_controlled: true,
+          is_bot_active: false,
+          status: 'human_takeover',
+          kanban_stage: 'em_atendimento',
+          bot_handoff_reason: `ASSIGNED:${targetUserId}`,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', convId);
+    } catch (_) {}
   };
 
   const handleSelectConversation = (conv: any) => {
@@ -1009,7 +1208,10 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
         return;
       }
     }
+    userClosedChatRef.current = false;
+    selectedChatIdRef.current = conv.id;
     setSelectedConversation(conv);
+    setActiveView('CHAT');
   };
 
   const handleTransfer = async (transferData: { userId?: string, inboxId?: string }) => {
@@ -1100,42 +1302,97 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
 
   const handleToggleBot = async () => {
     if (!selectedConversation) return;
+    const convId = selectedConversation.id;
+    const currentTenantId = tenantId || localUser?.tenant_id || currentUser?.tenant_id || 'default';
     const currentStatus = selectedConversation.is_bot_active !== false && !selectedConversation.is_human_controlled && !selectedConversation.assigned_user_id;
     const nextStatus = !currentStatus;
     
-    // Optimistic UI update
-    const updated = { 
-      ...selectedConversation, 
+    const patch = { 
       is_bot_active: nextStatus,
       is_human_controlled: !nextStatus,
-      assigned_user_id: nextStatus ? null : selectedConversation.assigned_user_id,
-      assigned_to: nextStatus ? null : selectedConversation.assigned_to,
+      assigned_user_id: nextStatus ? null : (selectedConversation.assigned_user_id || effectiveUserId),
+      assigned_to: nextStatus ? null : (selectedConversation.assigned_to || effectiveUserId),
       bot_interaction_count: nextStatus ? 0 : selectedConversation.bot_interaction_count,
-      bot_handoff_reason: nextStatus ? null : selectedConversation.bot_handoff_reason,
+      bot_handoff_reason: nextStatus ? null : `ASSIGNED:${selectedConversation.assigned_user_id || effectiveUserId}`,
       bot_handoff_at: nextStatus ? null : selectedConversation.bot_handoff_at,
       status: nextStatus ? 'bot' : 'human_takeover',
-      kanban_stage: nextStatus ? 'novos_triagem' : 'em_atendimento'
+      kanban_stage: nextStatus ? 'ia_atendendo' : 'em_atendimento',
+      stage: nextStatus ? 'ia_atendendo' : 'em_atendimento'
     };
+
+    optimisticLockRef.current[convId] = {
+      until: Date.now() + 12000,
+      patch
+    };
+
+    const updated = { ...selectedConversation, ...patch };
     setSelectedConversation(updated);
-    setConversations(conversations.map(c => c.id === updated.id ? updated : c));
+    setConversations(prev => prev.map(c => c.id === convId ? { ...c, ...patch } : c));
 
     try {
-      await fetch(`/api/v1/chat/conversations/${selectedConversation.id}/toggle-bot`, {
+      await fetch(`/api/v1/chat/conversations/${convId}/toggle-bot`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ storeId: tenantId, isBotActive: nextStatus })
+        body: JSON.stringify({ storeId: currentTenantId, isBotActive: nextStatus })
       });
     } catch (e) {
       console.error("Erro ao alterar estado do bot:", e);
     }
   };
 
-  const handleCloseConversation = () => {
+  const handleCloseConversation = async () => {
     if (!selectedConversation) return;
-    const updated = { ...selectedConversation, status: 'CLOSED', kanban_stage: 'finalizado' };
+    const convId = selectedConversation.id;
+    const currentTenantId = tenantId || localUser?.tenant_id || currentUser?.tenant_id || 'default';
+
+    const patch = {
+      status: 'CLOSED',
+      kanban_stage: 'finalizado',
+      stage: 'finalizado',
+      is_bot_active: false,
+      is_human_controlled: false
+    };
+
+    optimisticLockRef.current[convId] = {
+      until: Date.now() + 15000,
+      patch
+    };
+
+    userClosedChatRef.current = true;
+    selectedChatIdRef.current = null;
     setSelectedConversation(null);
-    setConversations(conversations.map(c => c.id === updated.id ? updated : c));
+    setMessages([]);
+    setConversations(prev => prev.map(c => c.id === convId ? { ...c, ...patch } : c));
     setActiveView('LIST');
+
+    try {
+      await fetch(`/api/v1/chat/conversations/${convId}/stage`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-tenant-id': currentTenantId
+        },
+        body: JSON.stringify({
+          storeId: currentTenantId,
+          stage: 'finalizado'
+        })
+      });
+    } catch (e) {
+      console.warn('Erro ao finalizar conversa na API:', e);
+    }
+
+    try {
+      await supabase
+        .from('chat_conversations')
+        .update({
+          status: 'CLOSED',
+          kanban_stage: 'finalizado',
+          is_bot_active: false,
+          is_human_controlled: false,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', convId);
+    } catch (_) {}
   };
 
   return (
@@ -1193,6 +1450,14 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
             teams={teams}
             availableLabels={availableLabels}
             onRefresh={fetchConversations}
+            searchQuery={searchQuery}
+            onSearchQueryChange={setSearchQuery}
+            selectedInboxId={selectedInboxId}
+            onSelectedInboxIdChange={setSelectedInboxId}
+            selectedTeamId={selectedTeamId}
+            onSelectedTeamIdChange={setSelectedTeamId}
+            selectedTagId={selectedTagId}
+            onSelectedTagIdChange={setSelectedTagId}
           />
         </div>
       ) : (
@@ -1426,8 +1691,10 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
             <div className="min-h-16 py-2 px-3 md:px-4 bg-white border-b border-gray-200 flex items-center justify-between gap-2 shadow-sm z-20 relative">
               <div className="flex items-center gap-2 md:gap-3 min-w-0 flex-1">
                 <button 
-                  onClick={() => setActiveView('LIST')}
-                  className="md:hidden p-1.5 -ml-1 text-gray-500 hover:bg-gray-100 rounded-full shrink-0"
+                  type="button"
+                  onClick={handleBackToList}
+                  title="Voltar para a lista de conversas"
+                  className="p-1.5 -ml-1 text-gray-500 hover:text-gray-800 hover:bg-gray-100 rounded-full shrink-0 transition-colors"
                 >
                   <ChevronLeft className="w-6 h-6" />
                 </button>
@@ -1887,7 +2154,19 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                       </div>
                     )}
 
-                    <button className="p-2 text-gray-400 hover:text-emerald-600 transition-colors">
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.xls,.xlsx,.txt"
+                      className="hidden"
+                      onChange={handleFileAttachmentUpload}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      title="Anexar imagem, áudio ou documento"
+                      className="p-2 text-gray-400 hover:text-emerald-600 transition-colors"
+                    >
                       <Paperclip className="w-5 h-5" />
                     </button>
                     <textarea 

@@ -11697,6 +11697,7 @@ app.post("/api/v1/chat/send", requireChatEnabled, async (req, res) => {
     }
 
     // Persistir mensagem e despachar via Evolution API se não for privada
+    const senderUserId = userId || (req.headers["x-user-id"] as string) || undefined;
     const { message, conversation } = await chatStore.addMessage(
       storeId,
       conversation_id,
@@ -11705,7 +11706,9 @@ app.post("/api/v1/chat/send", requireChatEnabled, async (req, res) => {
       Boolean(is_private),
       media_url,
       media_type,
-      resolvedInstance
+      resolvedInstance,
+      false,
+      senderUserId
     );
 
     // Transmitir via SSE
