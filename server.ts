@@ -8696,6 +8696,11 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
 
     const getValFromProduct = (product: any, keys: string[]) => {
       if (!product || typeof product !== 'object') return undefined;
+      for (const k of keys) {
+        if (product[k] !== undefined && product[k] !== null && String(product[k]).trim() !== '') {
+          return product[k];
+        }
+      }
       const normalize = (str: string) => {
         let s = str;
         try {
@@ -8705,40 +8710,83 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
              .replace(/Ã¡/g, 'a').replace(/Ã©/g, 'e')
              .replace(/Ãµ/g, 'o').replace(/Ãº/g, 'u').replace(/Ã¢/g, 'a')
              .replace(/Ãª/g, 'e').replace(/Ã´/g, 'o');
-        return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9_]/g, "");
+        return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
       };
       const normalizedKeys = keys.map(k => normalize(k));
       
       for (const key of Object.keys(product)) {
-        if (normalizedKeys.includes(normalize(key))) {
-          return product[key];
+        const val = product[key];
+        if (val !== undefined && val !== null && String(val).trim() !== '' && normalizedKeys.includes(normalize(key))) {
+          return val;
         }
       }
       return undefined;
     };
 
+    const parseAgentNumber = (raw: any, fallback = 0): number => {
+      if (raw === null || raw === undefined || raw === '') return fallback;
+      if (typeof raw === 'number') return Number.isFinite(raw) ? raw : fallback;
+      return parseInovafarmaNumber(raw, fallback);
+    };
+
+    const isTruthyErpFlag = (val: any): boolean => {
+      if (val === true || val === 1) return true;
+      if (val === false || val === 0 || val === null || val === undefined) return false;
+      const s = String(val)
+        .trim()
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "");
+      return (
+        s === "1" ||
+        s === "s" ||
+        s === "sim" ||
+        s === "true" ||
+        s === "y" ||
+        s === "yes" ||
+        s === "ativo" ||
+        s === "g" ||
+        s === "generico"
+      );
+    };
+
     const uniquePayloadMap = new Map();
     for (const p of productsBatch) {
-       const rawEan = getValFromProduct(p, [
-         'barcode', 'ean', 'ean13', 'codigo_barra', 'codigo_barras', 'cod_barra', 'cod_barras', 'codigo_de_barras', 'barras', 'codigo_barra_produto', 'cod barras', 'cod. barras', 
-         'cd barras', 'cd. barras', 'cd_barras', 'cd.barras', 'codbarras', 'cdbarras', 'ean_produto'
-       ]);
-       const ean = rawEan !== undefined && rawEan !== null ? String(rawEan).trim() : "";
-       if (!ean) continue;
-
+       // 1. Código Interno (CodigoProduto, CODIGO, ID_PRODUTO, id)
        const rawInternalCode = getValFromProduct(p, [
-         'internal_code', 'internalCode', 'CodigoInterno', 'codigo_interno', 'codigo', 'cod_interno', 'cod_prod', 'codigo_produto', 'cod_produto', 'referencia', 'ref', 'id',
-         'cdigo', 'cdg', 'cd'
+         'CodigoProduto', 'CODIGO', 'ID_PRODUTO', 'id',
+         'internal_code', 'internalCode', 'CodigoInterno', 'codigo_interno', 'cod_interno', 'cod_prod', 'codigo_produto', 'cod_produto', 'idProduto', 'referencia', 'ref',
+         'cdigo', 'cdg', 'cd', 'sku'
        ]);
        const internalCode = rawInternalCode !== undefined && rawInternalCode !== null ? String(rawInternalCode).trim() : "";
+
+       // 2. EAN (CodigoBarras, EAN, COD_BARRAS, BARRAS)
+       const rawEan = getValFromProduct(p, [
+         'CodigoBarras', 'EAN', 'COD_BARRAS', 'BARRAS',
+         'barcode', 'ean', 'ean13', 'codigo_barra', 'codigo_barras', 'cod_barra', 'cod_barras', 'codigo_de_barras', 'barras', 'codigo_barra_produto', 'cod barras', 'cod. barras', 
+         'cd barras', 'cd. barras', 'cd_barras', 'cd.barras', 'codbarras', 'cdbarras', 'ean_produto', 'gtin'
+       ]);
+       const cleanedEan = sanitizeInovafarmaEan(rawEan) || (rawEan !== undefined && rawEan !== null ? String(rawEan).trim() : "");
+       const ean = cleanedEan || internalCode;
+       if (!ean) continue;
        
-       let stock = Number(getValFromProduct(p, ['stock', 'estoque', 'estoque_atual', 'estoque_disponivel', 'saldo', 'saldo_estoque', 'qtd_estoque', 'quantidade', 'qtd', 'quantidade_estoque', 'quant']));
+       // 6. Estoque (EstoqueAtual, SALDO_ESTOQUE, ESTOQUE, QTD_ESTOQUE, QUANTIDADE)
+       let stock = Math.floor(parseAgentNumber(getValFromProduct(p, [
+         'EstoqueAtual', 'SALDO_ESTOQUE', 'ESTOQUE', 'QTD_ESTOQUE', 'QUANTIDADE',
+         'stock', 'estoque', 'estoque_atual', 'estoque_disponivel', 'saldo', 'saldo_estoque', 'qtd_estoque', 'quantidade', 'qtd', 'quantidade_estoque', 'quant'
+       ]), 0));
        if (isNaN(stock) || stock < 0) stock = 0;
        
-       let price = Number(getValFromProduct(p, ['price', 'preco_venda', 'preco', 'preco_por', 'preco_unitario', 'valor', 'valor_venda', 'venda', 'preco_venda_unitario']));
+       // 4. Preço de Venda (PrecoVenda, PRECO_VENDA, PRECO, VALOR)
+       let price = parseAgentNumber(getValFromProduct(p, [
+         'PrecoVenda', 'PRECO_VENDA', 'PRECO', 'VALOR',
+         'price', 'preco_venda', 'preco', 'preco_por', 'preco_unitario', 'valor', 'valor_venda', 'venda', 'preco_venda_unitario', 'MENORPRECOVENDA', 'menor_preco_venda'
+       ]), 0);
        if (isNaN(price) || price < 0) price = 0;
 
-       let originalPrice = Number(getValFromProduct(p, ['original_price', 'originalPrice', 'preco_original', 'preco_de', 'preco_tabela', 'preco_cadastro', 'preco_antigo', 'valor_original']));
+       let originalPrice = parseAgentNumber(getValFromProduct(p, [
+         'original_price', 'originalPrice', 'preco_original', 'preco_de', 'preco_tabela', 'preco_cadastro', 'preco_antigo', 'valor_original'
+       ]), 0);
        if (isNaN(originalPrice) || originalPrice < 0) originalPrice = 0;
 
        // Normalização e extração de colunas de promoção do ERP (com retrocompatibilidade total)
@@ -8763,24 +8811,26 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
          if (!isNaN(eDate.getTime()) && now > eDate) isPromoValid = false;
        }
 
-       let rawPromoPrice = Number(getValFromProduct(p, [
-         'promotional_price', 'promotionalPrice', 'promo_price', 'preco_promocional', 'preco_promo', 'promocional', 'valor_promocional', 'preco_oferta', 'vl_promo', 'preco_por'
-       ]));
+       // 5. Preço Promocional (PrecoPromocao, PRECO_PROMOCAO, PRECO_DESCONTO, PRECO_LIQUido, VL_PROMOCAO)
+       let rawPromoPrice = parseAgentNumber(getValFromProduct(p, [
+         'PrecoPromocao', 'PRECO_PROMOCAO', 'PRECO_DESCONTO', 'PRECO_LIQUido', 'PRECO_LIQUIDO', 'VL_PROMOCAO',
+         'promotional_price', 'promotionalPrice', 'promo_price', 'preco_promocional', 'preco_promo', 'promocional', 'valor_promocional', 'preco_oferta', 'vl_promo', 'preco_por', 'preco_vitrine'
+       ]), 0);
        const promoPrice = (!isNaN(rawPromoPrice) && rawPromoPrice > 0 && isPromoValid) ? rawPromoPrice : null;
 
-       const rawBuyQty = Number(getValFromProduct(p, [
+       const rawBuyQty = parseAgentNumber(getValFromProduct(p, [
          'promo_buy_qty', 'promo_qtd_minima', 'qtd_leve', 'leve_x', 'qtd_minima', 'qtd_min', 'buy_x', 'buyX', 'promoBuyQty'
-       ]));
+       ]), 0);
        const buyQty = (!isNaN(rawBuyQty) && rawBuyQty > 0 && isPromoValid) ? Math.floor(rawBuyQty) : null;
 
-       const rawPayQty = Number(getValFromProduct(p, [
+       const rawPayQty = parseAgentNumber(getValFromProduct(p, [
          'promo_pay_qty', 'promo_qtd_paga', 'qtd_pague', 'pague_y', 'pay_y', 'payY', 'promoPayQty'
-       ]));
+       ]), 0);
        const payQty = (!isNaN(rawPayQty) && rawPayQty > 0 && isPromoValid) ? Math.floor(rawPayQty) : null;
 
-       const rawProgPrice = Number(getValFromProduct(p, [
+       const rawProgPrice = parseAgentNumber(getValFromProduct(p, [
          'promo_progressive_price', 'preco_atacado', 'preco_progressivo', 'valor_atacado', 'vl_atacado', 'promoProgressivePrice'
-       ]));
+       ]), 0);
        const progPrice = (!isNaN(rawProgPrice) && rawProgPrice > 0 && isPromoValid) ? rawProgPrice : null;
 
        const rawPromoType = getValFromProduct(p, [
@@ -8834,41 +8884,136 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
 
        const promotionalPrice = finalPromotionalPrice;
 
+       // 3. Nome/Descrição (NomeProduto, DESCRICAO, NOME, PRODUTO, APRESENTACAO)
        const rawName = getValFromProduct(p, [
+         'NomeProduto', 'DESCRICAO', 'NOME', 'PRODUTO', 'APRESENTACAO',
          'name', 'nome', 'descricao', 'descricao_produto', 'nome_produto', 'produto',
-         'descrio', 'descr'
+         'descrio', 'descr', 'title'
        ]);
        const name = rawName !== undefined && rawName !== null ? String(rawName).trim() : `Produto ${ean}`;
 
+       // 8. Departamento / Grupo / Seção (NomeGrupo, GRUPO, SECAO, DEPARTAMENTO, CATEGORIA, SUBGRUPO)
        const rawCategory = getValFromProduct(p, [
-         'category', 'categoria', 'secao', 'grupo', 'departamento', 'classe', 'subcategoria', 'familia', 'depto'
+         'NomeGrupo', 'GRUPO', 'SECAO', 'DEPARTAMENTO', 'CATEGORIA', 'SUBGRUPO',
+         'category', 'categoria', 'secao', 'grupo', 'departamento', 'subgrupo', 'nome_grupo', 'grupo_produto', 'nome_secao', 'nome_departamento', 'classe', 'subcategoria', 'familia', 'depto'
        ]);
        const rawActivePrinciple = getValFromProduct(p, [
-         'active_principle', 'activePrinciple', 'principio_ativo', 'substancia', 'formula'
+         'active_principle', 'activePrinciple', 'principio_ativo', 'principioAtivo', 'substancia', 'formula'
        ]);
        const rawDescription = getValFromProduct(p, ['description', 'descricao_longa', 'detalhes']);
-       const rawDrugType = getValFromProduct(p, ['drug_type', 'drugType', 'tipo', 'tipo_produto', 'classe_terapeutica']);
-       const rawManufacturer = getValFromProduct(p, ['manufacturer', 'fabricante', 'laboratorio']);
-       const rawPresentation = getValFromProduct(p, ['presentation', 'apresentacao', 'embalagem']);
 
+       // 7. Fabricante / Laboratório (NomeFabricante, FABRICANTE, LABORATORIO, NOME_FABRICANTE, MARCA)
+       const rawManufacturer = getValFromProduct(p, [
+         'NomeFabricante', 'FABRICANTE', 'LABORATORIO', 'NOME_FABRICANTE', 'MARCA',
+         'manufacturer', 'fabricante', 'laboratorio', 'nome_fabricante', 'marca'
+       ]);
+       const rawPresentation = getValFromProduct(p, [
+         'APRESENTACAO', 'presentation', 'apresentacao', 'embalagem', 'unidade_medida', 'unidadeMedida', 'unidade'
+       ]);
+
+       // 9. Classificação / Genérico / Receita (Classificacao, TIPO, GENERICO, LISTA_PBM, PSICOTROPICO, RETENCAO_RECEITA)
+       const rawClassificacao = getValFromProduct(p, [
+         'Classificacao', 'CLASSIFICACAO', 'TIPO', 'drug_type', 'drugType', 'tipo', 'tipo_produto', 'classe_terapeutica'
+       ]);
+       const rawGenerico = getValFromProduct(p, [
+         'GENERICO', 'Generico', 'generico', 'eh_generico', 'is_generic'
+       ]);
+       const rawListaPbm = getValFromProduct(p, [
+         'LISTA_PBM', 'ListaPbm', 'lista_pbm', 'pbm'
+       ]);
+       const rawPsicotropico = getValFromProduct(p, [
+         'PSICOTROPICO', 'Psicotropico', 'psicotropico', 'controlado', 'portaria_344'
+       ]);
+       const rawRetencaoReceita = getValFromProduct(p, [
+         'RETENCAO_RECEITA', 'RetencaoReceita', 'retencao_receita', 'requires_prescription', 'exige_receita', 'receita'
+       ]);
+
+       const normClassStr = String(rawClassificacao || '')
+         .toLowerCase()
+         .normalize("NFD")
+         .replace(/[\u0300-\u036f]/g, "")
+         .trim();
+
+       let resolvedDrugType = rawClassificacao ? String(rawClassificacao).trim() : '';
+       if (isTruthyErpFlag(rawGenerico) || normClassStr.includes('generico') || normClassStr === 'g') {
+         resolvedDrugType = 'Genérico';
+       } else if (normClassStr.includes('similar') || normClassStr === 's') {
+         resolvedDrugType = 'Similar';
+       } else if (normClassStr.includes('referencia') || normClassStr.includes('etico') || normClassStr === 'r') {
+         resolvedDrugType = 'Referência';
+       }
+
+       const requiresPrescription =
+         isTruthyErpFlag(rawPsicotropico) ||
+         isTruthyErpFlag(rawRetencaoReceita) ||
+         normClassStr.includes('psicotropico') ||
+         normClassStr.includes('controlado') ||
+         normClassStr.includes('retencao') ||
+         normClassStr.includes('tarja preta') ||
+         normClassStr.includes('antimicrobiano');
+
+       // Classificação taxonômica oficial + heurística por nome caso categoria/grupo venha vazio ou genérico
        const classified = classifyProductTaxonomy({
          name: name,
          activePrinciple: rawActivePrinciple,
          description: rawDescription,
          rawCategory: rawCategory,
-         drugType: rawDrugType,
+         drugType: resolvedDrugType || rawClassificacao,
          manufacturer: rawManufacturer
        });
+
+       const isGenericRawCat = !rawCategory || [
+         'geral', 'outros', 'outro', 'diversos', 'sem grupo', 'sem secao', 'sem categoria', 'padrao', 'padrão', 'nao cadastrado', 'não cadastrado', 'n/a', 'null', 'undefined'
+       ].includes(String(rawCategory).trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""));
+
+       // Se o ERP enviou um Departamento/Grupo/Seção explícito e a taxonomia caiu no fallback genérico "Outros Medicamentos",
+       // aproveita a heurística do Inovafarma ou o próprio nome do grupo enviado pelo ERP
+       let finalSubcategory = classified.subcategory;
+       let finalDepartment = classified.department;
+       if (finalSubcategory === 'Outros Medicamentos') {
+         const normalizedHelper = normalizeInovafarmaProduct({
+           CODIGOPRODUTO: internalCode || ean,
+           CODIGOBARRAS: ean,
+           DESCRICAO: name,
+           PRINCIPIOATIVO: rawActivePrinciple ? String(rawActivePrinciple) : '',
+           GRUPO: !isGenericRawCat ? String(rawCategory).trim() : '',
+         });
+         if (normalizedHelper && normalizedHelper.category && normalizedHelper.category !== 'Medicamentos') {
+           finalSubcategory = normalizedHelper.category;
+           if (normalizedHelper.category === 'Perfumaria') {
+             finalDepartment = 'Dermocosméticos e Beleza';
+           } else if (normalizedHelper.category === 'Higiene') {
+             finalDepartment = 'Higiene e Cuidados Pessoais';
+           } else if (normalizedHelper.category === 'Suplementos') {
+             finalDepartment = 'Vitaminas e Suplementos';
+           } else if (normalizedHelper.category === 'Primeiros Socorros') {
+             finalDepartment = 'Primeiros Socorros e Aparelhos';
+           } else if (normalizedHelper.category === 'Conveniência') {
+             finalDepartment = 'Conveniência';
+           }
+         } else if (!isGenericRawCat) {
+           finalSubcategory = String(rawCategory).trim();
+         }
+       }
+
+       const pbmClean = rawListaPbm !== undefined && rawListaPbm !== null ? String(rawListaPbm).trim() : '';
+       const hasValidPbm = Boolean(pbmClean && !['0', 'n', 'nao', 'não', 'false'].includes(pbmClean.toLowerCase()));
+       const finalDescription = [
+         rawDescription ? String(rawDescription).trim() : '',
+         hasValidPbm ? `Lista PBM: ${pbmClean}` : '',
+         requiresPrescription ? 'Medicamento sob retenção de receita / controle especial' : ''
+       ].filter(Boolean).join(' | ') || undefined;
 
        const rawImage = getValFromProduct(p, [
          'image', 'imagem', 'foto', 'url_imagem', 'url_foto', 'imagem_url', 'img'
        ]);
        const image = (rawImage !== undefined && rawImage !== null && String(rawImage).trim().length > 0) ? String(rawImage).trim() : null;
 
-       uniquePayloadMap.set(ean, {
+       const dedupKey = internalCode ? `COD:${internalCode}` : `EAN:${ean}`;
+       uniquePayloadMap.set(dedupKey, {
           tenant_id: tenantId,
           barcode: ean,
-          internal_code: internalCode || null,
+          internal_code: internalCode || ean,
           stock,
           price,
           is_featured: (Number(price) <= 0 || isNaN(Number(price))) ? false : undefined,
@@ -8887,12 +9032,14 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
           discount_qty_percentage: dbDiscountPercentage,
           image: image,
           name: name,
-          category: classified.subcategory,
-          department: classified.department,
-          active_principle: rawActivePrinciple || null,
-          manufacturer: rawManufacturer || null,
-          presentation: rawPresentation || null,
-          drug_type: rawDrugType || (classified.department === "Medicamentos" ? "Outros" : "Cosmético")
+          category: finalSubcategory,
+          department: finalDepartment,
+          active_principle: rawActivePrinciple ? String(rawActivePrinciple).trim() : null,
+          manufacturer: rawManufacturer ? String(rawManufacturer).trim() : null,
+          presentation: rawPresentation ? String(rawPresentation).trim() : null,
+          ...(finalDescription ? { description: finalDescription } : {}),
+          requires_prescription: requiresPrescription,
+          drug_type: resolvedDrugType || (finalDepartment === "Medicamentos" ? "Outros" : "Cosmético")
        });
      }
 
@@ -8915,25 +9062,28 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
     for (let i = 0; i < upsertPayload.length; i += CHUNK_SIZE) {
       const chunk = upsertPayload.slice(i, i + CHUNK_SIZE);
       
-      const barcodes = chunk.map(p => p.barcode);
-      const { data: existingProducts } = await supabaseAdmin
-        .from('products')
-        .select('*')
-        .eq('tenant_id', tenantId)
-        .in('barcode', barcodes);
+      const barcodes = chunk.map(p => p.barcode).filter(Boolean);
+      const internalCodes = chunk.map(p => p.internal_code).filter(Boolean);
+
+      const [{ data: existingByBc }, { data: existingByCode }] = await Promise.all([
+        barcodes.length > 0
+          ? supabaseAdmin.from('products').select('*').eq('tenant_id', tenantId).in('barcode', barcodes)
+          : Promise.resolve({ data: [] as any[] }),
+        internalCodes.length > 0
+          ? supabaseAdmin.from('products').select('*').eq('tenant_id', tenantId).in('internal_code', internalCodes)
+          : Promise.resolve({ data: [] as any[] }),
+      ]);
         
       const existingMap = new Map();
-      if (existingProducts && existingProducts.length > 0) {
-         existingProducts.forEach(p => {
-            if (p.barcode) {
-               existingMap.set(p.barcode, p);
-            }
-         });
+      const existingInternalMap = new Map();
+      for (const p of [...(existingByBc || []), ...(existingByCode || [])]) {
+        if (p.barcode) existingMap.set(String(p.barcode).trim(), p);
+        if (p.internal_code) existingInternalMap.set(String(p.internal_code).trim(), p);
       }
 
       // Regra de Ouro: Se produto novo vier sem foto mas tiver barcode, busca se já existe foto para aquele barcode em outra loja no Supabase
       const newBarcodesNeedingImage = chunk
-        .filter(item => !existingMap.has(item.barcode) && (!item.image || String(item.image).trim().length === 0))
+        .filter(item => !existingMap.has(item.barcode) && !existingInternalMap.has(item.internal_code) && (!item.image || String(item.image).trim().length === 0))
         .map(item => item.barcode);
 
       const crossStoreImageMap = new Map<string, string>();
@@ -8968,8 +9118,8 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
       const existingProductsPayload: any[] = [];
 
       chunk.forEach(item => {
-         if (existingMap.has(item.barcode)) {
-            const existing = existingMap.get(item.barcode);
+         const existing = (item.internal_code && existingInternalMap.get(String(item.internal_code).trim())) || existingMap.get(String(item.barcode).trim());
+         if (existing) {
             let finalPrice = item.price;
             let finalOriginalPrice = item.original_price;
             let finalPromotionalPrice = item.promotional_price;
@@ -9010,7 +9160,7 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
 
             // Se a categoria existente for vazia ou genérica ('OUTROS', 'DIVERSOS', 'Geral', etc.), atualiza para a classificação oficial
             const isGenericCategory = !existing.category || 
-              ['outros', 'diversos', 'geral', 'sem categoria', 'nao cadastrado', 'não cadastrado', 'padrao', 'padrão'].includes(String(existing.category).trim().toLowerCase());
+              ['outros', 'outros medicamentos', 'medicamentos', 'diversos', 'geral', 'sem categoria', 'nao cadastrado', 'não cadastrado', 'padrao', 'padrão'].includes(String(existing.category).trim().toLowerCase());
             
             const finalCategory = isGenericCategory ? item.category : existing.category;
             const finalDepartment = (!existing.department || isGenericCategory) ? item.department : existing.department;
@@ -9019,9 +9169,14 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
             const isZeroPrice = Number(finalPrice) <= 0 || isNaN(Number(finalPrice));
             existingProductsPayload.push({
                ...existing, // Mantém todos os campos existentes (nome, categoria, imagem, princípio ativo, etc.)
+               barcode: item.barcode || existing.barcode,
                category: finalCategory,
                department: finalDepartment,
                internal_code: item.internal_code || existing.internal_code,
+               manufacturer: item.manufacturer || existing.manufacturer,
+               presentation: item.presentation || existing.presentation,
+               drug_type: (item.drug_type && item.drug_type !== 'Outros') ? item.drug_type : (existing.drug_type || item.drug_type),
+               requires_prescription: item.requires_prescription || existing.requires_prescription || false,
                stock: item.stock,
                price: finalPrice,
                is_featured: isZeroPrice ? false : existing.is_featured,
@@ -9060,12 +9215,20 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
          const { error } = await supabaseAdmin
            .from('products')
            .upsert(newProductsPayload, { 
-              onConflict: 'tenant_id,barcode', 
+              onConflict: 'tenant_id,internal_code', 
               ignoreDuplicates: false 
            });
          if (error) {
-            console.error("[Integration] New Products Insert Error:", error);
-            throw new Error(`Database insert error: ${error.message}`);
+            const { error: fallbackErr } = await supabaseAdmin
+              .from('products')
+              .upsert(newProductsPayload, { 
+                 onConflict: 'tenant_id,barcode', 
+                 ignoreDuplicates: false 
+              });
+            if (fallbackErr) {
+              console.error("[Integration] New Products Insert Error:", fallbackErr);
+              throw new Error(`Database insert error: ${fallbackErr.message}`);
+            }
          }
       }
 
@@ -9073,12 +9236,20 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
          const { error } = await supabaseAdmin
            .from('products')
            .upsert(existingProductsPayload, { 
-              onConflict: 'tenant_id,barcode', 
+              onConflict: 'tenant_id,internal_code', 
               ignoreDuplicates: false 
            });
          if (error) {
-            console.error("[Integration] Existing Products Update Error:", error);
-            throw new Error(`Database update error: ${error.message}`);
+            const { error: fallbackErr } = await supabaseAdmin
+              .from('products')
+              .upsert(existingProductsPayload, { 
+                 onConflict: 'tenant_id,barcode', 
+                 ignoreDuplicates: false 
+              });
+            if (fallbackErr) {
+              console.error("[Integration] Existing Products Update Error:", fallbackErr);
+              throw new Error(`Database update error: ${fallbackErr.message}`);
+            }
          }
       }
       

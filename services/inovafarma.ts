@@ -283,6 +283,7 @@ export interface NormalizedInovafarmaProduct {
   erpProductId: string; // CODIGOPRODUTO
   additionalEans: string[];
   unitMeasure: string; // UNIDADEMEDIDA (2 ou 3 chars: UN, CX, etc.)
+  presentation?: string; // APRESENTACAO textual quando enviada pelo ERP
   name: string;
   price: number; // Preço final de venda (MENORPRECOVENDA quando disponível)
   originalPrice: number | null; // Preço "De" (PRECOVENDA quando maior que MENORPRECOVENDA)
@@ -292,6 +293,9 @@ export interface NormalizedInovafarmaProduct {
   category: string;
   manufacturer?: string;
   activeIngredient?: string;
+  drugType?: string; // Classificação / Genérico / Similar / Referência
+  requiresPrescription?: boolean; // PSICOTROPICO / RETENCAO_RECEITA
+  pbmList?: string; // LISTA_PBM
   updatedAtErp?: string; // DATAATUALIZACAOPRODUTO
 }
 
@@ -1922,13 +1926,17 @@ export function normalizeInovafarmaProduct(
 
   const rawEan =
     getProductFieldCI(raw as any, [
-      "CODIGOBARRAS",
       "CodigoBarras",
+      "CODIGOBARRAS",
       "codigoBarras",
       "codigo_barras",
+      "COD_BARRAS",
+      "cod_barras",
       "codBarras",
-      "ean",
       "EAN",
+      "ean",
+      "BARRAS",
+      "barras",
       "gtin",
       "barcode",
       "ean13",
@@ -1936,17 +1944,20 @@ export function normalizeInovafarmaProduct(
 
   const rawCodigoProduto =
     getProductFieldCI(raw as any, [
-      "CODIGOPRODUTO",
       "CodigoProduto",
+      "CODIGOPRODUTO",
       "codigoProduto",
       "codigo_produto",
+      "CODIGO",
+      "codigo",
+      "ID_PRODUTO",
+      "id_produto",
+      "idProduto",
+      "id",
       "codProduto",
       "codigoInterno",
       "codigo_interno",
-      "codigo",
-      "idProduto",
       "sku",
-      "id",
     ]) ?? "";
 
   const rawEanAdicional =
@@ -1983,19 +1994,36 @@ export function normalizeInovafarmaProduct(
     return null;
   }
 
+  const rawApresentacao = String(
+    getProductFieldCI(raw as any, [
+      "APRESENTACAO",
+      "Apresentacao",
+      "apresentacao",
+      "presentation",
+      "embalagem",
+    ]) ?? "",
+  ).trim();
+
   const rawName =
     getProductFieldCI(raw as any, [
+      "NomeProduto",
+      "NOMEPRODUTO",
+      "nome_produto",
+      "nomeProduto",
       "DESCRICAO",
       "Descricao",
+      "descricao",
       "NOME",
       "Nome",
       "nome",
-      "descricao",
-      "nomeProduto",
-      "descricaoProduto",
+      "PRODUTO",
+      "Produto",
       "produto",
+      "descricaoProduto",
       "name",
       "title",
+      "APRESENTACAO",
+      "apresentacao",
     ]) ?? "";
 
   const name = String(rawName ?? "").trim();
@@ -2014,13 +2042,16 @@ export function normalizeInovafarmaProduct(
   );
 
   const rawPrecoVenda = getProductFieldCI(raw as any, [
-    "PRECOVENDA",
     "PrecoVenda",
-    "precoVenda",
+    "PRECOVENDA",
+    "PRECO_VENDA",
     "preco_venda",
-    "valorVenda",
+    "precoVenda",
+    "PRECO",
     "preco",
+    "VALOR",
     "valor",
+    "valorVenda",
     "price",
     "salePrice",
   ]);
@@ -2033,10 +2064,21 @@ export function normalizeInovafarmaProduct(
   ]);
 
   const rawPromo = getProductFieldCI(raw as any, [
-    "PRECOPROMOCAO",
     "PrecoPromocao",
-    "precoPromocao",
+    "PRECOPROMOCAO",
+    "PRECO_PROMOCAO",
     "preco_promocao",
+    "precoPromocao",
+    "PRECO_DESCONTO",
+    "preco_desconto",
+    "precoDesconto",
+    "PRECO_LIQUido",
+    "PRECO_LIQUIDO",
+    "preco_liquido",
+    "precoLiquido",
+    "VL_PROMOCAO",
+    "vl_promocao",
+    "vlPromocao",
     "PRECOPROMOCIONAL",
     "PrecoPromocional",
     "precoPromocional",
@@ -2060,16 +2102,25 @@ export function normalizeInovafarmaProduct(
   ]);
 
   const rawStock = getProductFieldCI(raw as any, [
-    "ESTOQUE",
-    "Estoque",
+    "EstoqueAtual",
+    "ESTOQUEATUAL",
+    "estoque_atual",
+    "estoqueAtual",
+    "SALDO_ESTOQUE",
     "SALDOESTOQUE",
     "SaldoEstoque",
-    "estoque",
-    "saldo",
+    "saldo_estoque",
     "saldoEstoque",
+    "ESTOQUE",
+    "Estoque",
+    "estoque",
+    "QTD_ESTOQUE",
+    "qtd_estoque",
     "qtdEstoque",
+    "QUANTIDADE",
+    "Quantidade",
     "quantidade",
-    "estoqueAtual",
+    "saldo",
     "stock",
     "qty",
   ]);
@@ -2088,9 +2139,13 @@ export function normalizeInovafarmaProduct(
   if (menorPrecoVal > 0 && precoVendaVal > menorPrecoVal) {
     finalSellingPrice = menorPrecoVal;
     originalCompareAtPrice = precoVendaVal;
+    promotionalPrice = roundCurrency(menorPrecoVal);
   } else if (promoExplicitVal > 0 && precoVendaVal > promoExplicitVal) {
-    finalSellingPrice = promoExplicitVal;
+    finalSellingPrice = roundCurrency(promoExplicitVal);
     originalCompareAtPrice = precoVendaVal;
+    promotionalPrice = roundCurrency(promoExplicitVal);
+  } else if (promoExplicitVal > 0 && finalSellingPrice === 0) {
+    finalSellingPrice = roundCurrency(promoExplicitVal);
     promotionalPrice = roundCurrency(promoExplicitVal);
   }
 
@@ -2102,16 +2157,19 @@ export function normalizeInovafarmaProduct(
 
   const manufacturer = String(
     getProductFieldCI(raw as any, [
-      "NOMEFABRICANTE",
       "NomeFabricante",
-      "nomeFabricante",
+      "NOMEFABRICANTE",
+      "NOME_FABRICANTE",
       "nome_fabricante",
+      "nomeFabricante",
       "FABRICANTE",
       "Fabricante",
+      "fabricante",
       "LABORATORIO",
       "Laboratorio",
-      "fabricante",
       "laboratorio",
+      "MARCA",
+      "Marca",
       "marca",
     ]) ?? "",
   ).trim();
@@ -2126,14 +2184,131 @@ export function normalizeInovafarmaProduct(
     ]) ?? "",
   ).trim();
 
+  // Classificação / Genérico / Receita (Classificacao, TIPO, GENERICO, LISTA_PBM, PSICOTROPICO, RETENCAO_RECEITA)
+  const rawClassificacao = String(
+    getProductFieldCI(raw as any, [
+      "Classificacao",
+      "CLASSIFICACAO",
+      "classificacao",
+      "TIPO",
+      "Tipo",
+      "tipo",
+      "tipo_produto",
+      "drug_type",
+      "drugType",
+    ]) ?? "",
+  ).trim();
+
+  const rawGenerico = getProductFieldCI(raw as any, [
+    "GENERICO",
+    "Generico",
+    "generico",
+    "eh_generico",
+    "is_generic",
+  ]);
+
+  const rawListaPbm = String(
+    getProductFieldCI(raw as any, [
+      "LISTA_PBM",
+      "ListaPbm",
+      "lista_pbm",
+      "listaPbm",
+      "PBM",
+      "pbm",
+    ]) ?? "",
+  ).trim();
+
+  const rawPsicotropico = getProductFieldCI(raw as any, [
+    "PSICOTROPICO",
+    "Psicotropico",
+    "psicotropico",
+    "CONTROLADO",
+    "controlado",
+    "portaria_344",
+  ]);
+
+  const rawRetencaoReceita = getProductFieldCI(raw as any, [
+    "RETENCAO_RECEITA",
+    "RetencaoReceita",
+    "retencao_receita",
+    "retencaoReceita",
+    "RECEITA",
+    "exige_receita",
+    "requires_prescription",
+  ]);
+
+  const isTruthyErpFlag = (val: unknown): boolean => {
+    if (val === true || val === 1) return true;
+    if (val === false || val === 0 || val === null || val === undefined) return false;
+    const s = String(val)
+      .trim()
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "");
+    return (
+      s === "1" ||
+      s === "s" ||
+      s === "sim" ||
+      s === "true" ||
+      s === "y" ||
+      s === "yes" ||
+      s === "ativo" ||
+      s === "g" ||
+      s === "generico"
+    );
+  };
+
+  const normClass = rawClassificacao
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+
+  let drugType: string | undefined;
+  if (
+    isTruthyErpFlag(rawGenerico) ||
+    normClass.includes("generico") ||
+    normClass === "g"
+  ) {
+    drugType = "Genérico";
+  } else if (normClass.includes("similar") || normClass === "s") {
+    drugType = "Similar";
+  } else if (
+    normClass.includes("referencia") ||
+    normClass.includes("etico") ||
+    normClass === "r"
+  ) {
+    drugType = "Referência";
+  } else if (rawClassificacao) {
+    drugType = rawClassificacao;
+  }
+
+  const requiresPrescription =
+    isTruthyErpFlag(rawPsicotropico) ||
+    isTruthyErpFlag(rawRetencaoReceita) ||
+    normClass.includes("psicotropico") ||
+    normClass.includes("controlado") ||
+    normClass.includes("retencao") ||
+    normClass.includes("tarja preta") ||
+    normClass.includes("antimicrobiano") ||
+    normClass.includes("antibiotico");
+
   // Extrai todas as propriedades possíveis enviadas pelo ERP para indicar grupo, seção, departamento ou categoria
   const erpCategoryCandidateKeys = [
-    "grupo",
-    "secao",
-    "departamento",
-    "categoria",
-    "grupoProduto",
+    "NomeGrupo",
+    "NOMEGRUPO",
     "nomeGrupo",
+    "nome_grupo",
+    "GRUPO",
+    "grupo",
+    "SECAO",
+    "secao",
+    "DEPARTAMENTO",
+    "departamento",
+    "CATEGORIA",
+    "categoria",
+    "SUBGRUPO",
+    "subgrupo",
+    "grupoProduto",
     "family",
     "subgrupo",
     "NOMEGRUPO",
@@ -2544,6 +2719,7 @@ export function normalizeInovafarmaProduct(
     erpProductId: erpProductId || internalCode || primaryBarcode,
     additionalEans,
     unitMeasure,
+    presentation: rawApresentacao || unitMeasure,
     name: finalName,
     price: finalSellingPrice,
     originalPrice: originalCompareAtPrice,
@@ -2553,6 +2729,9 @@ export function normalizeInovafarmaProduct(
     category,
     manufacturer: manufacturer || undefined,
     activeIngredient: activeIngredient || undefined,
+    drugType: drugType || undefined,
+    requiresPrescription: requiresPrescription || undefined,
+    pbmList: rawListaPbm && !["0", "n", "nao", "não", "false"].includes(rawListaPbm.toLowerCase()) ? rawListaPbm : undefined,
     updatedAtErp: updatedAtErp || undefined,
   };
 }
@@ -5662,7 +5841,11 @@ export async function syncInovafarmaProductsToSupabase(
           ...(item.manufacturer && (!existing.manufacturer || existing.manufacturer === "Outros")
             ? { manufacturer: item.manufacturer }
             : {}),
-          presentation: item.unitMeasure || existing.presentation || "UN",
+          ...(item.drugType ? { drug_type: item.drugType } : {}),
+          ...(item.requiresPrescription !== undefined
+            ? { requires_prescription: item.requiresPrescription }
+            : {}),
+          presentation: item.presentation || item.unitMeasure || existing.presentation || "UN",
           updated_at: syncedAt,
         };
 
@@ -5716,16 +5899,19 @@ export async function syncInovafarmaProductsToSupabase(
           item.erpProductId || item.internalCode || item.barcode || "",
         ).trim();
 
+        const descParts: string[] = [];
+        if (item.activeIngredient) descParts.push(`Princípio Ativo: ${item.activeIngredient}`);
+        if (item.pbmList) descParts.push(`Lista PBM: ${item.pbmList}`);
+        if (item.requiresPrescription) descParts.push("Medicamento sob retenção de receita / controle especial");
+
         const newRow: any = {
           id: crypto.randomUUID(),
           tenant_id: tenantId,
           barcode: item.barcode,
           internal_code: finalInternalCode,
           name: item.name,
-          presentation: item.unitMeasure || "UN",
-          description: item.activeIngredient
-            ? `Princípio Ativo: ${item.activeIngredient}`
-            : "",
+          presentation: item.presentation || item.unitMeasure || "UN",
+          description: descParts.join(" | "),
           price: item.price,
           ...(item.originalPrice !== null ? { original_price: item.originalPrice } : {}),
           promotional_price: item.promotionalPrice,
@@ -5734,6 +5920,10 @@ export async function syncInovafarmaProductsToSupabase(
           department: resolvedDepartment,
           subcategory: resolvedSubcategory,
           ...(item.manufacturer ? { manufacturer: item.manufacturer } : {}),
+          ...(item.drugType ? { drug_type: item.drugType } : {}),
+          ...(item.requiresPrescription !== undefined
+            ? { requires_prescription: item.requiresPrescription }
+            : {}),
           is_featured: false,
           is_ai_enriched: false,
           updated_at: syncedAt,
