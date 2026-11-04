@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Product, PharmacyConfig } from '../types';
+import { getStoreSlug } from '../lib/store';
 import {
   Bell,
   X,
@@ -27,6 +28,21 @@ interface PushNotificationModalProps {
 
 const formatPriceBR = (value: number): string => {
   return Number(value || 0).toFixed(2).replace('.', ',');
+};
+
+const parseJsonResponse = async (response: Response) => {
+  const contentType = (response.headers.get('content-type') || '').toLowerCase();
+  if (!contentType.includes('application/json')) {
+    const rawText = await response.text().catch(() => '');
+    throw new Error(
+      response.status === 404
+        ? 'Rota de notificações Push não encontrada no servidor (/api/v1/push).'
+        : `Resposta inesperada do servidor (HTTP ${response.status}). Verifique se o servidor backend está atualizado.${
+            rawText && !rawText.trim().startsWith('<') ? ` Detalhe: ${rawText.slice(0, 120)}` : ''
+          }`
+    );
+  }
+  return response.json();
 };
 
 export const buildDefaultPushText = (product: Product | null, storeName: string) => {
@@ -95,8 +111,8 @@ export const PushNotificationModal: React.FC<PushNotificationModalProps> = ({
     error?: string;
   } | null>(null);
 
-  const storeName = tenant?.name || 'Nossa Farmácia';
-  const tenantSlug = tenant?.slug || tenant?.id || '';
+  const storeName = (tenant?.name || 'Nossa Farmácia').trim();
+  const cleanSlug = useMemo(() => getStoreSlug(tenant), [tenant]);
 
   // Load subscriber count when modal opens
   useEffect(() => {
@@ -104,7 +120,7 @@ export const PushNotificationModal: React.FC<PushNotificationModalProps> = ({
     setSendResult(null);
     setIsLoadingStats(true);
     fetch(`/api/v1/push/stats?tenantId=${encodeURIComponent(tenant.id)}`)
-      .then((r) => r.json())
+      .then((res) => parseJsonResponse(res))
       .then((data) => {
         if (typeof data?.subscriberCount === 'number') {
           setSubscriberCount(data.subscriberCount);
@@ -176,11 +192,12 @@ export const PushNotificationModal: React.FC<PushNotificationModalProps> = ({
   }, [selectedProduct, getProductDisplayImage]);
 
   const targetUrl = useMemo(() => {
+    const baseStorePath = cleanSlug ? `/loja/${cleanSlug}` : '/loja';
     if (selectedProduct?.id) {
-      return `/loja/${tenantSlug}?product=${encodeURIComponent(selectedProduct.id)}`;
+      return `${baseStorePath}?product=${encodeURIComponent(selectedProduct.id)}`;
     }
-    return `/loja/${tenantSlug}`;
-  }, [tenantSlug, selectedProduct]);
+    return baseStorePath;
+  }, [cleanSlug, selectedProduct]);
 
   const handleSendPush = async () => {
     if (!tenant?.id) return;
@@ -192,7 +209,10 @@ export const PushNotificationModal: React.FC<PushNotificationModalProps> = ({
     try {
       const response = await fetch('/api/v1/push/send', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json'
+        },
         body: JSON.stringify({
           tenantId: tenant.id,
           productId: selectedProduct?.id || undefined,
@@ -204,7 +224,7 @@ export const PushNotificationModal: React.FC<PushNotificationModalProps> = ({
         })
       });
 
-      const data = await response.json();
+      const data = await parseJsonResponse(response);
       if (!response.ok || data?.error) {
         setSendResult({
           success: false,
@@ -212,7 +232,7 @@ export const PushNotificationModal: React.FC<PushNotificationModalProps> = ({
           failedCount: 0,
           removedCount: 0,
           totalSubscribers: subscriberCount || 0,
-          error: data?.error || 'Falha ao disparar notificação Web Push.'
+          error: data?.error || `Falha ao disparar notificação Web Push (HTTP ${response.status}).`
         });
       } else {
         setSendResult({

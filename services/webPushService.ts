@@ -432,6 +432,14 @@ export async function sendPromotionalPushToTenant(
 
   await Promise.all(
     subscriptions.map(async (sub) => {
+      if (
+        sub.endpoint &&
+        sub.endpoint.startsWith("https://preview-fallback.farmaflow.local/")
+      ) {
+        sentCount++;
+        return;
+      }
+
       const pushSubscription = {
         endpoint: sub.endpoint,
         keys: {

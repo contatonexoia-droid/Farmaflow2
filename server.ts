@@ -41,6 +41,7 @@ import {
 } from "./services/eanImageService.js";
 import {
   syncInovafarmaProductsToSupabase,
+  normalizeInovafarmaProduct,
   sanitizeInovafarmaEan,
   parseInovafarmaNumber,
   INOVAFARMA_DEFAULT_API_URL,
@@ -8759,37 +8760,48 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
 
     const uniquePayloadMap = new Map();
     for (const p of productsBatch) {
-       // 1. Código Interno (CodigoProduto, CODIGO, ID_PRODUTO, id)
+       // 1. Código Interno (codigo, cod_produto, Id_do_produto, SKU, Id_do_Sku, CodigoProduto, CODIGO, ID_PRODUTO, id)
        const rawInternalCode = getValFromProduct(p, [
+         'codigo', 'cod_produto', 'Id_do_produto', 'id_do_produto', 'SKU', 'sku', 'Id_do_Sku', 'id_do_sku',
          'CodigoProduto', 'CODIGO', 'ID_PRODUTO', 'id',
-         'internal_code', 'internalCode', 'CodigoInterno', 'codigo_interno', 'cod_interno', 'cod_prod', 'codigo_produto', 'cod_produto', 'idProduto', 'referencia', 'ref',
-         'cdigo', 'cdg', 'cd', 'sku'
+         'internal_code', 'internalCode', 'CodigoInterno', 'codigo_interno', 'cod_interno', 'cod_prod', 'codigo_produto', 'idProduto', 'referencia', 'ref',
+         'cdigo', 'cdg', 'cd'
        ]);
        const internalCode = rawInternalCode !== undefined && rawInternalCode !== null ? String(rawInternalCode).trim() : "";
 
-       // 2. EAN (CodigoBarras, EAN, COD_BARRAS, BARRAS)
+       // 2. EAN / Código de Barras (codigo_barras, EAN, ean, gtin, CodigoBarras, COD_BARRAS, BARRAS)
        const rawEan = getValFromProduct(p, [
-         'CodigoBarras', 'EAN', 'COD_BARRAS', 'BARRAS',
-         'barcode', 'ean', 'ean13', 'codigo_barra', 'codigo_barras', 'cod_barra', 'cod_barras', 'codigo_de_barras', 'barras', 'codigo_barra_produto', 'cod barras', 'cod. barras', 
-         'cd barras', 'cd. barras', 'cd_barras', 'cd.barras', 'codbarras', 'cdbarras', 'ean_produto', 'gtin'
+         'codigo_barras', 'EAN', 'ean', 'gtin',
+         'CodigoBarras', 'COD_BARRAS', 'BARRAS',
+         'barcode', 'ean13', 'codigo_barra', 'cod_barra', 'cod_barras', 'codigo_de_barras', 'barras', 'codigo_barra_produto', 'cod barras', 'cod. barras', 
+         'cd barras', 'cd. barras', 'cd_barras', 'cd.barras', 'codbarras', 'cdbarras', 'ean_produto'
        ]);
        const cleanedEan = sanitizeInovafarmaEan(rawEan) || (rawEan !== undefined && rawEan !== null ? String(rawEan).trim() : "");
        const ean = cleanedEan || internalCode;
        if (!ean) continue;
        
-       // 6. Estoque (EstoqueAtual, SALDO_ESTOQUE, ESTOQUE, QTD_ESTOQUE, QUANTIDADE)
+       // 6. Estoque (estoque, Quantidade_do_estoque, EstoqueAtual, SALDO_ESTOQUE, ESTOQUE, QTD_ESTOQUE, QUANTIDADE)
        let stock = Math.floor(parseAgentNumber(getValFromProduct(p, [
+         'estoque', 'Quantidade_do_estoque', 'quantidade_do_estoque',
          'EstoqueAtual', 'SALDO_ESTOQUE', 'ESTOQUE', 'QTD_ESTOQUE', 'QUANTIDADE',
-         'stock', 'estoque', 'estoque_atual', 'estoque_disponivel', 'saldo', 'saldo_estoque', 'qtd_estoque', 'quantidade', 'qtd', 'quantidade_estoque', 'quant'
+         'stock', 'estoque_atual', 'estoque_disponivel', 'saldo', 'saldo_estoque', 'qtd_estoque', 'quantidade', 'qtd', 'quantidade_estoque', 'quant'
        ]), 0));
        if (isNaN(stock) || stock < 0) stock = 0;
        
-       // 4. Preço de Venda (PrecoVenda, PRECO_VENDA, PRECO, VALOR)
-       let price = parseAgentNumber(getValFromProduct(p, [
+       // 4. Preço de Venda (preco, preco_venda, Preco_Bruto; se vier 0, usa Preco_Liquido)
+       let rawPriceBruto = parseAgentNumber(getValFromProduct(p, [
+         'preco', 'preco_venda', 'Preco_Bruto', 'preco_bruto', 'PrecoBruto', 'PRECO_BRUTO',
          'PrecoVenda', 'PRECO_VENDA', 'PRECO', 'VALOR',
-         'price', 'preco_venda', 'preco', 'preco_por', 'preco_unitario', 'valor', 'valor_venda', 'venda', 'preco_venda_unitario', 'MENORPRECOVENDA', 'menor_preco_venda'
+         'price', 'preco_por', 'preco_unitario', 'valor', 'valor_venda', 'venda', 'preco_venda_unitario', 'MENORPRECOVENDA', 'menor_preco_venda'
        ]), 0);
-       if (isNaN(price) || price < 0) price = 0;
+       if (isNaN(rawPriceBruto) || rawPriceBruto < 0) rawPriceBruto = 0;
+
+       let rawPrecoLiquidoFallback = parseAgentNumber(getValFromProduct(p, [
+         'Preco_Liquido', 'preco_liquido', 'PrecoLiquido', 'PRECO_LIQUIDO', 'PRECO_LIQUido'
+       ]), 0);
+       if (isNaN(rawPrecoLiquidoFallback) || rawPrecoLiquidoFallback < 0) rawPrecoLiquidoFallback = 0;
+
+       let price = rawPriceBruto > 0 ? rawPriceBruto : rawPrecoLiquidoFallback;
 
        let originalPrice = parseAgentNumber(getValFromProduct(p, [
          'original_price', 'originalPrice', 'preco_original', 'preco_de', 'preco_tabela', 'preco_cadastro', 'preco_antigo', 'valor_original'
@@ -8818,12 +8830,13 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
          if (!isNaN(eDate.getTime()) && now > eDate) isPromoValid = false;
        }
 
-       // 5. Preço Promocional (PrecoPromocao, PRECO_PROMOCAO, PRECO_DESCONTO, PRECO_LIQUido, VL_PROMOCAO)
+       // 5. Preço Promocional (preco_promocional, Preco_Liquido quando > 0 e < Preco_Bruto / price)
        let rawPromoPrice = parseAgentNumber(getValFromProduct(p, [
+         'preco_promocional', 'Preco_Liquido', 'preco_liquido', 'PrecoLiquido',
          'PrecoPromocao', 'PRECO_PROMOCAO', 'PRECO_DESCONTO', 'PRECO_LIQUido', 'PRECO_LIQUIDO', 'VL_PROMOCAO',
-         'promotional_price', 'promotionalPrice', 'promo_price', 'preco_promocional', 'preco_promo', 'promocional', 'valor_promocional', 'preco_oferta', 'vl_promo', 'preco_por', 'preco_vitrine'
+         'promotional_price', 'promotionalPrice', 'promo_price', 'preco_promo', 'promocional', 'valor_promocional', 'preco_oferta', 'vl_promo', 'preco_por', 'preco_vitrine'
        ]), 0);
-       const promoPrice = (!isNaN(rawPromoPrice) && rawPromoPrice > 0 && isPromoValid) ? rawPromoPrice : null;
+       const promoPrice = (!isNaN(rawPromoPrice) && rawPromoPrice > 0 && rawPromoPrice < price && isPromoValid) ? rawPromoPrice : null;
 
        const rawBuyQty = parseAgentNumber(getValFromProduct(p, [
          'promo_buy_qty', 'promo_qtd_minima', 'qtd_leve', 'leve_x', 'qtd_minima', 'qtd_min', 'buy_x', 'buyX', 'promoBuyQty'
@@ -8891,10 +8904,11 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
 
        const promotionalPrice = finalPromotionalPrice;
 
-       // 3. Nome/Descrição (NomeProduto, DESCRICAO, NOME, PRODUTO, APRESENTACAO)
+       // 3. Nome/Descrição (descricao_produto, nome, Nome_do_Produto, Nome_do_Sku, NomeProduto, DESCRICAO, NOME, PRODUTO, APRESENTACAO)
        const rawName = getValFromProduct(p, [
+         'descricao_produto', 'nome', 'Nome_do_Produto', 'nome_do_produto', 'Nome_do_Sku', 'nome_do_sku',
          'NomeProduto', 'DESCRICAO', 'NOME', 'PRODUTO', 'APRESENTACAO',
-         'name', 'nome', 'descricao', 'descricao_produto', 'nome_produto', 'produto',
+         'name', 'descricao', 'nome_produto', 'produto',
          'descrio', 'descr', 'title'
        ]);
        const name = rawName !== undefined && rawName !== null ? String(rawName).trim() : `Produto ${ean}`;
@@ -8907,12 +8921,15 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
        const rawActivePrinciple = getValFromProduct(p, [
          'active_principle', 'activePrinciple', 'principio_ativo', 'principioAtivo', 'substancia', 'formula'
        ]);
-       const rawDescription = getValFromProduct(p, ['description', 'descricao_longa', 'detalhes']);
+       const rawDescription = getValFromProduct(p, [
+         'Descricao', 'apresentacao', 'description', 'descricao_longa', 'detalhes', 'APRESENTACAO', 'Apresentacao'
+       ]);
 
-       // 7. Fabricante / Laboratório (NomeFabricante, FABRICANTE, LABORATORIO, NOME_FABRICANTE, MARCA)
+       // 7. Fabricante / Laboratório (fabricante, laboratorio, Marca, NomeFabricante, FABRICANTE, LABORATORIO, NOME_FABRICANTE, MARCA)
        const rawManufacturer = getValFromProduct(p, [
+         'fabricante', 'laboratorio', 'Marca', 'marca',
          'NomeFabricante', 'FABRICANTE', 'LABORATORIO', 'NOME_FABRICANTE', 'MARCA',
-         'manufacturer', 'fabricante', 'laboratorio', 'nome_fabricante', 'marca'
+         'manufacturer', 'nome_fabricante'
        ]);
        const rawPresentation = getValFromProduct(p, [
          'APRESENTACAO', 'presentation', 'apresentacao', 'embalagem', 'unidade_medida', 'unidadeMedida', 'unidade'
@@ -8978,13 +8995,16 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
        let finalSubcategory = classified.subcategory;
        let finalDepartment = classified.department;
        if (finalSubcategory === 'Outros Medicamentos') {
-         const normalizedHelper = normalizeInovafarmaProduct({
-           CODIGOPRODUTO: internalCode || ean,
-           CODIGOBARRAS: ean,
-           DESCRICAO: name,
-           PRINCIPIOATIVO: rawActivePrinciple ? String(rawActivePrinciple) : '',
-           GRUPO: !isGenericRawCat ? String(rawCategory).trim() : '',
-         });
+         const normalizedHelper = normalizeInovafarmaProduct(
+           {
+             CODIGOPRODUTO: internalCode || ean,
+             CODIGOBARRAS: ean,
+             DESCRICAO: name,
+             PRINCIPIOATIVO: rawActivePrinciple ? String(rawActivePrinciple) : '',
+             GRUPO: !isGenericRawCat ? String(rawCategory).trim() : '',
+           },
+           tenantId,
+         );
          if (normalizedHelper && normalizedHelper.category && normalizedHelper.category !== 'Medicamentos') {
            finalSubcategory = normalizedHelper.category;
            if (normalizedHelper.category === 'Perfumaria') {
@@ -12748,90 +12768,122 @@ app.post("/api/v1/chat/transfer", handleTransferConversation);
 // NOTIFICAÇÕES WEB PUSH PROMOCIONAIS (PWA PUSH NOTIFICATIONS ISOLADAS POR LOJA)
 // ==============================================================================
 
-app.get("/api/v1/push/vapid-public-key", async (req, res) => {
-  try {
-    const keys = await getOrInitVapidKeys(supabaseAdmin);
-    const tenantId = String(req.query.tenantId || req.query.tenant_id || "").trim();
-    let subscriberCount = 0;
-    if (tenantId) {
-      const subs = await getTenantPushSubscriptions(supabaseAdmin, tenantId);
-      subscriberCount = subs.length;
-    }
-    return res.json({
-      publicKey: keys.publicKey,
-      subscriberCount,
-    });
-  } catch (err: any) {
-    console.error("[WebPush VAPID Key Error]:", err);
-    return res.status(500).json({ error: err.message || "Erro ao obter chave pública VAPID." });
-  }
-});
+const slugifyStoreIdentifier = (raw: any): string => {
+  return String(raw || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s-]/g, "")
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+};
 
-app.get("/api/v1/push/stats", async (req, res) => {
+app.get(
+  ["/api/v1/push/vapid-public-key", "/api/push/vapid-public-key"],
+  async (req, res) => {
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    try {
+      const keys = await getOrInitVapidKeys(supabaseAdmin);
+      const tenantId = String(req.query.tenantId || req.query.tenant_id || "").trim();
+      let subscriberCount = 0;
+      if (tenantId) {
+        const subs = await getTenantPushSubscriptions(supabaseAdmin, tenantId);
+        subscriberCount = subs.length;
+      }
+      return res.status(200).json({
+        publicKey: keys.publicKey,
+        subscriberCount,
+      });
+    } catch (err: any) {
+      console.error("[WebPush VAPID Key Error]:", err);
+      return res
+        .status(500)
+        .json({ error: err.message || "Erro ao obter chave pública VAPID." });
+    }
+  }
+);
+
+app.get(["/api/v1/push/stats", "/api/push/stats"], async (req, res) => {
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
   try {
     const tenantId = String(req.query.tenantId || req.query.tenant_id || "").trim();
     if (!tenantId) {
       return res.status(400).json({ error: "tenantId é obrigatório." });
     }
     const subs = await getTenantPushSubscriptions(supabaseAdmin, tenantId);
-    return res.json({
+    return res.status(200).json({
       success: true,
       tenantId,
       subscriberCount: subs.length,
     });
   } catch (err: any) {
     console.error("[WebPush Stats Error]:", err);
-    return res.status(500).json({ error: err.message || "Erro ao consultar inscritos Web Push." });
+    return res
+      .status(500)
+      .json({ error: err.message || "Erro ao consultar inscritos Web Push." });
   }
 });
 
-app.post("/api/v1/push/subscribe", async (req, res) => {
-  try {
-    const body = req.body || {};
-    const tenantId = String(body.tenantId || body.tenant_id || "").trim();
-    const subscription = body.subscription || body;
-    const endpoint = String(subscription?.endpoint || body.endpoint || "").trim();
-    const p256dh = String(
-      subscription?.keys?.p256dh || body.p256dh || ""
-    ).trim();
-    const auth = String(
-      subscription?.keys?.auth || body.auth || ""
-    ).trim();
-    const userAgent = String(
-      body.userAgent || body.user_agent || req.headers["user-agent"] || ""
-    ).trim();
+app.post(
+  ["/api/v1/push/subscribe", "/api/push/subscribe"],
+  async (req, res) => {
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    try {
+      const body = req.body || {};
+      const tenantId = String(body.tenantId || body.tenant_id || "").trim();
+      const subscription = body.subscription || body;
+      const endpoint = String(subscription?.endpoint || body.endpoint || "").trim();
+      const p256dh = String(
+        subscription?.keys?.p256dh || body.p256dh || ""
+      ).trim();
+      const auth = String(
+        subscription?.keys?.auth || body.auth || ""
+      ).trim();
+      const userAgent = String(
+        body.userAgent || body.user_agent || req.headers["user-agent"] || ""
+      ).trim();
 
-    if (!tenantId) {
-      return res.status(400).json({ error: "tenant_id é obrigatório para inscrição Push." });
-    }
-    if (!endpoint || !p256dh || !auth) {
-      return res.status(400).json({
-        error: "Dados de inscrição Push incompletos (endpoint, p256dh e auth são obrigatórios).",
+      if (!tenantId) {
+        return res
+          .status(400)
+          .json({ error: "tenant_id é obrigatório para inscrição Push." });
+      }
+      if (!endpoint || !p256dh || !auth) {
+        return res.status(400).json({
+          error:
+            "Dados de inscrição Push incompletos (endpoint, p256dh e auth são obrigatórios).",
+        });
+      }
+
+      const saved = await savePushSubscription(supabaseAdmin, {
+        tenantId,
+        endpoint,
+        p256dh,
+        auth,
+        userAgent,
       });
+
+      const allSubs = await getTenantPushSubscriptions(supabaseAdmin, tenantId);
+
+      return res.status(200).json({
+        success: true,
+        subscription: saved,
+        subscriberCount: allSubs.length,
+      });
+    } catch (err: any) {
+      console.error("[WebPush Subscribe Error]:", err);
+      return res
+        .status(500)
+        .json({ error: err.message || "Erro ao registrar inscrição Web Push." });
     }
-
-    const saved = await savePushSubscription(supabaseAdmin, {
-      tenantId,
-      endpoint,
-      p256dh,
-      auth,
-      userAgent,
-    });
-
-    const allSubs = await getTenantPushSubscriptions(supabaseAdmin, tenantId);
-
-    return res.json({
-      success: true,
-      subscription: saved,
-      subscriberCount: allSubs.length,
-    });
-  } catch (err: any) {
-    console.error("[WebPush Subscribe Error]:", err);
-    return res.status(500).json({ error: err.message || "Erro ao registrar inscrição Web Push." });
   }
-});
+);
 
-app.post("/api/v1/push/send", async (req, res) => {
+app.post(["/api/v1/push/send", "/api/push/send"], async (req, res) => {
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
   try {
     const {
       tenantId,
@@ -12861,7 +12913,9 @@ app.post("/api/v1/push/send", async (req, res) => {
       return res.status(400).json({ error: "tenantId é obrigatório." });
     }
     if (!resolvedTitle || !resolvedBody) {
-      return res.status(400).json({ error: "Título e mensagem da notificação são obrigatórios." });
+      return res
+        .status(400)
+        .json({ error: "Título e mensagem da notificação são obrigatórios." });
     }
 
     // Busca informações da loja caso iconUrl ou targetUrl não tenham sido informados
@@ -12882,18 +12936,22 @@ app.post("/api/v1/push/send", async (req, res) => {
           }
         }
         if (!resolvedTargetUrl) {
-          const slugOrId = tenantRow.slug || tenantRow.id;
+          const cleanSlug =
+            slugifyStoreIdentifier(tenantRow.slug) ||
+            slugifyStoreIdentifier(tenantRow.id) ||
+            slugifyStoreIdentifier(tenantRow.name);
           resolvedTargetUrl = resolvedProductId
-            ? `/loja/${slugOrId}?product=${encodeURIComponent(resolvedProductId)}`
-            : `/loja/${slugOrId}`;
+            ? `/loja/${cleanSlug}?product=${encodeURIComponent(resolvedProductId)}`
+            : `/loja/${cleanSlug}`;
         }
       }
     } catch (_) {}
 
     if (!resolvedTargetUrl) {
+      const cleanFallbackSlug = slugifyStoreIdentifier(resolvedTenantId);
       resolvedTargetUrl = resolvedProductId
-        ? `/loja/${resolvedTenantId}?product=${encodeURIComponent(resolvedProductId)}`
-        : `/loja/${resolvedTenantId}`;
+        ? `/loja/${cleanFallbackSlug}?product=${encodeURIComponent(resolvedProductId)}`
+        : `/loja/${cleanFallbackSlug}`;
     }
 
     const result = await sendPromotionalPushToTenant(supabaseAdmin, {
@@ -12906,7 +12964,7 @@ app.post("/api/v1/push/send", async (req, res) => {
       iconUrl: resolvedIconUrl || "/icon-192.svg",
     });
 
-    return res.json({
+    return res.status(200).json({
       success: true,
       sentCount: result.sentCount,
       failedCount: result.failedCount,
@@ -12916,7 +12974,9 @@ app.post("/api/v1/push/send", async (req, res) => {
     });
   } catch (err: any) {
     console.error("[WebPush Send Error]:", err);
-    return res.status(500).json({ error: err.message || "Erro ao disparar notificações Web Push." });
+    return res
+      .status(500)
+      .json({ error: err.message || "Erro ao disparar notificações Web Push." });
   }
 });
 
@@ -13140,6 +13200,12 @@ async function startServer() {
     });
 
     app.use(async (req, res, next) => {
+      if (req.path.startsWith("/api/")) {
+        res.setHeader("Content-Type", "application/json; charset=utf-8");
+        return res.status(404).json({
+          error: `Rota de API não encontrada: ${req.method} ${req.path}`,
+        });
+      }
       if (!viteMiddleware) {
         await viteReady;
       }

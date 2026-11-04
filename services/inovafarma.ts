@@ -278,23 +278,31 @@ export interface InovafarmaRawProduct {
 }
 
 export interface NormalizedInovafarmaProduct {
+  tenant_id?: string;
   barcode: string;
   internalCode: string; // CODIGOPRODUTO obrigatório para POST /Venda
+  internal_code: string;
   erpProductId: string; // CODIGOPRODUTO
   additionalEans: string[];
   unitMeasure: string; // UNIDADEMEDIDA (2 ou 3 chars: UN, CX, etc.)
   presentation?: string; // APRESENTACAO textual quando enviada pelo ERP
+  description?: string; // Descricao / apresentacao
   name: string;
-  price: number; // Preço final de venda (MENORPRECOVENDA quando disponível)
+  price: number; // Preço final de venda (MENORPRECOVENDA / Preco_Bruto ou Preco_Liquido quando Bruto=0)
   originalPrice: number | null; // Preço "De" (PRECOVENDA quando maior que MENORPRECOVENDA)
+  original_price: number | null;
   promotionalPrice: number | null;
+  promotional_price: number | null;
   costPrice: number | null;
   stock: number;
   category: string;
   manufacturer?: string;
   activeIngredient?: string;
+  active_principle?: string;
   drugType?: string; // Classificação / Genérico / Similar / Referência
+  drug_type?: string;
   requiresPrescription?: boolean; // PSICOTROPICO / RETENCAO_RECEITA
+  requires_prescription?: boolean;
   pbmList?: string; // LISTA_PBM
   updatedAtErp?: string; // DATAATUALIZACAOPRODUTO
 }
@@ -1920,36 +1928,44 @@ function getProductFieldCI(raw: Record<string, any>, candidateNames: string[]): 
  * - Copia `UNIDADEMEDIDA` (2 ou 3 caracteres: `UN`, `CX`, etc.)
  */
 export function normalizeInovafarmaProduct(
-  raw: InovafarmaRawProduct,
+  raw: InovafarmaRawProduct | Record<string, any>,
+  tenantId?: string,
 ): NormalizedInovafarmaProduct | null {
   if (!raw || typeof raw !== "object") return null;
 
   const rawEan =
     getProductFieldCI(raw as any, [
+      "codigo_barras",
+      "EAN",
+      "ean",
+      "gtin",
       "CodigoBarras",
       "CODIGOBARRAS",
       "codigoBarras",
-      "codigo_barras",
       "COD_BARRAS",
       "cod_barras",
       "codBarras",
-      "EAN",
-      "ean",
       "BARRAS",
       "barras",
-      "gtin",
       "barcode",
       "ean13",
     ]) ?? "";
 
   const rawCodigoProduto =
     getProductFieldCI(raw as any, [
+      "codigo",
+      "cod_produto",
+      "Id_do_produto",
+      "id_do_produto",
+      "SKU",
+      "sku",
+      "Id_do_Sku",
+      "id_do_sku",
       "CodigoProduto",
       "CODIGOPRODUTO",
       "codigoProduto",
       "codigo_produto",
       "CODIGO",
-      "codigo",
       "ID_PRODUTO",
       "id_produto",
       "idProduto",
@@ -1957,7 +1973,8 @@ export function normalizeInovafarmaProduct(
       "codProduto",
       "codigoInterno",
       "codigo_interno",
-      "sku",
+      "internal_code",
+      "internalCode",
     ]) ?? "";
 
   const rawEanAdicional =
@@ -2004,18 +2021,34 @@ export function normalizeInovafarmaProduct(
     ]) ?? "",
   ).trim();
 
+  const rawDescricaoField = String(
+    getProductFieldCI(raw as any, [
+      "Descricao",
+      "apresentacao",
+      "description",
+      "descricao_longa",
+      "detalhes",
+      "APRESENTACAO",
+      "Apresentacao",
+    ]) ?? "",
+  ).trim();
+
   const rawName =
     getProductFieldCI(raw as any, [
+      "descricao_produto",
+      "nome",
+      "Nome_do_Produto",
+      "nome_do_produto",
+      "Nome_do_Sku",
+      "nome_do_sku",
       "NomeProduto",
       "NOMEPRODUTO",
-      "nome_produto",
       "nomeProduto",
       "DESCRICAO",
       "Descricao",
       "descricao",
       "NOME",
       "Nome",
-      "nome",
       "PRODUTO",
       "Produto",
       "produto",
@@ -2041,19 +2074,31 @@ export function normalizeInovafarmaProduct(
     ]) ?? "UN",
   );
 
-  const rawPrecoVenda = getProductFieldCI(raw as any, [
+  const rawPrecoBruto = getProductFieldCI(raw as any, [
+    "preco",
+    "preco_venda",
+    "Preco_Bruto",
+    "preco_bruto",
+    "PrecoBruto",
+    "PRECO_BRUTO",
     "PrecoVenda",
     "PRECOVENDA",
     "PRECO_VENDA",
-    "preco_venda",
     "precoVenda",
     "PRECO",
-    "preco",
     "VALOR",
     "valor",
     "valorVenda",
     "price",
     "salePrice",
+  ]);
+
+  const rawPrecoLiquido = getProductFieldCI(raw as any, [
+    "Preco_Liquido",
+    "preco_liquido",
+    "PrecoLiquido",
+    "PRECO_LIQUIDO",
+    "PRECO_LIQUido",
   ]);
 
   const rawMenorPrecoVenda = getProductFieldCI(raw as any, [
@@ -2064,6 +2109,10 @@ export function normalizeInovafarmaProduct(
   ]);
 
   const rawPromo = getProductFieldCI(raw as any, [
+    "preco_promocional",
+    "Preco_Liquido",
+    "preco_liquido",
+    "PrecoLiquido",
     "PrecoPromocao",
     "PRECOPROMOCAO",
     "PRECO_PROMOCAO",
@@ -2074,21 +2123,19 @@ export function normalizeInovafarmaProduct(
     "precoDesconto",
     "PRECO_LIQUido",
     "PRECO_LIQUIDO",
-    "preco_liquido",
-    "precoLiquido",
     "VL_PROMOCAO",
     "vl_promocao",
     "vlPromocao",
     "PRECOPROMOCIONAL",
     "PrecoPromocional",
     "precoPromocional",
-    "preco_promocional",
     "PRECOVITRINE",
     "PrecoVitrine",
     "precoVitrine",
     "valorPromocao",
     "precoOferta",
     "promotionalPrice",
+    "promotional_price",
   ]);
 
   const rawCost = getProductFieldCI(raw as any, [
@@ -2102,6 +2149,9 @@ export function normalizeInovafarmaProduct(
   ]);
 
   const rawStock = getProductFieldCI(raw as any, [
+    "estoque",
+    "Quantidade_do_estoque",
+    "quantidade_do_estoque",
     "EstoqueAtual",
     "ESTOQUEATUAL",
     "estoque_atual",
@@ -2113,7 +2163,6 @@ export function normalizeInovafarmaProduct(
     "saldoEstoque",
     "ESTOQUE",
     "Estoque",
-    "estoque",
     "QTD_ESTOQUE",
     "qtd_estoque",
     "qtdEstoque",
@@ -2125,13 +2174,19 @@ export function normalizeInovafarmaProduct(
     "qty",
   ]);
 
-  const precoVendaVal = Math.max(0, roundCurrency(parseInovafarmaNumber(rawPrecoVenda, 0)));
+  const precoBrutoVal = Math.max(0, roundCurrency(parseInovafarmaNumber(rawPrecoBruto, 0)));
+  const precoLiquidoVal = Math.max(0, roundCurrency(parseInovafarmaNumber(rawPrecoLiquido, 0)));
   const menorPrecoVal = Math.max(0, roundCurrency(parseInovafarmaNumber(rawMenorPrecoVenda, 0)));
   const promoExplicitVal = parseInovafarmaNumber(rawPromo, -1);
   const costPriceVal = parseInovafarmaNumber(rawCost, -1);
   const costPrice = costPriceVal >= 0 ? roundCurrency(costPriceVal) : null;
 
-  // Regra Inovafarma v1: Utilize MENORPRECOVENDA como preço final de venda e PRECOVENDA como preço "De" quando maior
+  // Se Preco_Bruto / preco vier 0, usa Preco_Liquido (ou MENORPRECOVENDA)
+  const precoVendaVal = precoBrutoVal > 0 ? precoBrutoVal : (precoLiquidoVal > 0 ? precoLiquidoVal : menorPrecoVal);
+
+  // Regra Inovafarma v1 / Catalogo:
+  // - Quando MENORPRECOVENDA é informado (API Portal PS), usa MENORPRECOVENDA como preço final e PRECOVENDA como originalPrice
+  // - Quando Preco_Liquido / preco_promocional > 0 e < Preco_Bruto, define promotionalPrice
   let finalSellingPrice = menorPrecoVal > 0 ? menorPrecoVal : precoVendaVal;
   let originalCompareAtPrice: number | null = null;
   let promotionalPrice: number | null = null;
@@ -2144,6 +2199,10 @@ export function normalizeInovafarmaProduct(
     finalSellingPrice = roundCurrency(promoExplicitVal);
     originalCompareAtPrice = precoVendaVal;
     promotionalPrice = roundCurrency(promoExplicitVal);
+  } else if (precoLiquidoVal > 0 && precoBrutoVal > precoLiquidoVal) {
+    finalSellingPrice = roundCurrency(precoLiquidoVal);
+    originalCompareAtPrice = precoBrutoVal;
+    promotionalPrice = roundCurrency(precoLiquidoVal);
   } else if (promoExplicitVal > 0 && finalSellingPrice === 0) {
     finalSellingPrice = roundCurrency(promoExplicitVal);
     promotionalPrice = roundCurrency(promoExplicitVal);
@@ -2157,6 +2216,10 @@ export function normalizeInovafarmaProduct(
 
   const manufacturer = String(
     getProductFieldCI(raw as any, [
+      "fabricante",
+      "laboratorio",
+      "Marca",
+      "marca",
       "NomeFabricante",
       "NOMEFABRICANTE",
       "NOME_FABRICANTE",
@@ -2164,13 +2227,10 @@ export function normalizeInovafarmaProduct(
       "nomeFabricante",
       "FABRICANTE",
       "Fabricante",
-      "fabricante",
       "LABORATORIO",
       "Laboratorio",
-      "laboratorio",
       "MARCA",
-      "Marca",
-      "marca",
+      "manufacturer",
     ]) ?? "",
   ).trim();
 
@@ -2181,6 +2241,8 @@ export function normalizeInovafarmaProduct(
       "principioAtivo",
       "principio_ativo",
       "substancia",
+      "active_principle",
+      "activePrinciple",
     ]) ?? "",
   ).trim();
 
@@ -2713,24 +2775,35 @@ export function normalizeInovafarmaProduct(
     ]) ?? "",
   ).trim();
 
+  const finalInternalCode = internalCode || primaryBarcode;
+  const finalBarcode = primaryBarcode || internalCode;
+
   return {
-    barcode: primaryBarcode || internalCode,
-    internalCode: internalCode || primaryBarcode,
-    erpProductId: erpProductId || internalCode || primaryBarcode,
+    ...(tenantId ? { tenant_id: tenantId } : {}),
+    barcode: finalBarcode,
+    internalCode: finalInternalCode,
+    internal_code: finalInternalCode,
+    erpProductId: erpProductId || finalInternalCode,
     additionalEans,
     unitMeasure,
     presentation: rawApresentacao || unitMeasure,
+    description: rawDescricaoField || rawApresentacao || undefined,
     name: finalName,
     price: finalSellingPrice,
     originalPrice: originalCompareAtPrice,
+    original_price: originalCompareAtPrice,
     promotionalPrice,
+    promotional_price: promotionalPrice,
     costPrice,
     stock,
     category,
     manufacturer: manufacturer || undefined,
     activeIngredient: activeIngredient || undefined,
+    active_principle: activeIngredient || undefined,
     drugType: drugType || undefined,
+    drug_type: drugType || undefined,
     requiresPrescription: requiresPrescription || undefined,
+    requires_prescription: requiresPrescription || undefined,
     pbmList: rawListaPbm && !["0", "n", "nao", "não", "false"].includes(rawListaPbm.toLowerCase()) ? rawListaPbm : undefined,
     updatedAtErp: updatedAtErp || undefined,
   };
