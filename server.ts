@@ -8758,8 +8758,16 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
       );
     };
 
-    const uniquePayloadMap = new Map();
-    for (const p of productsBatch) {
+    const syncRequestStartTime = Date.now();
+    const uniquePayloadMap = new Map<string, any>();
+    const internalCodeToKeyMap = new Map<string, string>();
+    const barcodeToKeyMap = new Map<string, string>();
+
+    for (let batchIdx = 0; batchIdx < productsBatch.length; batchIdx++) {
+       if (batchIdx > 0 && batchIdx % 250 === 0) {
+         await new Promise((resolve) => setImmediate(resolve));
+       }
+       const p = productsBatch[batchIdx];
        // 1. Código Interno (codigo, cod_produto, Id_do_produto, SKU, Id_do_Sku, CodigoProduto, CODIGO, ID_PRODUTO, id)
        const rawInternalCode = getValFromProduct(p, [
          'codigo', 'cod_produto', 'Id_do_produto', 'id_do_produto', 'SKU', 'sku', 'Id_do_Sku', 'id_do_sku',
@@ -9012,9 +9020,9 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
            } else if (normalizedHelper.category === 'Higiene') {
              finalDepartment = 'Higiene e Cuidados Pessoais';
            } else if (normalizedHelper.category === 'Suplementos') {
-             finalDepartment = 'Vitaminas e Suplementos';
+             finalDepartment = 'Saúde e Bem-Estar';
            } else if (normalizedHelper.category === 'Primeiros Socorros') {
-             finalDepartment = 'Primeiros Socorros e Aparelhos';
+             finalDepartment = 'Saúde, Ortopedia e Primeiros Socorros';
            } else if (normalizedHelper.category === 'Conveniência') {
              finalDepartment = 'Conveniência';
            }
@@ -9036,11 +9044,25 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
        ]);
        const image = (rawImage !== undefined && rawImage !== null && String(rawImage).trim().length > 0) ? String(rawImage).trim() : null;
 
-       const dedupKey = internalCode ? `COD:${internalCode}` : `EAN:${ean}`;
+       const resolvedInternalCode = internalCode || ean;
+       const resolvedBarcode = ean;
+
+       // Desduplicação estrita por internal_code E barcode para evitar erro ON CONFLICT DO UPDATE no PostgreSQL
+       const existingKeyByCode = resolvedInternalCode ? internalCodeToKeyMap.get(resolvedInternalCode) : undefined;
+       const existingKeyByBarcode = resolvedBarcode ? barcodeToKeyMap.get(resolvedBarcode) : undefined;
+
+       if (existingKeyByCode && existingKeyByBarcode && existingKeyByCode !== existingKeyByBarcode) {
+         uniquePayloadMap.delete(existingKeyByBarcode);
+       }
+
+       const dedupKey = existingKeyByCode || existingKeyByBarcode || (internalCode ? `COD:${internalCode}` : `EAN:${ean}`);
+       if (resolvedInternalCode) internalCodeToKeyMap.set(resolvedInternalCode, dedupKey);
+       if (resolvedBarcode) barcodeToKeyMap.set(resolvedBarcode, dedupKey);
+
        uniquePayloadMap.set(dedupKey, {
           tenant_id: tenantId,
-          barcode: ean,
-          internal_code: internalCode || ean,
+          barcode: resolvedBarcode,
+          internal_code: resolvedInternalCode,
           stock,
           price,
           is_featured: (Number(price) <= 0 || isNaN(Number(price))) ? false : undefined,
@@ -9083,14 +9105,20 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
       return res.status(200).json({ success: true, processed: 0, message: "Nenhum produto válido encontrado no lote." });
     }
 
-    const CHUNK_SIZE = 100;
-    let processed = 0;
-    
-    for (let i = 0; i < upsertPayload.length; i += CHUNK_SIZE) {
-      const chunk = upsertPayload.slice(i, i + CHUNK_SIZE);
-      
-      const barcodes = chunk.map(p => p.barcode).filter(Boolean);
-      const internalCodes = chunk.map(p => p.internal_code).filter(Boolean);
+    // Garante que nenhum lote enviado ao Supabase tenha chaves duplicadas para a constraint usada no ON CONFLICT
+    const deduplicateByConflictField = (rows: any[], field: 'internal_code' | 'barcode') => {
+      const map = new Map<string, any>();
+      for (const row of rows) {
+        const keyVal = row[field] ? String(row[field]).trim() : '';
+        if (!keyVal) continue;
+        map.set(keyVal, row);
+      }
+      return Array.from(map.values());
+    };
+
+    const processProductChunk = async (chunk: any[]) => {
+      const barcodes = Array.from(new Set(chunk.map(p => p.barcode).filter(Boolean)));
+      const internalCodes = Array.from(new Set(chunk.map(p => p.internal_code).filter(Boolean)));
 
       const [{ data: existingByBc }, { data: existingByCode }] = await Promise.all([
         barcodes.length > 0
@@ -9162,7 +9190,6 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
             let finalPromoStartDate = item.promo_start_date;
             let finalPromoEndDate = item.promo_end_date;
             
-            // Se o ignore_erp_prices estiver ativo, preserva os preços e regras promocionais salvos no painel
             if (ignoreErpPrices) {
                finalPrice = existing.price;
                finalOriginalPrice = existing.original_price;
@@ -9180,22 +9207,19 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
                finalPromoEndDate = existing.promo_end_date;
             }
             
-            // Regra de Ouro: NUNCA sobrescreva uma imagem já existente no banco se o ERP enviar vazio ou nulo!
             const finalImage = (item.image && typeof item.image === 'string' && item.image.trim().length > 0)
               ? item.image.trim()
               : existing.image;
 
-            // Se a categoria existente for vazia ou genérica ('OUTROS', 'DIVERSOS', 'Geral', etc.), atualiza para a classificação oficial
             const isGenericCategory = !existing.category || 
               ['outros', 'outros medicamentos', 'medicamentos', 'diversos', 'geral', 'sem categoria', 'nao cadastrado', 'não cadastrado', 'padrao', 'padrão'].includes(String(existing.category).trim().toLowerCase());
             
             const finalCategory = isGenericCategory ? item.category : existing.category;
             const finalDepartment = (!existing.department || isGenericCategory) ? item.department : existing.department;
 
-            // Regra de Ouro: atualizações de produtos existentes alteram apenas campos específicos, mas completamos a linha com os dados já existentes para evitar que o upsert do PostgREST limpe as colunas não informadas (sobrescrevendo com NULL)
             const isZeroPrice = Number(finalPrice) <= 0 || isNaN(Number(finalPrice));
             existingProductsPayload.push({
-               ...existing, // Mantém todos os campos existentes (nome, categoria, imagem, princípio ativo, etc.)
+               ...existing,
                barcode: item.barcode || existing.barcode,
                category: finalCategory,
                department: finalDepartment,
@@ -9223,7 +9247,6 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
                image: finalImage
             });
          } else {
-            // Novo produto: se não veio foto do ERP e NÃO for medicamento Genérico, aproveita foto do barcode encontrada em outra farmácia
             const isGenItem = isGenericMedicationProduct(item);
             const finalImage = (item.image && typeof item.image === 'string' && item.image.trim().length > 0 && !isPlaceholderImageUrl(item.image))
               ? item.image.trim()
@@ -9239,16 +9262,18 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
       });
 
       if (newProductsPayload.length > 0) {
+         const dedupedNewByCode = deduplicateByConflictField(newProductsPayload, 'internal_code');
          const { error } = await supabaseAdmin
            .from('products')
-           .upsert(newProductsPayload, { 
+           .upsert(dedupedNewByCode, { 
               onConflict: 'tenant_id,internal_code', 
               ignoreDuplicates: false 
            });
          if (error) {
+            const dedupedNewByBarcode = deduplicateByConflictField(newProductsPayload, 'barcode');
             const { error: fallbackErr } = await supabaseAdmin
               .from('products')
-              .upsert(newProductsPayload, { 
+              .upsert(dedupedNewByBarcode, { 
                  onConflict: 'tenant_id,barcode', 
                  ignoreDuplicates: false 
               });
@@ -9260,16 +9285,18 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
       }
 
       if (existingProductsPayload.length > 0) {
+         const dedupedExistingByCode = deduplicateByConflictField(existingProductsPayload, 'internal_code');
          const { error } = await supabaseAdmin
            .from('products')
-           .upsert(existingProductsPayload, { 
+           .upsert(dedupedExistingByCode, { 
               onConflict: 'tenant_id,internal_code', 
               ignoreDuplicates: false 
            });
          if (error) {
+            const dedupedExistingByBarcode = deduplicateByConflictField(existingProductsPayload, 'barcode');
             const { error: fallbackErr } = await supabaseAdmin
               .from('products')
-              .upsert(existingProductsPayload, { 
+              .upsert(dedupedExistingByBarcode, { 
                  onConflict: 'tenant_id,barcode', 
                  ignoreDuplicates: false 
               });
@@ -9279,22 +9306,97 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
             }
          }
       }
-      
-      processed += chunk.length;
+
+      // Libera o event loop entre lotes para não bloquear /api/v1/integration/heartbeat
+      await new Promise((resolve) => setImmediate(resolve));
+    };
+
+    const CHUNK_SIZE = 200;
+    const IMMEDIATE_PRODUCT_LIMIT = 500;
+    const MAX_SYNC_MS_BEFORE_BACKGROUND = 8000;
+
+    const allChunks: any[][] = [];
+    for (let i = 0; i < upsertPayload.length; i += CHUNK_SIZE) {
+      allChunks.push(upsertPayload.slice(i, i + CHUNK_SIZE));
+    }
+
+    let immediateProcessed = 0;
+    let nextChunkIndex = 0;
+
+    // Processa os primeiros lotes sincronamente (até 500 produtos ou 8 segundos) para responder em < 20s ao Agente Desktop
+    while (nextChunkIndex < allChunks.length) {
+      const currentChunk = allChunks[nextChunkIndex];
+      await processProductChunk(currentChunk);
+      immediateProcessed += currentChunk.length;
+      nextChunkIndex++;
+
+      const elapsedMs = Date.now() - syncRequestStartTime;
+      if (
+        nextChunkIndex < allChunks.length &&
+        (immediateProcessed >= IMMEDIATE_PRODUCT_LIMIT || elapsedMs >= MAX_SYNC_MS_BEFORE_BACKGROUND)
+      ) {
+        break;
+      }
+    }
+
+    const remainingChunks = allChunks.slice(nextChunkIndex);
+    const totalToProcess = upsertPayload.length;
+
+    if (remainingChunks.length > 0) {
+      const remainingCount = totalToProcess - immediateProcessed;
+      console.log(
+        `[Integration] Lote grande detectado (${totalToProcess} produtos). ${immediateProcessed} processados imediatamente em ${Date.now() - syncRequestStartTime}ms; ${remainingCount} continuarão em background para evitar timeout de 20s do agente.`
+      );
+
+      setImmediate(async () => {
+        let bgProcessed = immediateProcessed;
+        try {
+          for (const bgChunk of remainingChunks) {
+            await processProductChunk(bgChunk);
+            bgProcessed += bgChunk.length;
+          }
+          await logIntegration(tenantId, "/api/v1/integration", {
+            message: `Sincronização em background concluída com sucesso (${bgProcessed}/${totalToProcess} produtos)`,
+            productsBatchSize: productsBatch.length,
+            processedCount: bgProcessed,
+            isSuccess: true,
+            backgroundCompleted: true,
+          }, "SUCCESS");
+          console.log(`[Integration] Background sync finalizado com sucesso para tenant ${tenantId}: ${bgProcessed} produtos.`);
+        } catch (bgErr: any) {
+          console.error(`[Integration] Erro no processamento em background para tenant ${tenantId}:`, bgErr?.message || bgErr);
+          try {
+            await logIntegration(tenantId, "/api/v1/integration", {
+              message: `Erro parcial no processamento em background após ${bgProcessed} produtos`,
+              productsBatchSize: productsBatch.length,
+              processedCount: bgProcessed,
+              isSuccess: false,
+              error: bgErr?.message || String(bgErr),
+            }, "FAILED", bgErr?.message || String(bgErr));
+          } catch (_) {}
+        }
+      });
+
+      return res.status(200).json({
+        success: true,
+        processed: totalToProcess,
+        immediateProcessed,
+        backgroundQueued: remainingCount,
+      });
     }
 
     try {
       await logIntegration(tenantId, "/api/v1/integration", { 
         message: `Sincronização do agente via API concluída com sucesso`, 
         productsBatchSize: productsBatch.length, 
-        processedCount: processed,
+        processedCount: immediateProcessed,
         isSuccess: true 
       }, "SUCCESS");
     } catch (logErr) {
       console.error("Erro ao salvar log de sucesso de integração:", logErr);
     }
 
-    res.status(200).json({ success: true, processed });
+    res.status(200).json({ success: true, processed: immediateProcessed });
 
   } catch (error: any) {
     console.error("[Integration] Error:", error.message);
