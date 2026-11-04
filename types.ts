@@ -283,6 +283,9 @@ export interface PharmacyConfig {
   last_customer_sync?: string;
   lastCustomerSync?: string;
   erpType?: string;
+  erp_type?: string;
+  integration_type?: string;
+  integrationType?: string;
   erpApiLogin?: string;
   erp_api_login?: string;
   erpApiPassword?: string;

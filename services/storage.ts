@@ -323,7 +323,32 @@ export const mapDbTenantToApp = (t: any): PharmacyConfig => {
       t.cnpj ||
       fallbackRegulatory.cnpj ||
       "",
-    erpType: t.erp_type || t.erptype || "",
+    erpType:
+      t.erp_type ||
+      t.erptype ||
+      t.erpType ||
+      t.integration_type ||
+      t.integrationtype ||
+      smartBannersObj?._erpCredentials?.erp_type ||
+      smartBannersObj?._erpCredentials?.erpType ||
+      "",
+    erp_type:
+      t.erp_type ||
+      t.erptype ||
+      t.erpType ||
+      t.integration_type ||
+      t.integrationtype ||
+      smartBannersObj?._erpCredentials?.erp_type ||
+      smartBannersObj?._erpCredentials?.erpType ||
+      "",
+    integration_type:
+      t.integration_type ||
+      t.integrationtype ||
+      t.erp_type ||
+      t.erptype ||
+      t.erpType ||
+      smartBannersObj?._erpCredentials?.erp_type ||
+      "",
     erp_login:
       t.erp_login ||
       t.erp_api_login ||
@@ -637,7 +662,7 @@ export const saveTenant = async (
       backup_config: tenant.backupConfig || { frequency: "OFF" },
       integration_token: tenant.integrationToken || "",
       erp_url: tenant.erpUrl || "",
-      erp_type: tenant.erpType || "",
+      erp_type: (tenant.erpType ?? tenant.erp_type ?? tenant.integration_type ?? "").trim(),
       enable_smart_banners: tenant.enableSmartBanners || false,
       smart_banners: tenant.smartBanners || {},
       coupon_banner_color: tenant.couponBannerColor || "",
@@ -750,6 +775,7 @@ export const saveTenant = async (
       _regulatoryData: regData,
       _erpCredentials: {
         ...(payload.smart_banners?._erpCredentials || {}),
+        erp_type: (tenant.erpType ?? tenant.erp_type ?? tenant.integration_type ?? "").trim(),
         erp_base_url: rawErpBaseUrl,
         erp_route_id: rawErpRouteId,
         erp_cnpj: rawErpCnpj,

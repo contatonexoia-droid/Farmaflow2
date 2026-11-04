@@ -748,10 +748,30 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
           fullAddress: editData.fullAddress || '',
           corporateEmail: editData.corporateEmail || '',
           ...(() => {
-            const parsedErp = parseInovafarmaUrlAndRoute(
-              editData.erpBaseUrl ?? editData.erp_base_url ?? editData.erpUrl ?? '',
-              editData.erpRouteId ?? editData.erp_route_id ?? existingTenant?.erpRouteId ?? '',
-            );
+            const selectedErpType = (
+              editData.erpType ??
+              editData.erp_type ??
+              editData.integration_type ??
+              ''
+            ).trim();
+            const isSavingInovafarma =
+              selectedErpType.toLowerCase() === 'inovafarma' ||
+              selectedErpType.toLowerCase().includes('inovafarma');
+            const rawUrl = (
+              editData.erpBaseUrl ??
+              editData.erp_base_url ??
+              editData.erpUrl ??
+              ''
+            ).trim();
+            const rawRoute = (
+              editData.erpRouteId ??
+              editData.erp_route_id ??
+              existingTenant?.erpRouteId ??
+              ''
+            ).trim();
+            const parsedErp = isSavingInovafarma
+              ? parseInovafarmaUrlAndRoute(rawUrl, rawRoute)
+              : { origin: rawUrl, routeId: rawRoute };
             const integrationCnpj = (
               editData.erpCnpj ??
               editData.erp_cnpj ??
@@ -760,6 +780,9 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
               ''
             ).trim();
             return {
+              erpType: selectedErpType,
+              erp_type: selectedErpType,
+              integration_type: selectedErpType,
               erpUrl: parsedErp.origin,
               erpBaseUrl: parsedErp.origin,
               erp_base_url: parsedErp.origin,
@@ -771,7 +794,6 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
           })(),
           erpApiKey: (editData.erpApiKey ?? editData.erp_api_key ?? existingTenant?.erpApiKey ?? '').trim(),
           erp_api_key: (editData.erpApiKey ?? editData.erp_api_key ?? existingTenant?.erpApiKey ?? '').trim(),
-          erpType: editData.erpType || '',
           erp_login: (editData.erp_login ?? editData.erpApiLogin ?? editData.erp_api_login ?? existingTenant?.erpApiLogin ?? '').trim(),
           erpApiLogin: (editData.erp_login ?? editData.erpApiLogin ?? editData.erp_api_login ?? existingTenant?.erpApiLogin ?? '').trim(),
           erp_api_login: (editData.erp_login ?? editData.erpApiLogin ?? editData.erp_api_login ?? existingTenant?.erpApiLogin ?? '').trim(),
@@ -1413,99 +1435,132 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
                         </div>
                       </div>
                     </div>
-                    <div className="space-y-4">
-                      <div className="space-y-1">
-                        <label className="text-[11px] font-black uppercase text-gray-800 ml-2">URL da API Inovafarma</label>
-                        <input
-                          type="text"
-                          className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black"
-                          value={editData.erpBaseUrl ?? editData.erp_base_url ?? editData.erpUrl ?? ''}
-                          onChange={e => {
-                            const rawVal = e.target.value;
-                            const routeMatch = rawVal.match(/\/api\/v1\/([^/?#[\]()]+)/i);
-                            const extractedSlug = routeMatch?.[1]?.trim();
-                            setEditData({
-                              ...editData,
-                              erpBaseUrl: rawVal,
-                              erp_base_url: rawVal,
-                              erpUrl: rawVal,
-                              ...(extractedSlug && extractedSlug.toLowerCase() !== 'api' && extractedSlug.toLowerCase() !== 'login'
-                                ? { erpRouteId: extractedSlug, erp_route_id: extractedSlug }
-                                : {}),
-                            });
-                          }}
-                          onBlur={e => {
-                            const parsed = parseInovafarmaUrlAndRoute(
-                              e.target.value,
-                              editData.erpRouteId ?? editData.erp_route_id,
-                            );
-                            setEditData(prev => ({
-                              ...prev,
-                              erpBaseUrl: parsed.origin,
-                              erp_base_url: parsed.origin,
-                              erpUrl: parsed.origin,
-                              erpRouteId: parsed.routeId,
-                              erp_route_id: parsed.routeId,
-                            }));
-                          }}
-                          placeholder="https://integracao.portalps.app"
-                        />
-                      </div>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div className="space-y-1">
-                          <label className="text-[11px] font-black uppercase text-gray-800 ml-2">Slug / Identificador da Rota (`&#123;integracao&#125;`)</label>
-                          <input
-                            type="text"
-                            className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black"
-                            value={editData.erpRouteId ?? editData.erp_route_id ?? INOVAFARMA_DEFAULT_ROUTE_ID}
-                            onChange={e => setEditData({ ...editData, erpRouteId: e.target.value, erp_route_id: e.target.value })}
-                            placeholder="homologacao"
-                          />
-                        </div>
-                        <div className="space-y-1">
-                          <label className="text-[11px] font-black uppercase text-gray-800 ml-2">CNPJ da Integração (Header `cnpj`)</label>
-                          <input
-                            type="text"
-                            className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black"
-                            value={editData.erpCnpj ?? editData.erp_cnpj ?? editData.cnpj ?? ''}
-                            onChange={e => setEditData({ ...editData, erpCnpj: e.target.value, erp_cnpj: e.target.value })}
-                            placeholder="02433981097173"
-                          />
-                        </div>
-                      </div>
-                    </div>
                     <div className="space-y-1">
-                      <label className="text-[11px] font-black uppercase text-gray-800 ml-2">Tipo de ERP</label>
-                      <select className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black" value={editData.erpType || ''} onChange={e => setEditData({...editData, erpType: e.target.value})}>
+                      <label className="text-[11px] font-black uppercase text-gray-800 ml-2">Tipo de ERP / PDV</label>
+                      <select
+                        className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black"
+                        value={editData.erpType ?? editData.erp_type ?? editData.integration_type ?? ''}
+                        onChange={e => {
+                          const nextErp = e.target.value;
+                          setEditData({
+                            ...editData,
+                            erpType: nextErp,
+                            erp_type: nextErp,
+                            integration_type: nextErp,
+                          });
+                        }}
+                      >
                         <option value="">Selecione o tipo de ERP</option>
-                        <option value="inovafarma">InovaFarma (Portal PS)</option>
-                        <option value="siagold">Siagold</option>
+                        <option value="siagold">Siagold (Agente Desktop)</option>
+                        <option value="inovafarma">Inovafarma (Portal PS)</option>
                         <option value="softpharma">Softpharma</option>
+                        <option value="trier">Trier Sistemas</option>
+                        <option value="linx">Linx / Big</option>
+                        <option value="hos">HOS Sistemas</option>
+                        <option value="custom">Outro ERP / Webhook Padrão</option>
                         <option value="outros">Outros</option>
                       </select>
                     </div>
-                    <div className="space-y-1">
-                      <label className="text-[11px] font-black uppercase text-gray-800 ml-2">Login da API (ERP / Inovafarma)</label>
-                      <input
-                        type="text"
-                        autoComplete="off"
-                        className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black"
-                        value={editData.erp_login || editData.erpApiLogin || editData.erp_api_login || ''}
-                        onChange={e => setEditData({ ...editData, erp_login: e.target.value, erpApiLogin: e.target.value, erp_api_login: e.target.value })}
-                        placeholder="Login de acesso da API do Inovafarma"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-[11px] font-black uppercase text-gray-800 ml-2">Senha da API (ERP / Inovafarma)</label>
-                      <input
-                        type="password"
-                        autoComplete="new-password"
-                        className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black"
-                        value={editData.erp_password || editData.erpApiPassword || ''}
-                        onChange={e => setEditData({ ...editData, erp_password: e.target.value, erpApiPassword: e.target.value, erp_api_password: e.target.value })}
-                        placeholder={editData.hasErpApiPassword ? '•••••••••••• (Digite apenas para alterar)' : 'Senha da API do Inovafarma'}
-                      />
-                    </div>
+                    {(() => {
+                      const editErp = String(
+                        editData.erpType ?? editData.erp_type ?? editData.integration_type ?? ''
+                      ).toLowerCase().trim();
+                      const isEditInovafarma = editErp === 'inovafarma' || editErp.includes('inovafarma');
+                      if (!isEditInovafarma) {
+                        return (
+                          <div className="bg-white p-4 rounded-2xl border border-gray-200 text-xs text-gray-600 font-medium">
+                            {editErp.includes('siagold')
+                              ? 'Integração Siagold ativa: a sincronização de catálogo, estoque e preços ocorre automaticamente via Agente Desktop FarmaFlow utilizando o ID da loja e o Integration Token (x-api-key).'
+                              : 'A sincronização desta unidade é realizada via Agente Desktop FarmaFlow ou Webhooks REST padrão utilizando o Integration Token (x-api-key).'}
+                          </div>
+                        );
+                      }
+                      return (
+                        <div className="space-y-4 pt-2 border-t border-gray-200/70">
+                          <div className="space-y-1">
+                            <label className="text-[11px] font-black uppercase text-gray-800 ml-2">URL da API Inovafarma</label>
+                            <input
+                              type="text"
+                              className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black"
+                              value={editData.erpBaseUrl ?? editData.erp_base_url ?? editData.erpUrl ?? ''}
+                              onChange={e => {
+                                const rawVal = e.target.value;
+                                const routeMatch = rawVal.match(/\/api\/v1\/([^/?#[\]()]+)/i);
+                                const extractedSlug = routeMatch?.[1]?.trim();
+                                setEditData({
+                                  ...editData,
+                                  erpBaseUrl: rawVal,
+                                  erp_base_url: rawVal,
+                                  erpUrl: rawVal,
+                                  ...(extractedSlug && extractedSlug.toLowerCase() !== 'api' && extractedSlug.toLowerCase() !== 'login'
+                                    ? { erpRouteId: extractedSlug, erp_route_id: extractedSlug }
+                                    : {}),
+                                });
+                              }}
+                              onBlur={e => {
+                                const parsed = parseInovafarmaUrlAndRoute(
+                                  e.target.value,
+                                  editData.erpRouteId ?? editData.erp_route_id,
+                                );
+                                setEditData(prev => ({
+                                  ...prev,
+                                  erpBaseUrl: parsed.origin,
+                                  erp_base_url: parsed.origin,
+                                  erpUrl: parsed.origin,
+                                  erpRouteId: parsed.routeId,
+                                  erp_route_id: parsed.routeId,
+                                }));
+                              }}
+                              placeholder="https://integracao.portalps.app"
+                            />
+                          </div>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div className="space-y-1">
+                              <label className="text-[11px] font-black uppercase text-gray-800 ml-2">Slug / Identificador da Rota (`&#123;integracao&#125;`)</label>
+                              <input
+                                type="text"
+                                className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black"
+                                value={editData.erpRouteId ?? editData.erp_route_id ?? INOVAFARMA_DEFAULT_ROUTE_ID}
+                                onChange={e => setEditData({ ...editData, erpRouteId: e.target.value, erp_route_id: e.target.value })}
+                                placeholder="homologacao"
+                              />
+                            </div>
+                            <div className="space-y-1">
+                              <label className="text-[11px] font-black uppercase text-gray-800 ml-2">CNPJ da Integração (Header `cnpj`)</label>
+                              <input
+                                type="text"
+                                className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black"
+                                value={editData.erpCnpj ?? editData.erp_cnpj ?? editData.cnpj ?? ''}
+                                onChange={e => setEditData({ ...editData, erpCnpj: e.target.value, erp_cnpj: e.target.value })}
+                                placeholder="02433981097173"
+                              />
+                            </div>
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-[11px] font-black uppercase text-gray-800 ml-2">Login da API (ERP / Inovafarma)</label>
+                            <input
+                              type="text"
+                              autoComplete="off"
+                              className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black"
+                              value={editData.erp_login || editData.erpApiLogin || editData.erp_api_login || ''}
+                              onChange={e => setEditData({ ...editData, erp_login: e.target.value, erpApiLogin: e.target.value, erp_api_login: e.target.value })}
+                              placeholder="Login de acesso da API do Inovafarma"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-[11px] font-black uppercase text-gray-800 ml-2">Senha da API (ERP / Inovafarma)</label>
+                            <input
+                              type="password"
+                              autoComplete="new-password"
+                              className="w-full bg-white p-4 rounded-2xl border-2 border-gray-200 outline-none font-bold text-black"
+                              value={editData.erp_password || editData.erpApiPassword || ''}
+                              onChange={e => setEditData({ ...editData, erp_password: e.target.value, erpApiPassword: e.target.value, erp_api_password: e.target.value })}
+                              placeholder={editData.hasErpApiPassword ? '•••••••••••• (Digite apenas para alterar)' : 'Senha da API do Inovafarma'}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })()}
                 </div>
 
                 <div className="bg-emerald-50 p-8 rounded-[2.5rem] border border-emerald-100 space-y-6">
@@ -1918,7 +1973,24 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
           </div>
       )}
 
-      {isIntegrationOpen && selectedTenantForIntegration && (
+      {isIntegrationOpen && selectedTenantForIntegration && (() => {
+          const modalErpType = String(
+              selectedTenantForIntegration.erpType ??
+              selectedTenantForIntegration.erp_type ??
+              selectedTenantForIntegration.integration_type ??
+              ''
+          ).toLowerCase().trim();
+          const isModalInovafarma = modalErpType === 'inovafarma' || modalErpType.includes('inovafarma');
+          const isModalSiagold = modalErpType === 'siagold' || modalErpType.includes('siagold');
+          const modalErpLabel = isModalInovafarma
+              ? 'Inovafarma - Portal PS'
+              : isModalSiagold
+                ? 'Siagold - Agente Desktop'
+                : modalErpType
+                  ? modalErpType.toUpperCase()
+                  : 'Agente Desktop / Webhook PDV';
+
+          return (
           <div className="fixed inset-0 z-[100] bg-gray-900/60 backdrop-blur-sm flex items-center justify-center p-4">
               <div className="bg-white w-full max-w-4xl rounded-[3rem] shadow-2xl p-8 overflow-y-auto max-h-[90vh] animate-in zoom-in-95 flex flex-col">
                   <div className="flex justify-between items-center mb-6 shrink-0">
@@ -1927,34 +1999,36 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
                               <Link size={24} />
                           </div>
                           <div>
-                              <h3 className="text-2xl font-black text-gray-900">Integração ERP/PDV (Inovafarma)</h3>
+                              <h3 className="text-2xl font-black text-gray-900">Integração ERP/PDV ({modalErpLabel})</h3>
                               <p className="text-sm font-bold text-gray-400">Empresa: {selectedTenantForIntegration.name}</p>
                           </div>
                       </div>
                       <div className="flex items-center gap-3">
-                          <button
-                              type="button"
-                              onClick={handleSyncTenantInovafarma}
-                              disabled={isSyncingInovafarma}
-                              className="px-4 py-2.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white font-black text-xs uppercase tracking-wider flex items-center gap-2 shadow-lg shadow-emerald-600/20 transition-all cursor-pointer"
-                          >
-                              {isSyncingInovafarma ? (
-                                  <>
-                                      <Loader2 size={16} className="animate-spin" />
-                                      {inovafarmaSyncProgressText || 'Sincronizando...'}
-                                  </>
-                              ) : (
-                                  <>
-                                      <RefreshCw size={16} />
-                                      SINCRONIZAR AGORA COM INOVAFARMA
-                                  </>
-                              )}
-                          </button>
+                          {isModalInovafarma && (
+                              <button
+                                  type="button"
+                                  onClick={handleSyncTenantInovafarma}
+                                  disabled={isSyncingInovafarma}
+                                  className="px-4 py-2.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white font-black text-xs uppercase tracking-wider flex items-center gap-2 shadow-lg shadow-emerald-600/20 transition-all cursor-pointer"
+                              >
+                                  {isSyncingInovafarma ? (
+                                      <>
+                                          <Loader2 size={16} className="animate-spin" />
+                                          {inovafarmaSyncProgressText || 'Sincronizando...'}
+                                      </>
+                                  ) : (
+                                      <>
+                                          <RefreshCw size={16} />
+                                          SINCRONIZAR AGORA COM INOVAFARMA
+                                      </>
+                                  )}
+                              </button>
+                          )}
                           <button onClick={() => setIsIntegrationOpen(false)} className="p-2 bg-gray-50 rounded-full hover:text-red-500"><X size={24}/></button>
                       </div>
                   </div>
 
-                  {inovafarmaSyncFeedback && (
+                  {isModalInovafarma && inovafarmaSyncFeedback && (
                       <div
                           className={`mb-6 p-4 rounded-2xl border flex items-start justify-between gap-3 ${
                               inovafarmaSyncFeedback.type === 'success'
@@ -2005,29 +2079,53 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
                                       {copiedWebhookField === 'token' ? 'Copiado!' : 'Copiar'}
                                   </button>
                               </div>
-                              <p className="text-xs text-gray-400 mt-2">Envie este token no header <code className="bg-gray-100 px-1 rounded">x-api-key</code> das requisições do PDV.</p>
+                              <p className="text-xs text-gray-400 mt-2">Envie este token no header <code className="bg-gray-100 px-1 rounded">x-api-key</code> das requisições do PDV / Agente Desktop.</p>
                           </div>
-                          <div>
-                              <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Portal PS / Inovafarma API</label>
-                              <div className="flex items-center gap-2">
-                                  <input 
-                                      type="text" 
-                                      readOnly 
-                                      value={selectedTenantForIntegration.erpUrl || INOVAFARMA_DEFAULT_API_URL} 
-                                      className="w-full bg-white border border-gray-200 rounded-xl px-4 py-3 text-sm font-mono text-gray-600"
-                                  />
-                                  <button 
-                                      onClick={() => {
-                                          navigator.clipboard.writeText(selectedTenantForIntegration.erpUrl || INOVAFARMA_DEFAULT_API_URL);
-                                          setCopiedWebhookField('erp_url');
-                                          setTimeout(() => setCopiedWebhookField(null), 2000);
-                                      }}
-                                      className="p-3 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 text-gray-600 text-xs font-bold"
-                                  >
-                                      {copiedWebhookField === 'erp_url' ? 'Copiado!' : 'Copiar'}
-                                  </button>
+                          {isModalInovafarma ? (
+                              <div>
+                                  <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Portal PS / Inovafarma API</label>
+                                  <div className="flex items-center gap-2">
+                                      <input 
+                                          type="text" 
+                                          readOnly 
+                                          value={selectedTenantForIntegration.erpUrl || INOVAFARMA_DEFAULT_API_URL} 
+                                          className="w-full bg-white border border-gray-200 rounded-xl px-4 py-3 text-sm font-mono text-gray-600"
+                                      />
+                                      <button 
+                                          onClick={() => {
+                                              navigator.clipboard.writeText(selectedTenantForIntegration.erpUrl || INOVAFARMA_DEFAULT_API_URL);
+                                              setCopiedWebhookField('erp_url');
+                                              setTimeout(() => setCopiedWebhookField(null), 2000);
+                                          }}
+                                          className="p-3 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 text-gray-600 text-xs font-bold"
+                                      >
+                                          {copiedWebhookField === 'erp_url' ? 'Copiado!' : 'Copiar'}
+                                      </button>
+                                  </div>
                               </div>
-                          </div>
+                          ) : (
+                              <div>
+                                  <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">ID da Unidade (`tenantId` no Agente Desktop)</label>
+                                  <div className="flex items-center gap-2">
+                                      <input 
+                                          type="text" 
+                                          readOnly 
+                                          value={selectedTenantForIntegration.id} 
+                                          className="w-full bg-white border border-gray-200 rounded-xl px-4 py-3 text-sm font-mono text-gray-600"
+                                      />
+                                      <button 
+                                          onClick={() => {
+                                              navigator.clipboard.writeText(selectedTenantForIntegration.id);
+                                              setCopiedWebhookField('tenant_id');
+                                              setTimeout(() => setCopiedWebhookField(null), 2000);
+                                          }}
+                                          className="p-3 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 text-gray-600 text-xs font-bold"
+                                      >
+                                          {copiedWebhookField === 'tenant_id' ? 'Copiado!' : 'Copiar'}
+                                      </button>
+                                  </div>
+                              </div>
+                          )}
                       </div>
                       <div className="mt-4 pt-4 border-t border-gray-200">
                           <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Webhooks de Entrada (PDV -&gt; FarmaFlow)</label>
@@ -2081,9 +2179,11 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
                           <a href="/api-docs" target="_blank" rel="noopener noreferrer" className="text-purple-600 hover:text-purple-700 font-bold text-sm flex items-center gap-1">
                               <FileText size={16} /> Ver Documentação da API (Swagger)
                           </a>
-                          <a href="https://guiaintegracao.portalps.app/" target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:text-emerald-700 font-bold text-sm flex items-center gap-1">
-                              <ExternalLink size={16} /> Guia de Integração Inovafarma (Portal PS)
-                          </a>
+                          {isModalInovafarma && (
+                              <a href="https://guiaintegracao.portalps.app/" target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:text-emerald-700 font-bold text-sm flex items-center gap-1">
+                                  <ExternalLink size={16} /> Guia de Integração Inovafarma (Portal PS)
+                              </a>
+                          )}
                       </div>
                   </div>
 
@@ -2128,7 +2228,8 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
                   </div>
               </div>
           </div>
-      )}
+          );
+      })()}
 
     </div>
   );

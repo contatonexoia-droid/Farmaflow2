@@ -193,10 +193,56 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
   const canSwitchStore = effectiveIsMatrixUser && networkTenants && networkTenants.length > 1 && !!onSelectTenant;
 
   const [activeTab, setActiveTab] = useState<'geral' | 'pagamentos' | 'entrega' | 'atendimento' | 'agente_ia'>('geral');
-  const [formData, setFormData] = useState<PharmacyConfig>({ ...config });
+  const resolveStoreErpType = (store?: Partial<PharmacyConfig> | null): string => {
+    if (!store) return '';
+    return String(
+      store.erpType ??
+      store.erp_type ??
+      store.integration_type ??
+      store.integrationType ??
+      store.smartBanners?._erpCredentials?.erp_type ??
+      store.smartBanners?._erpCredentials?.erpType ??
+      ''
+    ).trim();
+  };
+
+  const [formData, setFormData] = useState<PharmacyConfig>(() => {
+    const initialErp = resolveStoreErpType(config);
+    return {
+      ...config,
+      erpType: initialErp,
+      erp_type: initialErp,
+      integration_type: initialErp,
+    };
+  });
   const [showSaved, setShowSaved] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const activeErpType = String(
+    formData.erpType ??
+    formData.erp_type ??
+    formData.integration_type ??
+    formData.integrationType ??
+    ''
+  ).toLowerCase().trim();
+
+  const isInovafarmaErp =
+    activeErpType === 'inovafarma' || activeErpType.includes('inovafarma');
+  const isSiagoldErp =
+    activeErpType === 'siagold' || activeErpType.includes('siagold');
+
+  const getErpDisplayName = (erpCode: string): string => {
+    if (!erpCode) return 'Agente Desktop / Webhook Padrão';
+    if (erpCode === 'inovafarma' || erpCode.includes('inovafarma')) return 'Inovafarma - Portal PS';
+    if (erpCode === 'siagold' || erpCode.includes('siagold')) return 'Siagold';
+    if (erpCode === 'softpharma') return 'Softpharma';
+    if (erpCode === 'trier') return 'Trier Sistemas';
+    if (erpCode === 'linx') return 'Linx / Big';
+    if (erpCode === 'hos') return 'HOS Sistemas';
+    if (erpCode === 'custom' || erpCode === 'outros') return 'Webhook Padrão / Agente Desktop';
+    return erpCode.toUpperCase();
+  };
 
   const [addressData, setAddressData] = useState({
     cep: "",
@@ -275,6 +321,8 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
     setFormData((prev) => ({
       ...prev,
       erpType: 'inovafarma',
+      erp_type: 'inovafarma',
+      integration_type: 'inovafarma',
       erpUrl: INOVAFARMA_HOMOLOGACAO_PRESET.erp_base_url,
       erpBaseUrl: INOVAFARMA_HOMOLOGACAO_PRESET.erp_base_url,
       erp_base_url: INOVAFARMA_HOMOLOGACAO_PRESET.erp_base_url,
@@ -729,8 +777,13 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
 
   useEffect(() => {
     const resolvedHours = resolveTenantOperatingHours(config);
+    const resolvedErp = resolveStoreErpType(config);
+    setInovafarmaFeedback(null);
     setFormData({
       ...config,
+      erpType: resolvedErp,
+      erp_type: resolvedErp,
+      integration_type: resolvedErp,
       opening_time_weekdays: resolvedHours.weekdays.open,
       closing_time_weekdays: resolvedHours.weekdays.close,
       opening_time_saturdays: resolvedHours.saturday.open,
@@ -767,6 +820,9 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
     }
   }, [
     config.id,
+    config.erpType,
+    config.erp_type,
+    config.integration_type,
     config.updatedAt,
     config.opening_time_weekdays,
     config.closing_time_weekdays,
@@ -941,10 +997,29 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
       logo_url: formData.logo_url || formData.logo || "",
       logoUrl: formData.logo_url || formData.logo || "",
       ...(() => {
-        const parsedErp = parseInovafarmaUrlAndRoute(
-          formData.erpBaseUrl ?? formData.erp_base_url ?? formData.erpUrl ?? "",
-          formData.erpRouteId ?? formData.erp_route_id ?? "",
-        );
+        const selectedErpType = (
+          formData.erpType ??
+          formData.erp_type ??
+          formData.integration_type ??
+          ""
+        ).trim();
+        const isSavingInovafarma =
+          selectedErpType.toLowerCase() === "inovafarma" ||
+          selectedErpType.toLowerCase().includes("inovafarma");
+        const rawUrl = (
+          formData.erpBaseUrl ??
+          formData.erp_base_url ??
+          formData.erpUrl ??
+          ""
+        ).trim();
+        const rawRoute = (
+          formData.erpRouteId ??
+          formData.erp_route_id ??
+          ""
+        ).trim();
+        const parsedErp = isSavingInovafarma
+          ? parseInovafarmaUrlAndRoute(rawUrl, rawRoute)
+          : { origin: rawUrl, routeId: rawRoute };
         const integrationCnpjRaw = (
           formData.erpCnpj ??
           formData.erp_cnpj ??
@@ -952,6 +1027,9 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
           ""
         ).trim();
         return {
+          erpType: selectedErpType,
+          erp_type: selectedErpType,
+          integration_type: selectedErpType,
           erpBaseUrl: parsedErp.origin,
           erp_base_url: parsedErp.origin,
           erpUrl: parsedErp.origin,
@@ -1747,76 +1825,106 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
                   <div>
                       <div className="flex flex-wrap items-center gap-2.5 mb-1">
                           <h3 className="text-lg font-black text-gray-900 flex items-center gap-2">
-                              <Store size={20} className="text-brand" /> Integração com ERP / PDV (Inovafarma - Portal PS)
+                              <Store size={20} className="text-brand" />{' '}
+                              {isInovafarmaErp
+                                ? 'Integração com ERP / PDV (Inovafarma - Portal PS)'
+                                : isSiagoldErp
+                                  ? 'Integração com ERP / PDV (Siagold)'
+                                  : `Integração com ERP / PDV (${getErpDisplayName(activeErpType)})`}
                           </h3>
-                          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-extrabold">
-                              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                              Sincronização Automática Ativa (a cada 15 min)
-                          </span>
+                          {isInovafarmaErp ? (
+                              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-extrabold">
+                                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                                  Sincronização Automática Ativa (a cada 15 min)
+                              </span>
+                          ) : isSiagoldErp ? (
+                              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-50 border border-blue-200 text-blue-700 text-xs font-extrabold">
+                                  <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+                                  Integração via Agente Desktop Local (Siagold)
+                              </span>
+                          ) : (
+                              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-gray-100 border border-gray-200 text-gray-700 text-xs font-extrabold">
+                                  <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                                  Integração via Agente Desktop / Webhook PDV
+                              </span>
+                          )}
                       </div>
-                      <p className="text-sm text-gray-500">
-                          Arquitetura oficial 100% via consultas ativas (<span className="font-mono text-xs">GET /api/v1/&#123;integracao&#125;/...</span>) e envio/conciliação de pedidos (<span className="font-mono text-xs">POST /Venda</span> &amp; <span className="font-mono text-xs">GET /vendaporid</span>).
-                      </p>
+                      {isInovafarmaErp ? (
+                          <p className="text-sm text-gray-500">
+                              Arquitetura oficial 100% via consultas ativas (<span className="font-mono text-xs">GET /api/v1/&#123;integracao&#125;/...</span>) e envio/conciliação de pedidos (<span className="font-mono text-xs">POST /Venda</span> &amp; <span className="font-mono text-xs">GET /vendaporid</span>).
+                          </p>
+                      ) : isSiagoldErp ? (
+                          <p className="text-sm text-gray-500">
+                              Sincronização automática de catálogo, preços, ofertas e estoque via Agente Desktop FarmaFlow conectado ao banco de dados local do Siagold.
+                          </p>
+                      ) : (
+                          <p className="text-sm text-gray-500">
+                              Sincronização de estoque, preços e pedidos via Agente Desktop FarmaFlow ou Webhooks REST padrão (<span className="font-mono text-xs">Header: x-api-key</span>).
+                          </p>
+                      )}
                   </div>
-                  <div className="flex flex-wrap items-center gap-2 shrink-0">
-                      <button
-                          type="button"
-                          onClick={handleApplyHomologacaoPreset}
-                          className="px-3.5 py-2.5 rounded-2xl border border-amber-200 bg-amber-50 hover:bg-amber-100 text-xs font-bold text-amber-800 flex items-center gap-1.5 transition-all cursor-pointer"
-                          title="Preenche automaticamente os dados oficiais de Homologação do Portal PS"
-                      >
-                          <Zap size={14} /> Preencher Homologação
-                      </button>
-                      <button
-                          type="button"
-                          onClick={handleTestInovafarmaConnectivity}
-                          disabled={isTestingInovafarmaServer}
-                          className="px-3.5 py-2.5 rounded-2xl border border-blue-200 bg-blue-50 hover:bg-blue-100 disabled:opacity-60 text-xs font-bold text-blue-800 flex items-center gap-1.5 transition-all cursor-pointer"
-                          title="Testa GET /api/v1/{integracao}/server para validar conexão com o banco da farmácia"
-                      >
-                          {isTestingInovafarmaServer ? (
-                              <Loader2 size={14} className="animate-spin" />
-                          ) : (
-                              <ShieldCheck size={14} />
-                          )}
-                          Testar Conectividade (/server)
-                      </button>
-                      <button
-                          type="button"
-                          onClick={handleReconcileInovafarmaOrders}
-                          disabled={isReconcilingInovafarma}
-                          className="px-3.5 py-2.5 rounded-2xl border border-purple-200 bg-purple-50 hover:bg-purple-100 disabled:opacity-60 text-xs font-bold text-purple-800 flex items-center gap-1.5 transition-all cursor-pointer"
-                          title="Consulta GET /api/v1/{integracao}/vendaporid/{codigoVendaOnLine} nos pedidos enviados"
-                      >
-                          {isReconcilingInovafarma ? (
-                              <Loader2 size={14} className="animate-spin" />
-                          ) : (
-                              <History size={14} />
-                          )}
-                          Conciliar Vendas (/vendaporid)
-                      </button>
-                      <button
-                          type="button"
-                          onClick={handleSyncInovafarmaNow}
-                          disabled={isSyncingInovafarma}
-                          className="px-5 py-2.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white font-black text-xs uppercase tracking-wider flex items-center gap-2 shadow-lg shadow-emerald-600/20 transition-all cursor-pointer"
-                      >
-                          {isSyncingInovafarma ? (
-                              <>
-                                  <Loader2 size={16} className="animate-spin" />
-                                  {inovafarmaSyncProgressText || 'Sincronizando...'}
-                              </>
-                          ) : (
-                              <>
-                                  <RefreshCw size={16} />
-                                  SINCRONIZAR AGORA COM INOVAFARMA
-                              </>
-                          )}
-                      </button>
-                  </div>
+
+                  {isInovafarmaErp && (
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                          <button
+                              type="button"
+                              onClick={handleApplyHomologacaoPreset}
+                              className="px-3.5 py-2.5 rounded-2xl border border-amber-200 bg-amber-50 hover:bg-amber-100 text-xs font-bold text-amber-800 flex items-center gap-1.5 transition-all cursor-pointer"
+                              title="Preenche automaticamente os dados oficiais de Homologação do Portal PS"
+                          >
+                              <Zap size={14} /> Preencher Homologação
+                          </button>
+                          <button
+                              type="button"
+                              onClick={handleTestInovafarmaConnectivity}
+                              disabled={isTestingInovafarmaServer}
+                              className="px-3.5 py-2.5 rounded-2xl border border-blue-200 bg-blue-50 hover:bg-blue-100 disabled:opacity-60 text-xs font-bold text-blue-800 flex items-center gap-1.5 transition-all cursor-pointer"
+                              title="Testa GET /api/v1/{integracao}/server para validar conexão com o banco da farmácia"
+                          >
+                              {isTestingInovafarmaServer ? (
+                                  <Loader2 size={14} className="animate-spin" />
+                              ) : (
+                                  <ShieldCheck size={14} />
+                              )}
+                              Testar Conectividade (/server)
+                          </button>
+                          <button
+                              type="button"
+                              onClick={handleReconcileInovafarmaOrders}
+                              disabled={isReconcilingInovafarma}
+                              className="px-3.5 py-2.5 rounded-2xl border border-purple-200 bg-purple-50 hover:bg-purple-100 disabled:opacity-60 text-xs font-bold text-purple-800 flex items-center gap-1.5 transition-all cursor-pointer"
+                              title="Consulta GET /api/v1/{integracao}/vendaporid/{codigoVendaOnLine} nos pedidos enviados"
+                          >
+                              {isReconcilingInovafarma ? (
+                                  <Loader2 size={14} className="animate-spin" />
+                              ) : (
+                                  <History size={14} />
+                              )}
+                              Conciliar Vendas (/vendaporid)
+                          </button>
+                          <button
+                              type="button"
+                              onClick={handleSyncInovafarmaNow}
+                              disabled={isSyncingInovafarma}
+                              className="px-5 py-2.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white font-black text-xs uppercase tracking-wider flex items-center gap-2 shadow-lg shadow-emerald-600/20 transition-all cursor-pointer"
+                          >
+                              {isSyncingInovafarma ? (
+                                  <>
+                                      <Loader2 size={16} className="animate-spin" />
+                                      {inovafarmaSyncProgressText || 'Sincronizando...'}
+                                  </>
+                              ) : (
+                                  <>
+                                      <RefreshCw size={16} />
+                                      SINCRONIZAR AGORA COM INOVAFARMA
+                                  </>
+                              )}
+                          </button>
+                      </div>
+                  )}
               </div>
 
-              {inovafarmaFeedback && (
+              {isInovafarmaErp && inovafarmaFeedback && (
                   <div
                       className={`mb-6 p-5 rounded-3xl border flex flex-col gap-2 ${
                           inovafarmaFeedback.type === 'success'
@@ -1868,327 +1976,450 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
               )}
 
               <div className="bg-gray-50/50 p-6 rounded-3xl border border-gray-100 space-y-6">
-                  {/* Linha 1: Sistema ERP / PDV e URL da API Inovafarma */}
+                  {/* Linha 1: Seleção do Sistema ERP / PDV */}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                       <div>
                           <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
                               Sistema ERP / PDV
                           </label>
                           <select
-                              value={formData.erpType || 'inovafarma'}
-                              onChange={(e) => setFormData({ ...formData, erpType: e.target.value })}
+                              value={
+                                  isInovafarmaErp
+                                      ? 'inovafarma'
+                                      : isSiagoldErp
+                                        ? 'siagold'
+                                        : activeErpType || 'custom'
+                              }
+                              onChange={(e) => {
+                                  const nextErp = e.target.value;
+                                  setInovafarmaFeedback(null);
+                                  setFormData((prev) => ({
+                                      ...prev,
+                                      erpType: nextErp,
+                                      erp_type: nextErp,
+                                      integration_type: nextErp,
+                                  }));
+                              }}
                               className="w-full p-3.5 bg-white border border-gray-200 rounded-2xl font-bold text-sm text-gray-800 outline-none focus:ring-2 focus:ring-brand"
                           >
+                              <option value="siagold">Siagold (Agente Desktop)</option>
                               <option value="inovafarma">Inovafarma (Portal PS)</option>
+                              <option value="softpharma">Softpharma</option>
                               <option value="trier">Trier Sistemas</option>
                               <option value="linx">Linx / Big</option>
                               <option value="hos">HOS Sistemas</option>
                               <option value="custom">Outro ERP / Webhook Padrão</option>
+                              {activeErpType &&
+                                  !['siagold', 'inovafarma', 'softpharma', 'trier', 'linx', 'hos', 'custom'].includes(activeErpType) &&
+                                  !isInovafarmaErp &&
+                                  !isSiagoldErp && (
+                                      <option value={activeErpType}>{getErpDisplayName(activeErpType)}</option>
+                                  )}
                           </select>
                       </div>
 
-                      <div className="md:col-span-2">
-                          <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
-                              URL da API Inovafarma
-                          </label>
-                          <input
-                              type="text"
-                              placeholder="https://integracao.portalps.app"
-                              value={formData.erpBaseUrl ?? formData.erp_base_url ?? formData.erpUrl ?? INOVAFARMA_DEFAULT_API_URL}
-                              onChange={(e) => {
-                                  const rawVal = e.target.value;
-                                  const routeMatch = rawVal.match(/\/api\/v1\/([^/?#[\]()]+)/i);
-                                  const extractedSlug = routeMatch?.[1]?.trim();
-                                  setFormData({
-                                      ...formData,
-                                      erpBaseUrl: rawVal,
-                                      erp_base_url: rawVal,
-                                      erpUrl: rawVal,
-                                      ...(extractedSlug && extractedSlug.toLowerCase() !== 'api' && extractedSlug.toLowerCase() !== 'login'
-                                          ? { erpRouteId: extractedSlug, erp_route_id: extractedSlug }
-                                          : {}),
-                                  });
-                              }}
-                              onBlur={(e) => {
-                                  const parsed = parseInovafarmaUrlAndRoute(
-                                      e.target.value,
-                                      formData.erpRouteId ?? formData.erp_route_id,
-                                  );
-                                  setFormData((prev) => ({
-                                      ...prev,
-                                      erpBaseUrl: parsed.origin,
-                                      erp_base_url: parsed.origin,
-                                      erpUrl: parsed.origin,
-                                      erpRouteId: parsed.routeId,
-                                      erp_route_id: parsed.routeId,
-                                  }));
-                              }}
-                              className="w-full p-3.5 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-700 outline-none focus:ring-2 focus:ring-brand"
-                          />
-                          <p className="text-[10px] text-gray-400 mt-1">
-                              O sistema extrai automaticamente a origem (<code className="bg-gray-100 px-1 rounded">https://integracao.portalps.app</code>) para o <code className="bg-gray-100 px-1 rounded">POST /api/login</code> mesmo se você colar <code className="bg-gray-100 px-1 rounded">/api/v1/homologacao</code>.
-                          </p>
-                      </div>
-                  </div>
-
-                  {/* Linha logo abaixo de URL da API Inovafarma: Slug / Identificador da Rota ({integracao}) e CNPJ da Integração (Header cnpj) */}
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-gray-200/70">
-                      <div>
-                          <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
-                              Slug / Identificador da Rota (`&#123;integracao&#125;`)
-                          </label>
-                          <input
-                              type="text"
-                              placeholder="homologacao"
-                              value={formData.erpRouteId ?? formData.erp_route_id ?? INOVAFARMA_DEFAULT_ROUTE_ID}
-                              onChange={(e) =>
-                                  setFormData({
-                                      ...formData,
-                                      erpRouteId: e.target.value,
-                                      erp_route_id: e.target.value,
-                                  })
-                              }
-                              className="w-full p-3.5 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-700 outline-none focus:ring-2 focus:ring-brand"
-                          />
-                          <p className="text-[10px] text-gray-400 mt-1">
-                              Ex: <code className="bg-gray-100 px-1 rounded">homologacao</code>. Monta <code className="bg-gray-100 px-1 rounded">{`${parseInovafarmaUrlAndRoute(formData.erpBaseUrl ?? formData.erp_base_url ?? formData.erpUrl, formData.erpRouteId ?? formData.erp_route_id).v1BaseUrl}/{recurso}`}</code>.
-                          </p>
-                      </div>
-
-                      <div>
-                          <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
-                              CNPJ da Integração (Header `cnpj`)
-                          </label>
-                          <input
-                              type="text"
-                              placeholder="02433981097173"
-                              value={formData.erpCnpj ?? formData.erp_cnpj ?? formData.cnpj ?? ''}
-                              onChange={(e) =>
-                                  setFormData({
-                                      ...formData,
-                                      erpCnpj: e.target.value,
-                                      erp_cnpj: e.target.value,
-                                  })
-                              }
-                              maxLength={18}
-                              className="w-full p-3.5 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-700 outline-none focus:ring-2 focus:ring-brand"
-                          />
-                          <p className="text-[10px] text-gray-400 mt-1">
-                              Permite testar com <code className="bg-gray-100 px-1 rounded">02433981097173</code> sem alterar o CNPJ principal da loja.
-                          </p>
-                      </div>
-                  </div>
-
-                  {/* Linha 2: Credenciais de Autenticação (erp_login, erp_password, erp_api_key opcional e Token Webhook) */}
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 pt-4 border-t border-gray-200/70">
-                      <div>
-                          <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
-                              Login da API (`erp_login`)
-                          </label>
-                          <input
-                              type="text"
-                              autoComplete="off"
-                              placeholder="homologacao@inovafarma.com.br"
-                              value={formData.erp_login ?? formData.erpApiLogin ?? formData.erp_api_login ?? ''}
-                              onChange={(e) =>
-                                  setFormData({
-                                      ...formData,
-                                      erp_login: e.target.value,
-                                      erpApiLogin: e.target.value,
-                                      erp_api_login: e.target.value,
-                                  })
-                              }
-                              className="w-full p-3.5 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-800 outline-none focus:ring-2 focus:ring-brand"
-                          />
-                          <p className="text-[10px] text-gray-400 mt-1.5">
-                              Autentica em <code className="bg-gray-100 px-1 rounded">POST /api/login</code> (validade de 30 dias em cache).
-                          </p>
-                      </div>
-
-                      <div>
-                          <div className="flex items-center justify-between mb-2">
-                              <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest">
-                                  Senha da API (`erp_password`)
+                      {isInovafarmaErp ? (
+                          <div className="md:col-span-2">
+                              <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
+                                  URL da API Inovafarma
                               </label>
-                              {(formData.hasErpApiPassword || formData.has_erp_api_password) && !formData.erpApiPassword && (
-                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-[10px] font-black text-emerald-700 uppercase tracking-wider">
-                                      <ShieldCheck size={12} /> Salva
-                                  </span>
-                              )}
-                          </div>
-                          <input
-                              type="password"
-                              autoComplete="new-password"
-                              placeholder={
-                                  formData.hasErpApiPassword || formData.has_erp_api_password
-                                      ? '•••••••••••• (Digite para alterar)'
-                                      : 'Senha da API do Inovafarma'
-                              }
-                              value={formData.erp_password ?? formData.erpApiPassword ?? ''}
-                              onChange={(e) =>
-                                  setFormData({
-                                      ...formData,
-                                      erp_password: e.target.value,
-                                      erpApiPassword: e.target.value,
-                                      erp_api_password: e.target.value,
-                                  })
-                              }
-                              className="w-full p-3.5 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-800 outline-none focus:ring-2 focus:ring-brand"
-                          />
-                          <p className="text-[10px] text-gray-400 mt-1.5">
-                              Criptografada (AES-256-GCM) e nunca exposta em texto plano.
-                          </p>
-                      </div>
-
-                      <div>
-                          <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
-                              ApiKey Adicional (`erp_api_key` - Opcional)
-                          </label>
-                          <input
-                              type="text"
-                              autoComplete="off"
-                              placeholder="Opcional (Header ApiKey)"
-                              value={formData.erpApiKey ?? formData.erp_api_key ?? ''}
-                              onChange={(e) =>
-                                  setFormData({
-                                      ...formData,
-                                      erpApiKey: e.target.value,
-                                      erp_api_key: e.target.value,
-                                  })
-                              }
-                              className="w-full p-3.5 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-700 outline-none focus:ring-2 focus:ring-brand"
-                          />
-                          <p className="text-[10px] text-gray-400 mt-1.5">
-                              Enviada no header <code className="bg-gray-100 px-1 rounded">ApiKey</code> caso exigida no credenciamento.
-                          </p>
-                      </div>
-
-                      <div>
-                          <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
-                              Token Webhook Outros ERPs (`x-api-key`)
-                          </label>
-                          <div className="flex items-center gap-2">
                               <input
                                   type="text"
-                                  placeholder="Chave do Webhook"
-                                  value={formData.integrationToken || ''}
-                                  onChange={(e) => setFormData({ ...formData, integrationToken: e.target.value })}
+                                  placeholder="https://integracao.portalps.app"
+                                  value={formData.erpBaseUrl ?? formData.erp_base_url ?? formData.erpUrl ?? INOVAFARMA_DEFAULT_API_URL}
+                                  onChange={(e) => {
+                                      const rawVal = e.target.value;
+                                      const routeMatch = rawVal.match(/\/api\/v1\/([^/?#[\]()]+)/i);
+                                      const extractedSlug = routeMatch?.[1]?.trim();
+                                      setFormData({
+                                          ...formData,
+                                          erpBaseUrl: rawVal,
+                                          erp_base_url: rawVal,
+                                          erpUrl: rawVal,
+                                          ...(extractedSlug && extractedSlug.toLowerCase() !== 'api' && extractedSlug.toLowerCase() !== 'login'
+                                              ? { erpRouteId: extractedSlug, erp_route_id: extractedSlug }
+                                              : {}),
+                                      });
+                                  }}
+                                  onBlur={(e) => {
+                                      const parsed = parseInovafarmaUrlAndRoute(
+                                          e.target.value,
+                                          formData.erpRouteId ?? formData.erp_route_id,
+                                      );
+                                      setFormData((prev) => ({
+                                          ...prev,
+                                          erpBaseUrl: parsed.origin,
+                                          erp_base_url: parsed.origin,
+                                          erpUrl: parsed.origin,
+                                          erpRouteId: parsed.routeId,
+                                          erp_route_id: parsed.routeId,
+                                      }));
+                                  }}
                                   className="w-full p-3.5 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-700 outline-none focus:ring-2 focus:ring-brand"
                               />
-                              <button
-                                  type="button"
-                                  onClick={() => {
-                                      const generated = (typeof crypto !== 'undefined' && crypto.randomUUID)
-                                          ? crypto.randomUUID()
-                                          : `ff_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-                                      setFormData({ ...formData, integrationToken: generated });
-                                  }}
-                                  title="Gerar novo token"
-                                  className="p-3.5 bg-white border border-gray-200 hover:bg-gray-100 rounded-2xl text-gray-600 text-xs font-bold shrink-0"
-                              >
-                                  <Key size={16} />
-                              </button>
-                              {formData.integrationToken && (
-                                  <button
-                                      type="button"
-                                      onClick={() => handleCopyText(formData.integrationToken || '', 'token')}
-                                      title="Copiar Token"
-                                      className="p-3.5 bg-white border border-gray-200 hover:bg-gray-100 rounded-2xl text-gray-600 text-xs font-bold shrink-0"
-                                  >
-                                      {copiedField === 'token' ? <Check size={16} className="text-emerald-600" /> : <Copy size={16} />}
-                                  </button>
-                              )}
+                              <p className="text-[10px] text-gray-400 mt-1">
+                                  O sistema extrai automaticamente a origem (<code className="bg-gray-100 px-1 rounded">https://integracao.portalps.app</code>) para o <code className="bg-gray-100 px-1 rounded">POST /api/login</code> mesmo se você colar <code className="bg-gray-100 px-1 rounded">/api/v1/homologacao</code>.
+                              </p>
                           </div>
-                      </div>
+                      ) : (
+                          <div className="md:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                              <div>
+                                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
+                                      ID da Loja (`tenantId` no Agente Desktop)
+                                  </label>
+                                  <div className="flex items-center gap-2">
+                                      <input
+                                          type="text"
+                                          readOnly
+                                          value={formData.id || config.id || ''}
+                                          className="w-full p-3.5 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-700 outline-none"
+                                      />
+                                      <button
+                                          type="button"
+                                          onClick={() => handleCopyText(formData.id || config.id || '', 'tenant_id')}
+                                          title="Copiar ID da Loja"
+                                          className="p-3.5 bg-white border border-gray-200 hover:bg-gray-100 rounded-2xl text-gray-600 text-xs font-bold shrink-0"
+                                      >
+                                          {copiedField === 'tenant_id' ? <Check size={16} className="text-emerald-600" /> : <Copy size={16} />}
+                                      </button>
+                                  </div>
+                              </div>
+
+                              <div>
+                                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
+                                      Token de Integração PDV / Agente (`x-api-key`)
+                                  </label>
+                                  <div className="flex items-center gap-2">
+                                      <input
+                                          type="text"
+                                          placeholder="Chave de autenticação do Agente / Webhook"
+                                          value={formData.integrationToken || ''}
+                                          onChange={(e) => setFormData({ ...formData, integrationToken: e.target.value })}
+                                          className="w-full p-3.5 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-700 outline-none focus:ring-2 focus:ring-brand"
+                                      />
+                                      <button
+                                          type="button"
+                                          onClick={() => {
+                                              const generated = (typeof crypto !== 'undefined' && crypto.randomUUID)
+                                                  ? crypto.randomUUID()
+                                                  : `ff_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+                                              setFormData({ ...formData, integrationToken: generated });
+                                          }}
+                                          title="Gerar novo token"
+                                          className="p-3.5 bg-white border border-gray-200 hover:bg-gray-100 rounded-2xl text-gray-600 text-xs font-bold shrink-0"
+                                      >
+                                          <Key size={16} />
+                                      </button>
+                                      {formData.integrationToken && (
+                                          <button
+                                              type="button"
+                                              onClick={() => handleCopyText(formData.integrationToken || '', 'token')}
+                                              title="Copiar Token"
+                                              className="p-3.5 bg-white border border-gray-200 hover:bg-gray-100 rounded-2xl text-gray-600 text-xs font-bold shrink-0"
+                                          >
+                                              {copiedField === 'token' ? <Check size={16} className="text-emerald-600" /> : <Copy size={16} />}
+                                          </button>
+                                      )}
+                                  </div>
+                              </div>
+                          </div>
+                      )}
                   </div>
 
-                  {/* Linha 3: Modo de Sincronização (/produtos vs /produtosalterados com janela máx 31 dias) e Watermarks */}
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-4 border-t border-gray-200/70">
-                      <div>
-                          <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
-                              Modo de Sincronização (offset=1, limit=500)
-                          </label>
-                          <select
-                              value={inovafarmaSyncMode}
-                              onChange={(e) => setInovafarmaSyncMode(e.target.value as 'full' | 'delta')}
-                              className="w-full p-3 bg-white border border-gray-200 rounded-2xl font-bold text-xs text-gray-800 outline-none focus:ring-2 focus:ring-brand"
-                          >
-                              <option value="full">Carga Inicial Completa (/produtos)</option>
-                              <option value="delta">Sincronização Incremental (/produtosalterados - máx. 31 dias)</option>
-                          </select>
-                      </div>
+                  {/* Painel exclusivo Inovafarma (Portal PS) */}
+                  {isInovafarmaErp && (
+                      <>
+                          {/* Linha logo abaixo de URL da API Inovafarma: Slug / Identificador da Rota ({integracao}) e CNPJ da Integração (Header cnpj) */}
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-gray-200/70">
+                              <div>
+                                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
+                                      Slug / Identificador da Rota (`&#123;integracao&#125;`)
+                                  </label>
+                                  <input
+                                      type="text"
+                                      placeholder="homologacao"
+                                      value={formData.erpRouteId ?? formData.erp_route_id ?? INOVAFARMA_DEFAULT_ROUTE_ID}
+                                      onChange={(e) =>
+                                          setFormData({
+                                              ...formData,
+                                              erpRouteId: e.target.value,
+                                              erp_route_id: e.target.value,
+                                          })
+                                      }
+                                      className="w-full p-3.5 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-700 outline-none focus:ring-2 focus:ring-brand"
+                                  />
+                                  <p className="text-[10px] text-gray-400 mt-1">
+                                      Ex: <code className="bg-gray-100 px-1 rounded">homologacao</code>. Monta <code className="bg-gray-100 px-1 rounded">{`${parseInovafarmaUrlAndRoute(formData.erpBaseUrl ?? formData.erp_base_url ?? formData.erpUrl, formData.erpRouteId ?? formData.erp_route_id).v1BaseUrl}/{recurso}`}</code>.
+                                  </p>
+                              </div>
 
-                      {inovafarmaSyncMode === 'full' && (
-                          <div className="md:col-span-2 flex flex-wrap items-center justify-between gap-3 bg-white p-3 rounded-2xl border border-gray-100 text-xs text-gray-600">
-                              <div className="flex flex-wrap items-center gap-3">
-                                  <div className="flex items-center gap-1.5">
-                                      <Clock size={14} className="text-emerald-600" />
-                                      <span className="font-bold">Último Sync Produtos:</span>
+                              <div>
+                                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
+                                      CNPJ da Integração (Header `cnpj`)
+                                  </label>
+                                  <input
+                                      type="text"
+                                      placeholder="02433981097173"
+                                      value={formData.erpCnpj ?? formData.erp_cnpj ?? formData.cnpj ?? ''}
+                                      onChange={(e) =>
+                                          setFormData({
+                                              ...formData,
+                                              erpCnpj: e.target.value,
+                                              erp_cnpj: e.target.value,
+                                          })
+                                      }
+                                      maxLength={18}
+                                      className="w-full p-3.5 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-700 outline-none focus:ring-2 focus:ring-brand"
+                                  />
+                                  <p className="text-[10px] text-gray-400 mt-1">
+                                      Permite testar com <code className="bg-gray-100 px-1 rounded">02433981097173</code> sem alterar o CNPJ principal da loja.
+                                  </p>
+                              </div>
+                          </div>
+
+                          {/* Linha 2: Credenciais de Autenticação Inovafarma (erp_login, erp_password, erp_api_key opcional e Token Webhook) */}
+                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 pt-4 border-t border-gray-200/70">
+                              <div>
+                                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
+                                      Login da API (`erp_login`)
+                                  </label>
+                                  <input
+                                      type="text"
+                                      autoComplete="off"
+                                      placeholder="homologacao@inovafarma.com.br"
+                                      value={formData.erp_login ?? formData.erpApiLogin ?? formData.erp_api_login ?? ''}
+                                      onChange={(e) =>
+                                          setFormData({
+                                              ...formData,
+                                              erp_login: e.target.value,
+                                              erpApiLogin: e.target.value,
+                                              erp_api_login: e.target.value,
+                                          })
+                                      }
+                                      className="w-full p-3.5 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-800 outline-none focus:ring-2 focus:ring-brand"
+                                  />
+                                  <p className="text-[10px] text-gray-400 mt-1.5">
+                                      Autentica em <code className="bg-gray-100 px-1 rounded">POST /api/login</code> (validade de 30 dias em cache).
+                                  </p>
+                              </div>
+
+                              <div>
+                                  <div className="flex items-center justify-between mb-2">
+                                      <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest">
+                                          Senha da API (`erp_password`)
+                                      </label>
+                                      {(formData.hasErpApiPassword || formData.has_erp_api_password) && !formData.erpApiPassword && (
+                                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-[10px] font-black text-emerald-700 uppercase tracking-wider">
+                                              <ShieldCheck size={12} /> Salva
+                                          </span>
+                                      )}
+                                  </div>
+                                  <input
+                                      type="password"
+                                      autoComplete="new-password"
+                                      placeholder={
+                                          formData.hasErpApiPassword || formData.has_erp_api_password
+                                              ? '•••••••••••• (Digite para alterar)'
+                                              : 'Senha da API do Inovafarma'
+                                      }
+                                      value={formData.erp_password ?? formData.erpApiPassword ?? ''}
+                                      onChange={(e) =>
+                                          setFormData({
+                                              ...formData,
+                                              erp_password: e.target.value,
+                                              erpApiPassword: e.target.value,
+                                              erp_api_password: e.target.value,
+                                          })
+                                      }
+                                      className="w-full p-3.5 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-800 outline-none focus:ring-2 focus:ring-brand"
+                                  />
+                                  <p className="text-[10px] text-gray-400 mt-1.5">
+                                      Criptografada (AES-256-GCM) e nunca exposta em texto plano.
+                                  </p>
+                              </div>
+
+                              <div>
+                                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
+                                      ApiKey Adicional (`erp_api_key` - Opcional)
+                                  </label>
+                                  <input
+                                      type="text"
+                                      autoComplete="off"
+                                      placeholder="Opcional (Header ApiKey)"
+                                      value={formData.erpApiKey ?? formData.erp_api_key ?? ''}
+                                      onChange={(e) =>
+                                          setFormData({
+                                              ...formData,
+                                              erpApiKey: e.target.value,
+                                              erp_api_key: e.target.value,
+                                          })
+                                      }
+                                      className="w-full p-3.5 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-700 outline-none focus:ring-2 focus:ring-brand"
+                                  />
+                                  <p className="text-[10px] text-gray-400 mt-1.5">
+                                      Enviada no header <code className="bg-gray-100 px-1 rounded">ApiKey</code> caso exigida no credenciamento.
+                                  </p>
+                              </div>
+
+                              <div>
+                                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
+                                      Token Webhook Outros ERPs (`x-api-key`)
+                                  </label>
+                                  <div className="flex items-center gap-2">
+                                      <input
+                                          type="text"
+                                          placeholder="Chave do Webhook"
+                                          value={formData.integrationToken || ''}
+                                          onChange={(e) => setFormData({ ...formData, integrationToken: e.target.value })}
+                                          className="w-full p-3.5 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-700 outline-none focus:ring-2 focus:ring-brand"
+                                      />
+                                      <button
+                                          type="button"
+                                          onClick={() => {
+                                              const generated = (typeof crypto !== 'undefined' && crypto.randomUUID)
+                                                  ? crypto.randomUUID()
+                                                  : `ff_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+                                              setFormData({ ...formData, integrationToken: generated });
+                                          }}
+                                          title="Gerar novo token"
+                                          className="p-3.5 bg-white border border-gray-200 hover:bg-gray-100 rounded-2xl text-gray-600 text-xs font-bold shrink-0"
+                                      >
+                                          <Key size={16} />
+                                      </button>
+                                      {formData.integrationToken && (
+                                          <button
+                                              type="button"
+                                              onClick={() => handleCopyText(formData.integrationToken || '', 'token')}
+                                              title="Copiar Token"
+                                              className="p-3.5 bg-white border border-gray-200 hover:bg-gray-100 rounded-2xl text-gray-600 text-xs font-bold shrink-0"
+                                          >
+                                              {copiedField === 'token' ? <Check size={16} className="text-emerald-600" /> : <Copy size={16} />}
+                                          </button>
+                                      )}
+                                  </div>
+                              </div>
+                          </div>
+
+                          {/* Linha 3: Modo de Sincronização (/produtos vs /produtosalterados com janela máx 31 dias) e Watermarks */}
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-4 border-t border-gray-200/70">
+                              <div>
+                                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
+                                      Modo de Sincronização (offset=1, limit=500)
+                                  </label>
+                                  <select
+                                      value={inovafarmaSyncMode}
+                                      onChange={(e) => setInovafarmaSyncMode(e.target.value as 'full' | 'delta')}
+                                      className="w-full p-3 bg-white border border-gray-200 rounded-2xl font-bold text-xs text-gray-800 outline-none focus:ring-2 focus:ring-brand"
+                                  >
+                                      <option value="full">Carga Inicial Completa (/produtos)</option>
+                                      <option value="delta">Sincronização Incremental (/produtosalterados - máx. 31 dias)</option>
+                                  </select>
+                              </div>
+
+                              {inovafarmaSyncMode === 'full' && (
+                                  <div className="md:col-span-2 flex flex-wrap items-center justify-between gap-3 bg-white p-3 rounded-2xl border border-gray-100 text-xs text-gray-600">
+                                      <div className="flex flex-wrap items-center gap-3">
+                                          <div className="flex items-center gap-1.5">
+                                              <Clock size={14} className="text-emerald-600" />
+                                              <span className="font-bold">Último Sync Produtos:</span>
+                                              <span className="font-mono">
+                                                  {formData.lastProductSync || formData.last_product_sync
+                                                      ? new Date(formData.lastProductSync || formData.last_product_sync || '').toLocaleString('pt-BR')
+                                                      : 'Aguardando 1ª carga'}
+                                              </span>
+                                          </div>
+                                          {(formData.erpTokenExpiration || formData.erp_token_expiration) && (
+                                              <div className="flex items-center gap-1.5 pl-3 border-l border-gray-200">
+                                                  <ShieldCheck size={14} className="text-blue-600" />
+                                                  <span className="font-bold">Token Cache válido até:</span>
+                                                  <span className="font-mono">
+                                                      {new Date(formData.erpTokenExpiration || formData.erp_token_expiration || '').toLocaleDateString('pt-BR')}
+                                                  </span>
+                                              </div>
+                                          )}
+                                      </div>
+                                      <button
+                                          type="button"
+                                          onClick={handleSyncInovafarmaNow}
+                                          disabled={isSyncingInovafarma}
+                                          className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white font-black text-[11px] uppercase tracking-wider flex items-center gap-2 shadow-md shadow-emerald-600/20 transition-all cursor-pointer shrink-0"
+                                      >
+                                          {isSyncingInovafarma ? (
+                                              <>
+                                                  <Loader2 size={14} className="animate-spin" />
+                                                  {inovafarmaSyncProgressText || 'Sincronizando...'}
+                                              </>
+                                          ) : (
+                                              <>
+                                                  <RefreshCw size={14} />
+                                                  SINCRONIZAR AGORA COM INOVAFARMA
+                                              </>
+                                          )}
+                                      </button>
+                                  </div>
+                              )}
+
+                              {inovafarmaSyncMode === 'delta' && (
+                                  <>
+                                      <div>
+                                          <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
+                                              Data Inicial (AAAA-MM-DD)
+                                          </label>
+                                          <input
+                                              type="date"
+                                              value={inovafarmaDateInicial}
+                                              onChange={(e) => setInovafarmaDateInicial(e.target.value)}
+                                              className="w-full p-3 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-700 outline-none focus:ring-2 focus:ring-brand"
+                                          />
+                                      </div>
+                                      <div>
+                                          <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
+                                              Data Final (AAAA-MM-DD - Janela máx. 31 dias)
+                                          </label>
+                                          <input
+                                              type="date"
+                                              value={inovafarmaDateFinal}
+                                              onChange={(e) => setInovafarmaDateFinal(e.target.value)}
+                                              className="w-full p-3 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-700 outline-none focus:ring-2 focus:ring-brand"
+                                          />
+                                      </div>
+                                  </>
+                              )}
+                          </div>
+                      </>
+                  )}
+
+                  {/* Painel dedicado quando a loja usa Siagold ou outro ERP */}
+                  {!isInovafarmaErp && (
+                      <div className="pt-4 border-t border-gray-200/70">
+                          <div className="bg-white p-5 rounded-2xl border border-gray-200/80 space-y-3">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <div className="flex items-center gap-2">
+                                      <ShieldCheck size={18} className="text-emerald-600 shrink-0" />
+                                      <h4 className="font-black text-gray-900 text-sm">
+                                          {isSiagoldErp
+                                              ? 'Método de Integração Ativo: Siagold (Agente Desktop Local)'
+                                              : `Método de Integração Ativo: ${getErpDisplayName(activeErpType)}`}
+                                      </h4>
+                                  </div>
+                                  <div className="flex items-center gap-1.5 text-xs text-gray-600 bg-gray-50 px-3 py-1 rounded-xl border border-gray-100">
+                                      <Clock size={13} className="text-emerald-600" />
+                                      <span className="font-bold">Última Sincronização:</span>
                                       <span className="font-mono">
                                           {formData.lastProductSync || formData.last_product_sync
                                               ? new Date(formData.lastProductSync || formData.last_product_sync || '').toLocaleString('pt-BR')
-                                              : 'Aguardando 1ª carga'}
+                                              : 'Aguardando sincronização do Agente'}
                                       </span>
                                   </div>
-                                  {(formData.erpTokenExpiration || formData.erp_token_expiration) && (
-                                      <div className="flex items-center gap-1.5 pl-3 border-l border-gray-200">
-                                          <ShieldCheck size={14} className="text-blue-600" />
-                                          <span className="font-bold">Token Cache válido até:</span>
-                                          <span className="font-mono">
-                                              {new Date(formData.erpTokenExpiration || formData.erp_token_expiration || '').toLocaleDateString('pt-BR')}
-                                          </span>
-                                      </div>
-                                  )}
                               </div>
-                              <button
-                                  type="button"
-                                  onClick={handleSyncInovafarmaNow}
-                                  disabled={isSyncingInovafarma}
-                                  className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white font-black text-[11px] uppercase tracking-wider flex items-center gap-2 shadow-md shadow-emerald-600/20 transition-all cursor-pointer shrink-0"
-                              >
-                                  {isSyncingInovafarma ? (
-                                      <>
-                                          <Loader2 size={14} className="animate-spin" />
-                                          {inovafarmaSyncProgressText || 'Sincronizando...'}
-                                      </>
-                                  ) : (
-                                      <>
-                                          <RefreshCw size={14} />
-                                          SINCRONIZAR AGORA COM INOVAFARMA
-                                      </>
-                                  )}
-                              </button>
+                              <p className="text-xs text-gray-600 leading-relaxed">
+                                  {isSiagoldErp
+                                      ? 'Esta unidade utiliza o Agente Desktop FarmaFlow integrado ao banco de dados do Siagold. O agente sincroniza automaticamente Código Interno, EAN, Nome/Apresentação, Preço de Venda, Preço Promocional, Saldo de Estoque, Fabricante/Laboratório, Departamento/Grupo e Classificação (Genérico/Retenção de Receita) usando o ID da Loja e o Token x-api-key acima.'
+                                      : 'Esta unidade realiza a sincronização de catálogo, estoque e pedidos por meio do Agente Desktop FarmaFlow ou via chamadas REST autenticadas com o Token x-api-key acima.'}
+                              </p>
                           </div>
-                      )}
-
-                      {inovafarmaSyncMode === 'delta' && (
-                          <>
-                              <div>
-                                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
-                                      Data Inicial (AAAA-MM-DD)
-                                  </label>
-                                  <input
-                                      type="date"
-                                      value={inovafarmaDateInicial}
-                                      onChange={(e) => setInovafarmaDateInicial(e.target.value)}
-                                      className="w-full p-3 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-700 outline-none focus:ring-2 focus:ring-brand"
-                                  />
-                              </div>
-                              <div>
-                                  <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">
-                                      Data Final (AAAA-MM-DD - Janela máx. 31 dias)
-                                  </label>
-                                  <input
-                                      type="date"
-                                      value={inovafarmaDateFinal}
-                                      onChange={(e) => setInovafarmaDateFinal(e.target.value)}
-                                      className="w-full p-3 bg-white border border-gray-200 rounded-2xl font-mono text-xs text-gray-700 outline-none focus:ring-2 focus:ring-brand"
-                                  />
-                              </div>
-                          </>
-                      )}
-                  </div>
-
+                      </div>
+                  )}
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t border-gray-200/70">
                       <div className="bg-white p-4 rounded-2xl border border-gray-100">
@@ -2259,7 +2490,9 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
                   <div className="flex items-center justify-between gap-4 pt-4 border-t border-gray-200/70">
                       <div className="flex-1">
                           <h4 className="font-black text-gray-900 text-sm">Ignorar Preços do ERP (Preservar Preços Manuais / Planilha)</h4>
-                          <p className="text-xs text-gray-500 mt-1">Ative para manter os preços que você cadastra manualmente ou envia via planilha no FarmaFlow. Quando ativo, a sincronização com o Inovafarma e o PDV atualizará apenas o estoque, mantendo seus preços intactos.</p>
+                          <p className="text-xs text-gray-500 mt-1">
+                              Ative para manter os preços que você cadastra manualmente ou envia via planilha no FarmaFlow. Quando ativo, a sincronização com {isInovafarmaErp ? 'o Inovafarma e o PDV' : 'o ERP e o Agente Desktop'} atualizará apenas o estoque, mantendo seus preços intactos.
+                          </p>
                       </div>
                       <label className="relative inline-flex items-center cursor-pointer shrink-0">
                          <input 
