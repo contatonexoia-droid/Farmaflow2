@@ -1040,6 +1040,46 @@ const App: React.FC = () => {
     }
   }, [products, handleProductClick]);
 
+  // Escuta cliques em Notificações Web Push quando a aba já está aberta
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) return;
+    const handleSwMessage = (event: MessageEvent) => {
+      if (event.data && event.data.type === "PUSH_NOTIFICATION_CLICK") {
+        let targetProductId = event.data.productId;
+        if (!targetProductId && event.data.url) {
+          try {
+            const parsedUrl = new URL(event.data.url, window.location.origin);
+            targetProductId =
+              parsedUrl.searchParams.get("product") ||
+              parsedUrl.searchParams.get("produto");
+          } catch (_) {}
+        }
+        if (targetProductId) {
+          const cleanId = String(targetProductId).trim();
+          const found = (products || []).find(
+            (p) => String(p.id).toLowerCase() === cleanId.toLowerCase(),
+          );
+          if (found) {
+            handleProductClick(found);
+          } else {
+            fetch(`/api/v1/products/${encodeURIComponent(cleanId)}`)
+              .then((res) => (res.ok ? res.json() : null))
+              .then((dbProd) => {
+                if (dbProd && dbProd.id) {
+                  handleProductClick(mapDbProductToApp(dbProd));
+                }
+              })
+              .catch(() => {});
+          }
+        }
+      }
+    };
+    navigator.serviceWorker.addEventListener("message", handleSwMessage);
+    return () => {
+      navigator.serviceWorker.removeEventListener("message", handleSwMessage);
+    };
+  }, [products, handleProductClick]);
+
   // --- NATIVE BACK BUTTON HANDLING (Browser History Sync) ---
   useEffect(() => {
     const handlePopState = (event: PopStateEvent) => {

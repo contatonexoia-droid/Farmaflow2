@@ -6,7 +6,7 @@ import {
   Loader2, Sparkles, Wand2, Upload, FileSpreadsheet, Factory, 
   Package, CheckSquare, Square, ListChecks, CheckCircle2, Star, ChevronDown, Filter,
   RefreshCw, Info, AlertCircle, CheckCircle, ArrowRight, History, FileText, Printer, FileImage, Link as LinkIcon, Store, ShoppingCart, ArrowDown, Minus, Download, Tag, RotateCcw, ImageOff, ScanLine, Layers,
-  Barcode
+  Barcode, Bell
 } from 'lucide-react';
 import { fetchProductDetails, generateAiProductImage } from '../services/gemini';
 import { processAiEnrichmentQueue, AiEnrichmentReport } from '../services/aiProcessor';
@@ -21,6 +21,7 @@ import { getDepartmentForCategory, DEPARTMENT_MAPPING, OFFICIAL_DEPARTMENTS, OFF
 import { getStoreUrl } from '../lib/store';
 import { AdminDepartmentManager } from './AdminDepartmentManager';
 import { DynamicFlyerGenerator } from './DynamicFlyerGenerator';
+import { PushNotificationModal } from './PushNotificationModal';
 import { getTenants, getProductsByTenant, saveProductsByTenant } from '../services/storage';
 import { supabase } from '../services/supabase';
 
@@ -661,6 +662,8 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
     return false;
   }, [isSuperAdmin]);
   const [isCleaningCorruptedImages, setIsCleaningCorruptedImages] = useState(false);
+  const [isPushModalOpen, setIsPushModalOpen] = useState(false);
+  const [pushTargetProduct, setPushTargetProduct] = useState<Product | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
   const [filterDepartment, setFilterDepartment] = useState('Todos');
@@ -4070,6 +4073,16 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                             <Printer size={18} /> Gerar Etiquetas
                         </button>
                     )}
+                    <button
+                        onClick={() => {
+                            setPushTargetProduct(null);
+                            setIsPushModalOpen(true);
+                        }}
+                        title="Selecionar um produto e disparar Notificação Push Promocional para clientes com o app instalado"
+                        className="flex-1 md:flex-none px-5 py-4 rounded-xl font-bold text-xs uppercase tracking-wide flex items-center justify-center gap-2 bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 whitespace-nowrap"
+                    >
+                        <Bell size={18} /> 🔔 Notificar Promoção
+                    </button>
                     <button onClick={handleCreateProduct} className="flex-1 md:flex-none px-8 py-4 rounded-xl font-black text-xs uppercase tracking-wide flex items-center justify-center gap-2 bg-brand text-brand-contrast hover:bg-emerald-700 transition-all shadow-lg w-full md:w-auto md:ml-auto whitespace-nowrap">
                         <Plus size={18} /> Novo Item
                     </button>
@@ -4141,8 +4154,18 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                                     {product.stock} un
                                 </div>
                                 <div className="flex gap-1">
-                                    <button onClick={() => handleEditProduct(product as Product)} className="p-1.5 bg-gray-50 text-gray-500 rounded-lg hover:bg-brand hover:text-brand-contrast"><Edit3 size={14}/></button>
-                                    <button onClick={() => onProductDelete(product.id)} className="p-1.5 bg-gray-50 text-gray-400 rounded-lg hover:bg-red-50 hover:text-red-500"><Trash2 size={14}/></button>
+                                    <button
+                                        onClick={() => {
+                                            setPushTargetProduct(product as Product);
+                                            setIsPushModalOpen(true);
+                                        }}
+                                        title="🔔 Notificar Promoção no Celular"
+                                        className="p-1.5 bg-amber-50 text-amber-600 rounded-lg hover:bg-amber-500 hover:text-white transition-colors"
+                                    >
+                                        <Bell size={14} />
+                                    </button>
+                                    <button onClick={() => handleEditProduct(product as Product)} title="Editar Produto" className="p-1.5 bg-gray-50 text-gray-500 rounded-lg hover:bg-brand hover:text-brand-contrast"><Edit3 size={14}/></button>
+                                    <button onClick={() => onProductDelete(product.id)} title="Excluir Produto" className="p-1.5 bg-gray-50 text-gray-400 rounded-lg hover:bg-red-50 hover:text-red-500"><Trash2 size={14}/></button>
                                 </div>
                             </div>
                         </div>
@@ -5734,6 +5757,20 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                     </div>
                 </div>
             </div>
+        )}
+
+        {tenant && (
+            <PushNotificationModal
+                isOpen={isPushModalOpen}
+                onClose={() => {
+                    setIsPushModalOpen(false);
+                    setPushTargetProduct(null);
+                }}
+                tenant={tenant}
+                products={products}
+                initialProduct={pushTargetProduct}
+                getProductDisplayImage={getProductDisplayImage}
+            />
         )}
 
     </div>

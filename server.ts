@@ -76,6 +76,13 @@ import {
   deriveInovafarmaDateRange,
   sanitizeTenantErpCredentialsForClient,
 } from "./services/inovafarma.js";
+import {
+  ensurePushSubscriptionsTable,
+  getOrInitVapidKeys,
+  savePushSubscription,
+  getTenantPushSubscriptions,
+  sendPromotionalPushToTenant,
+} from "./services/webPushService.js";
 
 
 
@@ -12738,6 +12745,182 @@ app.post("/api/v1/chat/conversations/:id/transfer", handleTransferConversation);
 app.post("/api/v1/chat/transfer", handleTransferConversation);
 
 // ==============================================================================
+// NOTIFICAÇÕES WEB PUSH PROMOCIONAIS (PWA PUSH NOTIFICATIONS ISOLADAS POR LOJA)
+// ==============================================================================
+
+app.get("/api/v1/push/vapid-public-key", async (req, res) => {
+  try {
+    const keys = await getOrInitVapidKeys(supabaseAdmin);
+    const tenantId = String(req.query.tenantId || req.query.tenant_id || "").trim();
+    let subscriberCount = 0;
+    if (tenantId) {
+      const subs = await getTenantPushSubscriptions(supabaseAdmin, tenantId);
+      subscriberCount = subs.length;
+    }
+    return res.json({
+      publicKey: keys.publicKey,
+      subscriberCount,
+    });
+  } catch (err: any) {
+    console.error("[WebPush VAPID Key Error]:", err);
+    return res.status(500).json({ error: err.message || "Erro ao obter chave pública VAPID." });
+  }
+});
+
+app.get("/api/v1/push/stats", async (req, res) => {
+  try {
+    const tenantId = String(req.query.tenantId || req.query.tenant_id || "").trim();
+    if (!tenantId) {
+      return res.status(400).json({ error: "tenantId é obrigatório." });
+    }
+    const subs = await getTenantPushSubscriptions(supabaseAdmin, tenantId);
+    return res.json({
+      success: true,
+      tenantId,
+      subscriberCount: subs.length,
+    });
+  } catch (err: any) {
+    console.error("[WebPush Stats Error]:", err);
+    return res.status(500).json({ error: err.message || "Erro ao consultar inscritos Web Push." });
+  }
+});
+
+app.post("/api/v1/push/subscribe", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const tenantId = String(body.tenantId || body.tenant_id || "").trim();
+    const subscription = body.subscription || body;
+    const endpoint = String(subscription?.endpoint || body.endpoint || "").trim();
+    const p256dh = String(
+      subscription?.keys?.p256dh || body.p256dh || ""
+    ).trim();
+    const auth = String(
+      subscription?.keys?.auth || body.auth || ""
+    ).trim();
+    const userAgent = String(
+      body.userAgent || body.user_agent || req.headers["user-agent"] || ""
+    ).trim();
+
+    if (!tenantId) {
+      return res.status(400).json({ error: "tenant_id é obrigatório para inscrição Push." });
+    }
+    if (!endpoint || !p256dh || !auth) {
+      return res.status(400).json({
+        error: "Dados de inscrição Push incompletos (endpoint, p256dh e auth são obrigatórios).",
+      });
+    }
+
+    const saved = await savePushSubscription(supabaseAdmin, {
+      tenantId,
+      endpoint,
+      p256dh,
+      auth,
+      userAgent,
+    });
+
+    const allSubs = await getTenantPushSubscriptions(supabaseAdmin, tenantId);
+
+    return res.json({
+      success: true,
+      subscription: saved,
+      subscriberCount: allSubs.length,
+    });
+  } catch (err: any) {
+    console.error("[WebPush Subscribe Error]:", err);
+    return res.status(500).json({ error: err.message || "Erro ao registrar inscrição Web Push." });
+  }
+});
+
+app.post("/api/v1/push/send", async (req, res) => {
+  try {
+    const {
+      tenantId,
+      tenant_id,
+      productId,
+      product_id,
+      title,
+      body,
+      message,
+      imageUrl,
+      image_url,
+      targetUrl,
+      target_url,
+      iconUrl,
+      icon_url,
+    } = req.body || {};
+
+    const resolvedTenantId = String(tenantId || tenant_id || "").trim();
+    const resolvedProductId = String(productId || product_id || "").trim();
+    const resolvedTitle = String(title || "").trim();
+    const resolvedBody = String(body || message || "").trim();
+    let resolvedImageUrl = String(imageUrl || image_url || "").trim();
+    let resolvedTargetUrl = String(targetUrl || target_url || "").trim();
+    let resolvedIconUrl = String(iconUrl || icon_url || "").trim();
+
+    if (!resolvedTenantId) {
+      return res.status(400).json({ error: "tenantId é obrigatório." });
+    }
+    if (!resolvedTitle || !resolvedBody) {
+      return res.status(400).json({ error: "Título e mensagem da notificação são obrigatórios." });
+    }
+
+    // Busca informações da loja caso iconUrl ou targetUrl não tenham sido informados
+    try {
+      const { data: tenantRow } = await supabaseAdmin
+        .from("tenants")
+        .select("id, slug, name, logo, logo_url")
+        .eq("id", resolvedTenantId)
+        .maybeSingle();
+
+      if (tenantRow) {
+        if (!resolvedIconUrl) {
+          const rawLogo = String(tenantRow.logo_url || tenantRow.logo || "").trim();
+          if (rawLogo.startsWith("http://") || rawLogo.startsWith("https://")) {
+            resolvedIconUrl = rawLogo;
+          } else if (rawLogo.startsWith("data:")) {
+            resolvedIconUrl = `/api/v1/store/${encodeURIComponent(resolvedTenantId)}/logo.png`;
+          }
+        }
+        if (!resolvedTargetUrl) {
+          const slugOrId = tenantRow.slug || tenantRow.id;
+          resolvedTargetUrl = resolvedProductId
+            ? `/loja/${slugOrId}?product=${encodeURIComponent(resolvedProductId)}`
+            : `/loja/${slugOrId}`;
+        }
+      }
+    } catch (_) {}
+
+    if (!resolvedTargetUrl) {
+      resolvedTargetUrl = resolvedProductId
+        ? `/loja/${resolvedTenantId}?product=${encodeURIComponent(resolvedProductId)}`
+        : `/loja/${resolvedTenantId}`;
+    }
+
+    const result = await sendPromotionalPushToTenant(supabaseAdmin, {
+      tenantId: resolvedTenantId,
+      productId: resolvedProductId || undefined,
+      title: resolvedTitle,
+      body: resolvedBody,
+      imageUrl: resolvedImageUrl || undefined,
+      targetUrl: resolvedTargetUrl,
+      iconUrl: resolvedIconUrl || "/icon-192.svg",
+    });
+
+    return res.json({
+      success: true,
+      sentCount: result.sentCount,
+      failedCount: result.failedCount,
+      removedCount: result.removedCount,
+      totalSubscribers: result.totalSubscribers,
+      targetUrl: resolvedTargetUrl,
+    });
+  } catch (err: any) {
+    console.error("[WebPush Send Error]:", err);
+    return res.status(500).json({ error: err.message || "Erro ao disparar notificações Web Push." });
+  }
+});
+
+// ==============================================================================
 // AGENDADOR AUTOMÁTICO EM BACKGROUND DO INOVAFARMA (POLLING A CADA 15 MINUTOS)
 // ==============================================================================
 let isInovafarmaCronRunning = false;
@@ -12999,6 +13182,13 @@ async function startServer() {
 
   app.listen(listenPort, "0.0.0.0", () => {
     console.log(`Server running on http://0.0.0.0:${listenPort}`);
+
+    // Inicializa chaves VAPID e tabela push_subscriptions no boot
+    ensurePushSubscriptionsTable()
+      .then(() => getOrInitVapidKeys(supabaseAdmin))
+      .catch((err) =>
+        console.warn("[WebPush Startup Init Warning]:", err?.message || err),
+      );
 
     // Inicia o agendador automático do Inovafarma a cada 15 minutos (900.000 ms)
     const INOVAFARMA_POLL_INTERVAL_MS = 15 * 60 * 1000;

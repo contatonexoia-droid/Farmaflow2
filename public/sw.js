@@ -63,44 +63,98 @@ self.addEventListener('push', function(event) {
   if (event.data) {
     try {
       data = event.data.json();
-    } catch(e) {
-      data = { title: 'Notificação', body: event.data.text() };
+    } catch (e) {
+      data = { title: 'Oferta Especial!', body: event.data.text() };
     }
   }
 
+  const targetUrl =
+    data.targetUrl ||
+    data.url ||
+    (data.data && (data.data.targetUrl || data.data.url)) ||
+    '/';
+
+  const iconUrl = data.icon || data.iconUrl || '/icon-192.svg';
+  const badgeUrl = data.badge || data.icon || data.iconUrl || '/icon-192.svg';
+  const imageUrl = data.image || data.imageUrl || undefined;
+
   const options = {
-    body: data.body || 'Novo pedido recebido!',
-    icon: '/icon-192.png',
-    badge: '/icon-192.png',
+    body: data.body || 'Confira nossas ofertas especiais no aplicativo!',
+    icon: iconUrl,
+    badge: badgeUrl,
+    ...(imageUrl ? { image: imageUrl } : {}),
     vibrate: [200, 100, 200, 100, 200],
-    data: data.url || '/',
+    tag: data.tag || (data.productId ? `promo-${data.productId}` : undefined),
+    renotify: true,
+    data: {
+      url: targetUrl,
+      targetUrl: targetUrl,
+      tenantId: data.tenantId || null,
+      productId: data.productId || null,
+    },
     requireInteraction: true,
     actions: [
-      { action: 'view', title: 'Visualizar Agora' }
+      { action: 'view', title: data.actionTitle || 'Ver Oferta Agora' }
     ]
   };
 
   event.waitUntil(
-    self.registration.showNotification(data.title || '📦 Novo Pedido Recebido!', options)
+    self.registration.showNotification(
+      data.title || '🔥 Oferta Especial!',
+      options
+    )
   );
 });
 
 self.addEventListener('notificationclick', function(event) {
   event.notification.close();
-  const urlToOpen = new URL(event.notification.data, self.location.origin).href;
+
+  const rawData = event.notification.data;
+  const rawUrl =
+    (typeof rawData === 'string' ? rawData : rawData?.targetUrl || rawData?.url) ||
+    '/';
+  const urlToOpen = new URL(rawUrl, self.location.origin).href;
 
   event.waitUntil(
-    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((windowClients) => {
-      for (let i = 0; i < windowClients.length; i++) {
-        const client = windowClients[i];
-        if (client.url === urlToOpen && 'focus' in client) {
-          client.postMessage({ type: 'ORDER_OPEN' });
-          return client.focus();
+    self.clients
+      .matchAll({ type: 'window', includeUncontrolled: true })
+      .then(async (windowClients) => {
+        for (let i = 0; i < windowClients.length; i++) {
+          const client = windowClients[i];
+          if (client.url === urlToOpen && 'focus' in client) {
+            client.postMessage({
+              type: 'PUSH_NOTIFICATION_CLICK',
+              url: urlToOpen,
+              productId: typeof rawData === 'object' ? rawData?.productId : null,
+            });
+            return client.focus();
+          }
         }
-      }
-      if (self.clients.openWindow) {
-        return self.clients.openWindow(urlToOpen);
-      }
-    })
+        // If there is an existing window on the same origin, navigate it and focus
+        for (let i = 0; i < windowClients.length; i++) {
+          const client = windowClients[i];
+          if (
+            client.url.startsWith(self.location.origin) &&
+            !client.url.includes('/admin') &&
+            'focus' in client
+          ) {
+            if ('navigate' in client) {
+              try {
+                await client.navigate(urlToOpen);
+              } catch (_) {}
+            }
+            client.postMessage({
+              type: 'PUSH_NOTIFICATION_CLICK',
+              url: urlToOpen,
+              productId: typeof rawData === 'object' ? rawData?.productId : null,
+            });
+            return client.focus();
+          }
+        }
+        if (self.clients.openWindow) {
+          return self.clients.openWindow(urlToOpen);
+        }
+      })
   );
 });
+
