@@ -8683,6 +8683,161 @@ app.all([
   "/api/agent/status"
 ], handleAgentStatus);
 
+// ============================================================================
+// CACHE DE HASH EM MEMÓRIA POR TENANT_ID PARA DELTA SYNC DO AGENTE DESKTOP
+// Evita esgotar o Disk IO Budget do Supabase quando o agente envia 5.000+ produtos a cada 1 minuto
+// ============================================================================
+interface ProductDeltaSnapshot {
+  internal_code: string;
+  barcode: string;
+  name: string;
+  price: number;
+  promotional_price: number;
+  stock: number;
+  hash: string;
+}
+
+interface TenantDeltaCacheEntry {
+  loadedAt: number;
+  byInternalCode: Map<string, ProductDeltaSnapshot>;
+  byBarcode: Map<string, ProductDeltaSnapshot>;
+}
+
+const tenantProductDeltaCache = new Map<string, TenantDeltaCacheEntry>();
+const DELTA_CACHE_TTL_MS = 30 * 60 * 1000; // Recarrega snapshot leve a cada 30 minutos
+
+const buildProductDeltaHash = (
+  name: any,
+  price: any,
+  promotionalPrice: any,
+  stock: any,
+): string => {
+  const normName = String(name || "").trim().toLowerCase();
+  const normPrice = (Number(price) || 0).toFixed(2);
+  const normPromo =
+    promotionalPrice !== null &&
+    promotionalPrice !== undefined &&
+    Number(promotionalPrice) > 0
+      ? Number(promotionalPrice).toFixed(2)
+      : "0.00";
+  const normStock = Math.max(0, Math.floor(Number(stock) || 0));
+  return `${normName}|${normPrice}|${normPromo}|${normStock}`;
+};
+
+const updateTenantDeltaCacheWithRows = (tenantId: string, rows: any[]) => {
+  const cacheEntry = tenantProductDeltaCache.get(tenantId);
+  if (!cacheEntry) return;
+
+  for (const row of rows) {
+    const codeKey = row.internal_code ? String(row.internal_code).trim() : "";
+    const barcodeKey = row.barcode ? String(row.barcode).trim() : "";
+    if (!codeKey && !barcodeKey) continue;
+
+    const priceNum = Number(row.price) || 0;
+    const promoNum =
+      row.promotional_price !== null &&
+      row.promotional_price !== undefined &&
+      Number(row.promotional_price) > 0
+        ? Number(row.promotional_price)
+        : 0;
+    const stockNum = Math.max(0, Math.floor(Number(row.stock) || 0));
+    const nameStr = String(row.name || "").trim();
+
+    const snapshot: ProductDeltaSnapshot = {
+      internal_code: codeKey,
+      barcode: barcodeKey,
+      name: nameStr,
+      price: priceNum,
+      promotional_price: promoNum,
+      stock: stockNum,
+      hash: buildProductDeltaHash(nameStr, priceNum, promoNum, stockNum),
+    };
+
+    if (codeKey) cacheEntry.byInternalCode.set(codeKey, snapshot);
+    if (barcodeKey) cacheEntry.byBarcode.set(barcodeKey, snapshot);
+  }
+};
+
+const getOrLoadTenantDeltaCache = async (
+  tenantId: string,
+): Promise<TenantDeltaCacheEntry> => {
+  const existing = tenantProductDeltaCache.get(tenantId);
+  if (existing && Date.now() - existing.loadedAt < DELTA_CACHE_TTL_MS) {
+    return existing;
+  }
+
+  const byInternalCode = new Map<string, ProductDeltaSnapshot>();
+  const byBarcode = new Map<string, ProductDeltaSnapshot>();
+
+  const PAGE_SIZE = 1000;
+  let offset = 0;
+  let hasMore = true;
+
+  try {
+    while (hasMore) {
+      const { data, error } = await supabaseAdmin
+        .from("products")
+        .select("barcode, internal_code, name, price, promotional_price, stock")
+        .eq("tenant_id", tenantId)
+        .range(offset, offset + PAGE_SIZE - 1);
+
+      if (error || !data || data.length === 0) {
+        hasMore = false;
+        break;
+      }
+
+      for (const row of data) {
+        const codeKey = row.internal_code ? String(row.internal_code).trim() : "";
+        const barcodeKey = row.barcode ? String(row.barcode).trim() : "";
+        if (!codeKey && !barcodeKey) continue;
+
+        const priceNum = Number(row.price) || 0;
+        const promoNum =
+          row.promotional_price !== null &&
+          row.promotional_price !== undefined &&
+          Number(row.promotional_price) > 0
+            ? Number(row.promotional_price)
+            : 0;
+        const stockNum = Math.max(0, Math.floor(Number(row.stock) || 0));
+        const nameStr = String(row.name || "").trim();
+
+        const snapshot: ProductDeltaSnapshot = {
+          internal_code: codeKey,
+          barcode: barcodeKey,
+          name: nameStr,
+          price: priceNum,
+          promotional_price: promoNum,
+          stock: stockNum,
+          hash: buildProductDeltaHash(nameStr, priceNum, promoNum, stockNum),
+        };
+
+        if (codeKey) byInternalCode.set(codeKey, snapshot);
+        if (barcodeKey) byBarcode.set(barcodeKey, snapshot);
+      }
+
+      if (data.length < PAGE_SIZE) {
+        hasMore = false;
+      } else {
+        offset += PAGE_SIZE;
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    }
+  } catch (err: any) {
+    console.warn(
+      `[Delta Sync] Aviso ao carregar snapshot inicial do tenant ${tenantId}:`,
+      err?.message || err,
+    );
+  }
+
+  const entry: TenantDeltaCacheEntry = {
+    loadedAt: Date.now(),
+    byInternalCode,
+    byBarcode,
+  };
+  tenantProductDeltaCache.set(tenantId, entry);
+  return entry;
+};
+
 const handleProductIntegration = async (req: express.Request, res: express.Response) => {
   let tenantId: string | null = null;
   try {
@@ -9104,18 +9259,100 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
        });
      }
 
-    const upsertPayload = Array.from(uniquePayloadMap.values());
+    const allNormalizedProducts = Array.from(uniquePayloadMap.values());
 
-    if (upsertPayload.length === 0) {
-      await logIntegration(tenantId, "/api/v1/integration", { 
-        message: "Nenhum produto válido encontrado no lote.", 
-        productsBatchSize: productsBatch.length,
-        processedCount: 0,
-        isSuccess: true,
-        rawBatchSample: productsBatch.slice(0, 5)
-      }, "SUCCESS");
-      return res.status(200).json({ success: true, processed: 0, message: "Nenhum produto válido encontrado no lote." });
+    if (allNormalizedProducts.length === 0) {
+      return res.status(200).json({
+        success: true,
+        processed: 0,
+        message: "Nenhum produto válido encontrado no lote.",
+      });
     }
+
+    // ==========================================================================
+    // DELTA SYNC: Compara o payload recebido com o cache em memória / estado atual
+    // e filtra APENAS produtos novos ou que tiveram alteração real de preço,
+    // preço promocional, nome ou estoque.
+    // ==========================================================================
+    const deltaCache = await getOrLoadTenantDeltaCache(tenantId);
+    const upsertPayload: any[] = [];
+    let unchangedCount = 0;
+
+    for (let idx = 0; idx < allNormalizedProducts.length; idx++) {
+      if (idx > 0 && idx % 500 === 0) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      const item = allNormalizedProducts[idx];
+      const codeKey = item.internal_code ? String(item.internal_code).trim() : "";
+      const barcodeKey = item.barcode ? String(item.barcode).trim() : "";
+
+      const cached =
+        (codeKey ? deltaCache.byInternalCode.get(codeKey) : undefined) ||
+        (barcodeKey ? deltaCache.byBarcode.get(barcodeKey) : undefined);
+
+      if (!cached) {
+        // Produto novo (ainda não existe na base desta loja)
+        upsertPayload.push(item);
+        continue;
+      }
+
+      const incomingStock = Math.max(0, Math.floor(Number(item.stock) || 0));
+      const cachedStock = Math.max(0, Math.floor(Number(cached.stock) || 0));
+      const stockChanged = incomingStock !== cachedStock;
+
+      const incomingName = String(item.name || "").trim().toLowerCase();
+      const cachedName = String(cached.name || "").trim().toLowerCase();
+      const nameChanged = Boolean(incomingName && incomingName !== cachedName);
+
+      let priceChanged = false;
+      let promoPriceChanged = false;
+
+      if (!ignoreErpPrices) {
+        const incomingPrice = Number(item.price) || 0;
+        const cachedPrice = Number(cached.price) || 0;
+        priceChanged = Math.abs(incomingPrice - cachedPrice) >= 0.005;
+
+        const incomingPromo =
+          item.promotional_price !== null &&
+          item.promotional_price !== undefined &&
+          Number(item.promotional_price) > 0
+            ? Number(item.promotional_price)
+            : 0;
+        const cachedPromo =
+          cached.promotional_price !== null &&
+          cached.promotional_price !== undefined &&
+          Number(cached.promotional_price) > 0
+            ? Number(cached.promotional_price)
+            : 0;
+        promoPriceChanged = Math.abs(incomingPromo - cachedPromo) >= 0.005;
+      }
+
+      if (stockChanged || nameChanged || priceChanged || promoPriceChanged) {
+        upsertPayload.push(item);
+      } else {
+        unchangedCount++;
+      }
+    }
+
+    // Se nenhum produto mudou entre um minuto e outro, apenas mantém o heartbeat atualizado
+    // e retorna 200 OK imediatamente SEM tocar na tabela products do Supabase.
+    if (upsertPayload.length === 0) {
+      console.log(
+        `[Delta Sync] Tenant ${tenantId}: 0 alterações detectadas em ${allNormalizedProducts.length} produtos (${Date.now() - syncRequestStartTime}ms). Nenhum UPSERT executado no Supabase.`,
+      );
+      return res.status(200).json({
+        success: true,
+        processed: 0,
+        unchanged: unchangedCount,
+        totalReceived: allNormalizedProducts.length,
+        deltaSync: true,
+        message: "Nenhum produto alterado desde a última sincronização.",
+      });
+    }
+
+    console.log(
+      `[Delta Sync] Tenant ${tenantId}: ${upsertPayload.length} produto(s) novo(s)/alterado(s) de ${allNormalizedProducts.length} recebidos (${unchangedCount} inalterados ignorados).`,
+    );
 
     // Garante que nenhum lote enviado ao Supabase tenha chaves duplicadas para a constraint usada no ON CONFLICT
     const deduplicateByConflictField = (rows: any[], field: 'internal_code' | 'barcode') => {
@@ -9232,6 +9469,7 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
             const isZeroPrice = Number(finalPrice) <= 0 || isNaN(Number(finalPrice));
             existingProductsPayload.push({
                ...existing,
+               name: item.name || existing.name,
                barcode: item.barcode || existing.barcode,
                category: finalCategory,
                department: finalDepartment,
@@ -9294,6 +9532,7 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
               throw new Error(`Database insert error: ${fallbackErr.message}`);
             }
          }
+         updateTenantDeltaCacheWithRows(tenantId!, newProductsPayload);
       }
 
       if (existingProductsPayload.length > 0) {
@@ -9317,6 +9556,7 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
               throw new Error(`Database update error: ${fallbackErr.message}`);
             }
          }
+         updateTenantDeltaCacheWithRows(tenantId!, existingProductsPayload);
       }
 
       // Libera o event loop entre lotes para não bloquear /api/v1/integration/heartbeat
@@ -9357,7 +9597,7 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
     if (remainingChunks.length > 0) {
       const remainingCount = totalToProcess - immediateProcessed;
       console.log(
-        `[Integration] Lote grande detectado (${totalToProcess} produtos). ${immediateProcessed} processados imediatamente em ${Date.now() - syncRequestStartTime}ms; ${remainingCount} continuarão em background para evitar timeout de 20s do agente.`
+        `[Integration] Lote grande detectado (${totalToProcess} produtos alterados/novos). ${immediateProcessed} processados imediatamente em ${Date.now() - syncRequestStartTime}ms; ${remainingCount} continuarão em background para evitar timeout de 20s do agente.`
       );
 
       setImmediate(async () => {
@@ -9368,13 +9608,14 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
             bgProcessed += bgChunk.length;
           }
           await logIntegration(tenantId, "/api/v1/integration", {
-            message: `Sincronização em background concluída com sucesso (${bgProcessed}/${totalToProcess} produtos)`,
+            message: `Sincronização Delta em background concluída com sucesso (${bgProcessed} alterados/novos de ${allNormalizedProducts.length} recebidos)`,
             productsBatchSize: productsBatch.length,
             processedCount: bgProcessed,
+            unchangedCount,
             isSuccess: true,
             backgroundCompleted: true,
           }, "SUCCESS");
-          console.log(`[Integration] Background sync finalizado com sucesso para tenant ${tenantId}: ${bgProcessed} produtos.`);
+          console.log(`[Integration] Background delta sync finalizado com sucesso para tenant ${tenantId}: ${bgProcessed} produtos atualizados.`);
         } catch (bgErr: any) {
           console.error(`[Integration] Erro no processamento em background para tenant ${tenantId}:`, bgErr?.message || bgErr);
           try {
@@ -9394,21 +9635,31 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
         processed: totalToProcess,
         immediateProcessed,
         backgroundQueued: remainingCount,
+        unchanged: unchangedCount,
+        totalReceived: allNormalizedProducts.length,
+        deltaSync: true,
       });
     }
 
     try {
       await logIntegration(tenantId, "/api/v1/integration", { 
-        message: `Sincronização do agente via API concluída com sucesso`, 
+        message: `Sincronização Delta do agente concluída com sucesso (${immediateProcessed} alterados/novos, ${unchangedCount} inalterados)`, 
         productsBatchSize: productsBatch.length, 
         processedCount: immediateProcessed,
+        unchangedCount,
         isSuccess: true 
       }, "SUCCESS");
     } catch (logErr) {
       console.error("Erro ao salvar log de sucesso de integração:", logErr);
     }
 
-    res.status(200).json({ success: true, processed: immediateProcessed });
+    res.status(200).json({
+      success: true,
+      processed: immediateProcessed,
+      unchanged: unchangedCount,
+      totalReceived: allNormalizedProducts.length,
+      deltaSync: true,
+    });
 
   } catch (error: any) {
     console.error("[Integration] Error:", error.message);
@@ -9431,7 +9682,9 @@ app.post([
   "/api/v1/desktop-agent/sync",
   "/api/desktop-agent/sync",
   "/api/v1/products/sync-erp",
-  "/api/v1/agent/sync"
+  "/api/v1/agent/sync",
+  "/api/v1/sync",
+  "/api/sync"
 ], handleProductIntegration);
 
 // =========================================
