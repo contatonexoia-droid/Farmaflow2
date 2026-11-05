@@ -75,7 +75,7 @@ import { getStoreUrl } from "./lib/store";
 if (typeof window !== "undefined") {
   try {
     const p = new URLSearchParams(window.location.search);
-    let prod = p.get("produto") || p.get("prod") || p.get("product") || p.get("p_id") || p.get("item");
+    let prod = p.get("produto") || p.get("prod") || p.get("product") || p.get("oferta") || p.get("p_id") || p.get("item");
     const pathMatch = window.location.pathname.match(/\/produto\/([^\/?#]+)/i);
     if (!prod && pathMatch && pathMatch[1]) {
       prod = decodeURIComponent(pathMatch[1]);
@@ -975,6 +975,7 @@ const App: React.FC = () => {
         params.get("produto") ||
         params.get("prod") ||
         params.get("product") ||
+        params.get("oferta") ||
         params.get("p_id") ||
         params.get("item") ||
         sessionStorage.getItem("ff_deeplink_produto");
@@ -1040,24 +1041,34 @@ const App: React.FC = () => {
     }
   }, [products, handleProductClick]);
 
-  // Escuta cliques em Notificações Web Push quando a aba já está aberta
+  // Escuta cliques em Notificações Web Push quando o PWA / aba já está aberta
   useEffect(() => {
     if (!("serviceWorker" in navigator)) return;
     const handleSwMessage = (event: MessageEvent) => {
-      if (event.data && event.data.type === "PUSH_NOTIFICATION_CLICK") {
+      if (
+        event.data &&
+        (event.data.type === "NOTIFICATION_CLICK" ||
+          event.data.type === "PUSH_NOTIFICATION_CLICK")
+      ) {
         let targetProductId = event.data.productId;
         if (!targetProductId && event.data.url) {
           try {
             const parsedUrl = new URL(event.data.url, window.location.origin);
             targetProductId =
               parsedUrl.searchParams.get("product") ||
-              parsedUrl.searchParams.get("produto");
+              parsedUrl.searchParams.get("oferta") ||
+              parsedUrl.searchParams.get("produto") ||
+              parsedUrl.searchParams.get("prod");
           } catch (_) {}
         }
         if (targetProductId) {
           const cleanId = String(targetProductId).trim();
+          setView((prev) => (prev === ViewMode.CART ? ViewMode.CATALOG : prev));
           const found = (products || []).find(
-            (p) => String(p.id).toLowerCase() === cleanId.toLowerCase(),
+            (p) =>
+              String(p.id).toLowerCase() === cleanId.toLowerCase() ||
+              (p.barcode && String(p.barcode).toLowerCase() === cleanId.toLowerCase()) ||
+              (p.internalCode && String(p.internalCode).toLowerCase() === cleanId.toLowerCase()),
           );
           if (found) {
             handleProductClick(found);
@@ -2976,15 +2987,10 @@ const App: React.FC = () => {
     };
     init();
 
-    // Register Service Worker for Push Notifications
+    // Register Service Worker for Push Notifications with root scope '/' to cover all /loja/:slug routes
     if ("serviceWorker" in navigator) {
-      const path = window.location.pathname;
-      const lojaMatch = path.match(/^\/loja\/([^/]+)/);
-      const urlTenantSlug = lojaMatch ? lojaMatch[1] : null;
-      const swScope = urlTenantSlug ? `/loja/${urlTenantSlug}/` : "/";
-
       navigator.serviceWorker
-        .register("/sw.js", { scope: swScope })
+        .register("/sw.js", { scope: "/" })
         .then((registration) => {
           console.log(
             "Service Worker registrado com sucesso no escopo:",

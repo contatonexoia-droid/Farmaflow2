@@ -390,6 +390,7 @@ export async function sendPromotionalPushToTenant(
   supabaseAdmin: SupabaseClient,
   params: {
     tenantId: string;
+    tenantSlug?: string;
     productId?: string;
     title: string;
     body: string;
@@ -415,6 +416,25 @@ export async function sendPromotionalPushToTenant(
   let failedCount = 0;
   let removedCount = 0;
 
+  const cleanSlug = String(params.tenantSlug || "").trim();
+  const cleanProductId = String(params.productId || "").trim();
+  let resolvedUrl = String(params.targetUrl || "").trim();
+
+  if (!resolvedUrl) {
+    const baseStoreUrl = cleanSlug ? `/loja/${cleanSlug}` : "/";
+    resolvedUrl = cleanProductId
+      ? `${baseStoreUrl}?product=${encodeURIComponent(cleanProductId)}`
+      : baseStoreUrl;
+  } else if (
+    cleanProductId &&
+    !resolvedUrl.includes("product=") &&
+    !resolvedUrl.includes("produto=") &&
+    !resolvedUrl.includes("oferta=")
+  ) {
+    const sep = resolvedUrl.includes("?") ? "&" : "?";
+    resolvedUrl = `${resolvedUrl}${sep}product=${encodeURIComponent(cleanProductId)}`;
+  }
+
   const payloadString = JSON.stringify({
     title: params.title,
     body: params.body,
@@ -422,11 +442,19 @@ export async function sendPromotionalPushToTenant(
     badge: params.iconUrl || "/icon-192.svg",
     image: params.imageUrl || undefined,
     imageUrl: params.imageUrl || undefined,
-    url: params.targetUrl || "/",
-    targetUrl: params.targetUrl || "/",
+    url: resolvedUrl,
+    targetUrl: resolvedUrl,
     tenantId: params.tenantId,
-    productId: params.productId || null,
-    tag: params.productId ? `promo-${params.productId}-${Date.now()}` : `promo-${Date.now()}`,
+    tenantSlug: cleanSlug || null,
+    productId: cleanProductId || null,
+    data: {
+      url: resolvedUrl,
+      targetUrl: resolvedUrl,
+      tenantId: params.tenantId,
+      tenantSlug: cleanSlug || null,
+      productId: cleanProductId || null,
+    },
+    tag: cleanProductId ? `promo-${cleanProductId}-${Date.now()}` : `promo-${Date.now()}`,
     actionTitle: "Ver Oferta Agora",
   });
 

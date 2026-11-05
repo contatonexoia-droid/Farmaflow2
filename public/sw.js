@@ -1,4 +1,4 @@
-const CACHE_NAME = "farmaflow-v3";
+const CACHE_NAME = "farmaflow-v4";
 
 self.addEventListener('install', (event) => {
   self.skipWaiting();
@@ -68,11 +68,28 @@ self.addEventListener('push', function(event) {
     }
   }
 
-  const targetUrl =
-    data.targetUrl ||
+  const nestedData = data && typeof data.data === 'object' ? data.data : {};
+  const productId = nestedData.productId || data.productId || null;
+  const tenantSlug = nestedData.tenantSlug || data.tenantSlug || null;
+  const tenantId = nestedData.tenantId || data.tenantId || null;
+
+  let targetUrl =
+    nestedData.url ||
+    nestedData.targetUrl ||
     data.url ||
-    (data.data && (data.data.targetUrl || data.data.url)) ||
-    '/';
+    data.targetUrl ||
+    (tenantSlug ? `/loja/${tenantSlug}` : '/');
+
+  if (
+    productId &&
+    targetUrl &&
+    !String(targetUrl).includes('product=') &&
+    !String(targetUrl).includes('produto=') &&
+    !String(targetUrl).includes('oferta=')
+  ) {
+    const sep = String(targetUrl).includes('?') ? '&' : '?';
+    targetUrl = `${targetUrl}${sep}product=${encodeURIComponent(productId)}`;
+  }
 
   const iconUrl = data.icon || data.iconUrl || '/icon-192.svg';
   const badgeUrl = data.badge || data.icon || data.iconUrl || '/icon-192.svg';
@@ -84,13 +101,14 @@ self.addEventListener('push', function(event) {
     badge: badgeUrl,
     ...(imageUrl ? { image: imageUrl } : {}),
     vibrate: [200, 100, 200, 100, 200],
-    tag: data.tag || (data.productId ? `promo-${data.productId}` : undefined),
+    tag: data.tag || (productId ? `promo-${productId}` : undefined),
     renotify: true,
     data: {
       url: targetUrl,
       targetUrl: targetUrl,
-      tenantId: data.tenantId || null,
-      productId: data.productId || null,
+      tenantId: tenantId,
+      tenantSlug: tenantSlug,
+      productId: productId,
     },
     requireInteraction: true,
     actions: [
@@ -109,52 +127,82 @@ self.addEventListener('push', function(event) {
 self.addEventListener('notificationclick', function(event) {
   event.notification.close();
 
-  const rawData = event.notification.data;
+  const notificationData = event.notification.data || {};
   const rawUrl =
-    (typeof rawData === 'string' ? rawData : rawData?.targetUrl || rawData?.url) ||
-    '/';
-  const urlToOpen = new URL(rawUrl, self.location.origin).href;
+    (typeof notificationData === 'string'
+      ? notificationData
+      : notificationData.url || notificationData.targetUrl) || '/';
+  const productId =
+    typeof notificationData === 'object' ? notificationData.productId || null : null;
+  const tenantSlug =
+    typeof notificationData === 'object' ? notificationData.tenantSlug || null : null;
+
+  const resolvedUrlObj = new URL(rawUrl, self.location.origin);
+  if (
+    productId &&
+    !resolvedUrlObj.searchParams.has('product') &&
+    !resolvedUrlObj.searchParams.has('produto') &&
+    !resolvedUrlObj.searchParams.has('oferta')
+  ) {
+    resolvedUrlObj.searchParams.set('product', String(productId));
+  }
+  const targetUrl = resolvedUrlObj.href;
 
   event.waitUntil(
-    self.clients
-      .matchAll({ type: 'window', includeUncontrolled: true })
-      .then(async (windowClients) => {
-        for (let i = 0; i < windowClients.length; i++) {
-          const client = windowClients[i];
-          if (client.url === urlToOpen && 'focus' in client) {
-            client.postMessage({
-              type: 'PUSH_NOTIFICATION_CLICK',
-              url: urlToOpen,
-              productId: typeof rawData === 'object' ? rawData?.productId : null,
-            });
-            return client.focus();
-          }
+    (async () => {
+      const windowClients = await self.clients.matchAll({
+        type: 'window',
+        includeUncontrolled: true,
+      });
+
+      const existingClient =
+        windowClients.find(
+          (c) =>
+            c.url &&
+            c.url.startsWith(self.location.origin) &&
+            !c.url.includes('/admin')
+        ) || windowClients[0];
+
+      if (existingClient) {
+        if ('navigate' in existingClient && typeof existingClient.navigate === 'function') {
+          try {
+            await existingClient.navigate(targetUrl);
+          } catch (_) {}
         }
-        // If there is an existing window on the same origin, navigate it and focus
-        for (let i = 0; i < windowClients.length; i++) {
-          const client = windowClients[i];
-          if (
-            client.url.startsWith(self.location.origin) &&
-            !client.url.includes('/admin') &&
-            'focus' in client
-          ) {
-            if ('navigate' in client) {
-              try {
-                await client.navigate(urlToOpen);
-              } catch (_) {}
-            }
-            client.postMessage({
-              type: 'PUSH_NOTIFICATION_CLICK',
-              url: urlToOpen,
-              productId: typeof rawData === 'object' ? rawData?.productId : null,
-            });
-            return client.focus();
-          }
+
+        const msgPayload = {
+          type: 'NOTIFICATION_CLICK',
+          url: targetUrl,
+          productId: productId,
+          tenantSlug: tenantSlug,
+        };
+
+        try {
+          existingClient.postMessage(msgPayload);
+          existingClient.postMessage({
+            ...msgPayload,
+            type: 'PUSH_NOTIFICATION_CLICK',
+          });
+        } catch (_) {}
+
+        setTimeout(() => {
+          try {
+            existingClient.postMessage(msgPayload);
+          } catch (_) {}
+        }, 600);
+
+        if ('focus' in existingClient) {
+          try {
+            await existingClient.focus();
+          } catch (_) {}
         }
-        if (self.clients.openWindow) {
-          return self.clients.openWindow(urlToOpen);
-        }
-      })
+        return;
+      }
+
+      if (self.clients.openWindow) {
+        await self.clients.openWindow(targetUrl);
+      }
+    })()
   );
 });
 

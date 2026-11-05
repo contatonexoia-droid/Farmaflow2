@@ -1,9 +1,14 @@
 {
+  "id": "/",
   "name": "FarmaFlow AI",
   "short_name": "FarmaFlow",
   "description": "Seu catálogo digital inteligente para drogarias",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
+  "launch_handler": {
+    "client_mode": ["navigate-existing", "auto"]
+  },
   "background_color": "#fcfdfe",
   "theme_color": "#3B82F6",
   "icons": [

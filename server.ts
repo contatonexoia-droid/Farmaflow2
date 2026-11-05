@@ -1127,6 +1127,9 @@ app.get(["/api/v1/manifest/:tenantId", "/manifest.json"], async (req, res) => {
         start_url: adminStartUrl,
         scope: "/",
         display: "standalone",
+        launch_handler: {
+          client_mode: ["navigate-existing", "auto"]
+        },
         background_color: "#f8fafc",
         theme_color: primaryColor,
         icons: [
@@ -1153,8 +1156,11 @@ app.get(["/api/v1/manifest/:tenantId", "/manifest.json"], async (req, res) => {
       short_name: name,
       description: `Compre online na ${name}`,
       start_url: segment === "default" ? "/" : `/loja/${segment}/`,
-      scope: segment === "default" ? "/" : `/loja/${segment}/`,
+      scope: "/",
       display: "standalone",
+      launch_handler: {
+        client_mode: ["navigate-existing", "auto"]
+      },
       background_color: "#fcfdfe",
       theme_color: primaryColor,
       icons: [
@@ -1195,6 +1201,9 @@ app.get(["/api/v1/manifest/:tenantId", "/manifest.json"], async (req, res) => {
         start_url: "/admin",
         scope: "/",
         display: "standalone",
+        launch_handler: {
+          client_mode: ["navigate-existing", "auto"]
+        },
         background_color: "#f8fafc",
         theme_color: "#059669",
         icons: [
@@ -1220,6 +1229,9 @@ app.get(["/api/v1/manifest/:tenantId", "/manifest.json"], async (req, res) => {
       start_url: "/",
       scope: "/",
       display: "standalone",
+      launch_handler: {
+        client_mode: ["navigate-existing", "auto"]
+      },
       background_color: "#fcfdfe",
       theme_color: "#3B82F6",
       icons: [
@@ -13021,6 +13033,7 @@ app.post(["/api/v1/push/send", "/api/push/send"], async (req, res) => {
     }
 
     // Busca informações da loja caso iconUrl ou targetUrl não tenham sido informados
+    let resolvedTenantSlug = slugifyStoreIdentifier(resolvedTenantId);
     try {
       const { data: tenantRow } = await supabaseAdmin
         .from("tenants")
@@ -13029,6 +13042,12 @@ app.post(["/api/v1/push/send", "/api/push/send"], async (req, res) => {
         .maybeSingle();
 
       if (tenantRow) {
+        resolvedTenantSlug =
+          slugifyStoreIdentifier(tenantRow.slug) ||
+          slugifyStoreIdentifier(tenantRow.id) ||
+          slugifyStoreIdentifier(tenantRow.name) ||
+          resolvedTenantSlug;
+
         if (!resolvedIconUrl) {
           const rawLogo = String(tenantRow.logo_url || tenantRow.logo || "").trim();
           if (rawLogo.startsWith("http://") || rawLogo.startsWith("https://")) {
@@ -13038,26 +13057,30 @@ app.post(["/api/v1/push/send", "/api/push/send"], async (req, res) => {
           }
         }
         if (!resolvedTargetUrl) {
-          const cleanSlug =
-            slugifyStoreIdentifier(tenantRow.slug) ||
-            slugifyStoreIdentifier(tenantRow.id) ||
-            slugifyStoreIdentifier(tenantRow.name);
           resolvedTargetUrl = resolvedProductId
-            ? `/loja/${cleanSlug}?product=${encodeURIComponent(resolvedProductId)}`
-            : `/loja/${cleanSlug}`;
+            ? `/loja/${resolvedTenantSlug}?product=${encodeURIComponent(resolvedProductId)}`
+            : `/loja/${resolvedTenantSlug}`;
         }
       }
     } catch (_) {}
 
     if (!resolvedTargetUrl) {
-      const cleanFallbackSlug = slugifyStoreIdentifier(resolvedTenantId);
       resolvedTargetUrl = resolvedProductId
-        ? `/loja/${cleanFallbackSlug}?product=${encodeURIComponent(resolvedProductId)}`
-        : `/loja/${cleanFallbackSlug}`;
+        ? `/loja/${resolvedTenantSlug}?product=${encodeURIComponent(resolvedProductId)}`
+        : `/loja/${resolvedTenantSlug}`;
+    } else if (
+      resolvedProductId &&
+      !resolvedTargetUrl.includes("product=") &&
+      !resolvedTargetUrl.includes("produto=") &&
+      !resolvedTargetUrl.includes("oferta=")
+    ) {
+      const sep = resolvedTargetUrl.includes("?") ? "&" : "?";
+      resolvedTargetUrl = `${resolvedTargetUrl}${sep}product=${encodeURIComponent(resolvedProductId)}`;
     }
 
     const result = await sendPromotionalPushToTenant(supabaseAdmin, {
       tenantId: resolvedTenantId,
+      tenantSlug: resolvedTenantSlug,
       productId: resolvedProductId || undefined,
       title: resolvedTitle,
       body: resolvedBody,

@@ -68,7 +68,13 @@ import {
   Timer,
   Menu,
 } from "lucide-react";
-import { saveAppReview, logSearch, getProductsByTenant, mapDbTenantToApp } from "../services/storage";
+import {
+  saveAppReview,
+  logSearch,
+  getProductsByTenant,
+  mapDbTenantToApp,
+  mapDbProductToApp,
+} from "../services/storage";
 import { supabase } from "../services/supabase";
 import { CouponBanner } from "./CouponBanner";
 import { toast } from "react-hot-toast";
@@ -3610,6 +3616,155 @@ export const Storefront: React.FC<StorefrontProps> = ({
       setIsSubscribingPush(false);
     }
   }, [tenant?.id, isSubscribingPush, urlBase64ToUint8Array]);
+
+  // Abre diretamente o modal de detalhes do produto via URL (?product= / ?oferta=) ou clique na notificação Push do Service Worker (NOTIFICATION_CLICK)
+  const processedDeepLinkProductRef = useRef<string | null>(null);
+
+  const openProductFromNotificationOrUrl = useCallback(
+    (rawProductId: string | null | undefined, forceReopen = false) => {
+      if (!rawProductId) return;
+      const cleanId = String(rawProductId).trim();
+      if (!cleanId) return;
+
+      if (!forceReopen && processedDeepLinkProductRef.current === cleanId) {
+        return;
+      }
+
+      const lowerId = cleanId.toLowerCase();
+      const localMatch = (products || []).find(
+        (p) =>
+          String(p.id).toLowerCase() === lowerId ||
+          ((p as any).slug && String((p as any).slug).toLowerCase() === lowerId) ||
+          (p.barcode && String(p.barcode).toLowerCase() === lowerId) ||
+          (p.internalCode && String(p.internalCode).toLowerCase() === lowerId)
+      );
+
+      if (localMatch) {
+        processedDeepLinkProductRef.current = cleanId;
+        try {
+          sessionStorage.removeItem("ff_deeplink_produto");
+        } catch (_) {}
+        onProductClick(localMatch);
+        return;
+      }
+
+      fetch(`/api/v1/products/${encodeURIComponent(cleanId)}`)
+        .then((res) => (res.ok ? res.json() : null))
+        .then((dbProd) => {
+          if (dbProd && dbProd.id) {
+            processedDeepLinkProductRef.current = cleanId;
+            try {
+              sessionStorage.removeItem("ff_deeplink_produto");
+            } catch (_) {}
+            onProductClick(mapDbProductToApp(dbProd));
+          }
+        })
+        .catch(() => {});
+    },
+    [products, onProductClick]
+  );
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const extractProductIdFromUrl = (urlStr?: string): string | null => {
+      try {
+        const urlObj = new URL(urlStr || window.location.href, window.location.origin);
+        const fromQuery =
+          urlObj.searchParams.get("product") ||
+          urlObj.searchParams.get("oferta") ||
+          urlObj.searchParams.get("produto") ||
+          urlObj.searchParams.get("prod") ||
+          urlObj.searchParams.get("p_id") ||
+          urlObj.searchParams.get("item");
+        if (fromQuery && fromQuery.trim()) {
+          return fromQuery.trim();
+        }
+        const pathMatch = urlObj.pathname.match(/\/produto\/([^/?#]+)/i);
+        if (pathMatch && pathMatch[1]) {
+          return decodeURIComponent(pathMatch[1]).trim();
+        }
+      } catch (_) {}
+      try {
+        const stored = sessionStorage.getItem("ff_deeplink_produto");
+        if (stored && stored.trim()) return stored.trim();
+      } catch (_) {}
+      return null;
+    };
+
+    // 1. Verifica URL atual no carregamento inicial e quando a lista de produtos terminar de carregar
+    const initialProdId = extractProductIdFromUrl();
+    if (initialProdId) {
+      openProductFromNotificationOrUrl(initialProdId, false);
+    }
+
+    // 2. Escuta mudanças de URL (popstate / hashchange)
+    const handleUrlChange = () => {
+      const prodId = extractProductIdFromUrl();
+      if (prodId) {
+        openProductFromNotificationOrUrl(prodId, true);
+      }
+    };
+
+    window.addEventListener("popstate", handleUrlChange);
+    window.addEventListener("hashchange", handleUrlChange);
+
+    // 3. Escuta mensagens diretas do Service Worker (NOTIFICATION_CLICK / PUSH_NOTIFICATION_CLICK) com PWA já aberto
+    const handleServiceWorkerMessage = (event: MessageEvent) => {
+      const data = event?.data;
+      if (
+        data &&
+        (data.type === "NOTIFICATION_CLICK" || data.type === "PUSH_NOTIFICATION_CLICK")
+      ) {
+        let targetProductId = data.productId ? String(data.productId).trim() : null;
+        if (data.url) {
+          try {
+            const parsedUrl = new URL(data.url, window.location.origin);
+            if (!targetProductId) {
+              targetProductId =
+                parsedUrl.searchParams.get("product") ||
+                parsedUrl.searchParams.get("oferta") ||
+                parsedUrl.searchParams.get("produto") ||
+                parsedUrl.searchParams.get("prod");
+            }
+            const nextRelativeUrl = parsedUrl.pathname + parsedUrl.search;
+            if (window.location.pathname + window.location.search !== nextRelativeUrl) {
+              window.history.replaceState(window.history.state, "", nextRelativeUrl);
+            }
+          } catch (_) {}
+        }
+        if (targetProductId) {
+          openProductFromNotificationOrUrl(targetProductId, true);
+        }
+      }
+    };
+
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.addEventListener("message", handleServiceWorkerMessage);
+    }
+
+    // 4. Suporte à Launch Queue API para PWAs instalados com launch_handler (navigate-existing / auto)
+    if ("launchQueue" in window && (window as any).launchQueue?.setConsumer) {
+      try {
+        (window as any).launchQueue.setConsumer((launchParams: any) => {
+          if (launchParams?.targetURL) {
+            const launchedProdId = extractProductIdFromUrl(launchParams.targetURL);
+            if (launchedProdId) {
+              openProductFromNotificationOrUrl(launchedProdId, true);
+            }
+          }
+        });
+      } catch (_) {}
+    }
+
+    return () => {
+      window.removeEventListener("popstate", handleUrlChange);
+      window.removeEventListener("hashchange", handleUrlChange);
+      if ("serviceWorker" in navigator) {
+        navigator.serviceWorker.removeEventListener("message", handleServiceWorkerMessage);
+      }
+    };
+  }, [openProductFromNotificationOrUrl]);
 
   return (
     <div className="bg-gray-50/50 min-h-screen font-sans relative flex flex-col justify-between">
