@@ -1920,6 +1920,190 @@ function getProductFieldCI(raw: Record<string, any>, candidateNames: string[]): 
   return undefined;
 }
 
+export interface ProductPriceDivisorRule {
+  id?: string;
+  tenant_id?: string | null;
+  internal_code?: string | null;
+  barcode?: string | null;
+  name_pattern?: string | null;
+  divisor: number;
+  min_raw_price?: number | null;
+  active?: boolean;
+}
+
+/**
+ * Verifica se o produto é vendido em unidade avulsa / frasco unitário (e não como caixa fechada/fardo/atacado).
+ */
+export function isSingleUnitRetailProduct(
+  name: string,
+  unitOrPresentation?: string | null,
+): boolean {
+  const normName = String(name || "")
+    .toUpperCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  const normUnit = String(unitOrPresentation || "")
+    .toUpperCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+
+  // Se o próprio nome do produto indicar claramente que é um fardo/caixa com 12 unidades, não é avulso
+  if (
+    /\b(CX|CAIXA|FARDO|DISPLAY|PACK|KIT)\s*(C\/|COM\s*)?(12|012)\b/.test(normName) ||
+    /\bC\s*\/\s*12\s*(UN|UND|FR|UNID)\b/.test(normName)
+  ) {
+    return false;
+  }
+
+  // Unidades típicas de frasco/item unitário
+  const singleUnits = new Set([
+    "UN",
+    "UND",
+    "UNI",
+    "UNID",
+    "UNIDADE",
+    "FR",
+    "FRS",
+    "FRASCO",
+    "RL",
+    "ROL",
+    "AE",
+    "AER",
+    "AEROSSOL",
+    "TB",
+    "TUB",
+    "BS",
+    "BIS",
+    "PT",
+    "POT",
+    "LT",
+    "LAT",
+    "PC",
+    "PCA",
+  ]);
+
+  if (!normUnit || singleUnits.has(normUnit)) {
+    return true;
+  }
+
+  // Se no nome do produto constar volume/peso de frasco individual (ex: 150ML, 50ML, 90G, AER, ROLL ON)
+  if (/\b(\d+\s*(ML|G|GR|MG)|AER|AEROSSOL|ROLL\s*ON|ROLLON|SPRAY|CREME|LOCAO|FRASCO)\b/.test(normName)) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Determina o divisor de correção de preço (ex: 12) quando:
+ * 1. Há regra configurada para o produto/tenant (por código interno, EAN ou padrão de nome/marca)
+ * 2. O payload traz `divisor_preco` / `price_divisor` explícito
+ * 3. O payload traz `fracao` / `qtd_embalagem` = 12 (ou > 1) mas a unidade de venda é frasco unitário
+ * 4. Regra nativa para desodorantes Dryon (cadastrados com fração 12 no Inovafarma onde a View envia preço multiplicado)
+ */
+export function resolveProductPriceDivisor(params: {
+  internalCode?: string | null;
+  barcode?: string | null;
+  name?: string | null;
+  manufacturer?: string | null;
+  unit?: string | null;
+  presentation?: string | null;
+  rawFraction?: number | null;
+  explicitDivisor?: number | null;
+  rawPriceBruto?: number | null;
+  rawPrecoLiquido?: number | null;
+  customRules?: ProductPriceDivisorRule[];
+}): number {
+  const internalCode = String(params.internalCode || "").trim();
+  const barcode = String(params.barcode || "").trim();
+  const name = String(params.name || "").trim();
+  const manufacturer = String(params.manufacturer || "").trim();
+  const normName = `${name} ${manufacturer}`
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+
+  const referencePrice = Math.max(
+    Number(params.rawPriceBruto) || 0,
+    Number(params.rawPrecoLiquido) || 0,
+  );
+
+  // 1. Divisor explícito enviado diretamente no payload
+  if (
+    params.explicitDivisor &&
+    Number.isFinite(params.explicitDivisor) &&
+    params.explicitDivisor > 1
+  ) {
+    return Number(params.explicitDivisor);
+  }
+
+  // 2. Regras customizadas do tenant ou globais (vindas do banco/configuração)
+  if (Array.isArray(params.customRules) && params.customRules.length > 0) {
+    for (const rule of params.customRules) {
+      if (rule.active === false) continue;
+      const divisor = Number(rule.divisor);
+      if (!Number.isFinite(divisor) || divisor <= 1) continue;
+
+      const minPrice = Number(rule.min_raw_price) || 0;
+      if (minPrice > 0 && referencePrice > 0 && referencePrice < minPrice) {
+        continue;
+      }
+
+      const ruleCode = String(rule.internal_code || "").trim();
+      const ruleBarcode = String(rule.barcode || "").trim();
+      const rulePattern = String(rule.name_pattern || "")
+        .trim()
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "");
+
+      if (ruleCode && internalCode && ruleCode === internalCode) {
+        return divisor;
+      }
+      if (ruleBarcode && barcode && ruleBarcode === barcode) {
+        return divisor;
+      }
+      if (rulePattern && normName.includes(rulePattern)) {
+        return divisor;
+      }
+    }
+  }
+
+  const fraction = Number(params.rawFraction) || 0;
+  const isSingleUnit = isSingleUnitRetailProduct(
+    name,
+    params.unit || params.presentation,
+  );
+
+  // 3. Regra específica para linha Dryon (com fração 12 no ERP):
+  // Se vier com fração > 1 usa a fração; se a View não expuser a coluna de fração mas o preço bruto/líquido vier multiplicado (>= R$ 45,00 para 1 frasco), divide por 12.
+  if (/\bdryon\b/i.test(normName) && isSingleUnit) {
+    if (fraction > 1) {
+      return fraction;
+    }
+    if (referencePrice >= 45) {
+      return 12;
+    }
+  }
+
+  // 4. Regra geral de Fração no payload: se a fração enviada for 12 (ou > 1) mas a unidade for de frasco unitário avulso
+  if (fraction > 1 && isSingleUnit) {
+    if (fraction === 12) {
+      return 12;
+    }
+    // Para outras frações de caixa de embarque (ex: 6, 12, 24) em itens de perfumaria/desodorante/frasco unitário cujo preço esteja multiplicado
+    if (
+      (fraction === 6 || fraction === 24 || fraction === 10) &&
+      referencePrice >= fraction * 8
+    ) {
+      return fraction;
+    }
+  }
+
+  return 1;
+}
+
 /**
  * Normaliza um item bruto retornado pela API Pública de E-commerce v1 do Inovafarma (Portal PS):
  * - Salva obrigatoriamente o `CODIGOPRODUTO` (`internalCode` / `erpProductId`)
@@ -1930,6 +2114,7 @@ function getProductFieldCI(raw: Record<string, any>, candidateNames: string[]): 
 export function normalizeInovafarmaProduct(
   raw: InovafarmaRawProduct | Record<string, any>,
   tenantId?: string,
+  customPriceRules?: ProductPriceDivisorRule[],
 ): NormalizedInovafarmaProduct | null {
   if (!raw || typeof raw !== "object") return null;
 
@@ -2174,12 +2359,55 @@ export function normalizeInovafarmaProduct(
     "qty",
   ]);
 
-  const precoBrutoVal = Math.max(0, roundCurrency(parseInovafarmaNumber(rawPrecoBruto, 0)));
-  const precoLiquidoVal = Math.max(0, roundCurrency(parseInovafarmaNumber(rawPrecoLiquido, 0)));
-  const menorPrecoVal = Math.max(0, roundCurrency(parseInovafarmaNumber(rawMenorPrecoVenda, 0)));
-  const promoExplicitVal = parseInovafarmaNumber(rawPromo, -1);
+  const rawFractionField = getProductFieldCI(raw as any, [
+    "fracao",
+    "Fracao",
+    "FRACAO",
+    "qtd_embalagem",
+    "Qtd_Embalagem",
+    "QTD_EMBALAGEM",
+    "quantidade_embalagem",
+    "Quantidade_Embalagem",
+    "fator_conversao",
+    "Fator_Conversao",
+    "multiplo",
+    "Multiplo",
+    "embalagem_venda",
+  ]);
+  const rawExplicitDivisor = getProductFieldCI(raw as any, [
+    "divisor_preco",
+    "price_divisor",
+    "divisorPreco",
+    "priceDivisor",
+  ]);
+
+  let precoBrutoVal = Math.max(0, roundCurrency(parseInovafarmaNumber(rawPrecoBruto, 0)));
+  let precoLiquidoVal = Math.max(0, roundCurrency(parseInovafarmaNumber(rawPrecoLiquido, 0)));
+  let menorPrecoVal = Math.max(0, roundCurrency(parseInovafarmaNumber(rawMenorPrecoVenda, 0)));
+  let promoExplicitVal = parseInovafarmaNumber(rawPromo, -1);
   const costPriceVal = parseInovafarmaNumber(rawCost, -1);
-  const costPrice = costPriceVal >= 0 ? roundCurrency(costPriceVal) : null;
+  let costPrice = costPriceVal >= 0 ? roundCurrency(costPriceVal) : null;
+
+  const priceDivisor = resolveProductPriceDivisor({
+    internalCode,
+    barcode: primaryBarcode,
+    name: finalName,
+    unit: unitMeasure,
+    presentation: rawApresentacao,
+    rawFraction: parseInovafarmaNumber(rawFractionField, 0),
+    explicitDivisor: parseInovafarmaNumber(rawExplicitDivisor, 0),
+    rawPriceBruto: precoBrutoVal,
+    rawPrecoLiquido: precoLiquidoVal > 0 ? precoLiquidoVal : menorPrecoVal,
+    customRules: customPriceRules,
+  });
+
+  if (priceDivisor > 1) {
+    if (precoBrutoVal > 0) precoBrutoVal = roundCurrency(precoBrutoVal / priceDivisor);
+    if (precoLiquidoVal > 0) precoLiquidoVal = roundCurrency(precoLiquidoVal / priceDivisor);
+    if (menorPrecoVal > 0) menorPrecoVal = roundCurrency(menorPrecoVal / priceDivisor);
+    if (promoExplicitVal > 0) promoExplicitVal = roundCurrency(promoExplicitVal / priceDivisor);
+    if (costPrice !== null && costPrice > 0) costPrice = roundCurrency(costPrice / priceDivisor);
+  }
 
   // Se Preco_Bruto / preco vier 0, usa Preco_Liquido (ou MENORPRECOVENDA)
   const precoVendaVal = precoBrutoVal > 0 ? precoBrutoVal : (precoLiquidoVal > 0 ? precoLiquidoVal : menorPrecoVal);

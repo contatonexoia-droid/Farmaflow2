@@ -42,6 +42,9 @@ import {
 import {
   syncInovafarmaProductsToSupabase,
   normalizeInovafarmaProduct,
+  resolveProductPriceDivisor,
+  isSingleUnitRetailProduct,
+  ProductPriceDivisorRule,
   sanitizeInovafarmaEan,
   parseInovafarmaNumber,
   INOVAFARMA_DEFAULT_API_URL,
@@ -8815,6 +8818,228 @@ const getOrLoadTenantDeltaCache = async (
   return tenantMap;
 };
 
+// ============================================================================
+// REGRAS DE CORREÇÃO DE PREÇO POR FRAÇÃO / EXCEÇÕES POR TENANT E PRODUTO
+// ============================================================================
+const tenantPriceRulesCache = new Map<
+  string,
+  { rules: ProductPriceDivisorRule[]; expiresAt: number }
+>();
+const PRICE_RULES_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutos
+
+const DEFAULT_GLOBAL_PRICE_DIVISOR_RULES: ProductPriceDivisorRule[] = [
+  {
+    id: "builtin-dryon-fraction-12",
+    tenant_id: null,
+    name_pattern: "dryon",
+    divisor: 12,
+    min_raw_price: 45,
+    active: true,
+  },
+];
+
+const getTenantPriceDivisorRules = async (
+  tenantId: string,
+  tenantObj?: any,
+  forceRefresh = false,
+): Promise<ProductPriceDivisorRule[]> => {
+  const now = Date.now();
+  const cached = tenantPriceRulesCache.get(tenantId);
+  if (!forceRefresh && cached && cached.expiresAt > now) {
+    return cached.rules;
+  }
+
+  const combinedRules: ProductPriceDivisorRule[] = [
+    ...DEFAULT_GLOBAL_PRICE_DIVISOR_RULES,
+  ];
+
+  // 1. Regras salvas dentro de delivery_settings.price_divisor_rules do tenant (não exige migração)
+  const settingsRules = tenantObj?.delivery_settings?.price_divisor_rules;
+  if (Array.isArray(settingsRules)) {
+    for (const r of settingsRules) {
+      if (r && Number(r.divisor) > 1 && r.active !== false) {
+        combinedRules.push({
+          id: r.id || undefined,
+          tenant_id: tenantId,
+          internal_code: r.internal_code || null,
+          barcode: r.barcode || r.ean || null,
+          name_pattern: r.name_pattern || null,
+          divisor: Number(r.divisor),
+          min_raw_price:
+            r.min_raw_price !== undefined && r.min_raw_price !== null
+              ? Number(r.min_raw_price)
+              : null,
+          active: true,
+        });
+      }
+    }
+  }
+
+  // 2. Regras salvas na tabela dedicada `public.product_price_rules` no Supabase (se existir)
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("product_price_rules")
+      .select(
+        "id, tenant_id, internal_code, barcode, name_pattern, divisor, min_raw_price, active",
+      )
+      .or(`tenant_id.eq.${tenantId},tenant_id.is.null`)
+      .eq("active", true);
+
+    if (!error && Array.isArray(data)) {
+      for (const row of data) {
+        if (Number(row.divisor) > 1) {
+          combinedRules.push({
+            id: row.id,
+            tenant_id: row.tenant_id,
+            internal_code: row.internal_code,
+            barcode: row.barcode,
+            name_pattern: row.name_pattern,
+            divisor: Number(row.divisor),
+            min_raw_price:
+              row.min_raw_price !== null && row.min_raw_price !== undefined
+                ? Number(row.min_raw_price)
+                : null,
+            active: row.active !== false,
+          });
+        }
+      }
+    }
+  } catch (_err) {
+    // Caso a tabela product_price_rules ainda não tenha sido criada no Supabase, segue com as regras em memória/settings
+  }
+
+  tenantPriceRulesCache.set(tenantId, {
+    rules: combinedRules,
+    expiresAt: now + PRICE_RULES_CACHE_TTL_MS,
+  });
+
+  return combinedRules;
+};
+
+/**
+ * Corrige imediatamente na tabela `products` do Supabase os produtos já gravados
+ * que se enquadrem nas regras de divisão de preço (ex: Dryon com preço multiplicado por 12).
+ */
+const applyPriceDivisorRulesToExistingProducts = async (
+  targetTenantId?: string,
+): Promise<{ correctedCount: number; correctedProducts: any[] }> => {
+  const correctedProducts: any[] = [];
+  try {
+    let customRules: ProductPriceDivisorRule[] = [
+      ...DEFAULT_GLOBAL_PRICE_DIVISOR_RULES,
+    ];
+    if (targetTenantId) {
+      customRules = await getTenantPriceDivisorRules(targetTenantId, undefined, true);
+    } else {
+      try {
+        const { data: dbRules } = await supabaseAdmin
+          .from("product_price_rules")
+          .select(
+            "id, tenant_id, internal_code, barcode, name_pattern, divisor, min_raw_price, active",
+          )
+          .eq("active", true);
+        if (Array.isArray(dbRules)) {
+          customRules.push(...(dbRules as ProductPriceDivisorRule[]));
+        }
+      } catch (_e) {}
+    }
+
+    let query = supabaseAdmin
+      .from("products")
+      .select(
+        "id, tenant_id, internal_code, barcode, name, manufacturer, presentation, price, original_price, promotional_price",
+      )
+      .gte("price", 40);
+
+    if (targetTenantId) {
+      query = query.eq("tenant_id", targetTenantId);
+    }
+
+    const { data: candidates, error } = await query.limit(2000);
+    if (error || !Array.isArray(candidates) || candidates.length === 0) {
+      return { correctedCount: 0, correctedProducts: [] };
+    }
+
+    for (const prod of candidates) {
+      const applicableRules = customRules.filter(
+        (r) => !r.tenant_id || r.tenant_id === prod.tenant_id,
+      );
+      const divisor = resolveProductPriceDivisor({
+        internalCode: prod.internal_code,
+        barcode: prod.barcode,
+        name: prod.name,
+        manufacturer: prod.manufacturer,
+        presentation: prod.presentation,
+        rawPriceBruto: prod.price,
+        rawPrecoLiquido: prod.promotional_price,
+        customRules: applicableRules,
+      });
+
+      if (divisor > 1 && Number(prod.price) >= 45) {
+        const newPrice = roundCurrency(Number(prod.price) / divisor);
+        const newOriginalPrice =
+          Number(prod.original_price) > 0
+            ? roundCurrency(Number(prod.original_price) / divisor)
+            : 0;
+        const newPromoPrice =
+          prod.promotional_price !== null &&
+          prod.promotional_price !== undefined &&
+          Number(prod.promotional_price) > 0
+            ? roundCurrency(Number(prod.promotional_price) / divisor)
+            : null;
+
+        const { error: updateErr } = await supabaseAdmin
+          .from("products")
+          .update({
+            price: newPrice,
+            original_price: newOriginalPrice,
+            promotional_price: newPromoPrice,
+          })
+          .eq("id", prod.id);
+
+        if (!updateErr) {
+          if (prod.tenant_id) {
+            tenantProductHashCache.delete(prod.tenant_id);
+          }
+          correctedProducts.push({
+            id: prod.id,
+            tenant_id: prod.tenant_id,
+            internal_code: prod.internal_code,
+            barcode: prod.barcode,
+            name: prod.name,
+            old_price: prod.price,
+            new_price: newPrice,
+            old_promotional_price: prod.promotional_price,
+            new_promotional_price: newPromoPrice,
+            divisor,
+          });
+        }
+      }
+    }
+  } catch (err: any) {
+    console.warn(
+      "[Price Divisor] Aviso ao corrigir produtos existentes:",
+      err?.message || err,
+    );
+  }
+
+  return {
+    correctedCount: correctedProducts.length,
+    correctedProducts,
+  };
+};
+
+// Executa uma varredura inicial não-bloqueante ao subir o servidor para corrigir imediatamente produtos Dryon já gravados com preço multiplicado
+setTimeout(() => {
+  applyPriceDivisorRulesToExistingProducts().then(({ correctedCount }) => {
+    if (correctedCount > 0) {
+      console.log(
+        `[Price Divisor] ${correctedCount} produto(s) com preço multiplicado (ex: Dryon fração 12) corrigidos automaticamente no Supabase.`,
+      );
+    }
+  });
+}, 4000);
+
 const handleProductIntegration = async (req: express.Request, res: express.Response) => {
   let tenantId: string | null = null;
   try {
@@ -8826,6 +9051,7 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
 
     tenantId = resolvedTenantId;
     const ignoreErpPrices = tenant.ignore_erp_prices === true || tenant.delivery_settings?.ignore_erp_prices === true;
+    const tenantPriceRules = await getTenantPriceDivisorRules(tenantId, tenant);
     
     // Atualiza heartbeat do agente imediatamente
     await touchAgentHeartbeat(tenantId, machineId, activationToken);
@@ -8940,6 +9166,35 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
        ]), 0));
        if (isNaN(stock) || stock < 0) stock = 0;
        
+       // 3. Nome/Descrição, Fabricante, Apresentação, Unidade e Fração (extraídos antes do preço para aplicar regras de divisão de fração)
+       const rawName = getValFromProduct(p, [
+         'descricao_produto', 'nome', 'Nome_do_Produto', 'nome_do_produto', 'Nome_do_Sku', 'nome_do_sku',
+         'NomeProduto', 'DESCRICAO', 'NOME', 'PRODUTO', 'APRESENTACAO',
+         'name', 'descricao', 'nome_produto', 'produto',
+         'descrio', 'descr', 'title'
+       ]);
+       const name = rawName !== undefined && rawName !== null ? String(rawName).trim() : `Produto ${ean}`;
+
+       const rawManufacturer = getValFromProduct(p, [
+         'fabricante', 'laboratorio', 'Marca', 'marca',
+         'NomeFabricante', 'FABRICANTE', 'LABORATORIO', 'NOME_FABRICANTE', 'MARCA',
+         'manufacturer', 'nome_fabricante'
+       ]);
+       const rawPresentation = getValFromProduct(p, [
+         'APRESENTACAO', 'presentation', 'apresentacao', 'embalagem', 'unidade_medida', 'unidadeMedida', 'unidade'
+       ]);
+       const rawUnit = getValFromProduct(p, [
+         'unidade', 'Unidade', 'UNIDADE', 'unidade_medida', 'Unidade_Medida', 'UNIDADEMEDIDA', 'und', 'UND', 'un'
+       ]);
+       const rawFraction = parseAgentNumber(getValFromProduct(p, [
+         'fracao', 'Fracao', 'FRACAO', 'qtd_embalagem', 'Qtd_Embalagem', 'QTD_EMBALAGEM',
+         'quantidade_embalagem', 'Quantidade_Embalagem', 'fator_conversao', 'Fator_Conversao',
+         'multiplo', 'Multiplo', 'embalagem_venda'
+       ]), 0);
+       const rawExplicitDivisor = parseAgentNumber(getValFromProduct(p, [
+         'divisor_preco', 'price_divisor', 'divisorPreco', 'priceDivisor'
+       ]), 0);
+
        // 4. Preço de Venda (preco, preco_venda, Preco_Bruto; se vier 0, usa Preco_Liquido)
        let rawPriceBruto = parseAgentNumber(getValFromProduct(p, [
          'preco', 'preco_venda', 'Preco_Bruto', 'preco_bruto', 'PrecoBruto', 'PRECO_BRUTO',
@@ -8953,12 +9208,48 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
        ]), 0);
        if (isNaN(rawPrecoLiquidoFallback) || rawPrecoLiquidoFallback < 0) rawPrecoLiquidoFallback = 0;
 
-       let price = rawPriceBruto > 0 ? rawPriceBruto : rawPrecoLiquidoFallback;
-
        let originalPrice = parseAgentNumber(getValFromProduct(p, [
          'original_price', 'originalPrice', 'preco_original', 'preco_de', 'preco_tabela', 'preco_cadastro', 'preco_antigo', 'valor_original'
        ]), 0);
        if (isNaN(originalPrice) || originalPrice < 0) originalPrice = 0;
+
+       // 5. Preço Promocional bruto antes da validação
+       let rawPromoPrice = parseAgentNumber(getValFromProduct(p, [
+         'preco_promocional', 'Preco_Liquido', 'preco_liquido', 'PrecoLiquido',
+         'PrecoPromocao', 'PRECO_PROMOCAO', 'PRECO_DESCONTO', 'PRECO_LIQUido', 'PRECO_LIQUIDO', 'VL_PROMOCAO',
+         'promotional_price', 'promotionalPrice', 'promo_price', 'preco_promo', 'promocional', 'valor_promocional', 'preco_oferta', 'vl_promo', 'preco_por', 'preco_vitrine'
+       ]), 0);
+       if (isNaN(rawPromoPrice) || rawPromoPrice < 0) rawPromoPrice = 0;
+
+       let rawProgPrice = parseAgentNumber(getValFromProduct(p, [
+         'promo_progressive_price', 'preco_atacado', 'preco_progressivo', 'valor_atacado', 'vl_atacado', 'promoProgressivePrice'
+       ]), 0);
+       if (isNaN(rawProgPrice) || rawProgPrice < 0) rawProgPrice = 0;
+
+       // Regra de correção automática de preço por fração / exceção (ex: Dryon com fração 12 ou regras por produto/tenant)
+       const priceDivisor = resolveProductPriceDivisor({
+         internalCode,
+         barcode: ean,
+         name,
+         manufacturer: rawManufacturer ? String(rawManufacturer) : null,
+         unit: rawUnit ? String(rawUnit) : null,
+         presentation: rawPresentation ? String(rawPresentation) : null,
+         rawFraction,
+         explicitDivisor: rawExplicitDivisor,
+         rawPriceBruto,
+         rawPrecoLiquido: rawPrecoLiquidoFallback > 0 ? rawPrecoLiquidoFallback : rawPromoPrice,
+         customRules: tenantPriceRules,
+       });
+
+       if (priceDivisor > 1) {
+         if (rawPriceBruto > 0) rawPriceBruto = roundCurrency(rawPriceBruto / priceDivisor);
+         if (rawPrecoLiquidoFallback > 0) rawPrecoLiquidoFallback = roundCurrency(rawPrecoLiquidoFallback / priceDivisor);
+         if (originalPrice > 0) originalPrice = roundCurrency(originalPrice / priceDivisor);
+         if (rawPromoPrice > 0) rawPromoPrice = roundCurrency(rawPromoPrice / priceDivisor);
+         if (rawProgPrice > 0) rawProgPrice = roundCurrency(rawProgPrice / priceDivisor);
+       }
+
+       let price = rawPriceBruto > 0 ? rawPriceBruto : rawPrecoLiquidoFallback;
 
        // Normalização e extração de colunas de promoção do ERP (com retrocompatibilidade total)
        const rawStartDate = getValFromProduct(p, [
@@ -8982,12 +9273,6 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
          if (!isNaN(eDate.getTime()) && now > eDate) isPromoValid = false;
        }
 
-       // 5. Preço Promocional (preco_promocional, Preco_Liquido quando > 0 e < Preco_Bruto / price)
-       let rawPromoPrice = parseAgentNumber(getValFromProduct(p, [
-         'preco_promocional', 'Preco_Liquido', 'preco_liquido', 'PrecoLiquido',
-         'PrecoPromocao', 'PRECO_PROMOCAO', 'PRECO_DESCONTO', 'PRECO_LIQUido', 'PRECO_LIQUIDO', 'VL_PROMOCAO',
-         'promotional_price', 'promotionalPrice', 'promo_price', 'preco_promo', 'promocional', 'valor_promocional', 'preco_oferta', 'vl_promo', 'preco_por', 'preco_vitrine'
-       ]), 0);
        const promoPrice = (!isNaN(rawPromoPrice) && rawPromoPrice > 0 && rawPromoPrice < price && isPromoValid) ? rawPromoPrice : null;
 
        const rawBuyQty = parseAgentNumber(getValFromProduct(p, [
@@ -9000,9 +9285,6 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
        ]), 0);
        const payQty = (!isNaN(rawPayQty) && rawPayQty > 0 && isPromoValid) ? Math.floor(rawPayQty) : null;
 
-       const rawProgPrice = parseAgentNumber(getValFromProduct(p, [
-         'promo_progressive_price', 'preco_atacado', 'preco_progressivo', 'valor_atacado', 'vl_atacado', 'promoProgressivePrice'
-       ]), 0);
        const progPrice = (!isNaN(rawProgPrice) && rawProgPrice > 0 && isPromoValid) ? rawProgPrice : null;
 
        const rawPromoType = getValFromProduct(p, [
@@ -9056,15 +9338,6 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
 
        const promotionalPrice = finalPromotionalPrice;
 
-       // 3. Nome/Descrição (descricao_produto, nome, Nome_do_Produto, Nome_do_Sku, NomeProduto, DESCRICAO, NOME, PRODUTO, APRESENTACAO)
-       const rawName = getValFromProduct(p, [
-         'descricao_produto', 'nome', 'Nome_do_Produto', 'nome_do_produto', 'Nome_do_Sku', 'nome_do_sku',
-         'NomeProduto', 'DESCRICAO', 'NOME', 'PRODUTO', 'APRESENTACAO',
-         'name', 'descricao', 'nome_produto', 'produto',
-         'descrio', 'descr', 'title'
-       ]);
-       const name = rawName !== undefined && rawName !== null ? String(rawName).trim() : `Produto ${ean}`;
-
        // 8. Departamento / Grupo / Seção (NomeGrupo, GRUPO, SECAO, DEPARTAMENTO, CATEGORIA, SUBGRUPO)
        const rawCategory = getValFromProduct(p, [
          'NomeGrupo', 'GRUPO', 'SECAO', 'DEPARTAMENTO', 'CATEGORIA', 'SUBGRUPO',
@@ -9075,16 +9348,6 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
        ]);
        const rawDescription = getValFromProduct(p, [
          'Descricao', 'apresentacao', 'description', 'descricao_longa', 'detalhes', 'APRESENTACAO', 'Apresentacao'
-       ]);
-
-       // 7. Fabricante / Laboratório (fabricante, laboratorio, Marca, NomeFabricante, FABRICANTE, LABORATORIO, NOME_FABRICANTE, MARCA)
-       const rawManufacturer = getValFromProduct(p, [
-         'fabricante', 'laboratorio', 'Marca', 'marca',
-         'NomeFabricante', 'FABRICANTE', 'LABORATORIO', 'NOME_FABRICANTE', 'MARCA',
-         'manufacturer', 'nome_fabricante'
-       ]);
-       const rawPresentation = getValFromProduct(p, [
-         'APRESENTACAO', 'presentation', 'apresentacao', 'embalagem', 'unidade_medida', 'unidadeMedida', 'unidade'
        ]);
 
        // 9. Classificação / Genérico / Receita (Classificacao, TIPO, GENERICO, LISTA_PBM, PSICOTROPICO, RETENCAO_RECEITA)
@@ -9640,6 +9903,103 @@ app.post([
   "/api/v1/sync",
   "/api/sync"
 ], handleProductIntegration);
+
+// Rotas para consultar, cadastrar e aplicar regras de divisão/correção de preço (ex: fração 12 Dryon)
+app.get("/api/v1/products/price-rules", async (req, res) => {
+  try {
+    const tenantId = String(req.query.tenantId || req.headers["x-tenant-id"] || "").trim();
+    const rules = tenantId
+      ? await getTenantPriceDivisorRules(tenantId, undefined, true)
+      : DEFAULT_GLOBAL_PRICE_DIVISOR_RULES;
+    return res.status(200).json({ success: true, rules });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "Erro ao listar regras de preço" });
+  }
+});
+
+app.post("/api/v1/products/price-rules", async (req, res) => {
+  try {
+    const tenantId = String(req.body?.tenant_id || req.body?.tenantId || req.headers["x-tenant-id"] || "").trim() || null;
+    const divisor = Number(req.body?.divisor || 12);
+    if (!Number.isFinite(divisor) || divisor <= 1) {
+      return res.status(400).json({ error: "O divisor deve ser maior que 1 (ex: 12)." });
+    }
+
+    const newRule: ProductPriceDivisorRule = {
+      tenant_id: tenantId,
+      internal_code: req.body?.internal_code ? String(req.body.internal_code).trim() : null,
+      barcode: req.body?.barcode || req.body?.ean ? String(req.body.barcode || req.body.ean).trim() : null,
+      name_pattern: req.body?.name_pattern ? String(req.body.name_pattern).trim() : null,
+      divisor,
+      min_raw_price:
+        req.body?.min_raw_price !== undefined && req.body?.min_raw_price !== null
+          ? Number(req.body.min_raw_price)
+          : null,
+      active: true,
+    };
+
+    // Tenta salvar na tabela product_price_rules (se existir) e também em delivery_settings.price_divisor_rules do tenant
+    let savedRow: any = null;
+    try {
+      const { data, error } = await supabaseAdmin
+        .from("product_price_rules")
+        .insert([newRule])
+        .select()
+        .single();
+      if (!error && data) {
+        savedRow = data;
+      }
+    } catch (_e) {}
+
+    if (tenantId) {
+      const { data: tenantData } = await supabaseAdmin
+        .from("tenants")
+        .select("delivery_settings")
+        .eq("id", tenantId)
+        .maybeSingle();
+      const currentSettings =
+        tenantData?.delivery_settings && typeof tenantData.delivery_settings === "object"
+          ? tenantData.delivery_settings
+          : {};
+      const currentList = Array.isArray(currentSettings.price_divisor_rules)
+        ? currentSettings.price_divisor_rules
+        : [];
+      const ruleWithId = savedRow || { ...newRule, id: `rule-${Date.now()}` };
+      currentList.push(ruleWithId);
+      await supabaseAdmin
+        .from("tenants")
+        .update({
+          delivery_settings: {
+            ...currentSettings,
+            price_divisor_rules: currentList,
+          },
+        })
+        .eq("id", tenantId);
+      tenantPriceRulesCache.delete(tenantId);
+      tenantProductHashCache.delete(tenantId);
+    }
+
+    const cleanupResult = await applyPriceDivisorRulesToExistingProducts(tenantId || undefined);
+
+    return res.status(200).json({
+      success: true,
+      rule: savedRow || newRule,
+      ...cleanupResult,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "Erro ao salvar regra de preço" });
+  }
+});
+
+app.post("/api/v1/products/price-rules/apply-now", async (req, res) => {
+  try {
+    const tenantId = String(req.body?.tenant_id || req.body?.tenantId || req.query.tenantId || req.headers["x-tenant-id"] || "").trim() || undefined;
+    const result = await applyPriceDivisorRulesToExistingProducts(tenantId);
+    return res.status(200).json({ success: true, ...result });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "Erro ao aplicar regras de preço" });
+  }
+});
 
 // =========================================
 // MÓDULO FARMAFLOW CHAT - ROTAS DE BACKEND
