@@ -85,6 +85,7 @@ import {
   getOrInitVapidKeys,
   savePushSubscription,
   getTenantPushSubscriptions,
+  verifyPushSubscriptionExists,
   sendPromotionalPushToTenant,
 } from "./services/webPushService.js";
 
@@ -13507,6 +13508,56 @@ app.get(["/api/v1/push/stats", "/api/push/stats"], async (req, res) => {
       .json({ error: err.message || "Erro ao consultar inscritos Web Push." });
   }
 });
+
+const handleVerifyPushSubscription = async (
+  req: express.Request,
+  res: express.Response
+) => {
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  try {
+    const tenantId = String(
+      req.query.tenantId ||
+        req.query.tenant_id ||
+        req.body?.tenantId ||
+        req.body?.tenant_id ||
+        ""
+    ).trim();
+    const endpoint = String(
+      req.query.endpoint || req.body?.endpoint || ""
+    ).trim();
+
+    if (!endpoint) {
+      return res.status(200).json({ success: true, exists: false });
+    }
+
+    const exists = await verifyPushSubscriptionExists(
+      supabaseAdmin,
+      tenantId,
+      endpoint
+    );
+
+    return res.status(200).json({
+      success: true,
+      exists,
+      tenantId: tenantId || null,
+      endpoint,
+    });
+  } catch (err: any) {
+    console.error("[WebPush Verify Error]:", err);
+    return res.status(500).json({
+      error: err.message || "Erro ao verificar subscrição Web Push.",
+    });
+  }
+};
+
+app.get(
+  ["/api/v1/push/verify", "/api/push/verify", "/api/v1/push/check", "/api/push/check"],
+  handleVerifyPushSubscription
+);
+app.post(
+  ["/api/v1/push/verify", "/api/push/verify", "/api/v1/push/check", "/api/push/check"],
+  handleVerifyPushSubscription
+);
 
 app.post(
   ["/api/v1/push/subscribe", "/api/push/subscribe"],

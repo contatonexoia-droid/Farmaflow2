@@ -321,6 +321,7 @@ export async function getTenantPushSubscriptions(
 
   const cleanTenantId = String(tenantId || "").trim();
   const byEndpoint = new Map<string, PushSubscriptionRow>();
+  let supabaseQuerySucceeded = false;
 
   try {
     const { data, error } = await supabaseAdmin
@@ -329,6 +330,7 @@ export async function getTenantPushSubscriptions(
       .eq("tenant_id", cleanTenantId);
 
     if (!error && Array.isArray(data)) {
+      supabaseQuerySucceeded = true;
       for (const item of data) {
         if (item?.endpoint && item?.p256dh && item?.auth) {
           byEndpoint.set(String(item.endpoint), {
@@ -347,6 +349,18 @@ export async function getTenantPushSubscriptions(
     console.warn("[WebPush] Aviso ao consultar push_subscriptions no Supabase:", err?.message || err);
   }
 
+  if (supabaseQuerySucceeded) {
+    // Mantém o arquivo espelho sincronizado com o Supabase (removendo registros que foram apagados no banco)
+    const allLocal = loadLocalSubscriptions();
+    const otherTenantsLocal = allLocal.filter((r) => r.tenant_id !== cleanTenantId);
+    const updatedLocal = [...otherTenantsLocal, ...Array.from(byEndpoint.values())];
+    if (updatedLocal.length !== allLocal.length) {
+      saveLocalSubscriptions(updatedLocal);
+    }
+    return Array.from(byEndpoint.values());
+  }
+
+  // Fallback apenas se a tabela não existir ou o Supabase estiver inacessível
   const localRows = loadLocalSubscriptions().filter(
     (r) => r.tenant_id === cleanTenantId && r.endpoint && r.p256dh && r.auth
   );
@@ -357,6 +371,63 @@ export async function getTenantPushSubscriptions(
   }
 
   return Array.from(byEndpoint.values());
+}
+
+/**
+ * Verifica se um endpoint de push específico existe ativo na tabela push_subscriptions do Supabase para o tenant atual.
+ */
+export async function verifyPushSubscriptionExists(
+  supabaseAdmin: SupabaseClient,
+  tenantId: string,
+  endpoint: string
+): Promise<boolean> {
+  await ensurePushSubscriptionsTable();
+
+  const cleanTenantId = String(tenantId || "").trim();
+  const cleanEndpoint = String(endpoint || "").trim();
+  if (!cleanEndpoint) return false;
+
+  try {
+    let query = supabaseAdmin
+      .from("push_subscriptions")
+      .select("id, endpoint, tenant_id")
+      .eq("endpoint", cleanEndpoint);
+
+    if (cleanTenantId) {
+      query = query.eq("tenant_id", cleanTenantId);
+    }
+
+    const { data, error } = await query.maybeSingle();
+
+    if (!error) {
+      const exists = Boolean(data && data.endpoint);
+      if (!exists) {
+        // Garante remoção também do espelho local caso tenha sido excluído no Supabase
+        const localRows = loadLocalSubscriptions();
+        const filtered = localRows.filter(
+          (r) =>
+            !(
+              r.endpoint === cleanEndpoint &&
+              (!cleanTenantId || r.tenant_id === cleanTenantId)
+            )
+        );
+        if (filtered.length !== localRows.length) {
+          saveLocalSubscriptions(filtered);
+        }
+      }
+      return exists;
+    }
+  } catch (err: any) {
+    console.warn("[WebPush] Erro ao verificar existência da subscrição no Supabase:", err?.message || err);
+  }
+
+  // Fallback para espelho local caso a tabela ainda não exista no banco
+  const localRows = loadLocalSubscriptions();
+  return localRows.some(
+    (r) =>
+      r.endpoint === cleanEndpoint &&
+      (!cleanTenantId || r.tenant_id === cleanTenantId)
+  );
 }
 
 /**

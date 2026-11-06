@@ -3402,63 +3402,192 @@ export const Storefront: React.FC<StorefrontProps> = ({
   useEffect(() => {
     if (typeof window === "undefined" || !tenant?.id) return;
 
+    let isCancelled = false;
     setIsPushSupported(true);
 
-    let hasLocalSub = false;
-    let hasDismissed = false;
-    try {
-      hasLocalSub =
-        localStorage.getItem(`push_subscribed_${tenant.id}`) === "true" ||
-        localStorage.getItem(`ff_push_subscribed_${tenant.id}`) === "true";
-      hasDismissed =
-        localStorage.getItem(`push_dismissed_${tenant.id}`) === "true" ||
-        sessionStorage.getItem(`ff_push_banner_dismissed_${tenant.id}`) === "true";
-    } catch (_) {}
-
-    setIsPushSubscribed(hasLocalSub);
-    setIsPushBannerDismissed(hasDismissed);
-    setShowPushBanner(!hasLocalSub && !hasDismissed);
-
-    if (
-      !("serviceWorker" in navigator) ||
-      !("PushManager" in window) ||
-      !("Notification" in window)
-    ) {
-      return;
-    }
-
-    navigator.serviceWorker
-      .register("/sw.js", { scope: "/" })
-      .then(async (reg) => {
-        const existingSub = await reg.pushManager.getSubscription();
-        if (existingSub && Notification.permission === "granted") {
-          try {
-            localStorage.setItem(`push_subscribed_${tenant.id}`, "true");
-            localStorage.setItem(`ff_push_subscribed_${tenant.id}`, "true");
-          } catch (_) {}
-          setIsPushSubscribed(true);
-          setShowPushBanner(false);
-
-          if (!hasLocalSub) {
-            try {
-              const subJson = existingSub.toJSON();
-              await fetch("/api/v1/push/subscribe", {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  Accept: "application/json",
-                },
-                body: JSON.stringify({
-                  tenantId: tenant.id,
-                  subscription: subJson,
-                  userAgent: navigator.userAgent,
-                }),
-              });
-            } catch (_) {}
+    const clearLocalPushStateAndUnsubscribe = async () => {
+      try {
+        if ("serviceWorker" in navigator) {
+          await navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(() => {});
+          const registration = await Promise.race([
+            navigator.serviceWorker.ready,
+            new Promise<ServiceWorkerRegistration | null>((resolve) =>
+              setTimeout(() => resolve(null), 4000)
+            ),
+          ]);
+          if (registration && registration.pushManager) {
+            const subscription = await registration.pushManager.getSubscription();
+            if (subscription) {
+              await subscription.unsubscribe();
+            }
           }
         }
-      })
-      .catch(() => {});
+      } catch (unsubErr) {
+        console.warn("[WebPush] Aviso ao desinscrever push local:", unsubErr);
+      }
+
+      try {
+        (window as any).currentPushEndpoint = null;
+        localStorage.removeItem(`push_subscribed_${tenant.id}`);
+        localStorage.removeItem(`ff_push_subscribed_${tenant.id}`);
+        localStorage.removeItem(`ff_push_endpoint_${tenant.id}`);
+        localStorage.removeItem("ff_push_endpoint");
+        localStorage.removeItem(`push_dismissed_${tenant.id}`);
+        sessionStorage.removeItem(`ff_push_banner_dismissed_${tenant.id}`);
+      } catch (_) {}
+
+      if (!isCancelled) {
+        setIsPushSubscribed(false);
+        setIsPushBannerDismissed(false);
+        setShowPushBanner(true);
+      }
+    };
+
+    const checkEndpointExistsInDatabase = async (
+      endpointToVerify: string
+    ): Promise<boolean> => {
+      const cleanEndpoint = String(endpointToVerify || "").trim();
+      if (!cleanEndpoint) return false;
+
+      // 1. Consulta direta à tabela de subscrições do Supabase
+      try {
+        const { data, error } = await supabase
+          .from("push_subscriptions")
+          .select("id, endpoint")
+          .eq("tenant_id", tenant.id)
+          .eq("endpoint", cleanEndpoint)
+          .maybeSingle();
+
+        if (!error) {
+          return Boolean(data && data.endpoint);
+        }
+      } catch (_) {}
+
+      // 2. Fallback via rota do backend (caso RLS restrinja leitura anônima no cliente)
+      try {
+        const res = await fetch(
+          `/api/v1/push/verify?tenantId=${encodeURIComponent(
+            tenant.id
+          )}&endpoint=${encodeURIComponent(cleanEndpoint)}`,
+          { headers: { Accept: "application/json" } }
+        );
+        const ct = (res.headers.get("content-type") || "").toLowerCase();
+        if (res.ok && ct.includes("application/json")) {
+          const payload = await res.json();
+          return Boolean(payload?.exists);
+        }
+      } catch (_) {}
+
+      return false;
+    };
+
+    const verifyAndSyncPushSubscription = async () => {
+      let hasLocalSub = false;
+      let hasDismissed = false;
+      let storedEndpoint = "";
+
+      try {
+        hasLocalSub =
+          localStorage.getItem(`push_subscribed_${tenant.id}`) === "true" ||
+          localStorage.getItem(`ff_push_subscribed_${tenant.id}`) === "true";
+        hasDismissed =
+          localStorage.getItem(`push_dismissed_${tenant.id}`) === "true" ||
+          sessionStorage.getItem(`ff_push_banner_dismissed_${tenant.id}`) === "true";
+        storedEndpoint =
+          String(
+            (window as any).currentPushEndpoint ||
+              localStorage.getItem(`ff_push_endpoint_${tenant.id}`) ||
+              localStorage.getItem("ff_push_endpoint") ||
+              ""
+          ).trim();
+      } catch (_) {}
+
+      let swEndpoint = "";
+      const supportsNativeSw =
+        "serviceWorker" in navigator &&
+        "PushManager" in window &&
+        "Notification" in window;
+
+      if (supportsNativeSw) {
+        try {
+          await navigator.serviceWorker
+            .register("/sw.js", { scope: "/" })
+            .catch(() => {});
+          const registration = await Promise.race([
+            navigator.serviceWorker.ready,
+            new Promise<ServiceWorkerRegistration | null>((resolve) =>
+              setTimeout(() => resolve(null), 4000)
+            ),
+          ]);
+          if (registration && registration.pushManager) {
+            const subscription = await registration.pushManager.getSubscription();
+            if (subscription && subscription.endpoint) {
+              swEndpoint = subscription.endpoint;
+              (window as any).currentPushEndpoint = swEndpoint;
+            }
+          }
+        } catch (_) {}
+      }
+
+      const activeEndpoint = swEndpoint || storedEndpoint;
+
+      // Se não há endpoint ativo nem no Service Worker nem armazenado localmente,
+      // mas havia estado local de inscrito preso no navegador, limpa tudo imediatamente
+      if (!activeEndpoint) {
+        if (hasLocalSub) {
+          await clearLocalPushStateAndUnsubscribe();
+        } else if (!isCancelled) {
+          setIsPushSubscribed(false);
+          setIsPushBannerDismissed(hasDismissed);
+          setShowPushBanner(!hasDismissed);
+        }
+        return;
+      }
+
+      // Se a permissão do navegador foi revogada pelo usuário, limpa também
+      if (
+        supportsNativeSw &&
+        swEndpoint &&
+        typeof Notification !== "undefined" &&
+        Notification.permission === "denied"
+      ) {
+        await clearLocalPushStateAndUnsubscribe();
+        return;
+      }
+
+      // Valida no Supabase se o endpoint atual realmente existe ativo na tabela push_subscriptions
+      const existsInSupabase = await checkEndpointExistsInDatabase(activeEndpoint);
+
+      if (isCancelled) return;
+
+      if (existsInSupabase) {
+        try {
+          (window as any).currentPushEndpoint = activeEndpoint;
+          localStorage.setItem(`push_subscribed_${tenant.id}`, "true");
+          localStorage.setItem(`ff_push_subscribed_${tenant.id}`, "true");
+          localStorage.setItem(`ff_push_endpoint_${tenant.id}`, activeEndpoint);
+        } catch (_) {}
+        setIsPushSubscribed(true);
+        setShowPushBanner(false);
+      } else {
+        // O registo não existe mais no Supabase: executa desinscrição local automática e apaga o sinal de alerta
+        await clearLocalPushStateAndUnsubscribe();
+      }
+    };
+
+    verifyAndSyncPushSubscription();
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        verifyAndSyncPushSubscription();
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      isCancelled = true;
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
   }, [tenant?.id]);
 
   const handleDismissPushBanner = useCallback(
@@ -3481,8 +3610,13 @@ export const Storefront: React.FC<StorefrontProps> = ({
 
     setIsSubscribingPush(true);
 
-    const markSubscribedAndHideBanner = () => {
+    const markSubscribedAndHideBanner = (endpoint?: string) => {
       try {
+        if (endpoint) {
+          (window as any).currentPushEndpoint = endpoint;
+          localStorage.setItem(`ff_push_endpoint_${tenant.id}`, endpoint);
+          localStorage.setItem("ff_push_endpoint", endpoint);
+        }
         localStorage.setItem(`push_subscribed_${tenant.id}`, "true");
         localStorage.setItem(`ff_push_subscribed_${tenant.id}`, "true");
       } catch (_) {}
@@ -3606,7 +3740,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
         console.warn("[WebPush] Aviso ao sincronizar inscrição no backend:", apiErr);
       }
 
-      markSubscribedAndHideBanner();
+      markSubscribedAndHideBanner(subscriptionPayload?.endpoint);
       toast.success("✅ Alertas de ofertas ativados!");
     } catch (err: any) {
       console.warn("[WebPush] Fallback de ativação concluído:", err);
