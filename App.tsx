@@ -1237,46 +1237,27 @@ const App: React.FC = () => {
     }
   }, [currentTenant?.id]);
 
-  const hasFixedOrphans = React.useRef(false);
-
   useEffect(() => {
-    hasFixedOrphans.current = false;
-  }, [currentTenant?.id]);
+    const tenantId = currentTenant?.id;
+    if (!tenantId || isLoading) return;
 
-  useEffect(() => {
-    const fixOrphanedProducts = async () => {
-      if (currentTenant && !hasFixedOrphans.current) {
-        hasFixedOrphans.current = true;
-        // Verifica se existem produtos sem tenantid e os vincula ao tenant atual
-        const { data, error } = await supabase
-          .from("products")
-          .update({ tenant_id: currentTenant.id })
-          .is("tenant_id", null);
-
-        if (!error && data) {
-          console.log("Produtos órfãos vinculados com sucesso!");
-          // Recarrega os produtos após a correção
-          getProductsByTenant(currentTenant.id, setProducts, true).then(
-            setProducts,
-          );
-        }
-      }
-    };
-    fixOrphanedProducts();
-  }, [currentTenant?.id]);
-
-  useEffect(() => {
-    if (currentTenant && !isLoading) {
-      getProductsByTenant(currentTenant.id, setProducts).then(setProducts);
-      getOrdersByTenant(currentTenant.id).then(setOrders);
-      getPromotionsByTenant(currentTenant.id, currentTenant.networkId).then(setPromotions);
-      getCouponsByTenant(currentTenant.id, currentTenant.networkId).then(setCoupons);
+    getProductsByTenant(tenantId, setProducts).then(setProducts);
+    if (session?.type === "PHARMACY_ADMIN" || session?.type === "SUPER_ADMIN") {
+      getOrdersByTenant(tenantId).then(setOrders);
     }
+    getPromotionsByTenant(tenantId, currentTenant.networkId).then(setPromotions);
+    getCouponsByTenant(tenantId, currentTenant.networkId).then(setCoupons);
   }, [currentTenant?.id, isLoading]);
 
   useEffect(() => {
-    if (currentTenant?.networkId && currentTenant.networkId !== currentTenant.id) {
-      getProductsByTenant(currentTenant.networkId, setMatrizProducts)
+    const tenantId = currentTenant?.id;
+    const networkId = currentTenant?.networkId;
+    if (!tenantId) {
+      setMatrizProducts([]);
+      return;
+    }
+    if (networkId && networkId !== tenantId) {
+      getProductsByTenant(networkId, setMatrizProducts)
         .then((initialProds) => {
           setMatrizProducts((prev) => (prev.length === 0 && initialProds.length > 0 ? initialProds : prev));
         })
@@ -1434,26 +1415,26 @@ const App: React.FC = () => {
   }, [currentTenant?.id]);
 
   useEffect(() => {
-    if (!currentTenant) return;
+    const tenantId = currentTenant?.id;
+    if (!tenantId) return;
 
     // Supabase Realtime Listener
     const channel = supabase
-      .channel(`public:promotions:tenant_id=eq.${currentTenant.id}`)
+      .channel(`public:promotions:tenant_id=eq.${tenantId}`)
       .on(
         "postgres_changes",
         {
           event: "*",
           schema: "public",
           table: "promotions",
-          filter: `tenant_id=eq.${currentTenant.id}`,
+          filter: `tenant_id=eq.${tenantId}`,
         },
         async () => {
-          // Re-fetch all promotions for simplicity
-          const promos = await getPromotionsByTenant(currentTenant.id, currentTenant.networkId);
+          const promos = await getPromotionsByTenant(tenantId, currentTenant.networkId);
           if (Array.isArray(promos)) {
             setPromotions(promos);
           }
-          const coups = await getCouponsByTenant(currentTenant.id, currentTenant.networkId);
+          const coups = await getCouponsByTenant(tenantId, currentTenant.networkId);
           if (Array.isArray(coups)) {
             setCoupons(coups);
           }
@@ -1461,17 +1442,21 @@ const App: React.FC = () => {
       )
       .subscribe();
 
-    // High-frequency polling fallback (10 seconds)
+    // Polling de segurança espaçado (a cada 5 minutos = 300.000ms) apenas com a aba visível
+    const PROMO_POLL_INTERVAL_MS = 5 * 60 * 1000;
     const interval = setInterval(async () => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+        return;
+      }
       try {
-        const promos = await getPromotionsByTenant(currentTenant.id, currentTenant.networkId);
+        const promos = await getPromotionsByTenant(tenantId, currentTenant.networkId);
         if (Array.isArray(promos)) {
           setPromotions((prev) =>
             JSON.stringify(prev) !== JSON.stringify(promos) ? promos : prev,
           );
         }
 
-        const coups = await getCouponsByTenant(currentTenant.id, currentTenant.networkId);
+        const coups = await getCouponsByTenant(tenantId, currentTenant.networkId);
         if (Array.isArray(coups)) {
           setCoupons((prev) =>
             JSON.stringify(prev) !== JSON.stringify(coups) ? coups : prev,
@@ -1480,7 +1465,7 @@ const App: React.FC = () => {
       } catch (e) {
         console.error("Error polling promotions/coupons run:", e);
       }
-    }, 10000);
+    }, PROMO_POLL_INTERVAL_MS);
 
     return () => {
       supabase.removeChannel(channel);
@@ -2415,32 +2400,37 @@ const App: React.FC = () => {
     const init = async () => {
       setIsLoading(true);
       try {
-        // Verificação de versão e limpeza de cache ativa para evitar travamentos de cache nos clientes
-        try {
-          const clientVersion = "3.0.5";
-          const res = await fetch("/api/v1/version");
-          if (res.ok) {
-            const data = await res.json();
-            if (data && data.version && data.version !== clientVersion) {
-              console.log("[FarmaFlow Auto-Update]: Nova versão detectada, limpando caches...");
-              if ("caches" in window) {
-                const keys = await caches.keys();
-                await Promise.all(keys.map(key => caches.delete(key)));
-              }
-              if ("serviceWorker" in navigator) {
-                const registrations = await navigator.serviceWorker.getRegistrations();
-                for (const registration of registrations) {
-                  await registration.unregister();
+        // Verificação de versão em background (com throttle de 5 minutos para não bloquear o carregamento inicial)
+        (async () => {
+          try {
+            const VERSION_CHECK_TTL_MS = 5 * 60 * 1000;
+            const lastCheck = Number(sessionStorage.getItem("ff_last_version_check") || "0");
+            if (Date.now() - lastCheck < VERSION_CHECK_TTL_MS) return;
+            sessionStorage.setItem("ff_last_version_check", String(Date.now()));
+
+            const clientVersion = "3.0.5";
+            const res = await fetch("/api/v1/version");
+            if (res.ok) {
+              const data = await res.json();
+              if (data && data.version && data.version !== clientVersion) {
+                console.log("[FarmaFlow Auto-Update]: Nova versão detectada, limpando caches...");
+                if ("caches" in window) {
+                  const keys = await caches.keys();
+                  await Promise.all(keys.map((key) => caches.delete(key)));
                 }
+                if ("serviceWorker" in navigator) {
+                  const registrations = await navigator.serviceWorker.getRegistrations();
+                  for (const registration of registrations) {
+                    await registration.unregister();
+                  }
+                }
+                window.location.reload();
               }
-              // Força o reload completo sem usar cache
-              window.location.reload();
-              return;
             }
+          } catch (versionError) {
+            console.warn("Falha ao verificar versão:", versionError);
           }
-        } catch (versionError) {
-          console.warn("Falha ao verificar versão:", versionError);
-        }
+        })();
 
         const hostname = window.location.hostname;
         const isMainDomain =

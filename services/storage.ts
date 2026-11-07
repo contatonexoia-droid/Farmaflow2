@@ -1024,6 +1024,9 @@ export const getProductsByTenant = async (
   abortSignal?: AbortSignal,
   isAdmin: boolean = false,
 ): Promise<Product[]> => {
+  if (!tenantId || tenantId === "undefined" || tenantId === "null" || !String(tenantId).trim()) {
+    return [];
+  }
   try {
     const cacheKey = `products_${tenantId}${isAdmin ? "_admin" : ""}`;
 
@@ -1478,6 +1481,9 @@ export const deleteProducts = async (productIds: string[]) => {
 };
 
 export const getOrdersByTenant = async (tenantId: string): Promise<Order[]> => {
+  if (!tenantId || tenantId === "undefined" || tenantId === "null" || !String(tenantId).trim()) {
+    return [];
+  }
   try {
     const res = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/orders`);
     if (res.ok) {
@@ -1766,11 +1772,14 @@ export const getAuthHeaders = async (tenantId: string) => {
   };
 };
 
+const promosInFlightMap = new Map<string, Promise<PromotionRule[]>>();
+const promosMemoryCache = new Map<string, { data: PromotionRule[]; expiresAt: number }>();
+
 export const getPromotionsByTenant = async (
   tenantId: string,
   networkId?: string,
 ): Promise<PromotionRule[]> => {
-  if (!tenantId || tenantId === 'undefined' || tenantId === 'null' || !tenantId.trim()) {
+  if (!tenantId || tenantId === 'undefined' || tenantId === 'null' || !String(tenantId).trim()) {
     return [];
   }
 
@@ -1778,64 +1787,87 @@ export const getPromotionsByTenant = async (
   const validNetworkId = (networkId && networkId !== 'undefined' && networkId !== 'null' && networkId !== tenantId) 
     ? networkId 
     : undefined;
+  const dedupKey = `${tenantId}:${validNetworkId || ''}`;
 
-  // 1. Tenta buscar via endpoint de API dedicado
-  try {
-    const query = validNetworkId ? `?networkId=${encodeURIComponent(validNetworkId)}` : '';
-    const res = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/promos${query}`);
-    
-    if (res.ok) {
-      const text = await res.text();
-      if (!text.trim().startsWith('<')) {
-        try {
-          const data = JSON.parse(text);
-          if (Array.isArray(data)) {
-            const mapped = data.map(mapDbPromotionToApp);
-            await localforage.setItem(cacheKey, mapped).catch(() => {});
-            return mapped;
-          }
-        } catch (_) {}
+  const memCached = promosMemoryCache.get(dedupKey);
+  if (memCached && memCached.expiresAt > Date.now()) {
+    return memCached.data;
+  }
+
+  const existingInFlight = promosInFlightMap.get(dedupKey);
+  if (existingInFlight) {
+    return existingInFlight;
+  }
+
+  const requestPromise = (async (): Promise<PromotionRule[]> => {
+    // 1. Tenta buscar via endpoint de API dedicado
+    try {
+      const query = validNetworkId ? `?networkId=${encodeURIComponent(validNetworkId)}` : '';
+      const res = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/promos${query}`);
+      
+      if (res.ok) {
+        const text = await res.text();
+        if (!text.trim().startsWith('<')) {
+          try {
+            const data = JSON.parse(text);
+            if (Array.isArray(data)) {
+              const mapped = data.map(mapDbPromotionToApp);
+              promosMemoryCache.set(dedupKey, { data: mapped, expiresAt: Date.now() + 8000 });
+              await localforage.setItem(cacheKey, mapped).catch(() => {});
+              return mapped;
+            }
+          } catch (_) {}
+        }
+      }
+    } catch (apiError: any) {
+      console.warn("[getPromotionsByTenant] API fetch não disponível, tentando fallback direto no banco:", apiError?.message || apiError);
+    }
+
+    // 2. Fallback direto no Supabase Client
+    try {
+      return await retryRequest(async () => {
+        let sbQuery = supabase.from("promotions").select("*");
+        if (validNetworkId) {
+          sbQuery = sbQuery.or(`tenant_id.eq.${tenantId},tenant_id.eq.${validNetworkId}`);
+        } else {
+          sbQuery = sbQuery.eq("tenant_id", tenantId);
+        }
+        const { data, error } = await sbQuery;
+        if (error) throw error;
+        const mapped = (data || []).map(mapDbPromotionToApp);
+        promosMemoryCache.set(dedupKey, { data: mapped, expiresAt: Date.now() + 8000 });
+        await localforage.setItem(cacheKey, mapped).catch(() => {});
+        return mapped;
+      });
+    } catch (dbError: any) {
+      if (dbError.message !== "CONFIG_MISSING") {
+        console.warn("[getPromotionsByTenant] Fallback do banco falhou, tentando cache offline:", dbError?.message || dbError);
       }
     }
-  } catch (apiError: any) {
-    console.warn("[getPromotionsByTenant] API fetch não disponível, tentando fallback direto no banco:", apiError?.message || apiError);
-  }
 
-  // 2. Fallback direto no Supabase Client
-  try {
-    return await retryRequest(async () => {
-      let sbQuery = supabase.from("promotions").select("*");
-      if (validNetworkId) {
-        sbQuery = sbQuery.or(`tenant_id.eq.${tenantId},tenant_id.eq.${validNetworkId}`);
-      } else {
-        sbQuery = sbQuery.eq("tenant_id", tenantId);
+    // 3. Fallback para cache local (offline)
+    try {
+      const cached = await localforage.getItem<PromotionRule[]>(cacheKey);
+      if (cached && Array.isArray(cached)) {
+        return cached;
       }
-      const { data, error } = await sbQuery;
-      if (error) throw error;
-      const mapped = (data || []).map(mapDbPromotionToApp);
-      await localforage.setItem(cacheKey, mapped).catch(() => {});
-      return mapped;
-    });
-  } catch (dbError: any) {
-    if (dbError.message !== "CONFIG_MISSING") {
-      console.warn("[getPromotionsByTenant] Fallback do banco falhou, tentando cache offline:", dbError?.message || dbError);
+    } catch (cacheErr) {
+      console.error("Erro ao ler promoções do cache local:", cacheErr);
     }
-  }
 
-  // 3. Fallback para cache local (offline)
+    return [];
+  })();
+
+  promosInFlightMap.set(dedupKey, requestPromise);
   try {
-    const cached = await localforage.getItem<PromotionRule[]>(cacheKey);
-    if (cached && Array.isArray(cached)) {
-      return cached;
-    }
-  } catch (cacheErr) {
-    console.error("Erro ao ler promoções do cache local:", cacheErr);
+    return await requestPromise;
+  } finally {
+    promosInFlightMap.delete(dedupKey);
   }
-
-  return [];
 };
 
 export const savePromotion = async (promotion: PromotionRule) => {
+  promosMemoryCache.clear();
   const isVarCombo = promotion.type === "VARIABLE_COMBO" || (promotion.type as string) === "COMBO_VARIABLE";
   const comboProds = promotion.comboProducts || promotion.specificProductIds || [];
   const comboPriceVal = promotion.comboPrice !== undefined && promotion.comboPrice !== null ? Number(promotion.comboPrice) : (promotion.bundle_price !== undefined ? Number(promotion.bundle_price) : undefined);
@@ -1976,71 +2008,98 @@ export const mapCouponFromDB = (c: any): CouponRule => ({
   scope: c.scope || "SINGLE_STORE",
 });
 
+const couponsInFlightMap = new Map<string, Promise<CouponRule[]>>();
+const couponsMemoryCache = new Map<string, { data: CouponRule[]; expiresAt: number }>();
+
 export const getCouponsByTenant = async (
   tenantId: string,
   networkId?: string,
 ): Promise<CouponRule[]> => {
-  if (!tenantId || tenantId === 'undefined' || tenantId === 'null') {
+  if (!tenantId || tenantId === 'undefined' || tenantId === 'null' || !String(tenantId).trim()) {
     return [];
   }
   const cacheKey = `coupons_${tenantId}`;
   const validNetworkId = (networkId && networkId !== 'undefined' && networkId !== 'null') ? networkId : undefined;
-  // 1. Tenta buscar via endpoint de API dedicado
-  try {
-    const query = validNetworkId ? `?networkId=${encodeURIComponent(validNetworkId)}` : '';
-    const res = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/vouchers${query}`);
-    if (res.ok) {
-      const text = await res.text();
-      if (!text.trim().startsWith('<')) {
-        try {
-          const data = JSON.parse(text);
-          if (Array.isArray(data)) {
-            const mapped = data.map(mapCouponFromDB);
-            await localforage.setItem(cacheKey, mapped).catch(() => {});
-            return mapped;
-          }
-        } catch (_) {}
+  const dedupKey = `${tenantId}:${validNetworkId || ''}`;
+
+  const memCached = couponsMemoryCache.get(dedupKey);
+  if (memCached && memCached.expiresAt > Date.now()) {
+    return memCached.data;
+  }
+
+  const existingInFlight = couponsInFlightMap.get(dedupKey);
+  if (existingInFlight) {
+    return existingInFlight;
+  }
+
+  const requestPromise = (async (): Promise<CouponRule[]> => {
+    // 1. Tenta buscar via endpoint de API dedicado
+    try {
+      const query = validNetworkId ? `?networkId=${encodeURIComponent(validNetworkId)}` : '';
+      const res = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/vouchers${query}`);
+      if (res.ok) {
+        const text = await res.text();
+        if (!text.trim().startsWith('<')) {
+          try {
+            const data = JSON.parse(text);
+            if (Array.isArray(data)) {
+              const mapped = data.map(mapCouponFromDB);
+              couponsMemoryCache.set(dedupKey, { data: mapped, expiresAt: Date.now() + 8000 });
+              await localforage.setItem(cacheKey, mapped).catch(() => {});
+              return mapped;
+            }
+          } catch (_) {}
+        }
+      }
+    } catch (apiError: any) {
+      console.warn("[getCouponsByTenant] API fetch não disponível, tentando fallback direto no banco:", apiError?.message || apiError);
+    }
+
+    // 2. Fallback direto no Supabase Client
+    try {
+      return await retryRequest(async () => {
+        let sbQuery = supabase.from("coupons").select("*");
+        if (validNetworkId) {
+          sbQuery = sbQuery.or(`tenant_id.eq.${tenantId},tenant_id.eq.${validNetworkId}`);
+        } else {
+          sbQuery = sbQuery.eq("tenant_id", tenantId);
+        }
+        const { data, error } = await sbQuery;
+        if (error) throw error;
+        const mapped = (data || []).map(mapCouponFromDB);
+        couponsMemoryCache.set(dedupKey, { data: mapped, expiresAt: Date.now() + 8000 });
+        await localforage.setItem(cacheKey, mapped).catch(() => {});
+        return mapped;
+      });
+    } catch (dbError: any) {
+      if (dbError.message !== "CONFIG_MISSING") {
+        console.warn("[getCouponsByTenant] Fallback do banco falhou, tentando cache offline:", dbError?.message || dbError);
       }
     }
-  } catch (apiError: any) {
-    console.warn("[getCouponsByTenant] API fetch não disponível, tentando fallback direto no banco:", apiError?.message || apiError);
-  }
 
-  // 2. Fallback direto no Supabase Client
-  try {
-    return await retryRequest(async () => {
-      let sbQuery = supabase.from("coupons").select("*");
-      if (validNetworkId) {
-        sbQuery = sbQuery.or(`tenant_id.eq.${tenantId},tenant_id.eq.${validNetworkId}`);
-      } else {
-        sbQuery = sbQuery.eq("tenant_id", tenantId);
+    // 3. Fallback para cache local (offline)
+    try {
+      const cached = await localforage.getItem<CouponRule[]>(cacheKey);
+      if (cached && Array.isArray(cached)) {
+        return cached;
       }
-      const { data, error } = await sbQuery;
-      if (error) throw error;
-      const mapped = (data || []).map(mapCouponFromDB);
-      await localforage.setItem(cacheKey, mapped).catch(() => {});
-      return mapped;
-    });
-  } catch (dbError: any) {
-    if (dbError.message !== "CONFIG_MISSING") {
-      console.warn("[getCouponsByTenant] Fallback do banco falhou, tentando cache offline:", dbError?.message || dbError);
+    } catch (cacheErr) {
+      console.error("Error reading cached coupons:", cacheErr);
     }
-  }
 
-  // 3. Fallback para cache local (offline)
+    return [];
+  })();
+
+  couponsInFlightMap.set(dedupKey, requestPromise);
   try {
-    const cached = await localforage.getItem<CouponRule[]>(cacheKey);
-    if (cached && Array.isArray(cached)) {
-      return cached;
-    }
-  } catch (cacheErr) {
-    console.error("Error reading cached coupons:", cacheErr);
+    return await requestPromise;
+  } finally {
+    couponsInFlightMap.delete(dedupKey);
   }
-
-  return [];
 };
 
 export const saveCoupon = async (coupon: CouponRule) => {
+  couponsMemoryCache.clear();
   const specificIds = coupon.specificProductIds || coupon.applicableProducts || [];
   const dbCoupon: any = {
     id: coupon.id,

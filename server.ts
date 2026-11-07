@@ -1,4 +1,5 @@
 import express from "express";
+import compression from "compression";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
 import cron from "node-cron";
@@ -116,6 +117,7 @@ const supabaseAdmin = createClient(SUPABASE_URL, process.env.SUPABASE_SERVICE_RO
   }
 });
 
+app.use(compression());
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
@@ -545,69 +547,200 @@ app.get("/api/v1/version", (req, res) => {
   res.json({ version: "3.0.5" });
 });
 
+// ============================================================================
+// CACHE EM MEMÓRIA RAM (TTL 10 MINUTOS) PARA TENANTS, MANIFEST E INDEX.HTML
+// ============================================================================
+const TENANT_RAM_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutos
+const tenantRamCacheByIdentifier = new Map<string, { tenant: any; expiresAt: number }>();
+let allTenantsRamCache: { list: any[]; expiresAt: number } | null = null;
+let cachedIndexHtmlRam: { content: string; filePath: string; loadedAt: number } | null = null;
+
+function getIndexHtmlFromRam(): string | null {
+  const now = Date.now();
+  if (cachedIndexHtmlRam && now - cachedIndexHtmlRam.loadedAt < TENANT_RAM_CACHE_TTL_MS) {
+    return cachedIndexHtmlRam.content;
+  }
+  const distHtml = path.join(process.cwd(), "dist", "index.html");
+  const rootHtml = path.join(process.cwd(), "index.html");
+  const filePath = fs.existsSync(distHtml) ? distHtml : rootHtml;
+  if (fs.existsSync(filePath)) {
+    try {
+      const content = fs.readFileSync(filePath, "utf-8");
+      cachedIndexHtmlRam = { content, filePath, loadedAt: now };
+      return content;
+    } catch (_) {}
+  }
+  return null;
+}
+
+function normalizeTenantCacheKey(raw: string): string {
+  return String(raw || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9.\-_]/g, "");
+}
+
+function storeTenantInRamCache(tenant: any, extraKeys: string[] = []): void {
+  if (!tenant) return;
+  const expiresAt = Date.now() + TENANT_RAM_CACHE_TTL_MS;
+  const keys = new Set<string>(extraKeys.map(normalizeTenantCacheKey).filter(Boolean));
+  if (tenant.id) keys.add(normalizeTenantCacheKey(tenant.id));
+  if (tenant.slug) {
+    keys.add(normalizeTenantCacheKey(tenant.slug));
+    keys.add(String(tenant.slug).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, ""));
+  }
+  if (tenant.custom_domain) keys.add(normalizeTenantCacheKey(tenant.custom_domain));
+  for (const k of keys) {
+    tenantRamCacheByIdentifier.set(k, { tenant, expiresAt });
+  }
+}
+
+function getTenantFromRamCacheSync(identifier: string): any | null {
+  if (!identifier) return null;
+  const now = Date.now();
+  const key = normalizeTenantCacheKey(identifier);
+  const direct = tenantRamCacheByIdentifier.get(key);
+  if (direct && direct.expiresAt > now) {
+    return direct.tenant;
+  }
+  const alphaKey = key.replace(/[^a-z0-9]/g, "");
+  const alphaDirect = tenantRamCacheByIdentifier.get(alphaKey);
+  if (alphaDirect && alphaDirect.expiresAt > now) {
+    return alphaDirect.tenant;
+  }
+  return null;
+}
+
+async function getTenantCachedOrFetch(identifier: string): Promise<any | null> {
+  if (!identifier) return null;
+  const cached = getTenantFromRamCacheSync(identifier);
+  if (cached !== null) return cached;
+
+  const cleanReq = identifier
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]/g, "");
+
+  let tenant: any = null;
+
+  // 1. Busca direta por ID, Slug ou Custom Domain
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("tenants")
+      .select("*")
+      .or(`id.eq.${identifier},slug.eq.${identifier},custom_domain.eq.${identifier}`)
+      .maybeSingle();
+
+    if (!error && data) {
+      tenant = data;
+    }
+  } catch (_) {
+    try {
+      const { data, error } = await supabaseAdmin
+        .from("tenants")
+        .select("*")
+        .or(`id.eq.${identifier},slug.eq.${identifier}`)
+        .maybeSingle();
+      if (!error && data) {
+        tenant = data;
+      }
+    } catch (_) {}
+  }
+
+  // 2. Fallback: lista em cache de 10 minutos
+  if (!tenant) {
+    try {
+      const now = Date.now();
+      let allTenants =
+        allTenantsRamCache && allTenantsRamCache.expiresAt > now
+          ? allTenantsRamCache.list
+          : null;
+
+      if (!allTenants) {
+        const { data } = await supabaseAdmin.from("tenants").select("*");
+        if (Array.isArray(data)) {
+          allTenants = data;
+          allTenantsRamCache = {
+            list: data,
+            expiresAt: now + TENANT_RAM_CACHE_TTL_MS,
+          };
+          for (const t of data) {
+            storeTenantInRamCache(t);
+          }
+        }
+      }
+
+      if (allTenants) {
+        tenant =
+          allTenants.find((t: any) => {
+            const rawSlug = (t.slug || "")
+              .toLowerCase()
+              .normalize("NFD")
+              .replace(/[\u0300-\u036f]/g, "")
+              .replace(/[^a-z0-9]/g, "");
+            const rawId = (t.id || "")
+              .toLowerCase()
+              .normalize("NFD")
+              .replace(/[\u0300-\u036f]/g, "")
+              .replace(/[^a-z0-9]/g, "");
+            const rawName = (t.name || "")
+              .toLowerCase()
+              .normalize("NFD")
+              .replace(/[\u0300-\u036f]/g, "")
+              .replace(/[^a-z0-9]/g, "");
+            const rawCustom = (t.custom_domain || "").toLowerCase();
+            return (
+              rawSlug === cleanReq ||
+              rawId === cleanReq ||
+              rawName === cleanReq ||
+              rawCustom === identifier.toLowerCase()
+            );
+          }) || null;
+      }
+    } catch (_) {}
+  }
+
+  if (tenant) {
+    storeTenantInRamCache(tenant, [identifier, cleanReq]);
+  }
+  return tenant;
+}
+
 app.get("/api/v1/resolve-tenant", async (req, res) => {
   try {
     const host = req.query.hostname || req.headers.host || "";
     const hostname = String(host).split(":")[0]; // Remove port if present
 
-    let tenantData = null;
+    let tenantData = getTenantFromRamCacheSync(hostname);
 
     // Regra A (Subdomínio)
-    if (hostname.endsWith(".farmaflow.online") || hostname.endsWith(".nexoia.online")) {
+    if (!tenantData && (hostname.endsWith(".farmaflow.online") || hostname.endsWith(".nexoia.online"))) {
       const parts = hostname.split(".");
       const tenantSlug = parts[0];
       
       if (tenantSlug && tenantSlug !== "www" && tenantSlug !== "farmaflow" && tenantSlug !== "nexoia") {
-        const { data, error } = await supabase
-          .from("tenants")
-          .select("*")
-          .eq("slug", tenantSlug)
-          .maybeSingle();
-          
-        if (!error && data) {
-          tenantData = data;
-        } else {
-          // Fallback: busca flexível comparando o slug limpo (sem acentos, espaços ou hífens)
-          const cleanReqSlug = tenantSlug.toLowerCase().replace(/[^a-z0-9]/g, "");
-          const { data: allTenants } = await supabase.from("tenants").select("*");
-          if (allTenants) {
-            tenantData = allTenants.find((t: any) => {
-              const rawSlug = (t.slug || t.subdomain || t.name || t.id || "")
-                .toLowerCase()
-                .normalize("NFD")
-                .replace(/[\u0300-\u036f]/g, "")
-                .replace(/[^a-z0-9]/g, "");
-              return rawSlug === cleanReqSlug;
-            }) || null;
-          }
-        }
+        tenantData = await getTenantCachedOrFetch(tenantSlug);
       }
     } 
     
     // Regra B (Domínio Próprio)
-    if (!tenantData) {
-      // Allow searching by custom_domain. If the column doesn't exist yet, this might throw a PostgrestError.
-      // We will handle the 42703 (undefined_column) error gracefully.
-      const { data, error } = await supabase
-        .from("tenants")
-        .select("*")
-        .eq("custom_domain", hostname)
-        .single();
-        
-      if (!error && data) {
-        tenantData = data;
-      }
+    if (!tenantData && hostname) {
+      tenantData = await getTenantCachedOrFetch(hostname);
     }
 
     if (tenantData) {
+      storeTenantInRamCache(tenantData, [hostname]);
+      res.setHeader("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
       return res.json({ tenant: sanitizeTenantErpCredentialsForClient(tenantData) });
     } else {
       return res.status(404).json({ error: "Tenant not found for this domain" });
     }
   } catch (e: any) {
     if (e.code === "42703") {
-        // custom_domain column doesn't exist yet, return 404
-        return res.status(404).json({ error: "Tenant not found for this domain" });
+      return res.status(404).json({ error: "Tenant not found for this domain" });
     }
     res.status(500).json({ error: e.message });
   }
@@ -635,44 +768,59 @@ interface TenantMetaRecord {
   rawTenant?: any;
 }
 
-async function getTenantMetaRecord(identifier: string, req: express.Request): Promise<TenantMetaRecord | null> {
-  if (!identifier) return null;
-  const cleanReq = identifier.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
+function buildTenantMetaRecordFromTenant(tenant: any, req: express.Request): TenantMetaRecord {
+  const host = (req.headers["x-forwarded-host"] || req.headers.host || "farmaflow.online").toString().split(":")[0];
+  const proto = (req.headers["x-forwarded-proto"] || (req.secure ? "https" : "https")).toString();
+  const baseUrl = `${proto}://${host}`;
 
-  let tenant: any = null;
+  const storeName = tenant.name || tenant.razao_social || "FarmaFlow Drogaria";
+  const locParts = [tenant.neighborhood, tenant.city, tenant.state].filter(Boolean);
+  const location = locParts.length > 0 ? locParts.join(" - ") : "";
+  const title = `${storeName}${location ? ` (${location})` : ""} - Farmácia Online & Delivery`;
 
-  // 1. Busca direta por ID ou Slug
-  try {
-    const { data, error } = await supabaseAdmin
-      .from("tenants")
-      .select("*")
-      .or(`id.eq.${identifier},slug.eq.${identifier}`)
-      .maybeSingle();
+  const description =
+    tenant.description ||
+    tenant.banner_subtitle ||
+    tenant.bannersubtitle ||
+    tenant.banner_title ||
+    tenant.bannertitle ||
+    "Faça seu pedido online com tele-entrega rápida direta no WhatsApp. Medicamentos, perfumaria e ofertas exclusivas.";
 
-    if (!error && data) {
-      tenant = data;
-    }
-  } catch (err) {}
+  const tenantSlug = tenant.slug || tenant.id;
 
-  // 2. Fallback: busca flexível comparando nomes e slugs normalizados
-  if (!tenant) {
-    try {
-      const { data: allTenants } = await supabaseAdmin
-        .from("tenants")
-        .select("*");
-
-      if (allTenants) {
-        tenant = allTenants.find((t: any) => {
-          const rawSlug = (t.slug || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
-          const rawId = (t.id || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
-          const rawName = (t.name || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
-          const rawCustom = (t.custom_domain || "").toLowerCase();
-          return rawSlug === cleanReq || rawId === cleanReq || rawName === cleanReq || rawCustom === identifier.toLowerCase();
-        }) || null;
-      }
-    } catch (err) {}
+  const rawLogo = (tenant.logo_url || tenant.logo || tenant.smart_banners?._regulatoryData?.logo_url || "").trim();
+  let logoUrl = "https://farmaflow.online/preview-share.png";
+  if ((rawLogo.startsWith("http://") || rawLogo.startsWith("https://")) && !rawLogo.startsWith("data:")) {
+    logoUrl = rawLogo.startsWith("http://") ? rawLogo.replace("http://", "https://") : rawLogo;
+  } else if (tenant.id && (rawLogo.length > 0 || tenant.logo)) {
+    logoUrl = `${baseUrl}/api/v1/store/${encodeURIComponent(tenant.id)}/logo.png`;
+    if (logoUrl.startsWith("http://")) logoUrl = logoUrl.replace("http://", "https://");
   }
 
+  let canonicalUrl = `${baseUrl}/loja/${encodeURIComponent(tenantSlug)}`;
+  if (tenant.custom_domain && tenant.custom_domain.trim()) {
+    canonicalUrl = `https://${tenant.custom_domain.replace(/^https?:\/\//, "").trim()}`;
+  } else if (host.endsWith(".farmaflow.online") && host !== "farmaflow.online" && host !== "www.farmaflow.online") {
+    canonicalUrl = `${proto}://${host}`;
+  }
+
+  return {
+    id: tenant.id,
+    name: storeName,
+    slug: tenantSlug,
+    title,
+    description,
+    logoUrl,
+    canonicalUrl,
+    location,
+    phone: tenant.whatsapp || "",
+    rawTenant: tenant,
+  };
+}
+
+async function getTenantMetaRecord(identifier: string, req: express.Request): Promise<TenantMetaRecord | null> {
+  if (!identifier) return null;
+  const tenant = await getTenantCachedOrFetch(identifier);
   if (!tenant) return null;
 
   // Resolução de URLs canônicas absolutas
@@ -886,11 +1034,12 @@ app.get(["/loja/:slug", "/loja/:slug/*all", "/produto/:id", "/produto/:id/*all",
   try {
     const slug = Array.isArray(req.params.slug) ? req.params.slug[0] : String(req.params.slug || "");
     const prodId = Array.isArray(req.params.id) ? req.params.id[0] : String(req.params.id || "");
-    const meta = await getTenantMetaRecord(slug || prodId, req);
-    if (!meta) return next();
-
+    const identifier = slug || prodId;
     const isCrawler = isSocialCrawler((req.headers["user-agent"] as string) || "");
+
     if (isCrawler) {
+      const meta = await getTenantMetaRecord(identifier, req);
+      if (!meta) return next();
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0, s-maxage=0");
       res.setHeader("CDN-Cache-Control", "no-store");
@@ -898,20 +1047,24 @@ app.get(["/loja/:slug", "/loja/:slug/*all", "/produto/:id", "/produto/:id/*all",
       return res.send(generateStoreOpenGraphHtml(meta));
     }
 
-    // Para navegadores regulares: injeta as meta tags dinâmicas no index.html e serve
-    const distHtml = path.join(process.cwd(), "dist", "index.html");
-    const rootHtml = path.join(process.cwd(), "index.html");
-    const filePath = fs.existsSync(distHtml) ? distHtml : rootHtml;
+    // Para navegadores regulares: serve imediatamente da memória RAM em < 5ms sem bloquear no Supabase!
+    const htmlFromRam = getIndexHtmlFromRam();
+    if (!htmlFromRam) return next();
 
-    if (fs.existsSync(filePath)) {
-      const original = fs.readFileSync(filePath, "utf-8");
-      const injected = injectStoreMetaIntoHtml(original, meta);
+    const cachedTenant = getTenantFromRamCacheSync(identifier);
+    if (cachedTenant) {
+      const meta = buildTenantMetaRecordFromTenant(cachedTenant, req);
+      const injected = injectStoreMetaIntoHtml(htmlFromRam, meta);
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
       return res.send(injected);
     }
 
-    return next();
+    // Se ainda não estiver no cache em memória, aquece o cache em background e entrega o index.html imediatamente
+    getTenantCachedOrFetch(identifier).catch(() => {});
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    return res.send(htmlFromRam);
   } catch (err) {
     return next();
   }
@@ -932,24 +1085,28 @@ app.get("/", async (req, res, next) => {
       }
 
       if (identifier) {
-        const meta = await getTenantMetaRecord(identifier, req);
-        if (meta) {
-          if (isCrawler) {
+        if (isCrawler) {
+          const meta = await getTenantMetaRecord(identifier, req);
+          if (meta) {
             res.setHeader("Content-Type", "text/html; charset=utf-8");
             res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0, s-maxage=0");
             res.setHeader("CDN-Cache-Control", "no-store");
             res.setHeader("Vercel-CDN-Cache-Control", "no-store");
             return res.send(generateStoreOpenGraphHtml(meta));
-          } else {
-            const distHtml = path.join(process.cwd(), "dist", "index.html");
-            const rootHtml = path.join(process.cwd(), "index.html");
-            const filePath = fs.existsSync(distHtml) ? distHtml : rootHtml;
-            if (fs.existsSync(filePath)) {
-              const original = fs.readFileSync(filePath, "utf-8");
-              const injected = injectStoreMetaIntoHtml(original, meta);
+          }
+        } else {
+          // Navegador regular: entrega da RAM imediatamente (< 5ms) sem aguardar query no Supabase
+          const htmlFromRam = getIndexHtmlFromRam();
+          if (htmlFromRam) {
+            const cachedTenant = getTenantFromRamCacheSync(identifier);
+            if (cachedTenant) {
+              const meta = buildTenantMetaRecordFromTenant(cachedTenant, req);
               res.setHeader("Content-Type", "text/html; charset=utf-8");
-              return res.send(injected);
+              return res.send(injectStoreMetaIntoHtml(htmlFromRam, meta));
             }
+            getTenantCachedOrFetch(identifier).catch(() => {});
+            res.setHeader("Content-Type", "text/html; charset=utf-8");
+            return res.send(htmlFromRam);
           }
         }
       }
@@ -1081,16 +1238,7 @@ app.get(["/api/v1/manifest/:tenantId", "/manifest.json"], async (req, res) => {
       const cleanedQuery = tenantQueryValue.replace(/[^a-zA-Z0-9\-_]/g, "");
       
       if (cleanedQuery) {
-        // Fetch from tenants table
-        const { data, error } = await supabase
-          .from("tenants")
-          .select("id, slug, name, logo, primary_color")
-          .or(`id.eq.${cleanedQuery},slug.eq.${cleanedQuery}`)
-          .maybeSingle();
-
-        if (!error && data) {
-          tenantData = data;
-        }
+        tenantData = await getTenantCachedOrFetch(cleanedQuery);
       }
     }
 
@@ -13977,7 +14125,7 @@ async function startServer() {
       }
     }));
 
-    // SPA Fallback: qualquer rota GET que não comece com /api/ ou /s/ entrega o dist/index.html
+    // SPA Fallback: qualquer rota GET que não comece com /api/ ou /s/ entrega o dist/index.html direto da RAM em < 5ms
     app.get("*all", (req, res, next) => {
       if (req.path.startsWith("/api/") || req.path.startsWith("/s/")) {
         return next();
@@ -13985,6 +14133,11 @@ async function startServer() {
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.setHeader('Pragma', 'no-cache');
       res.setHeader('Expires', '0');
+      const htmlFromRam = getIndexHtmlFromRam();
+      if (htmlFromRam) {
+        res.setHeader("Content-Type", "text/html; charset=utf-8");
+        return res.send(htmlFromRam);
+      }
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
