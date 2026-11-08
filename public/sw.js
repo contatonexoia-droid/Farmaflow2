@@ -1,4 +1,4 @@
-const CACHE_NAME = "farmaflow-v5";
+const CACHE_NAME = "farmaflow-v6";
 const STATIC_ASSETS = ["/icon-192.svg", "/icon-512.svg"];
 
 self.addEventListener("install", (event) => {
@@ -13,16 +13,17 @@ self.addEventListener("install", (event) => {
 
 self.addEventListener("activate", (event) => {
   event.waitUntil(
-    caches
-      .keys()
-      .then((cacheNames) =>
-        Promise.all(
+    (async () => {
+      try {
+        const cacheNames = await caches.keys();
+        await Promise.all(
           cacheNames
             .filter((name) => name !== CACHE_NAME)
             .map((cacheName) => caches.delete(cacheName))
-        )
-      )
-      .then(() => self.clients.claim())
+        );
+      } catch (_) {}
+      await self.clients.claim();
+    })()
   );
 });
 

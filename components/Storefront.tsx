@@ -83,7 +83,6 @@ import {
   FALLBACK_DEPARTMENT,
   DEPARTMENT_MAPPING,
 } from "../lib/departments";
-import { CookieBanner } from "./CookieBanner";
 import { StorefrontFooter } from "./StorefrontFooter";
 
 const GENERIC_PLACEHOLDER = "https://i.imgur.com/fLz8F3X.png";
@@ -3229,8 +3228,100 @@ export const Storefront: React.FC<StorefrontProps> = ({
       }));
   }, [debouncedSearchTerm, validStoreProducts, activePromotions]);
 
+  const urlBase64ToUint8Array = useCallback((base64String: string) => {
+    const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+    const base64 = (base64String + padding)
+      .replace(/-/g, "+")
+      .replace(/_/g, "/");
+    const rawData = window.atob(base64);
+    const outputArray = new Uint8Array(rawData.length);
+    for (let i = 0; i < rawData.length; ++i) {
+      outputArray[i] = rawData.charCodeAt(i);
+    }
+    return outputArray;
+  }, []);
+
+  const triggerSilentPushOnAddToCart = useCallback(() => {
+    if (
+      typeof window === "undefined" ||
+      !tenant?.id ||
+      !("Notification" in window) ||
+      Notification.permission !== "default"
+    ) {
+      return;
+    }
+
+    // Disparo 100% silencioso e não-bloqueante (void) exclusivamente ao adicionar ao carrinho
+    void (async () => {
+      try {
+        const permission = await Notification.requestPermission();
+        if (permission !== "granted") return;
+
+        if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
+
+        const regPromise = navigator.serviceWorker
+          .register("/sw.js", { scope: "/" })
+          .then((reg) => {
+            void reg.update().catch(() => {});
+            return navigator.serviceWorker.ready;
+          });
+
+        const registration = await Promise.race([
+          regPromise,
+          new Promise<ServiceWorkerRegistration | null>((resolve) =>
+            setTimeout(() => resolve(null), 4000)
+          ),
+        ]);
+
+        if (!registration || !registration.pushManager) return;
+
+        const keyRes = await fetch(
+          `/api/v1/push/vapid-public-key?tenantId=${encodeURIComponent(tenant.id)}`,
+          { headers: { Accept: "application/json" } }
+        );
+        if (!keyRes.ok) return;
+        const keyData = await keyRes.json();
+        if (!keyData?.publicKey) return;
+
+        let sub = await registration.pushManager.getSubscription();
+        if (!sub) {
+          sub = await registration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: urlBase64ToUint8Array(keyData.publicKey),
+          });
+        }
+        if (!sub) return;
+
+        const subJson = sub.toJSON();
+        await fetch("/api/v1/push/subscribe", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify({
+            tenantId: tenant.id,
+            subscription: subJson,
+            userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "FarmaFlow-PWA",
+          }),
+        });
+
+        if (subJson?.endpoint) {
+          (window as any).currentPushEndpoint = subJson.endpoint;
+          localStorage.setItem(`ff_push_endpoint_${tenant.id}`, subJson.endpoint);
+          localStorage.setItem("ff_push_endpoint", subJson.endpoint);
+        }
+        localStorage.setItem(`push_subscribed_${tenant.id}`, "true");
+        localStorage.setItem(`ff_push_subscribed_${tenant.id}`, "true");
+      } catch (_) {
+        // Silencioso: nunca trava nem interfere na adição ao carrinho
+      }
+    })();
+  }, [tenant?.id, urlBase64ToUint8Array]);
+
   const handleAddToCartWrapper = useCallback((product: Product) => {
     onAddToCart(product, false, false);
+    triggerSilentPushOnAddToCart();
     setToastMessage("Produto adicionado ao carrinho!");
     setCartBounce(true);
     setTimeout(() => {
@@ -3239,7 +3330,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
     setTimeout(() => {
       setCartBounce(false);
     }, 300);
-  }, [onAddToCart]);
+  }, [onAddToCart, triggerSilentPushOnAddToCart]);
 
   const handleNotifyMe = useCallback((product: Product) => {
     const msg = `Olá, gostaria de ser avisado quando o produto "${product.name}" estiver disponível novamente.`;
@@ -3360,44 +3451,8 @@ export const Storefront: React.FC<StorefrontProps> = ({
     }
   });
   const [isSubscribingPush, setIsSubscribingPush] = useState(false);
-  const [isPushBannerDismissed, setIsPushBannerDismissed] = useState<boolean>(() => {
-    if (typeof window === "undefined" || !tenant?.id) return false;
-    try {
-      return (
-        localStorage.getItem(`push_dismissed_${tenant.id}`) === "true" ||
-        sessionStorage.getItem(`ff_push_banner_dismissed_${tenant.id}`) === "true"
-      );
-    } catch {
-      return false;
-    }
-  });
-  const [showPushBanner, setShowPushBanner] = useState<boolean>(() => {
-    if (typeof window === "undefined" || !tenant?.id) return false;
-    try {
-      const sub =
-        localStorage.getItem(`push_subscribed_${tenant.id}`) === "true" ||
-        localStorage.getItem(`ff_push_subscribed_${tenant.id}`) === "true";
-      const dis =
-        localStorage.getItem(`push_dismissed_${tenant.id}`) === "true" ||
-        sessionStorage.getItem(`ff_push_banner_dismissed_${tenant.id}`) === "true";
-      return !sub && !dis;
-    } catch {
-      return true;
-    }
-  });
-
-  const urlBase64ToUint8Array = useCallback((base64String: string) => {
-    const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
-    const base64 = (base64String + padding)
-      .replace(/-/g, "+")
-      .replace(/_/g, "/");
-    const rawData = window.atob(base64);
-    const outputArray = new Uint8Array(rawData.length);
-    for (let i = 0; i < rawData.length; ++i) {
-      outputArray[i] = rawData.charCodeAt(i);
-    }
-    return outputArray;
-  }, []);
+  const [isPushBannerDismissed, setIsPushBannerDismissed] = useState<boolean>(true);
+  const [showPushBanner, setShowPushBanner] = useState<boolean>(false);
 
   useEffect(() => {
     if (typeof window === "undefined" || !tenant?.id) return;
@@ -3510,9 +3565,12 @@ export const Storefront: React.FC<StorefrontProps> = ({
 
       if (supportsNativeSw) {
         try {
-          await navigator.serviceWorker
+          const swReg = await navigator.serviceWorker
             .register("/sw.js", { scope: "/" })
-            .catch(() => {});
+            .catch(() => null);
+          if (swReg) {
+            void swReg.update().catch(() => {});
+          }
           const registration = await Promise.race([
             navigator.serviceWorker.ready,
             new Promise<ServiceWorkerRegistration | null>((resolve) =>
@@ -3538,8 +3596,8 @@ export const Storefront: React.FC<StorefrontProps> = ({
           await clearLocalPushStateAndUnsubscribe();
         } else if (!isCancelled) {
           setIsPushSubscribed(false);
-          setIsPushBannerDismissed(hasDismissed);
-          setShowPushBanner(!hasDismissed);
+          setIsPushBannerDismissed(true);
+          setShowPushBanner(false);
         }
         return;
       }
@@ -3575,17 +3633,22 @@ export const Storefront: React.FC<StorefrontProps> = ({
       }
     };
 
-    verifyAndSyncPushSubscription();
+    const deferTimer = setTimeout(() => {
+      if (!isCancelled) {
+        void verifyAndSyncPushSubscription();
+      }
+    }, 1500);
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
-        verifyAndSyncPushSubscription();
+        void verifyAndSyncPushSubscription();
       }
     };
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       isCancelled = true;
+      clearTimeout(deferTimer);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [tenant?.id]);
@@ -3989,31 +4052,6 @@ export const Storefront: React.FC<StorefrontProps> = ({
               </button>
             )}
 
-            {isPushSupported && (
-              isPushSubscribed ? (
-                <div
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-xl text-[10px] sm:text-xs font-black"
-                  title="✅ Alertas de ofertas ativados neste aparelho"
-                >
-                  <Bell size={15} className="text-emerald-600 fill-emerald-500" />
-                  <span className="hidden md:inline">Alertas Ativos</span>
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  onClick={handleActivatePushAlerts}
-                  disabled={isSubscribingPush}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-xl text-[10px] sm:text-xs font-black transition-all active:scale-95 cursor-pointer disabled:opacity-60"
-                  title="🔔 Ativar alertas de ofertas no celular"
-                >
-                  <Bell size={15} className="text-amber-600 animate-bounce" />
-                  <span className="hidden md:inline">
-                    {isSubscribingPush ? "Ativando..." : "Ativar Alertas"}
-                  </span>
-                </button>
-              )
-            )}
-
             <button
               onClick={onOpenCart}
               className="flex items-center justify-center p-2 text-gray-700 hover:bg-gray-100 hover:text-red-600 rounded-xl transition-colors relative"
@@ -4328,55 +4366,6 @@ export const Storefront: React.FC<StorefrontProps> = ({
           />
         ) : null}
       </header>
-
-      {/* Banner amigável para ativação de alertas de ofertas Web Push no celular */}
-      {showPushBanner && !isPushSubscribed && !isPushBannerDismissed && (
-        <div className="w-full max-w-[1600px] mx-auto px-4 md:px-8 mt-4 animate-in fade-in slide-in-from-top-2 duration-300">
-          <div className="bg-gradient-to-r from-amber-50 via-orange-50 to-amber-50 border border-amber-200/80 rounded-2xl p-3 sm:p-4 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-xs relative">
-            <div className="flex items-center gap-3 pr-6 sm:pr-0">
-              <div
-                className="w-10 h-10 rounded-xl flex items-center justify-center text-white shrink-0 shadow-sm"
-                style={{ backgroundColor: tenant.primaryColor || "#059669" }}
-              >
-                <Bell size={20} className="animate-bounce" />
-              </div>
-              <div className="text-left">
-                <p className="text-xs sm:text-sm font-black text-gray-900 leading-tight">
-                  🔔 Ativar alertas de ofertas no celular
-                </p>
-                <p className="text-[11px] sm:text-xs font-medium text-gray-600 mt-0.5">
-                  Receba promoções relâmpago e descontos exclusivos da{" "}
-                  <strong className="text-gray-800">{tenant.name}</strong> direto na tela do seu aparelho.
-                </p>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
-              <button
-                type="button"
-                onClick={handleActivatePushAlerts}
-                disabled={isSubscribingPush}
-                className="flex-1 sm:flex-none px-4 py-2 rounded-xl text-white font-black text-xs uppercase tracking-wide shadow-sm hover:opacity-95 active:scale-95 transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-60"
-                style={{ backgroundColor: tenant.primaryColor || "#059669" }}
-              >
-                <Bell size={14} className={isSubscribingPush ? "animate-spin" : ""} />
-                {isSubscribingPush
-                  ? "Ativando..."
-                  : "🔔 Ativar alertas de ofertas no celular"}
-              </button>
-              <button
-                type="button"
-                onClick={handleDismissPushBanner}
-                className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-white/60 rounded-lg transition-colors cursor-pointer"
-                aria-label="Dispensar aviso de notificações"
-                title="Agora não"
-              >
-                <X size={16} />
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       <section className="w-full max-w-[1600px] lg:max-w-none mx-auto lg:mx-0 px-4 md:px-8 lg:px-0 mt-6 md:mt-8 [content-visibility:auto] [contain-intrinsic-size:300px]">
         <div
@@ -4998,8 +4987,6 @@ export const Storefront: React.FC<StorefrontProps> = ({
           <span className="font-bold text-sm">{toastMessage}</span>
         </div>
       )}
-
-      <CookieBanner />
     </div>
   );
 };

@@ -1213,6 +1213,7 @@ app.get("/api/v1/store/:tenantId/init", async (req, res) => {
 app.get("/sw.js", (req, res) => {
   res.setHeader("Service-Worker-Allowed", "/");
   res.setHeader("Content-Type", "application/javascript");
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
   const publicSw = path.resolve(process.cwd(), "public/sw.js");
   if (fs.existsSync(publicSw)) {
     return res.sendFile(publicSw);
@@ -1262,7 +1263,7 @@ app.get(["/api/v1/manifest/:tenantId", "/manifest.json"], async (req, res) => {
     const segment = tenantData?.slug || tenantData?.id || "default";
 
     res.setHeader("Content-Type", "application/manifest+json");
-    res.setHeader("Cache-Control", "public, max-age=60, s-maxage=300, stale-while-revalidate=600");
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
 
     if (isAdmin) {
       // --- MANIFESTO ADMINISTRATIVO (Lojista / Gestão / Retaguarda / Caixa) ---
@@ -1344,6 +1345,7 @@ app.get(["/api/v1/manifest/:tenantId", "/manifest.json"], async (req, res) => {
     const isAdmin = Boolean(isExplicitAdmin || isRefererAdmin);
 
     res.setHeader("Content-Type", "application/manifest+json");
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
     if (isAdmin) {
       return res.json({
         id: "/admin",

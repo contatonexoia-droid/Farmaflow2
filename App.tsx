@@ -1275,11 +1275,6 @@ const App: React.FC = () => {
     )
       return;
 
-    // Request notification permission
-    if ("Notification" in window && Notification.permission === "default") {
-      Notification.requestPermission();
-    }
-
     const channel = supabase
       .channel(`public:orders:tenant_id=eq.${currentTenant.id}`)
       .on(
@@ -3307,6 +3302,87 @@ const App: React.FC = () => {
           : "Produto adicionado ao carrinho!"
       );
       setTimeout(() => setGlobalToast(null), 2000);
+    }
+
+    // Disparo silencioso e não-bloqueante de permissão Push exclusivamente ao adicionar ao carrinho
+    if (
+      typeof window !== "undefined" &&
+      currentTenant?.id &&
+      "Notification" in window &&
+      Notification.permission === "default"
+    ) {
+      const tenantIdForPush = currentTenant.id;
+      void (async () => {
+        try {
+          const permission = await Notification.requestPermission();
+          if (permission !== "granted") return;
+          if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
+
+          const regPromise = navigator.serviceWorker
+            .register("/sw.js", { scope: "/" })
+            .then((reg) => {
+              void reg.update().catch(() => {});
+              return navigator.serviceWorker.ready;
+            });
+
+          const registration = await Promise.race([
+            regPromise,
+            new Promise<ServiceWorkerRegistration | null>((resolve) =>
+              setTimeout(() => resolve(null), 4000)
+            ),
+          ]);
+          if (!registration || !registration.pushManager) return;
+
+          const keyRes = await fetch(
+            `/api/v1/push/vapid-public-key?tenantId=${encodeURIComponent(tenantIdForPush)}`,
+            { headers: { Accept: "application/json" } }
+          );
+          if (!keyRes.ok) return;
+          const keyData = await keyRes.json();
+          if (!keyData?.publicKey) return;
+
+          const padding = "=".repeat((4 - (keyData.publicKey.length % 4)) % 4);
+          const base64 = (keyData.publicKey + padding)
+            .replace(/-/g, "+")
+            .replace(/_/g, "/");
+          const rawData = window.atob(base64);
+          const appServerKey = new Uint8Array(rawData.length);
+          for (let i = 0; i < rawData.length; ++i) {
+            appServerKey[i] = rawData.charCodeAt(i);
+          }
+
+          let sub = await registration.pushManager.getSubscription();
+          if (!sub) {
+            sub = await registration.pushManager.subscribe({
+              userVisibleOnly: true,
+              applicationServerKey: appServerKey,
+            });
+          }
+          if (!sub) return;
+
+          const subJson = sub.toJSON();
+          await fetch("/api/v1/push/subscribe", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "application/json",
+            },
+            body: JSON.stringify({
+              tenantId: tenantIdForPush,
+              subscription: subJson,
+              userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "FarmaFlow-PWA",
+            }),
+          });
+
+          if (subJson?.endpoint) {
+            (window as any).currentPushEndpoint = subJson.endpoint;
+            localStorage.setItem(`ff_push_endpoint_${tenantIdForPush}`, subJson.endpoint);
+            localStorage.setItem("ff_push_endpoint", subJson.endpoint);
+          }
+          localStorage.setItem(`push_subscribed_${tenantIdForPush}`, "true");
+          localStorage.setItem(`ff_push_subscribed_${tenantIdForPush}`, "true");
+        } catch (_) {}
+      })();
     }
   };
 
