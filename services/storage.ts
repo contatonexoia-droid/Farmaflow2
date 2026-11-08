@@ -893,6 +893,15 @@ export const mapDbProductToApp = (p: any): Product => {
       }).subcategory || "Geral"
     : rawCategory;
 
+  const rawSalePrice = Number(p.price ?? p.preco_venda) || 0;
+  const rawOriginalPrice = Number(p.original_price ?? p.originalprice ?? p.preco_original ?? p.pmc) || 0;
+  const resolvedPrice =
+    rawSalePrice > 0
+      ? rawSalePrice
+      : rawOriginalPrice > 0
+        ? rawOriginalPrice
+        : 0;
+
   return {
     id: p.id,
     tenantId: p.tenant_id || p.tenantid,
@@ -902,7 +911,7 @@ export const mapDbProductToApp = (p: any): Product => {
     activePrinciple: p.active_principle || p.activeprinciple || "",
     drugType: p.drug_type || p.drugtype || "",
     manufacturer: p.manufacturer || "Outros",
-    price: Number(p.price) || 0,
+    price: resolvedPrice,
     stock: Number(p.stock) || 0,
     category: resolvedCategory,
     groupingSlug: p.grouping_slug || p.groupingslug || "",
@@ -920,19 +929,19 @@ export const mapDbProductToApp = (p: any): Product => {
     p.promotion_type === 'BUY_X_PAY_Y' ? 'buy_x_pay_y' :
     p.promotion_type === 'DISCOUNT_ON_QTY' ? 'progressive' :
     p.promotion_type === 'DISCOUNT' ? 'simple' :
-    (p.promotional_price && Number(p.promotional_price) > 0 && Number(p.promotional_price) < Number(p.price)) ? 'simple' : 'none'
+    (p.promotional_price && Number(p.promotional_price) > 0 && Number(p.promotional_price) < resolvedPrice) ? 'simple' : 'none'
   ),
   promo_buy_qty: p.promo_buy_qty ?? (Number(p.buy_x || p.discount_qty_threshold) || null),
   promo_pay_qty: p.promo_pay_qty ?? (Number(p.pay_y) || null),
   promo_progressive_price: p.promo_progressive_price ?? (
     p.promotion_type === 'DISCOUNT_ON_QTY' && p.promotional_price ? Number(p.promotional_price) :
-    (p.promotion_type === 'DISCOUNT_ON_QTY' && p.discount_qty_percentage && Number(p.price) > 0)
-      ? Number((Number(p.price) * (1 - Number(p.discount_qty_percentage) / 100)).toFixed(2))
+    (p.promotion_type === 'DISCOUNT_ON_QTY' && p.discount_qty_percentage && resolvedPrice > 0)
+      ? Number((resolvedPrice * (1 - Number(p.discount_qty_percentage) / 100)).toFixed(2))
       : null
   ),
   promo_start_date: p.promo_start_date || p.promo_data_inicio || null,
   promo_end_date: p.promo_end_date || p.promo_data_fim || null,
-  originalPrice: Number(p.original_price || p.originalprice) || 0,
+  originalPrice: rawOriginalPrice > 0 ? rawOriginalPrice : 0,
   promotionalPrice:
     p.promotional_price !== null && p.promotional_price !== undefined && !isNaN(Number(p.promotional_price)) && Number(p.promotional_price) > 0
       ? Number(p.promotional_price)
@@ -1261,6 +1270,22 @@ export const saveProductsByTenant = async (
       const numPromo = rawPromo !== '' && rawPromo !== null && rawPromo !== undefined ? Number(rawPromo) : NaN;
       const validPromotionalPrice = !isNaN(numPromo) && numPromo > 0 ? numPromo : null;
 
+      const rawSalePrice = Number(p.price ?? (p as any).preco_venda) || 0;
+      const rawOriginalPrice =
+        Number(
+          p.originalPrice ??
+            (p as any).original_price ??
+            (p as any).preco_original ??
+            (p as any).pmc,
+        ) || 0;
+      const resolvedPrice =
+        rawSalePrice > 0
+          ? rawSalePrice
+          : rawOriginalPrice > 0
+            ? rawOriginalPrice
+            : validPromotionalPrice || 0;
+      const resolvedOriginalPrice = rawOriginalPrice > 0 ? rawOriginalPrice : 0;
+
       return {
         id: existingId,
         tenant_id: tenantId,
@@ -1269,8 +1294,8 @@ export const saveProductsByTenant = async (
         name: p.name,
         active_principle: p.activePrinciple || "",
         drug_type: p.drugType || "",
-        price: Number(p.price) || 0,
-        original_price: Number(p.originalPrice) || 0,
+        price: resolvedPrice,
+        original_price: resolvedOriginalPrice,
         promotional_price: validPromotionalPrice,
         stock: Number(p.stock) || 0,
         category: p.category || "Geral",

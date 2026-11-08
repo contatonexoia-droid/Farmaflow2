@@ -3213,25 +3213,52 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
 
       const rawPromo = p.promotional_price !== undefined && p.promotional_price !== null
         ? p.promotional_price
-        : p.promotionalPrice;
+        : (p.promotionalPrice !== undefined && p.promotionalPrice !== null ? p.promotionalPrice : p.preco_promocional);
       const numPromo = rawPromo !== '' && rawPromo !== null && rawPromo !== undefined ? Number(rawPromo) : NaN;
       const validPromo = !isNaN(numPromo) && numPromo > 0 ? numPromo : null;
 
-      const rawPrice = p.price !== undefined && p.price !== null ? Number(p.price) : 0;
-      const validPrice = !isNaN(rawPrice) && rawPrice >= 0 ? rawPrice : 0;
+      const rawSaleSource =
+        p.price ??
+        p.preco_venda ??
+        p.precoVenda ??
+        p.PRECO_VENDA ??
+        p.preco ??
+        p.salePrice ??
+        p.valor_venda;
+      const rawPrice = rawSaleSource !== undefined && rawSaleSource !== null && rawSaleSource !== '' ? Number(rawSaleSource) : 0;
+      let validPrice = !isNaN(rawPrice) && rawPrice > 0 ? rawPrice : 0;
 
-      const rawOrigPrice = (p.original_price !== undefined && p.original_price !== null)
-        ? Number(p.original_price)
-        : (p.originalPrice !== undefined && p.originalPrice !== null ? Number(p.originalPrice) : 0);
-      const validOrigPrice = !isNaN(rawOrigPrice) && rawOrigPrice >= 0 ? rawOrigPrice : 0;
+      const rawOrigSource =
+        p.original_price ??
+        p.originalPrice ??
+        p.preco_original ??
+        p.precoOriginal ??
+        p.PRECO_ORIGINAL ??
+        p.pmc ??
+        p.PMC ??
+        p.preco_pmc ??
+        p.PRECO_PMC ??
+        p.preco_tabela ??
+        p.valor_original;
+      const rawOrigPrice = rawOrigSource !== undefined && rawOrigSource !== null && rawOrigSource !== '' ? Number(rawOrigSource) : 0;
+      const validOrigPrice = !isNaN(rawOrigPrice) && rawOrigPrice > 0 ? rawOrigPrice : 0;
+
+      // Regra de Fallback Inteligente de Preço:
+      // Se preco_venda (price) for nulo, indefinido ou <= 0, assume automaticamente preco_original (PMC) ou promocional
+      if (validPrice <= 0 && validOrigPrice > 0) {
+        validPrice = validOrigPrice;
+      } else if (validPrice <= 0 && validPromo !== null && validPromo > 0) {
+        validPrice = validPromo;
+      }
 
       // Preserva estoque 0 (ZERO estoque é perfeitamente válido no catálogo)
       const rawStock = p.stock !== undefined && p.stock !== null ? Number(p.stock) : 0;
       const validStock = !isNaN(rawStock) ? rawStock : 0;
 
       let cleanBarcode: string | null = null;
-      if (p.barcode !== undefined && p.barcode !== null && String(p.barcode).trim() !== '') {
-        let rawBc = String(p.barcode).trim().replace(/^=?"|"$|^'/g, '').trim();
+      const rawBarcodeInput = p.barcode ?? p.ean ?? p.codigo_barras ?? p.cod_barras;
+      if (rawBarcodeInput !== undefined && rawBarcodeInput !== null && String(rawBarcodeInput).trim() !== '') {
+        let rawBc = String(rawBarcodeInput).trim().replace(/^=?"|"$|^'/g, '').trim();
         if (/^[+-]?\d+(?:[.,]\d+)?e[+-]?\d+$/i.test(rawBc)) {
           const parsedNum = Number(rawBc.replace(',', '.'));
           if (Number.isFinite(parsedNum) && parsedNum > 0) {
@@ -3243,15 +3270,16 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
         const digitsOnly = rawBc.replace(/\D/g, '');
         cleanBarcode = digitsOnly || rawBc || null;
       }
-      const cleanInternalCode = p.internal_code ?? p.internalCode;
+      const cleanInternalCode = p.internal_code ?? p.internalCode ?? p.codigo ?? p.cod_produto;
       const cleanCode = cleanInternalCode && String(cleanInternalCode).trim() !== '' ? String(cleanInternalCode).trim() : null;
 
+      const rawNameInput = p.name ?? p.nome ?? p.descricao_produto ?? p.descricao;
       const item: any = {
         ...p,
         id: p.id || Math.random().toString(36).substr(2, 9),
         tenant_id: tenantId,
         tenantid: tenantId,
-        name: p.name ? String(p.name).trim() : 'Produto sem nome',
+        name: rawNameInput ? String(rawNameInput).trim() : 'Produto sem nome',
         barcode: cleanBarcode,
         internal_code: cleanCode,
         price: validPrice,
@@ -3308,8 +3336,8 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
       .map(p => p.id)
       .filter((id): id is string => Boolean(id && id.length > 0));
 
-    const dbExistingByBarcode = new Map<string, { id: string; barcode: string | null; internal_code: string | null; name: string }>();
-    const dbExistingById = new Map<string, { id: string; barcode: string | null; internal_code: string | null; name: string }>();
+    const dbExistingByBarcode = new Map<string, { id: string; barcode: string | null; internal_code: string | null; name: string; price?: number | null; original_price?: number | null }>();
+    const dbExistingById = new Map<string, { id: string; barcode: string | null; internal_code: string | null; name: string; price?: number | null; original_price?: number | null }>();
 
     const LOOKUP_CHUNK = 500;
 
@@ -3319,7 +3347,7 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
         const barcodeChunk = barcodesToLookup.slice(i, i + LOOKUP_CHUNK);
         const { data: dbMatches } = await supabaseAdmin
           .from("products")
-          .select("id, barcode, internal_code, name")
+          .select("id, barcode, internal_code, name, price, original_price")
           .eq("tenant_id", tenantId)
           .in("barcode", barcodeChunk);
 
@@ -3338,7 +3366,7 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
         const idChunk = idsToLookup.slice(i, i + LOOKUP_CHUNK);
         const { data: dbMatches } = await supabaseAdmin
           .from("products")
-          .select("id, barcode, internal_code, name")
+          .select("id, barcode, internal_code, name, price, original_price")
           .eq("tenant_id", tenantId)
           .in("id", idChunk);
 
@@ -3354,9 +3382,47 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
     // 3. Classifica produtos entre UPDATE (já existentes por EAN ou ID) e INSERT (genuinamente novos)
     const productsToUpdate: any[] = [];
     const productsToInsert: any[] = [];
+    let savedCount = 0;
+    let failedCount = 0;
+    const failedDetails: any[] = [];
 
     for (const p of sanitizedProducts) {
-      let existingMatch: { id: string; barcode: string | null; internal_code: string | null; name: string } | undefined = undefined;
+      // Remove campos de alias temporários para não enviar colunas inexistentes ao Supabase
+      delete p.preco_venda;
+      delete p.precoVenda;
+      delete p.PRECO_VENDA;
+      delete p.preco;
+      delete p.salePrice;
+      delete p.valor_venda;
+      delete p.preco_original;
+      delete p.precoOriginal;
+      delete p.PRECO_ORIGINAL;
+      delete p.originalPrice;
+      delete p.pmc;
+      delete p.PMC;
+      delete p.preco_pmc;
+      delete p.PRECO_PMC;
+      delete p.preco_tabela;
+      delete p.valor_original;
+      delete p.promotionalPrice;
+      delete p.preco_promocional;
+      delete p.internalCode;
+      delete p.activePrinciple;
+      delete p.drugType;
+      delete p.sideEffects;
+      delete p.isFeatured;
+      delete p.requiresPrescription;
+      delete p.promotionType;
+      delete p.buyX;
+      delete p.payY;
+      delete p.discountQtyThreshold;
+      delete p.discountQtyPercentage;
+      delete p.videoUri;
+      delete p.isAiEnriched;
+      delete p.groupingSlug;
+      delete p.variantAttribute;
+
+      let existingMatch: { id: string; barcode: string | null; internal_code: string | null; name: string; price?: number | null; original_price?: number | null } | undefined = undefined;
 
       // Correspondência estritamente por EAN (barcode) ou ID existente
       if (p.barcode && dbExistingByBarcode.has(p.barcode)) {
@@ -3368,17 +3434,43 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
       if (existingMatch) {
         // Produto já existe na farmácia: adota o ID real da farmácia para UPDATE limpo
         p.id = existingMatch.id;
+        // Se tanto price quanto original_price vieram zerados no lote, preserva o preço existente válido do banco
+        if (Number(p.price) <= 0) {
+          const existingValidPrice = Number(existingMatch.price) > 0
+            ? Number(existingMatch.price)
+            : (Number(existingMatch.original_price) > 0 ? Number(existingMatch.original_price) : 0);
+          if (existingValidPrice > 0) {
+            p.price = existingValidPrice;
+          }
+        }
+        if (Number(p.price) <= 0 && Number(p.original_price) <= 0) {
+          failedCount++;
+          failedDetails.push({
+            name: p.name,
+            barcode: p.barcode,
+            code: p.internal_code,
+            reason: "Preço inválido: informe preco_venda ou preco_original (PMC) maior que zero."
+          });
+          continue;
+        }
         productsToUpdate.push(p);
       } else {
-        // Novo produto genuíno (EAN não encontrado na farmácia)
+        // Novo produto genuíno: rejeita apenas se AMBOS (preco_venda e preco_original) estiverem zerados ou nulos
+        if (Number(p.price) <= 0 && Number(p.original_price) <= 0) {
+          failedCount++;
+          failedDetails.push({
+            name: p.name,
+            barcode: p.barcode,
+            code: p.internal_code,
+            reason: "Preço inválido: informe preco_venda ou preco_original (PMC) maior que zero."
+          });
+          continue;
+        }
         productsToInsert.push(p);
       }
     }
 
     // 4. Execução do Salvamento com Tratamento Silencioso de Conflitos (23505)
-    let savedCount = 0;
-    let failedCount = 0;
-    const failedDetails: any[] = [];
     const CHUNK_SIZE = 100;
 
     const is23505Error = (err: any) => {
@@ -5718,6 +5810,17 @@ app.post(
           rawItem.preco ??
           rawItem.price;
 
+        const rawOriginalPrice =
+          rawItem.originalPrice ??
+          rawItem.original_price ??
+          rawItem.precoOriginal ??
+          rawItem.preco_original ??
+          rawItem.pmc ??
+          rawItem.PMC ??
+          rawItem.preco_pmc ??
+          rawItem.preco_tabela ??
+          rawItem.valor_original;
+
         const sanitizedEan = sanitizeInovafarmaEan(rawEan);
         const sanitizedInternalCode = rawInternalCode
           ? String(rawInternalCode).trim()
@@ -5747,8 +5850,14 @@ app.post(
           parsedCost >= 0 ? Math.round(parsedCost * 100) / 100 : undefined;
 
         const parsedSale = parseInovafarmaNumber(rawSalePrice, -1);
+        const parsedOriginal = parseInovafarmaNumber(rawOriginalPrice, -1);
+        // Fallback inteligente: se preco_venda for nulo, indefinido ou <= 0, assume preco_original (PMC)
         let sanitizedSalePrice =
-          parsedSale >= 0 ? Math.round(parsedSale * 100) / 100 : undefined;
+          parsedSale > 0
+            ? Math.round(parsedSale * 100) / 100
+            : parsedOriginal > 0
+              ? Math.round(parsedOriginal * 100) / 100
+              : undefined;
 
         let products: any[] | null = null;
         if (sanitizedEan) {
@@ -9346,7 +9455,7 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
          'divisor_preco', 'price_divisor', 'divisorPreco', 'priceDivisor'
        ]), 0);
 
-       // 4. Preço de Venda (preco, preco_venda, Preco_Bruto; se vier 0, usa Preco_Liquido)
+       // 4. Preço de Venda (preco, preco_venda, Preco_Bruto; se vier <= 0 ou nulo, usa Preco_Liquido ou preco_original / PMC)
        let rawPriceBruto = parseAgentNumber(getValFromProduct(p, [
          'preco', 'preco_venda', 'Preco_Bruto', 'preco_bruto', 'PrecoBruto', 'PRECO_BRUTO',
          'PrecoVenda', 'PRECO_VENDA', 'PRECO', 'VALOR',
@@ -9360,7 +9469,9 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
        if (isNaN(rawPrecoLiquidoFallback) || rawPrecoLiquidoFallback < 0) rawPrecoLiquidoFallback = 0;
 
        let originalPrice = parseAgentNumber(getValFromProduct(p, [
-         'original_price', 'originalPrice', 'preco_original', 'preco_de', 'preco_tabela', 'preco_cadastro', 'preco_antigo', 'valor_original'
+         'original_price', 'originalPrice', 'preco_original', 'Preco_Original', 'PRECO_ORIGINAL', 'PrecoOriginal',
+         'pmc', 'PMC', 'preco_pmc', 'PRECO_PMC', 'Preco_PMC', 'PrecoPmc',
+         'preco_de', 'preco_tabela', 'Preco_Tabela', 'PRECO_TABELA', 'preco_cadastro', 'preco_antigo', 'valor_original', 'preco_cheio', 'preco_maximo'
        ]), 0);
        if (isNaN(originalPrice) || originalPrice < 0) originalPrice = 0;
 
@@ -9387,7 +9498,7 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
          presentation: rawPresentation ? String(rawPresentation) : null,
          rawFraction,
          explicitDivisor: rawExplicitDivisor,
-         rawPriceBruto,
+         rawPriceBruto: rawPriceBruto > 0 ? rawPriceBruto : originalPrice,
          rawPrecoLiquido: rawPrecoLiquidoFallback > 0 ? rawPrecoLiquidoFallback : rawPromoPrice,
          customRules: tenantPriceRules,
        });
@@ -9400,7 +9511,19 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
          if (rawProgPrice > 0) rawProgPrice = roundCurrency(rawProgPrice / priceDivisor);
        }
 
-       let price = rawPriceBruto > 0 ? rawPriceBruto : rawPrecoLiquidoFallback;
+       // Regra de Fallback Inteligente de Preço (Siagold / ERP):
+       // Se preco_venda (rawPriceBruto / rawPrecoLiquidoFallback) for nulo, indefinido ou <= 0,
+       // assume automaticamente o valor de preco_original (PMC/tabela) como o preco_venda principal
+       let price =
+         rawPriceBruto > 0
+           ? rawPriceBruto
+           : rawPrecoLiquidoFallback > 0
+             ? rawPrecoLiquidoFallback
+             : originalPrice > 0
+               ? originalPrice
+               : rawPromoPrice > 0
+                 ? rawPromoPrice
+                 : 0;
 
        // Normalização e extração de colunas de promoção do ERP (com retrocompatibilidade total)
        const rawStartDate = getValFromProduct(p, [
@@ -9820,6 +9943,17 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
                finalPromoProgressivePrice = existing.promo_progressive_price;
                finalPromoStartDate = existing.promo_start_date;
                finalPromoEndDate = existing.promo_end_date;
+            } else {
+               // Fallback adicional na atualização: se finalPrice <= 0, assume finalOriginalPrice ou preserva o preço válido já cadastrado
+               if (Number(finalPrice) <= 0 || isNaN(Number(finalPrice))) {
+                 if (Number(finalOriginalPrice) > 0) {
+                   finalPrice = Number(finalOriginalPrice);
+                 } else if (Number(existing.price) > 0) {
+                   finalPrice = Number(existing.price);
+                 } else if (Number(existing.original_price) > 0) {
+                   finalPrice = Number(existing.original_price);
+                 }
+               }
             }
             
             const finalImage = (item.image && typeof item.image === 'string' && item.image.trim().length > 0)
@@ -14168,6 +14302,46 @@ async function startServer() {
         console.warn("[EAN IMAGE CLEANUP STARTUP WARNING]:", err?.message || err),
       );
     }, 5 * 1000);
+
+    // Corrige automaticamente no boot produtos que tenham ficado com price <= 0 mas possuam original_price > 0 (ex: sincronizados do Siagold antes do fallback)
+    setTimeout(async () => {
+      try {
+        const { data: zeroPriceRows, error: zeroErr } = await supabaseAdmin
+          .from("products")
+          .select("id, tenant_id, price, original_price")
+          .or("price.lte.0,price.is.null")
+          .gt("original_price", 0)
+          .limit(2000);
+
+        if (!zeroErr && zeroPriceRows && zeroPriceRows.length > 0) {
+          let fixedZeroCount = 0;
+          const affectedTenants = new Set<string>();
+          for (const row of zeroPriceRows) {
+            const origVal = Number(row.original_price);
+            if (origVal > 0) {
+              const { error: updErr } = await supabaseAdmin
+                .from("products")
+                .update({ price: origVal })
+                .eq("id", row.id);
+              if (!updErr) {
+                fixedZeroCount++;
+                if (row.tenant_id) affectedTenants.add(String(row.tenant_id));
+              }
+            }
+          }
+          for (const tId of affectedTenants) {
+            tenantProductHashCache.delete(tId);
+          }
+          if (fixedZeroCount > 0) {
+            console.log(
+              `[Price Fallback Startup Fix] ${fixedZeroCount} produto(s) com preco_venda <= 0 atualizado(s) automaticamente com preco_original (PMC).`,
+            );
+          }
+        }
+      } catch (fixErr: any) {
+        console.warn("[Price Fallback Startup Warning]:", fixErr?.message || fixErr);
+      }
+    }, 3 * 1000);
 
     // Dispara uma verificação inicial rápida após o boot do servidor (15 segundos)
     setTimeout(() => {

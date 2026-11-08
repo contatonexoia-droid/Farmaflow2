@@ -2293,6 +2293,25 @@ export function normalizeInovafarmaProduct(
     "menor_preco_venda",
   ]);
 
+  const rawPrecoOriginal = getProductFieldCI(raw as any, [
+    "preco_original",
+    "Preco_Original",
+    "PRECO_ORIGINAL",
+    "PrecoOriginal",
+    "precoOriginal",
+    "original_price",
+    "originalPrice",
+    "pmc",
+    "PMC",
+    "preco_pmc",
+    "PRECO_PMC",
+    "preco_tabela",
+    "Preco_Tabela",
+    "PRECO_TABELA",
+    "preco_de",
+    "valor_original",
+  ]);
+
   const rawPromo = getProductFieldCI(raw as any, [
     "preco_promocional",
     "Preco_Liquido",
@@ -2384,6 +2403,7 @@ export function normalizeInovafarmaProduct(
   let precoBrutoVal = Math.max(0, roundCurrency(parseInovafarmaNumber(rawPrecoBruto, 0)));
   let precoLiquidoVal = Math.max(0, roundCurrency(parseInovafarmaNumber(rawPrecoLiquido, 0)));
   let menorPrecoVal = Math.max(0, roundCurrency(parseInovafarmaNumber(rawMenorPrecoVenda, 0)));
+  let precoOriginalVal = Math.max(0, roundCurrency(parseInovafarmaNumber(rawPrecoOriginal, 0)));
   let promoExplicitVal = parseInovafarmaNumber(rawPromo, -1);
   const costPriceVal = parseInovafarmaNumber(rawCost, -1);
   let costPrice = costPriceVal >= 0 ? roundCurrency(costPriceVal) : null;
@@ -2396,7 +2416,7 @@ export function normalizeInovafarmaProduct(
     presentation: rawApresentacao,
     rawFraction: parseInovafarmaNumber(rawFractionField, 0),
     explicitDivisor: parseInovafarmaNumber(rawExplicitDivisor, 0),
-    rawPriceBruto: precoBrutoVal,
+    rawPriceBruto: precoBrutoVal > 0 ? precoBrutoVal : precoOriginalVal,
     rawPrecoLiquido: precoLiquidoVal > 0 ? precoLiquidoVal : menorPrecoVal,
     customRules: customPriceRules,
   });
@@ -2405,18 +2425,26 @@ export function normalizeInovafarmaProduct(
     if (precoBrutoVal > 0) precoBrutoVal = roundCurrency(precoBrutoVal / priceDivisor);
     if (precoLiquidoVal > 0) precoLiquidoVal = roundCurrency(precoLiquidoVal / priceDivisor);
     if (menorPrecoVal > 0) menorPrecoVal = roundCurrency(menorPrecoVal / priceDivisor);
+    if (precoOriginalVal > 0) precoOriginalVal = roundCurrency(precoOriginalVal / priceDivisor);
     if (promoExplicitVal > 0) promoExplicitVal = roundCurrency(promoExplicitVal / priceDivisor);
     if (costPrice !== null && costPrice > 0) costPrice = roundCurrency(costPrice / priceDivisor);
   }
 
-  // Se Preco_Bruto / preco vier 0, usa Preco_Liquido (ou MENORPRECOVENDA)
-  const precoVendaVal = precoBrutoVal > 0 ? precoBrutoVal : (precoLiquidoVal > 0 ? precoLiquidoVal : menorPrecoVal);
+  // Fallback inteligente de preço: se preco_venda / Preco_Bruto vier <= 0, usa Preco_Liquido, MENORPRECOVENDA ou preco_original (PMC)
+  const precoVendaVal =
+    precoBrutoVal > 0
+      ? precoBrutoVal
+      : precoLiquidoVal > 0
+        ? precoLiquidoVal
+        : menorPrecoVal > 0
+          ? menorPrecoVal
+          : precoOriginalVal;
 
   // Regra Inovafarma v1 / Catalogo:
   // - Quando MENORPRECOVENDA é informado (API Portal PS), usa MENORPRECOVENDA como preço final e PRECOVENDA como originalPrice
   // - Quando Preco_Liquido / preco_promocional > 0 e < Preco_Bruto, define promotionalPrice
   let finalSellingPrice = menorPrecoVal > 0 ? menorPrecoVal : precoVendaVal;
-  let originalCompareAtPrice: number | null = null;
+  let originalCompareAtPrice: number | null = precoOriginalVal > 0 ? precoOriginalVal : null;
   let promotionalPrice: number | null = null;
 
   if (menorPrecoVal > 0 && precoVendaVal > menorPrecoVal) {
@@ -2431,12 +2459,14 @@ export function normalizeInovafarmaProduct(
     finalSellingPrice = roundCurrency(precoLiquidoVal);
     originalCompareAtPrice = precoBrutoVal;
     promotionalPrice = roundCurrency(precoLiquidoVal);
-  } else if (promoExplicitVal > 0 && finalSellingPrice === 0) {
+  } else if (promoExplicitVal > 0 && finalSellingPrice <= 0) {
     finalSellingPrice = roundCurrency(promoExplicitVal);
     promotionalPrice = roundCurrency(promoExplicitVal);
+  } else if (finalSellingPrice <= 0 && precoOriginalVal > 0) {
+    finalSellingPrice = precoOriginalVal;
   }
 
-  if (finalSellingPrice === 0 && costPrice !== null && costPrice > 0) {
+  if (finalSellingPrice <= 0 && costPrice !== null && costPrice > 0) {
     finalSellingPrice = roundCurrency(costPrice * 1.5);
   }
 

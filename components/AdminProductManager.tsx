@@ -1154,8 +1154,24 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
       const parsedPromo = rawPromo !== '' && rawPromo !== undefined && rawPromo !== null && !isNaN(Number(rawPromo)) && Number(rawPromo) > 0
         ? Number(rawPromo)
         : undefined;
+      const rawPrice = Number(product.price ?? (product as any).preco_venda ?? 0);
+      const rawOrigPrice = Number(
+        product.originalPrice ??
+        (product as any).original_price ??
+        (product as any).preco_original ??
+        (product as any).pmc ??
+        0
+      );
+      const effectivePrice =
+        !isNaN(rawPrice) && rawPrice > 0
+          ? rawPrice
+          : !isNaN(rawOrigPrice) && rawOrigPrice > 0
+            ? rawOrigPrice
+            : 0;
       setEditingProduct({
         ...product,
+        price: effectivePrice,
+        originalPrice: !isNaN(rawOrigPrice) && rawOrigPrice > 0 ? rawOrigPrice : 0,
         promotionalPrice: parsedPromo,
         promotional_price: parsedPromo !== undefined ? parsedPromo : null
       });
@@ -1241,7 +1257,40 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
   };
 
   const handleSaveProduct = async () => {
-    if (!editingProduct || !editingProduct.name || !editingProduct.price || !editingProduct.barcode || !editingProduct.barcode.trim()) {
+    const rawSalePrice = Number(editingProduct?.price ?? (editingProduct as any)?.preco_venda ?? 0);
+    const rawOriginalPrice = Number(
+      editingProduct?.originalPrice ??
+      (editingProduct as any)?.original_price ??
+      (editingProduct as any)?.preco_original ??
+      (editingProduct as any)?.pmc ??
+      0
+    );
+    const rawPromoCandidate =
+      editingProduct?.promotionalPrice !== undefined && editingProduct?.promotionalPrice !== null
+        ? Number(editingProduct.promotionalPrice)
+        : Number((editingProduct as any)?.promotional_price ?? 0);
+
+    // Regra de Fallback Inteligente: se preco_venda <= 0, assume preco_original (PMC)
+    const effectivePrice =
+      !isNaN(rawSalePrice) && rawSalePrice > 0
+        ? rawSalePrice
+        : !isNaN(rawOriginalPrice) && rawOriginalPrice > 0
+          ? rawOriginalPrice
+          : !isNaN(rawPromoCandidate) && rawPromoCandidate > 0
+            ? rawPromoCandidate
+            : 0;
+    const effectiveOriginalPrice =
+      !isNaN(rawOriginalPrice) && rawOriginalPrice > 0 ? rawOriginalPrice : 0;
+
+    // Rejeita apenas se nome, código de barras estiverem vazios OU se AMBOS (preço de venda e preço original) forem <= 0
+    if (
+      !editingProduct ||
+      !editingProduct.name ||
+      !editingProduct.name.trim() ||
+      effectivePrice <= 0 ||
+      !editingProduct.barcode ||
+      !editingProduct.barcode.trim()
+    ) {
         alert("Preencha nome, preço e código de barras.");
         return;
     }
@@ -1293,8 +1342,8 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
           sideEffects: editingProduct.sideEffects || '',
           contraindications: editingProduct.contraindications || '',
           isAiEnriched: Boolean(editingProduct.isAiEnriched),
-          price: Number(editingProduct.price) || 0,
-          originalPrice: Number(editingProduct.originalPrice) || 0,
+          price: effectivePrice,
+          originalPrice: effectiveOriginalPrice,
           promotionalPrice: validPromoPrice !== null ? validPromoPrice : undefined,
           promotional_price: validPromoPrice,
           stock: Number(editingProduct.stock) || 0,
@@ -2621,6 +2670,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
 
             const rawEan = getVal(IMPORT_COLUMN_KEYS.EAN);
             const priceRaw = getVal(IMPORT_COLUMN_KEYS.PRICE);
+            const origPriceRaw = getVal(IMPORT_COLUMN_KEYS.ORIGINAL_PRICE);
 
             const ean = sanitizeEanValue(rawEan);
             console.log("[FarmaFlow Debug] EAN Processado da Planilha:", ean);
@@ -2630,11 +2680,12 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                 return; // Descarta/filtra essa linha específica
             }
 
-            if (priceRaw !== undefined && priceRaw !== null) {
-                const parsedPrice = parseNumberSafe(priceRaw);
-                if (parsedPrice > 0) {
-                    priceMap.set(ean, parsedPrice);
-                }
+            const parsedSalePrice = priceRaw !== undefined && priceRaw !== null ? parseNumberSafe(priceRaw) : 0;
+            const parsedOrigPrice = origPriceRaw !== undefined && origPriceRaw !== null ? parseNumberSafe(origPriceRaw) : 0;
+            // Fallback inteligente: se preco_venda <= 0, assume preco_original (PMC)
+            const resolvedPrice = parsedSalePrice > 0 ? parsedSalePrice : (parsedOrigPrice > 0 ? parsedOrigPrice : 0);
+            if (resolvedPrice > 0) {
+                priceMap.set(ean, resolvedPrice);
             }
         });
 
@@ -3067,11 +3118,15 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
             const hasRowPromoPrice = rawPromoPriceVal !== undefined && rawPromoPriceVal !== null && String(rawPromoPriceVal).trim() !== '';
             const rowPromotionalPrice = hasRowPromoPrice ? parseNumberSafe(rawPromoPriceVal) : 0;
             
-            // Promotional & Price logic
-            let finalPrice = rowPrice || 0;
-            let finalOriginalPrice = rowOriginalPrice || 0;
-            let finalPromotionalPrice = rowPromotionalPrice || 0;
+            // Promotional & Price logic (com Fallback Inteligente: se preco_venda <= 0, assume preco_original / PMC)
+            let finalPrice = rowPrice > 0 ? rowPrice : 0;
+            let finalOriginalPrice = rowOriginalPrice > 0 ? rowOriginalPrice : 0;
+            let finalPromotionalPrice = rowPromotionalPrice > 0 ? rowPromotionalPrice : 0;
             let rowPromoType: 'NONE' | 'DISCOUNT' | 'BUY_X_PAY_Y' | undefined = undefined;
+
+            if (finalPrice <= 0 && finalOriginalPrice > 0) {
+                finalPrice = finalOriginalPrice;
+            }
 
             if (finalPromotionalPrice > 0) {
                 if (finalPrice > 0 && finalPromotionalPrice < finalPrice) {
@@ -3083,7 +3138,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                     finalPrice = finalPromotionalPrice;
                     rowPromoType = 'DISCOUNT';
                     countPromotional++;
-                } else if (finalPrice === 0) {
+                } else if (finalPrice <= 0) {
                     finalPrice = finalPromotionalPrice;
                 }
             } else if (finalPrice > 0 && finalOriginalPrice > 0) {
@@ -3093,12 +3148,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                 } else {
                     rowPromoType = 'NONE';
                 }
-            } else if (finalOriginalPrice > 0 && finalPrice === 0) {
-                finalPrice = finalOriginalPrice;
-                finalOriginalPrice = 0;
-                rowPromoType = 'NONE';
             } else {
-                finalOriginalPrice = 0;
                 rowPromoType = 'NONE';
             }
 
