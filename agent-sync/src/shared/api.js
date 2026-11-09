@@ -7,12 +7,30 @@ const os = require('os');
 const fs = require('fs');
 const https = require('https');
 const http = require('http');
+const { normalizeAndSanitizeSiagoldRecord } = require('./priceNormalizer');
 
 // Tenta carregar as variáveis de ambiente a partir do arquivo .env no diretório de execução atual (process.cwd())
 try {
     require('dotenv').config({ path: path.join(process.cwd(), '.env') });
 } catch (e) {
     // dotenv é opcional
+}
+
+const BATCH_SIZE = 200;
+const BATCH_DELAY_MS = 500;
+const MAX_BATCH_RETRIES = 3;
+const REQUEST_TIMEOUT_MS = 60000; // 60 segundos por lote
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function chunkArray(items, size = BATCH_SIZE) {
+    const chunks = [];
+    for (let i = 0; i < items.length; i += size) {
+        chunks.push(items.slice(i, i + size));
+    }
+    return chunks;
 }
 
 function getMachineId() {
@@ -102,16 +120,18 @@ const httpAgent = new http.Agent({
 const apiClient = axios.create({
     httpsAgent,
     httpAgent,
-    timeout: 25000,
+    timeout: REQUEST_TIMEOUT_MS,
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity,
     headers: {
-        'User-Agent': 'FarmaFlow-Desktop-Agent/1.0',
+        'User-Agent': 'FarmaFlow-Desktop-Agent/2.0',
         'Accept': 'application/json, text/plain, */*'
     }
 });
 
 /**
  * Normaliza e sanitiza a URL de integração, corrigindo concatenações incorretas
- * e garantindo o domínio oficial farmaflow.online e a estrutura correta /api/v1.
+ * e garantindo a estrutura correta /api/v1 (suportando farmaflow.online e farmaflow.site).
  */
 function sanitizeBaseUrl(inputUrl) {
     if (!inputUrl || typeof inputUrl !== 'string') {
@@ -121,18 +141,18 @@ function sanitizeBaseUrl(inputUrl) {
     if (!url.startsWith('http://') && !url.startsWith('https://')) {
         url = 'https://' + url;
     }
-    
-    // Substitui domínios legados ou concatenados incorretamente pelo domínio oficial
+
+    // Substitui domínios legados ou concatenados incorretamente
     url = url.replace(/farmaflow\.nexoia\.online/gi, 'farmaflow.online');
     url = url.replace(/farmaflow\.online\.nexoia\.online/gi, 'farmaflow.online');
     url = url.replace(/nexoia\.online\.farmaflow\.online/gi, 'farmaflow.online');
-    
+
     // Remove barras finais
     url = url.replace(/\/+$/, '');
-    
+
     // Remove sufixos de endpoints se foram informados na base
     url = url.replace(/\/integration(\/validate-token|\/heartbeat|\/ping)?\/?$/i, '');
-    
+
     // Garante que termine com /api/v1 se não tiver /api/
     if (!url.includes('/api/')) {
         url = `${url}/api/v1`;
@@ -146,13 +166,14 @@ function getCandidateBaseUrls() {
     const primary = sanitizeBaseUrl(rawEnv);
     const fallbacks = [
         'https://farmaflow.online/api/v1',
+        'https://farmaflow.site/api/v1',
         'https://www.farmaflow.online/api/v1',
+        'https://www.farmaflow.site/api/v1',
         'http://farmaflow.online/api/v1',
-        'http://www.farmaflow.online/api/v1'
+        'http://farmaflow.site/api/v1'
     ];
-    
+
     const candidates = [primary];
-    // Se a primary for HTTPS, adiciona a versão HTTP correspondente como fallback imediato
     if (primary.startsWith('https://')) {
         const httpPrimary = primary.replace('https://', 'http://');
         if (!candidates.includes(httpPrimary)) {
@@ -172,26 +193,25 @@ let activeBaseUrl = getCandidateBaseUrls()[0];
 /**
  * Executa requisição POST com fallback inteligente entre os domínios da FarmaFlow
  */
-async function postWithFallback(path, data, config = {}) {
+async function postWithFallback(pathSuffix, data, config = {}) {
     const candidates = getCandidateBaseUrls();
-    // Prioriza a URL que já teve sucesso anteriormente
     const sortedCandidates = [activeBaseUrl, ...candidates.filter(c => c !== activeBaseUrl)];
-    
+
     let lastError = null;
     for (let i = 0; i < sortedCandidates.length; i++) {
         const baseUrl = sortedCandidates[i];
-        const targetUrl = `${baseUrl}${path.startsWith('/') ? '' : '/'}${path}`;
-        
+        const targetUrl = `${baseUrl}${pathSuffix.startsWith('/') ? '' : '/'}${pathSuffix}`;
+
         try {
             const response = await apiClient.post(targetUrl, data, {
+                timeout: REQUEST_TIMEOUT_MS,
                 ...config,
                 headers: {
                     ...config.headers,
                     'x-agent-target': baseUrl
                 }
             });
-            
-            // Marca a URL como ativa após o primeiro sucesso
+
             if (activeBaseUrl !== baseUrl) {
                 activeBaseUrl = baseUrl;
                 console.log(`[INFO] Conexão estabelecida com sucesso com o servidor em: ${baseUrl}`);
@@ -199,24 +219,38 @@ async function postWithFallback(path, data, config = {}) {
             return { response, targetUrl };
         } catch (err) {
             lastError = err;
-            const isSslOrNetwork = err.code === 'EPROTO' || 
-                                   err.code === 'ECONNRESET' || 
-                                   err.code === 'ECONNREFUSED' || 
-                                   err.code === 'ENOTFOUND' || 
-                                   err.code === 'ETIMEDOUT' ||
-                                   (err.message && (err.message.includes('SSL') || err.message.includes('tlsv1') || err.message.includes('alert')));
-            
+            const isSslOrNetwork =
+                err.code === 'EPROTO' ||
+                err.code === 'ECONNRESET' ||
+                err.code === 'ECONNREFUSED' ||
+                err.code === 'ENOTFOUND' ||
+                err.code === 'ETIMEDOUT' ||
+                err.code === 'ECONNABORTED' ||
+                (err.message && (
+                    err.message.includes('SSL') ||
+                    err.message.includes('tlsv1') ||
+                    err.message.includes('alert') ||
+                    err.message.includes('timeout')
+                ));
+
             if (i < sortedCandidates.length - 1 && isSslOrNetwork) {
                 console.warn(`⚠️ [REDE/SSL] Falha na URL "${targetUrl}" (${err.code || err.message}). Tentando rota alternativa...`);
                 continue;
             }
-            // Se for erro HTTP 4xx (ex: 400 token inválido, 401 não autorizado), não adianta tentar outra URL
-            if (err.response && err.response.status < 500) {
+            // Se for erro HTTP 4xx (exceto 408/413/429), não adianta tentar outra URL
+            if (
+                err.response &&
+                err.response.status >= 400 &&
+                err.response.status < 500 &&
+                err.response.status !== 408 &&
+                err.response.status !== 413 &&
+                err.response.status !== 429
+            ) {
                 break;
             }
         }
     }
-    
+
     throw lastError;
 }
 
@@ -235,12 +269,13 @@ async function validateToken(token) {
             headers: {
                 'x-machine-id': machineId,
                 'Content-Type': 'application/json'
-            }
+            },
+            timeout: REQUEST_TIMEOUT_MS
         });
-        
+
         console.log(`[DEBUG] Token validado com sucesso na URL: ${targetUrl}`);
         console.log(`- Código de Status HTTP: ${response.status} (${response.statusText})`);
-        return response.data; // Espera: { erpType, dbConfig, apiKey }
+        return response.data;
     } catch (error) {
         console.error(`\n[DEBUG ERROR] Falha na requisição de validação do token:`);
         if (error.response) {
@@ -254,38 +289,135 @@ async function validateToken(token) {
             console.error(`- Erro Geral: ${error.message}`);
         }
         console.error(`===================================================\n`);
-        
+
         throw new Error(error.response?.data?.message || error.response?.data?.error || `Erro ao validar token ou se conectar ao servidor (${error.code || error.message}).`);
     }
 }
 
+/**
+ * Envia um único lote com até MAX_BATCH_RETRIES tentativas e timeout de 60s.
+ */
+async function sendSingleBatchWithRetry(apiKey, batch, batchNumber, totalBatches, machineId) {
+    let lastBatchError = null;
+
+    for (let attempt = 1; attempt <= MAX_BATCH_RETRIES; attempt++) {
+        try {
+            const { response } = await postWithFallback('/integration', {
+                dados: batch,
+                machineId,
+                machine_id: machineId,
+                batchNumber,
+                totalBatches
+            }, {
+                headers: {
+                    'x-api-key': apiKey,
+                    'x-machine-id': machineId,
+                    'Content-Type': 'application/json'
+                },
+                timeout: REQUEST_TIMEOUT_MS
+            });
+
+            return {
+                success: true,
+                data: response.data,
+                attempt
+            };
+        } catch (error) {
+            lastBatchError = error;
+            const statusInfo = error.response ? `HTTP ${error.response.status}` : (error.code || error.message);
+            console.warn(
+                `⚠️ [Sincronizando] Falha no lote ${batchNumber}/${totalBatches} ` +
+                `(Tentativa ${attempt}/${MAX_BATCH_RETRIES}): ${statusInfo}`
+            );
+
+            if (attempt < MAX_BATCH_RETRIES) {
+                const retryDelay = attempt * 1500;
+                console.log(`⏳ Aguardando ${retryDelay}ms antes de reenviar o lote ${batchNumber}...`);
+                await sleep(retryDelay);
+            }
+        }
+    }
+
+    console.error(
+        `❌ [Sincronizando] Lote ${batchNumber}/${totalBatches} falhou após ${MAX_BATCH_RETRIES} tentativas. ` +
+        `Prosseguindo para o próximo lote sem abortar a sincronização.`
+    );
+    return {
+        success: false,
+        error: lastBatchError
+    };
+}
+
+/**
+ * Envia os produtos de forma estritamente fracionada em lotes de no máximo 200 registros (BATCH_SIZE = 200),
+ * sequencialmente (for...of com await), com intervalo de 500ms entre lotes, timeout de 60s e até 3 retries por lote.
+ */
 async function sendData(apiKey, data) {
     const machineId = getMachineId();
-    try {
-        const { response } = await postWithFallback('/integration', {
-            dados: data,
-            machineId,
-            machine_id: machineId
-        }, {
-            headers: {
-                'x-api-key': apiKey,
-                'x-machine-id': machineId,
-                'Content-Type': 'application/json'
-            },
-            timeout: 20000
-        });
-        return response.data;
-    } catch (error) {
-        console.error(`[DEBUG ERROR] Falha ao enviar dados de sincronização:`);
-        console.error(`- URL Base: "${activeBaseUrl}"`);
-        if (error.response) {
-            console.error(`- Código de Status HTTP: ${error.response.status}`);
-            console.error(`- Erro da API:`, JSON.stringify(error.response.data));
-        } else {
-            console.error(`- Erro de Rede/Conexão: ${error.message}`);
-        }
-        throw error;
+    const rawArray = Array.isArray(data) ? data : [];
+
+    if (rawArray.length === 0) {
+        return { success: true, totalSent: 0, totalBatches: 0, failedBatches: 0 };
     }
+
+    // Higienização e normalização preventiva de preços antes de montar os lotes HTTP
+    const sanitizedRecords = [];
+    for (const item of rawArray) {
+        const cleaned = normalizeAndSanitizeSiagoldRecord(item);
+        if (cleaned) {
+            delete cleaned._priceFallbackApplied;
+            sanitizedRecords.push(cleaned);
+        }
+    }
+
+    if (sanitizedRecords.length === 0) {
+        console.log('⚠️ Nenhum registro com preço válido (> 0) para enviar após higienização.');
+        return { success: true, totalSent: 0, totalBatches: 0, failedBatches: 0 };
+    }
+
+    const batches = chunkArray(sanitizedRecords, BATCH_SIZE);
+    const totalBatches = batches.length;
+
+    let successBatches = 0;
+    let failedBatches = 0;
+    let totalSent = 0;
+    let batchIndex = 0;
+
+    for (const batch of batches) {
+        batchIndex++;
+        console.log(`[Sincronizando] Enviando lote ${batchIndex} de ${totalBatches} (${batch.length} registros)...`);
+
+        const result = await sendSingleBatchWithRetry(apiKey, batch, batchIndex, totalBatches, machineId);
+        if (result.success) {
+            successBatches++;
+            totalSent += batch.length;
+        } else {
+            failedBatches++;
+        }
+
+        // Intervalo de 500ms entre os lotes para não sobrecarregar o Nginx nem a VPS
+        if (batchIndex < totalBatches) {
+            await sleep(BATCH_DELAY_MS);
+        }
+    }
+
+    if (successBatches === 0 && failedBatches > 0) {
+        throw new Error(`Todos os ${totalBatches} lotes falharam durante o envio.`);
+    }
+
+    console.log(
+        `✅ [Sincronizando] Envio em lotes finalizado: ${successBatches}/${totalBatches} lotes confirmados ` +
+        `(${totalSent} produtos enviados${failedBatches > 0 ? `, ${failedBatches} lotes com falha` : ''}).`
+    );
+
+    return {
+        success: failedBatches === 0,
+        partialSuccess: successBatches > 0 && failedBatches > 0,
+        totalSent,
+        totalBatches,
+        successBatches,
+        failedBatches
+    };
 }
 
 async function sendHeartbeat(apiKey) {
@@ -301,7 +433,7 @@ async function sendHeartbeat(apiKey) {
                 'x-machine-id': machineId,
                 'Content-Type': 'application/json'
             },
-            timeout: 8000
+            timeout: 15000
         });
     } catch (error) {
         console.error(`[DEBUG ERROR] Falha ao enviar heartbeat: ${error.message}`);
@@ -310,11 +442,16 @@ async function sendHeartbeat(apiKey) {
 }
 
 module.exports = {
+    BATCH_SIZE,
+    BATCH_DELAY_MS,
+    MAX_BATCH_RETRIES,
+    REQUEST_TIMEOUT_MS,
     validateToken,
     sendData,
     sendHeartbeat,
     getMachineId,
     sanitizeBaseUrl,
-    activeBaseUrl
+    activeBaseUrl,
+    chunkArray,
+    sleep
 };
-

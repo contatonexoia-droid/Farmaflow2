@@ -1,6 +1,6 @@
 const readline = require('readline');
 const { loadConfig, saveConfig, getLastSyncDate, updateLastSyncDate } = require('./shared/state');
-const { validateToken, sendData, sendHeartbeat, activeBaseUrl } = require('./shared/api');
+const { validateToken, sendData, sendHeartbeat, BATCH_SIZE } = require('./shared/api');
 
 const SYNC_INTERVAL_MS = 60000;
 const RETRY_INTERVAL_MS = 300000;
@@ -19,6 +19,20 @@ async function askForToken() {
     });
 }
 
+function resolveMaxSyncDate(records) {
+    let maxTimestamp = 0;
+    for (const r of records) {
+        const rawDate = r.data_ultima_alteracao || r.Data_Ultima_Alteracao || r.updated_at;
+        if (rawDate) {
+            const ts = new Date(rawDate).getTime();
+            if (Number.isFinite(ts) && ts > maxTimestamp) {
+                maxTimestamp = ts;
+            }
+        }
+    }
+    return maxTimestamp > 0 ? new Date(maxTimestamp).toISOString() : new Date().toISOString();
+}
+
 /**
  * Inicia o agente de sincronização
  * @param {string} expectedErpType O tipo de ERP (ex: 'siagold')
@@ -27,7 +41,7 @@ async function askForToken() {
 async function startAgent(expectedErpType, ConnectorClass) {
     console.log('===================================================');
     console.log(`🚀 Agente FarmaFlow Iniciado (Módulo: ${expectedErpType.toUpperCase()})`);
-    console.log(`🌐 Servidor de Destino: https://farmaflow.online`);
+    console.log(`📦 Envio Fracionado Ativo: lotes de até ${BATCH_SIZE} produtos`);
     console.log('===================================================\n');
 
     let config = loadConfig();
@@ -35,11 +49,11 @@ async function startAgent(expectedErpType, ConnectorClass) {
     if (!config || !config.activated) {
         console.log('⚠️ Agente não configurado.');
         const token = await askForToken();
-        
+
         console.log('Validando token na nuvem...');
         try {
             const apiConfig = await validateToken(token);
-            
+
             if (apiConfig.erpType !== expectedErpType) {
                 console.error(`❌ Erro: Este instalador é para ${expectedErpType}, mas seu token retornou ${apiConfig.erpType}.`);
                 console.error(`Por favor, baixe o instalador correto no painel.`);
@@ -70,30 +84,39 @@ async function startAgent(expectedErpType, ConnectorClass) {
         } catch (hbError) {
             console.log(`⚠️ Alerta: Não foi possível atualizar o status (heartbeat) com o servidor: ${hbError.message}`);
         }
-        setTimeout(heartbeatLoop, 60000); // 1 minuto, independentemente do sucesso
+        setTimeout(heartbeatLoop, 60000);
     }
 
     async function loop() {
         try {
-            console.log(`[${new Date().toISOString()}] Verificando atualizações no banco...`);
+            console.log(`\n[${new Date().toISOString()}] Verificando atualizações no banco...`);
             const lastSync = getLastSyncDate();
-            
+
             const records = await connector.getChangedRecords(lastSync);
-            
+
             if (records && records.length > 0) {
-                console.log(`Encontrados ${records.length} novos registros para envio.`);
-                await sendData(config.apiKey, records);
-                
-                const maxDate = records.reduce((max, r) => {
-                    return (new Date(r.data_ultima_alteracao) > new Date(max)) ? r.data_ultima_alteracao : max;
-                }, records[0].data_ultima_alteracao);
-                
-                updateLastSyncDate(new Date(maxDate).toISOString());
-                console.log('✅ Dados sincronizados com sucesso.');
+                const totalBatches = Math.ceil(records.length / BATCH_SIZE);
+                console.log(
+                    `Encontrados ${records.length} registros válidos para envio ` +
+                    `(${totalBatches} lotes de até ${BATCH_SIZE} produtos).`
+                );
+
+                const syncResult = await sendData(config.apiKey, records);
+
+                if (!syncResult || syncResult.failedBatches === 0) {
+                    const nextSyncIso = resolveMaxSyncDate(records);
+                    updateLastSyncDate(nextSyncIso);
+                    console.log('✅ Todos os lotes foram sincronizados com sucesso.');
+                } else {
+                    console.warn(
+                        `⚠️ Sincronização concluída parcialmente (${syncResult.successBatches}/${syncResult.totalBatches} lotes). ` +
+                        `A data de corte será mantida para reprocessar os lotes pendentes no próximo ciclo.`
+                    );
+                }
             } else {
-                console.log('Tudo atualizado.');
+                console.log('Tudo atualizado. Nenhum registro pendente para envio.');
             }
-            
+
             setTimeout(loop, SYNC_INTERVAL_MS);
         } catch (error) {
             console.error(`❌ Erro durante a sincronização: ${error.message}`);

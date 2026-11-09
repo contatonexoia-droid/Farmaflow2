@@ -8633,6 +8633,8 @@ const validateTokenHandler = async (req: express.Request, res: express.Response)
       defaultUser = "postgres";
     }
 
+    const defaultViewName = erpType === "siagold" ? "vw_FarmaFlow_Itens" : "VW_INTEGRACAO_FARMAFLOW";
+
     res.json({
       erpType: erpType,
       dbConfig: {
@@ -8642,7 +8644,14 @@ const validateTokenHandler = async (req: express.Request, res: express.Response)
         port: defaultPort,
         database: defaultDatabase,
         branchCode: "1",
-        viewName: 'VW_INTEGRACAO_FARMAFLOW'
+        viewName: defaultViewName,
+        fallbackViewName: "VW_INTEGRACAO_FARMAFLOW"
+      },
+      syncConfig: {
+        batchSize: 200,
+        batchDelayMs: 500,
+        timeoutMs: 60000,
+        maxRetries: 3
       },
       apiKey: tenant?.integration_token || tokenData.tenant_id,
       tenantId: tokenData.tenant_id,
