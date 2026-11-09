@@ -3251,9 +3251,32 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
         validPrice = validPromo;
       }
 
-      // Preserva estoque 0 (ZERO estoque é perfeitamente válido no catálogo)
-      const rawStock = p.stock !== undefined && p.stock !== null ? Number(p.stock) : 0;
-      const validStock = !isNaN(rawStock) ? rawStock : 0;
+      // Normaliza estoque (se vier negativo, converte para 0) e verifica status ativo/inativo
+      const rawStockVal =
+        p.stock ??
+        p.estoque ??
+        p.Estoque_Atual ??
+        p.estoque_atual ??
+        p.Qtd_Estoque ??
+        p.qtd_estoque ??
+        p.saldo ??
+        p.Saldo_Estoque ??
+        p.quantidade;
+      const rawStock = rawStockVal !== undefined && rawStockVal !== null && rawStockVal !== '' ? Number(rawStockVal) : 0;
+      const isExplicitlyInactive =
+        p.active === false ||
+        p.ativo === false ||
+        p.ativo === 0 ||
+        ['0', 'N', 'NAO', 'NÃO', 'FALSE', 'I', 'INATIVO', 'BLOQUEADO', 'CANCELADO', 'EXCLUIDO'].includes(
+          String(p.active ?? p.ativo ?? p.Ativo ?? p.situacao ?? p.Situacao ?? p.status ?? '').trim().toUpperCase()
+        ) ||
+        p.bloqueado === true ||
+        p.bloqueado === 1 ||
+        p.inativo === true ||
+        p.inativo === 1 ||
+        ['1', 'S', 'SIM', 'TRUE'].includes(String(p.bloqueado ?? p.inativo ?? '').trim().toUpperCase());
+
+      const validStock = isExplicitlyInactive ? 0 : (!isNaN(rawStock) && rawStock > 0 ? Math.floor(rawStock) : 0);
 
       let cleanBarcode: string | null = null;
       const rawBarcodeInput = p.barcode ?? p.ean ?? p.codigo_barras ?? p.cod_barras;
@@ -3286,6 +3309,7 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
         original_price: validOrigPrice,
         promotional_price: validPromo,
         stock: validStock,
+        _isExplicitlyInactive: isExplicitlyInactive,
         category: p.category ? String(p.category).trim() : 'Geral',
         manufacturer: p.manufacturer ? String(p.manufacturer).trim() : 'Outros',
         active_principle: p.active_principle ?? p.activePrinciple ?? '',
@@ -3326,22 +3350,25 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
       sanitizedProducts.push(item);
     }
 
-    // 2. Busca estritamente por EAN (barcode) e ID no banco de dados da farmácia
-    // O código interno NUNCA é utilizado para buscar ou corresponder produtos entre planilhas
+    // 2. Busca por EAN (barcode), código interno (internal_code) e ID no banco de dados da farmácia
     const barcodesToLookup = sanitizedProducts
       .map(p => p.barcode)
       .filter((b): b is string => Boolean(b && b.length > 0));
+
+    const internalCodesToLookup = sanitizedProducts
+      .map(p => p.internal_code)
+      .filter((c): c is string => Boolean(c && c.length > 0));
 
     const idsToLookup = sanitizedProducts
       .map(p => p.id)
       .filter((id): id is string => Boolean(id && id.length > 0));
 
     const dbExistingByBarcode = new Map<string, { id: string; barcode: string | null; internal_code: string | null; name: string; price?: number | null; original_price?: number | null }>();
+    const dbExistingByInternalCode = new Map<string, { id: string; barcode: string | null; internal_code: string | null; name: string; price?: number | null; original_price?: number | null }>();
     const dbExistingById = new Map<string, { id: string; barcode: string | null; internal_code: string | null; name: string; price?: number | null; original_price?: number | null }>();
 
     const LOOKUP_CHUNK = 500;
 
-    // Busca estritamente por código de barras (EAN)
     if (barcodesToLookup.length > 0) {
       for (let i = 0; i < barcodesToLookup.length; i += LOOKUP_CHUNK) {
         const barcodeChunk = barcodesToLookup.slice(i, i + LOOKUP_CHUNK);
@@ -3354,13 +3381,32 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
         if (dbMatches) {
           dbMatches.forEach(row => {
             if (row.barcode) dbExistingByBarcode.set(String(row.barcode).trim(), row);
+            if (row.internal_code) dbExistingByInternalCode.set(String(row.internal_code).trim(), row);
             dbExistingById.set(row.id, row);
           });
         }
       }
     }
 
-    // Busca por ID direto
+    if (internalCodesToLookup.length > 0) {
+      for (let i = 0; i < internalCodesToLookup.length; i += LOOKUP_CHUNK) {
+        const codeChunk = internalCodesToLookup.slice(i, i + LOOKUP_CHUNK);
+        const { data: dbMatches } = await supabaseAdmin
+          .from("products")
+          .select("id, barcode, internal_code, name, price, original_price")
+          .eq("tenant_id", tenantId)
+          .in("internal_code", codeChunk);
+
+        if (dbMatches) {
+          dbMatches.forEach(row => {
+            if (row.barcode) dbExistingByBarcode.set(String(row.barcode).trim(), row);
+            if (row.internal_code) dbExistingByInternalCode.set(String(row.internal_code).trim(), row);
+            dbExistingById.set(row.id, row);
+          });
+        }
+      }
+    }
+
     if (idsToLookup.length > 0) {
       for (let i = 0; i < idsToLookup.length; i += LOOKUP_CHUNK) {
         const idChunk = idsToLookup.slice(i, i + LOOKUP_CHUNK);
@@ -3373,20 +3419,40 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
         if (dbMatches) {
           dbMatches.forEach(row => {
             if (row.barcode) dbExistingByBarcode.set(String(row.barcode).trim(), row);
+            if (row.internal_code) dbExistingByInternalCode.set(String(row.internal_code).trim(), row);
             dbExistingById.set(row.id, row);
           });
         }
       }
     }
 
-    // 3. Classifica produtos entre UPDATE (já existentes por EAN ou ID) e INSERT (genuinamente novos)
+    // 3. Classifica produtos entre UPDATE (já existentes por EAN, internal_code ou ID) e INSERT (genuinamente novos)
     const productsToUpdate: any[] = [];
     const productsToInsert: any[] = [];
     let savedCount = 0;
     let failedCount = 0;
+    let ignoredZeroStockNewCount = 0;
     const failedDetails: any[] = [];
 
     for (const p of sanitizedProducts) {
+      const isItemInactive = Boolean(p._isExplicitlyInactive);
+      delete p._isExplicitlyInactive;
+      delete p.active;
+      delete p.ativo;
+      delete p.Ativo;
+      delete p.situacao;
+      delete p.Situacao;
+      delete p.status;
+      delete p.bloqueado;
+      delete p.inativo;
+      delete p.estoque;
+      delete p.Estoque_Atual;
+      delete p.estoque_atual;
+      delete p.Qtd_Estoque;
+      delete p.qtd_estoque;
+      delete p.saldo;
+      delete p.Saldo_Estoque;
+      delete p.quantidade;
       // Remove campos de alias temporários para não enviar colunas inexistentes ao Supabase
       delete p.preco_venda;
       delete p.precoVenda;
@@ -3424,17 +3490,18 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
 
       let existingMatch: { id: string; barcode: string | null; internal_code: string | null; name: string; price?: number | null; original_price?: number | null } | undefined = undefined;
 
-      // Correspondência estritamente por EAN (barcode) ou ID existente
+      // Correspondência por barcode (EAN), internal_code ou ID existente
       if (p.barcode && dbExistingByBarcode.has(p.barcode)) {
         existingMatch = dbExistingByBarcode.get(p.barcode);
+      } else if (p.internal_code && dbExistingByInternalCode.has(p.internal_code)) {
+        existingMatch = dbExistingByInternalCode.get(p.internal_code);
       } else if (p.id && dbExistingById.has(p.id)) {
         existingMatch = dbExistingById.get(p.id);
       }
 
       if (existingMatch) {
-        // Produto já existe na farmácia: adota o ID real da farmácia para UPDATE limpo
+        // Produto JÁ EXISTE na farmácia: faz UPDATE normalmente (permitindo que stock vá para 0 caso tenha esgotado)
         p.id = existingMatch.id;
-        // Se tanto price quanto original_price vieram zerados no lote, preserva o preço existente válido do banco
         if (Number(p.price) <= 0) {
           const existingValidPrice = Number(existingMatch.price) > 0
             ? Number(existingMatch.price)
@@ -3455,7 +3522,12 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
         }
         productsToUpdate.push(p);
       } else {
-        // Novo produto genuíno: rejeita apenas se AMBOS (preco_venda e preco_original) estiverem zerados ou nulos
+        // Produto NÃO EXISTE no banco (seria um INSERT novo):
+        // Regra de proteção: NUNCA inserir produto novo se estiver com estoque <= 0 ou inativo
+        if (Number(p.stock) <= 0 || isItemInactive) {
+          ignoredZeroStockNewCount++;
+          continue;
+        }
         if (Number(p.price) <= 0 && Number(p.original_price) <= 0) {
           failedCount++;
           failedDetails.push({
@@ -3468,6 +3540,10 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
         }
         productsToInsert.push(p);
       }
+    }
+
+    if (ignoredZeroStockNewCount > 0) {
+      console.log(`[Bulk Products] Tenant ${tenantId}: ${ignoredZeroStockNewCount} produtos novos ignorados por estarem com estoque <= 0 ou inativos.`);
     }
 
     // 4. Execução do Salvamento com Tratamento Silencioso de Conflitos (23505)
@@ -9427,13 +9503,34 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
        const ean = cleanedEan || internalCode;
        if (!ean) continue;
        
-       // 6. Estoque (estoque, Quantidade_do_estoque, EstoqueAtual, SALDO_ESTOQUE, ESTOQUE, QTD_ESTOQUE, QUANTIDADE)
+       // 6. Estoque e Status Ativo/Inativo (estoque, Estoque_Atual, Qtd_Estoque, Saldo_Estoque, ativo, situacao, status, bloqueado, inativo)
        let stock = Math.floor(parseAgentNumber(getValFromProduct(p, [
-         'estoque', 'Quantidade_do_estoque', 'quantidade_do_estoque',
+         'estoque', 'Estoque_Atual', 'estoque_atual', 'Qtd_Estoque', 'qtd_estoque',
+         'Saldo_Estoque', 'saldo_estoque', 'Quantidade_do_estoque', 'quantidade_do_estoque',
          'EstoqueAtual', 'SALDO_ESTOQUE', 'ESTOQUE', 'QTD_ESTOQUE', 'QUANTIDADE',
-         'stock', 'estoque_atual', 'estoque_disponivel', 'saldo', 'saldo_estoque', 'qtd_estoque', 'quantidade', 'qtd', 'quantidade_estoque', 'quant'
+         'stock', 'estoque_disponivel', 'saldo', 'quantidade', 'qtd', 'quantidade_estoque', 'quant'
        ]), 0));
        if (isNaN(stock) || stock < 0) stock = 0;
+
+       const rawBlockedFlag = getValFromProduct(p, ['bloqueado', 'Bloqueado', 'BLOQUEADO', 'inativo', 'Inativo', 'INATIVO', 'excluido', 'Excluido']);
+       const rawActiveFlag = getValFromProduct(p, ['active', 'ativo', 'Ativo', 'ATIVO', 'situacao', 'Situacao', 'SITUACAO', 'status', 'Status', 'STATUS']);
+
+       const isExplicitlyBlocked =
+         rawBlockedFlag === true ||
+         rawBlockedFlag === 1 ||
+         ['1', 'S', 'SIM', 'TRUE', 'Y', 'YES', 'BLOQUEADO', 'INATIVO'].includes(String(rawBlockedFlag ?? '').trim().toUpperCase());
+
+       const isExplicitlyDeactivated =
+         rawActiveFlag === false ||
+         rawActiveFlag === 0 ||
+         ['0', 'N', 'NAO', 'NÃO', 'FALSE', 'I', 'INATIVO', 'B', 'BLOQUEADO', 'C', 'CANCELADO', 'D', 'DESATIVADO', 'E', 'EXCLUIDO'].includes(
+           String(rawActiveFlag ?? '').trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+         );
+
+       const isExplicitlyInactive = isExplicitlyBlocked || isExplicitlyDeactivated;
+       if (isExplicitlyInactive) {
+         stock = 0;
+       }
        
        // 3. Nome/Descrição, Fabricante, Apresentação, Unidade e Fração (extraídos antes do preço para aplicar regras de divisão de fração)
        const rawName = getValFromProduct(p, [
@@ -9754,6 +9851,7 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
           barcode: resolvedBarcode,
           internal_code: resolvedInternalCode,
           stock,
+          _isExplicitlyInactive: isExplicitlyInactive,
           price,
           is_featured: (Number(price) <= 0 || isNaN(Number(price))) ? false : undefined,
           original_price: originalPrice,
@@ -9797,11 +9895,12 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
     // ==========================================================================
     // DELTA SYNC EM MEMÓRIA:
     // Compara os produtos enviados pelo Agente com Map<tenant_id, Map<id, "${price}|${promotional_price}|${stock}|${name}">>
-    // e filtra para `changedProducts` APENAS produtos novos ou cujo hash mudou.
+    // e filtra para `changedProducts` APENAS produtos novos (com stock > 0) ou existentes cujo hash mudou.
     // ==========================================================================
     const tenantHashMap = await getOrLoadTenantDeltaCache(tenantId, ignoreErpPrices);
     const changedProducts: any[] = [];
     let unchangedCount = 0;
+    let skippedNewZeroStockInDelta = 0;
 
     for (let idx = 0; idx < allNormalizedProducts.length; idx++) {
       if (idx > 0 && idx % 500 === 0) {
@@ -9823,7 +9922,16 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
         (codeKey ? tenantHashMap.get(`COD:${codeKey}`) || tenantHashMap.get(codeKey) : undefined) ??
         (barcodeKey ? tenantHashMap.get(`EAN:${barcodeKey}`) || tenantHashMap.get(barcodeKey) : undefined);
 
-      if (cachedHash === undefined || cachedHash !== incomingHash) {
+      if (cachedHash === undefined) {
+        // Produto NÃO existe no cache do banco do tenant:
+        // Se estiver com stock <= 0 ou inativo, ignora imediatamente sem tocar no Supabase
+        if (Number(item.stock) <= 0 || item._isExplicitlyInactive) {
+          skippedNewZeroStockInDelta++;
+          continue;
+        }
+        changedProducts.push(item);
+      } else if (cachedHash !== incomingHash) {
+        // Produto JÁ existe no banco do tenant e sofreu alteração (ex: preço mudou ou estoque caiu para 0)
         changedProducts.push(item);
       } else {
         unchangedCount++;
@@ -9834,7 +9942,8 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
     // apenas mantém o heartbeat do agente atualizado e retorna 200 OK imediatamente.
     if (changedProducts.length === 0) {
       console.log(
-        `[Delta Sync] Tenant ${tenantId}: 0 alterações detectadas em ${productsBatch.length} produtos recebidos (${Date.now() - syncRequestStartTime}ms). Nenhum UPSERT executado no Supabase.`,
+        `[Delta Sync] Tenant ${tenantId}: 0 alterações aplicáveis em ${productsBatch.length} produtos recebidos ` +
+        `(${unchangedCount} inalterados, ${skippedNewZeroStockInDelta} novos com estoque <= 0/inativos ignorados em ${Date.now() - syncRequestStartTime}ms). Nenhum UPSERT executado no Supabase.`,
       );
       return res.status(200).json({
         success: true,
@@ -9842,6 +9951,7 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
         upserted: 0,
         processed: 0,
         unchanged: unchangedCount,
+        ignoredZeroStockNew: skippedNewZeroStockInDelta,
         deltaSync: true,
       });
     }
@@ -9849,7 +9959,8 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
     const upsertPayload = changedProducts;
 
     console.log(
-      `[Delta Sync] Tenant ${tenantId}: ${changedProducts.length} produto(s) novo(s)/alterado(s) de ${productsBatch.length} recebidos (${unchangedCount} inalterados ignorados).`,
+      `[Delta Sync] Tenant ${tenantId}: ${changedProducts.length} produto(s) novo(s)/alterado(s) de ${productsBatch.length} recebidos ` +
+      `(${unchangedCount} inalterados, ${skippedNewZeroStockInDelta} novos sem estoque ignorados).`,
     );
 
     // Garante que nenhum lote enviado ao Supabase tenha chaves duplicadas para a constraint usada no ON CONFLICT
@@ -9883,9 +9994,15 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
         if (p.internal_code) existingInternalMap.set(String(p.internal_code).trim(), p);
       }
 
-      // Regra de Ouro: Se produto novo vier sem foto mas tiver barcode, busca se já existe foto para aquele barcode em outra loja no Supabase
+      // Regra de Ouro: Se produto novo (e com estoque > 0) vier sem foto mas tiver barcode, busca se já existe foto para aquele barcode em outra loja no Supabase
       const newBarcodesNeedingImage = chunk
-        .filter(item => !existingMap.has(item.barcode) && !existingInternalMap.has(item.internal_code) && (!item.image || String(item.image).trim().length === 0))
+        .filter(item =>
+          !existingMap.has(item.barcode) &&
+          !existingInternalMap.has(item.internal_code) &&
+          Number(item.stock) > 0 &&
+          !item._isExplicitlyInactive &&
+          (!item.image || String(item.image).trim().length === 0)
+        )
         .map(item => item.barcode);
 
       const crossStoreImageMap = new Map<string, string>();
@@ -9918,10 +10035,13 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
 
       const newProductsPayload: any[] = [];
       const existingProductsPayload: any[] = [];
+      let chunkIgnoredNewZeroStock = 0;
 
-      chunk.forEach(item => {
+      chunk.forEach(rawItem => {
+         const { _isExplicitlyInactive, ...item } = rawItem;
          const existing = (item.internal_code && existingInternalMap.get(String(item.internal_code).trim())) || existingMap.get(String(item.barcode).trim());
          if (existing) {
+            // Produto JÁ EXISTE no banco do tenant: faz UPDATE normalmente (permitindo que stock vá para 0 caso tenha esgotado ou sido inativado)
             let finalPrice = item.price;
             let finalOriginalPrice = item.original_price;
             let finalPromotionalPrice = item.promotional_price;
@@ -9976,6 +10096,8 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
             const finalDepartment = (!existing.department || isGenericCategory) ? item.department : existing.department;
 
             const isZeroPrice = Number(finalPrice) <= 0 || isNaN(Number(finalPrice));
+            const updatedStock = _isExplicitlyInactive ? 0 : Math.max(0, Number(item.stock) || 0);
+
             existingProductsPayload.push({
                ...existing,
                name: item.name || existing.name,
@@ -9987,7 +10109,7 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
                presentation: item.presentation || existing.presentation,
                drug_type: (item.drug_type && item.drug_type !== 'Outros') ? item.drug_type : (existing.drug_type || item.drug_type),
                requires_prescription: item.requires_prescription || existing.requires_prescription || false,
-               stock: item.stock,
+               stock: updatedStock,
                price: finalPrice,
                is_featured: isZeroPrice ? false : existing.is_featured,
                original_price: finalOriginalPrice,
@@ -10006,19 +10128,37 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
                image: finalImage
             });
          } else {
+            // Proteção Definitiva no Banco:
+            // Se o produto NÃO EXISTIR no banco do tenant (seria um INSERT de produto novo)
+            // e estiver com stock <= 0 ou inativo, IGNORA a criação desse produto!
+            if (Number(item.stock) <= 0 || _isExplicitlyInactive) {
+              chunkIgnoredNewZeroStock++;
+              return;
+            }
+
+            const isNewZeroPrice = Number(item.price) <= 0 || isNaN(Number(item.price));
+            if (isNewZeroPrice && (Number(item.original_price) <= 0 || isNaN(Number(item.original_price)))) {
+              chunkIgnoredNewZeroStock++;
+              return;
+            }
+
             const isGenItem = isGenericMedicationProduct(item);
             const finalImage = (item.image && typeof item.image === 'string' && item.image.trim().length > 0 && !isPlaceholderImageUrl(item.image))
               ? item.image.trim()
               : (!isGenItem ? (crossStoreImageMap.get(item.barcode) || null) : null);
 
-            const isNewZeroPrice = Number(item.price) <= 0 || isNaN(Number(item.price));
             newProductsPayload.push({
               ...item,
+              stock: Math.max(0, Number(item.stock) || 0),
               is_featured: isNewZeroPrice ? false : Boolean(item.is_featured),
               image: finalImage
             });
          }
       });
+
+      if (chunkIgnoredNewZeroStock > 0) {
+        console.log(`[Integration] Tenant ${tenantId}: ${chunkIgnoredNewZeroStock} produto(s) novo(s) ignorado(s) no lote por estarem com estoque <= 0 ou inativos.`);
+      }
 
       if (newProductsPayload.length > 0) {
          const dedupedNewByCode = deduplicateByConflictField(newProductsPayload, 'internal_code');

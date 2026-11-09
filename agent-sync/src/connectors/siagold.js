@@ -1,183 +1,26 @@
 const sql = require('mssql');
+const {
+    parsePriceValue,
+    parseStockValue,
+    parseActiveStatus,
+    getFieldIgnoreCase,
+    normalizeAndSanitizeSiagoldRecord
+} = require('../shared/priceNormalizer');
 
 sql.on('error', err => {
     console.error('Erro global na conexão MSSQL (Siagold):', err.message);
 });
 
-/**
- * Converte valores numéricos ou strings formatadas (ex: "19,90" ou "1.234,56") em float seguro.
- */
-function parsePriceValue(val) {
-    if (val === null || val === undefined || val === '') return 0;
-    if (typeof val === 'number') {
-        return Number.isFinite(val) ? val : 0;
-    }
-    let str = String(val).trim();
-    if (!str) return 0;
-    str = str.replace(/[^\d.,-]/g, '');
-    if (!str) return 0;
-
-    if (str.includes(',') && str.includes('.')) {
-        if (str.lastIndexOf(',') > str.lastIndexOf('.')) {
-            str = str.replace(/\./g, '').replace(',', '.');
-        } else {
-            str = str.replace(/,/g, '');
-        }
-    } else if (str.includes(',')) {
-        str = str.replace(',', '.');
-    }
-
-    const parsed = parseFloat(str);
-    return Number.isFinite(parsed) ? parsed : 0;
-}
-
-/**
- * Retorna o primeiro valor de preço positivo (> 0) dentre uma lista de possíveis nomes de colunas.
- */
-function pickFirstPositivePrice(record, keys) {
-    if (!record || typeof record !== 'object') return 0;
-    for (const key of keys) {
-        if (Object.prototype.hasOwnProperty.call(record, key)) {
-            const val = parsePriceValue(record[key]);
-            if (val > 0) return val;
-        }
-    }
-    // Busca case-insensitive caso o driver SQL retorne capitalização diferente
-    const lowerMap = {};
-    for (const k of Object.keys(record)) {
-        lowerMap[k.toLowerCase()] = record[k];
-    }
-    for (const key of keys) {
-        const lowerKey = key.toLowerCase();
-        if (Object.prototype.hasOwnProperty.call(lowerMap, lowerKey)) {
-            const val = parsePriceValue(lowerMap[lowerKey]);
-            if (val > 0) return val;
-        }
-    }
-    return 0;
-}
-
-/**
- * Normaliza e higieniza os preços de um registro vindo da view vw_FarmaFlow_Itens / VW_INTEGRACAO_FARMAFLOW:
- * 1. Se preco_venda / Preco_Bruto / preco vier <= 0 ou null, assume preco_original / PMC / preco_tabela.
- * 2. Se houver Preco_Liquido / preco_promocional válido (> 0 e < preço base), mapeia como promocional,
- *    evitando preços invertidos ou irreais.
- * 3. Retorna null se TODOS os campos de preço forem <= 0 (para filtrar itens sem preço algum).
- */
-function normalizeAndSanitizeSiagoldRecord(raw) {
-    if (!raw || typeof raw !== 'object') return null;
-
-    const rawSellingPrice = pickFirstPositivePrice(raw, [
-        'preco_venda',
-        'Preco_Venda',
-        'PRECO_VENDA',
-        'Preco_Bruto',
-        'preco_bruto',
-        'PRECO_BRUTO',
-        'PrecoVenda',
-        'preco',
-        'Preco',
-        'PRECO',
-        'price',
-        'valor_venda',
-        'vl_venda',
-        'Pr_Venda',
-        'pr_venda'
+function resolveRecordIdentityKey(record) {
+    const code = getFieldIgnoreCase(record, [
+        'codigo', 'cod_produto', 'CodigoProduto', 'CODIGO', 'ID_PRODUTO', 'id', 'internal_code', 'SKU', 'sku'
     ]);
-
-    const rawOriginalPrice = pickFirstPositivePrice(raw, [
-        'preco_original',
-        'Preco_Original',
-        'PRECO_ORIGINAL',
-        'PMC',
-        'pmc',
-        'preco_pmc',
-        'Preco_PMC',
-        'PRECO_PMC',
-        'preco_tabela',
-        'Preco_Tabela',
-        'PRECO_TABELA',
-        'original_price',
-        'Preco_Maximo',
-        'preco_maximo',
-        'Pr_Fabrica',
-        'pr_fabrica'
+    const ean = getFieldIgnoreCase(record, [
+        'codigo_barras', 'EAN', 'ean', 'gtin', 'CodigoBarras', 'COD_BARRAS', 'BARRAS', 'barcode'
     ]);
-
-    const rawLiquidOrPromoPrice = pickFirstPositivePrice(raw, [
-        'Preco_Liquido',
-        'preco_liquido',
-        'PRECO_LIQUIDO',
-        'preco_promocional',
-        'Preco_Promocional',
-        'PRECO_PROMOCIONAL',
-        'PrecoPromocao',
-        'preco_oferta',
-        'promotional_price',
-        'vl_promocao',
-        'Pr_Liquido',
-        'pr_liquido'
-    ]);
-
-    // Regra 3: Ignorar/filtrar apenas registros onde TODOS os campos de preço sejam <= 0
-    if (rawSellingPrice <= 0 && rawOriginalPrice <= 0 && rawLiquidOrPromoPrice <= 0) {
-        return null;
-    }
-
-    // Regra 1: Se preco_venda / Preco_Bruto vier <= 0 ou null, preenche automaticamente com Preço Original / PMC
-    // (ou Preco_Liquido caso seja o único preço positivo disponível)
-    let baseSellingPrice = rawSellingPrice;
-    let usedOriginalFallback = false;
-
-    if (baseSellingPrice <= 0) {
-        if (rawOriginalPrice > 0) {
-            baseSellingPrice = rawOriginalPrice;
-            usedOriginalFallback = true;
-        } else if (rawLiquidOrPromoPrice > 0) {
-            baseSellingPrice = rawLiquidOrPromoPrice;
-        }
-    }
-
-    // Regra 2: Tratamento de Preco_Liquido / promocional evitando preços invertidos
-    let finalOriginalPrice = rawOriginalPrice > 0 ? rawOriginalPrice : baseSellingPrice;
-    let finalPromoPrice = null;
-
-    if (rawSellingPrice > 0 && rawLiquidOrPromoPrice > rawSellingPrice) {
-        // Caso invertido no ERP (Preco_Liquido maior que Preco_Bruto):
-        // O maior é o preço cheio/bruto e o menor é o preço promocional/líquido
-        baseSellingPrice = rawLiquidOrPromoPrice;
-        finalPromoPrice = rawSellingPrice;
-        if (finalOriginalPrice < baseSellingPrice) {
-            finalOriginalPrice = baseSellingPrice;
-        }
-    } else if (rawLiquidOrPromoPrice > 0 && rawLiquidOrPromoPrice < baseSellingPrice) {
-        // Preço líquido/promocional válido (> 0 e menor que o preço de venda base)
-        finalPromoPrice = rawLiquidOrPromoPrice;
-    }
-
-    if (finalOriginalPrice < baseSellingPrice) {
-        finalOriginalPrice = baseSellingPrice;
-    }
-
-    const normalizedPrice = Number(baseSellingPrice.toFixed(2));
-    const normalizedOriginal = Number(finalOriginalPrice.toFixed(2));
-    const normalizedPromo = finalPromoPrice && finalPromoPrice > 0 && finalPromoPrice < normalizedPrice
-        ? Number(finalPromoPrice.toFixed(2))
-        : null;
-
-    return {
-        ...raw,
-        price: normalizedPrice,
-        preco_venda: normalizedPrice,
-        Preco_Bruto: normalizedPrice,
-        original_price: normalizedOriginal,
-        preco_original: normalizedOriginal,
-        PMC: normalizedOriginal,
-        promotional_price: normalizedPromo,
-        preco_promocional: normalizedPromo,
-        Preco_Liquido: normalizedPromo !== null ? normalizedPromo : normalizedPrice,
-        _priceFallbackApplied: usedOriginalFallback
-    };
+    const cleanCode = code !== undefined && code !== null ? String(code).trim() : '';
+    const cleanEan = ean !== undefined && ean !== null ? String(ean).trim() : '';
+    return cleanCode || cleanEan || null;
 }
 
 class SiagoldConnector {
@@ -198,18 +41,22 @@ class SiagoldConnector {
         };
         this.viewName = dbConfig.viewName || 'vw_FarmaFlow_Itens';
         this.branchCode = dbConfig.branchCode || null;
+        // Guarda os produtos que já possuem estoque na loja para permitir baixa (estoque -> 0)
+        // mesmo quando a View do SQL Server não possui coluna data_ultima_alteracao
+        this.knownActiveProductKeys = new Set();
     }
 
     async queryViewRecords(pool, viewName, lastSyncDate) {
-        const hasValidLastSync =
+        const hasValidLastSync = Boolean(
             lastSyncDate &&
             lastSyncDate !== '1970-01-01T00:00:00.000Z' &&
-            !Number.isNaN(new Date(lastSyncDate).getTime());
+            !Number.isNaN(new Date(lastSyncDate).getTime())
+        );
 
-        // Tentativa 1: Com filtro incremental de data_ultima_alteracao (se a coluna existir na View)
+        // Tentativa 1: Sincronização Incremental via data_ultima_alteracao (se a coluna existir na View)
         if (hasValidLastSync) {
             try {
-                let query = `SELECT * FROM ${viewName} WHERE (data_ultima_alteracao IS NULL OR data_ultima_alteracao > @lastSync)`;
+                let query = `SELECT * FROM ${viewName} WHERE data_ultima_alteracao > @lastSync`;
                 const request = pool.request().input('lastSync', sql.DateTime, new Date(lastSyncDate));
 
                 if (this.branchCode) {
@@ -219,9 +66,12 @@ class SiagoldConnector {
 
                 query += ` ORDER BY data_ultima_alteracao ASC`;
                 const result = await request.query(query);
-                return result.recordset || [];
+                return {
+                    records: result.recordset || [],
+                    isIncrementalQuery: true
+                };
             } catch (incrementalErr) {
-                // Se a view (ex: vw_FarmaFlow_Itens) não tiver data_ultima_alteracao ou codigo_filial, faz fallback para leitura completa da view
+                // Se a view (ex: vw_FarmaFlow_Itens) não tiver data_ultima_alteracao ou codigo_filial, faz fallback para leitura completa
             }
         }
 
@@ -230,7 +80,10 @@ class SiagoldConnector {
             try {
                 const request = pool.request().input('branchCode', sql.VarChar, String(this.branchCode));
                 const result = await request.query(`SELECT * FROM ${viewName} WHERE codigo_filial = @branchCode`);
-                return result.recordset || [];
+                return {
+                    records: result.recordset || [],
+                    isIncrementalQuery: false
+                };
             } catch (branchErr) {
                 // Fallback para SELECT simples caso codigo_filial não exista na view
             }
@@ -238,13 +91,22 @@ class SiagoldConnector {
 
         // Tentativa 3: Leitura direta da View (ex: SELECT * FROM vw_FarmaFlow_Itens)
         const result = await pool.request().query(`SELECT * FROM ${viewName}`);
-        return result.recordset || [];
+        return {
+            records: result.recordset || [],
+            isIncrementalQuery: false
+        };
     }
 
     async getChangedRecords(lastSyncDate) {
         let pool;
         try {
             pool = await sql.connect(this.dbConfig);
+
+            const hasValidLastSync = Boolean(
+                lastSyncDate &&
+                lastSyncDate !== '1970-01-01T00:00:00.000Z' &&
+                !Number.isNaN(new Date(lastSyncDate).getTime())
+            );
 
             const candidateViews = Array.from(new Set([
                 this.viewName,
@@ -253,12 +115,15 @@ class SiagoldConnector {
             ].filter(Boolean)));
 
             let rawRecords = [];
+            let isIncrementalQuery = false;
             let lastQueryError = null;
             let usedView = this.viewName;
 
             for (const candidateView of candidateViews) {
                 try {
-                    rawRecords = await this.queryViewRecords(pool, candidateView, lastSyncDate);
+                    const queryResult = await this.queryViewRecords(pool, candidateView, lastSyncDate);
+                    rawRecords = queryResult.records;
+                    isIncrementalQuery = queryResult.isIncrementalQuery;
                     usedView = candidateView;
                     lastQueryError = null;
                     break;
@@ -273,6 +138,8 @@ class SiagoldConnector {
 
             let fallbackCount = 0;
             let skippedZeroPriceCount = 0;
+            let skippedZeroStockOrInactiveCount = 0;
+            let zeroStockUpdatesAllowed = 0;
             const sanitizedRecords = [];
 
             for (const row of rawRecords) {
@@ -281,6 +148,33 @@ class SiagoldConnector {
                     skippedZeroPriceCount++;
                     continue;
                 }
+
+                const identityKey = resolveRecordIdentityKey(normalized);
+                const hasPositiveStock = normalized.stock > 0 && normalized.active !== false;
+
+                if (!hasPositiveStock) {
+                    // Regra de Filtro Inteligente:
+                    // 1. Na Carga Completa inicial (!hasValidLastSync): envia APENAS produtos ativos com estoque > 0.
+                    // 2. Na Sincronização Incremental (hasValidLastSync):
+                    //    - Se a query SQL filtrou por data_ultima_alteracao > @lastSync (isIncrementalQuery), permite enviar estoque 0 para dar baixa na loja.
+                    //    - Se a View não possui data_ultima_alteracao, permite enviar estoque 0 se o produto estava ativo em memória (knownActiveProductKeys).
+                    const canSendStockOut =
+                        hasValidLastSync &&
+                        (isIncrementalQuery || (identityKey && this.knownActiveProductKeys.has(identityKey)));
+
+                    if (!canSendStockOut) {
+                        skippedZeroStockOrInactiveCount++;
+                        continue;
+                    }
+
+                    zeroStockUpdatesAllowed++;
+                    if (identityKey) {
+                        this.knownActiveProductKeys.delete(identityKey);
+                    }
+                } else if (identityKey) {
+                    this.knownActiveProductKeys.add(identityKey);
+                }
+
                 if (normalized._priceFallbackApplied) {
                     fallbackCount++;
                 }
@@ -289,10 +183,12 @@ class SiagoldConnector {
             }
 
             console.log(
-                `[Siagold] View "${usedView}": ${rawRecords.length} lidos | ` +
-                `${sanitizedRecords.length} válidos | ` +
-                `${fallbackCount} com preço corrigido via Preço Original/PMC | ` +
-                `${skippedZeroPriceCount} ignorados (todos os preços <= 0).`
+                `[Siagold] ${rawRecords.length} lidos | ` +
+                `${sanitizedRecords.length} válidos (estoque > 0${zeroStockUpdatesAllowed > 0 ? ` + ${zeroStockUpdatesAllowed} baixas p/ 0` : ''}) | ` +
+                `${skippedZeroStockOrInactiveCount} ignorados por estoque zerado/inativo` +
+                (fallbackCount > 0 ? ` | ${fallbackCount} corrigidos via PMC` : '') +
+                (skippedZeroPriceCount > 0 ? ` | ${skippedZeroPriceCount} sem preço` : '') +
+                ` [View: ${usedView}]`
             );
 
             return sanitizedRecords;
@@ -310,5 +206,7 @@ class SiagoldConnector {
 
 SiagoldConnector.normalizeAndSanitizeSiagoldRecord = normalizeAndSanitizeSiagoldRecord;
 SiagoldConnector.parsePriceValue = parsePriceValue;
+SiagoldConnector.parseStockValue = parseStockValue;
+SiagoldConnector.parseActiveStatus = parseActiveStatus;
 
 module.exports = SiagoldConnector;

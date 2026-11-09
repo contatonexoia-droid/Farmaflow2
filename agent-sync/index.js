@@ -10,6 +10,13 @@ const path = require('path');
 const os = require('os');
 const https = require('https');
 const http = require('http');
+const {
+    parsePriceValue,
+    parseStockValue,
+    parseActiveStatus,
+    getFieldIgnoreCase,
+    normalizeAndSanitizeSiagoldRecord
+} = require('./src/shared/priceNormalizer');
 
 const BATCH_SIZE = 200;
 const BATCH_DELAY_MS = 500;
@@ -83,14 +90,12 @@ function sanitizeUrl(raw) {
     return url;
 }
 
-// Configurações via variáveis de ambiente
 const API_URL = sanitizeUrl(process.env.API_URL || process.env.API_BASE_URL);
 const API_KEY = process.env.API_KEY || '02ebf5a7-ccec-47e1-99ae-4e00729b4df1';
 const VIEW_NAME = process.env.DB_VIEW || 'vw_FarmaFlow_Itens';
-const SYNC_INTERVAL_MS = parseInt(process.env.SYNC_INTERVAL_MS, 10) || 60000; // 1 minuto
-const RETRY_INTERVAL_MS = parseInt(process.env.RETRY_INTERVAL_MS, 10) || 300000; // 5 minutos
+const SYNC_INTERVAL_MS = parseInt(process.env.SYNC_INTERVAL_MS, 10) || 60000;
+const RETRY_INTERVAL_MS = parseInt(process.env.RETRY_INTERVAL_MS, 10) || 300000;
 
-// Configuração do Banco de Dados (SQL Server - Siagold)
 const dbConfig = {
     user: process.env.DB_USER || 'sa',
     password: process.env.DB_PASSWORD,
@@ -107,6 +112,7 @@ const dbConfig = {
 };
 
 const STATE_FILE = path.join(process.cwd(), 'sync_state.json');
+const knownActiveProductKeys = new Set();
 
 function getLastSyncDate() {
     try {
@@ -129,169 +135,16 @@ function saveLastSyncDate(dateStr) {
     }
 }
 
-/**
- * Converte valores numéricos ou strings formatadas (ex: "19,90" ou "1.234,56") em float seguro.
- */
-function parsePriceValue(val) {
-    if (val === null || val === undefined || val === '') return 0;
-    if (typeof val === 'number') {
-        return Number.isFinite(val) ? val : 0;
-    }
-    let str = String(val).trim();
-    if (!str) return 0;
-    str = str.replace(/[^\d.,-]/g, '');
-    if (!str) return 0;
-
-    if (str.includes(',') && str.includes('.')) {
-        if (str.lastIndexOf(',') > str.lastIndexOf('.')) {
-            str = str.replace(/\./g, '').replace(',', '.');
-        } else {
-            str = str.replace(/,/g, '');
-        }
-    } else if (str.includes(',')) {
-        str = str.replace(',', '.');
-    }
-
-    const parsed = parseFloat(str);
-    return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function pickFirstPositivePrice(record, keys) {
-    if (!record || typeof record !== 'object') return 0;
-    for (const key of keys) {
-        if (Object.prototype.hasOwnProperty.call(record, key)) {
-            const val = parsePriceValue(record[key]);
-            if (val > 0) return val;
-        }
-    }
-    const lowerMap = {};
-    for (const k of Object.keys(record)) {
-        lowerMap[k.toLowerCase()] = record[k];
-    }
-    for (const key of keys) {
-        const lowerKey = key.toLowerCase();
-        if (Object.prototype.hasOwnProperty.call(lowerMap, lowerKey)) {
-            const val = parsePriceValue(lowerMap[lowerKey]);
-            if (val > 0) return val;
-        }
-    }
-    return 0;
-}
-
-/**
- * Normaliza e higieniza os preços de um registro lido da vw_FarmaFlow_Itens / VW_INTEGRACAO_FARMAFLOW:
- * 1. Se preco_venda / Preco_Bruto / preco vier <= 0 ou null, assume preco_original / PMC / preco_tabela.
- * 2. Se houver Preco_Liquido / preco_promocional válido (> 0 e < preço base), mapeia adequadamente.
- * 3. Retorna null se TODOS os campos de preço forem <= 0.
- */
-function normalizeAndSanitizeSiagoldRecord(raw) {
-    if (!raw || typeof raw !== 'object') return null;
-
-    const rawSellingPrice = pickFirstPositivePrice(raw, [
-        'preco_venda',
-        'Preco_Venda',
-        'PRECO_VENDA',
-        'Preco_Bruto',
-        'preco_bruto',
-        'PRECO_BRUTO',
-        'PrecoVenda',
-        'preco',
-        'Preco',
-        'PRECO',
-        'price',
-        'valor_venda',
-        'vl_venda',
-        'Pr_Venda',
-        'pr_venda'
+function resolveRecordIdentityKey(record) {
+    const code = getFieldIgnoreCase(record, [
+        'codigo', 'cod_produto', 'CodigoProduto', 'CODIGO', 'ID_PRODUTO', 'id', 'internal_code', 'SKU', 'sku'
     ]);
-
-    const rawOriginalPrice = pickFirstPositivePrice(raw, [
-        'preco_original',
-        'Preco_Original',
-        'PRECO_ORIGINAL',
-        'PMC',
-        'pmc',
-        'preco_pmc',
-        'Preco_PMC',
-        'PRECO_PMC',
-        'preco_tabela',
-        'Preco_Tabela',
-        'PRECO_TABELA',
-        'original_price',
-        'Preco_Maximo',
-        'preco_maximo',
-        'Pr_Fabrica',
-        'pr_fabrica'
+    const ean = getFieldIgnoreCase(record, [
+        'codigo_barras', 'EAN', 'ean', 'gtin', 'CodigoBarras', 'COD_BARRAS', 'BARRAS', 'barcode'
     ]);
-
-    const rawLiquidOrPromoPrice = pickFirstPositivePrice(raw, [
-        'Preco_Liquido',
-        'preco_liquido',
-        'PRECO_LIQUIDO',
-        'preco_promocional',
-        'Preco_Promocional',
-        'PRECO_PROMOCIONAL',
-        'PrecoPromocao',
-        'preco_oferta',
-        'promotional_price',
-        'vl_promocao',
-        'Pr_Liquido',
-        'pr_liquido'
-    ]);
-
-    // Ignorar/filtrar apenas registros onde TODOS os campos de preço sejam <= 0
-    if (rawSellingPrice <= 0 && rawOriginalPrice <= 0 && rawLiquidOrPromoPrice <= 0) {
-        return null;
-    }
-
-    let baseSellingPrice = rawSellingPrice;
-    let usedOriginalFallback = false;
-
-    if (baseSellingPrice <= 0) {
-        if (rawOriginalPrice > 0) {
-            baseSellingPrice = rawOriginalPrice;
-            usedOriginalFallback = true;
-        } else if (rawLiquidOrPromoPrice > 0) {
-            baseSellingPrice = rawLiquidOrPromoPrice;
-        }
-    }
-
-    let finalOriginalPrice = rawOriginalPrice > 0 ? rawOriginalPrice : baseSellingPrice;
-    let finalPromoPrice = null;
-
-    if (rawSellingPrice > 0 && rawLiquidOrPromoPrice > rawSellingPrice) {
-        baseSellingPrice = rawLiquidOrPromoPrice;
-        finalPromoPrice = rawSellingPrice;
-        if (finalOriginalPrice < baseSellingPrice) {
-            finalOriginalPrice = baseSellingPrice;
-        }
-    } else if (rawLiquidOrPromoPrice > 0 && rawLiquidOrPromoPrice < baseSellingPrice) {
-        finalPromoPrice = rawLiquidOrPromoPrice;
-    }
-
-    if (finalOriginalPrice < baseSellingPrice) {
-        finalOriginalPrice = baseSellingPrice;
-    }
-
-    const normalizedPrice = Number(baseSellingPrice.toFixed(2));
-    const normalizedOriginal = Number(finalOriginalPrice.toFixed(2));
-    const normalizedPromo = finalPromoPrice && finalPromoPrice > 0 && finalPromoPrice < normalizedPrice
-        ? Number(finalPromoPrice.toFixed(2))
-        : null;
-
-    return {
-        ...raw,
-        price: normalizedPrice,
-        preco_venda: normalizedPrice,
-        Preco_Bruto: normalizedPrice,
-        original_price: normalizedOriginal,
-        preco_original: normalizedOriginal,
-        PMC: normalizedOriginal,
-        promotional_price: normalizedPromo,
-        preco_promocional: normalizedPromo,
-        Preco_Liquido: normalizedPromo !== null ? normalizedPromo : normalizedPrice,
-        _priceFallbackApplied: usedOriginalFallback
-    };
+    const cleanCode = code !== undefined && code !== null ? String(code).trim() : '';
+    const cleanEan = ean !== undefined && ean !== null ? String(ean).trim() : '';
+    return cleanCode || cleanEan || null;
 }
 
 async function fetchRecordsFromView(pool, lastSync) {
@@ -301,26 +154,40 @@ async function fetchRecordsFromView(pool, lastSync) {
         'VW_INTEGRACAO_FARMAFLOW'
     ]));
 
+    const hasValidLastSync = Boolean(
+        lastSync &&
+        lastSync !== '1970-01-01T00:00:00.000Z' &&
+        !Number.isNaN(new Date(lastSync).getTime())
+    );
+
     let lastErr = null;
     for (const view of candidateViews) {
         try {
-            if (lastSync && lastSync !== '1970-01-01T00:00:00.000Z') {
+            if (hasValidLastSync) {
                 try {
                     const incResult = await pool.request()
                         .input('lastSync', sql.DateTime, new Date(lastSync))
                         .query(`
                             SELECT * FROM ${view}
-                            WHERE (data_ultima_alteracao IS NULL OR data_ultima_alteracao > @lastSync)
+                            WHERE data_ultima_alteracao > @lastSync
                             ORDER BY data_ultima_alteracao ASC
                         `);
-                    return { records: incResult.recordset || [], viewName: view };
+                    return {
+                        records: incResult.recordset || [],
+                        viewName: view,
+                        isIncrementalQuery: true
+                    };
                 } catch (incErr) {
                     // Fallback se a view não possuir a coluna data_ultima_alteracao
                 }
             }
 
             const fullResult = await pool.request().query(`SELECT * FROM ${view}`);
-            return { records: fullResult.recordset || [], viewName: view };
+            return {
+                records: fullResult.recordset || [],
+                viewName: view,
+                isIncrementalQuery: false
+            };
         } catch (err) {
             lastErr = err;
         }
@@ -412,18 +279,20 @@ function resolveMaxSyncDate(records) {
     return maxTimestamp > 0 ? new Date(maxTimestamp).toISOString() : new Date().toISOString();
 }
 
-// Loop Principal de Sincronização
 async function syncData() {
     let pool;
     try {
         console.log(`\n[${new Date().toISOString()}] Iniciando verificação de sincronização...`);
         const lastSync = getLastSyncDate();
+        const hasValidLastSync = Boolean(
+            lastSync &&
+            lastSync !== '1970-01-01T00:00:00.000Z' &&
+            !Number.isNaN(new Date(lastSync).getTime())
+        );
 
-        // 1. Conectar ao banco de dados local
         pool = await sql.connect(dbConfig);
 
-        // 2. Buscar registros na View de integração (vw_FarmaFlow_Itens / VW_INTEGRACAO_FARMAFLOW)
-        const { records: rawRecords, viewName } = await fetchRecordsFromView(pool, lastSync);
+        const { records: rawRecords, viewName, isIncrementalQuery } = await fetchRecordsFromView(pool, lastSync);
 
         if (!rawRecords || rawRecords.length === 0) {
             console.log('Tudo atualizado! Nenhum registro novo para sincronizar.');
@@ -431,10 +300,11 @@ async function syncData() {
             return;
         }
 
-        // 3. Higienizar e normalizar preços antes de montar os lotes HTTP
         const validRecords = [];
         let fallbackCount = 0;
         let ignoredZeroPriceCount = 0;
+        let ignoredZeroStockOrInactiveCount = 0;
+        let zeroStockUpdatesAllowed = 0;
 
         for (const row of rawRecords) {
             const normalized = normalizeAndSanitizeSiagoldRecord(row);
@@ -442,6 +312,28 @@ async function syncData() {
                 ignoredZeroPriceCount++;
                 continue;
             }
+
+            const identityKey = resolveRecordIdentityKey(normalized);
+            const hasPositiveStock = normalized.stock > 0 && normalized.active !== false;
+
+            if (!hasPositiveStock) {
+                const canSendStockOut =
+                    hasValidLastSync &&
+                    (isIncrementalQuery || (identityKey && knownActiveProductKeys.has(identityKey)));
+
+                if (!canSendStockOut) {
+                    ignoredZeroStockOrInactiveCount++;
+                    continue;
+                }
+
+                zeroStockUpdatesAllowed++;
+                if (identityKey) {
+                    knownActiveProductKeys.delete(identityKey);
+                }
+            } else if (identityKey) {
+                knownActiveProductKeys.add(identityKey);
+            }
+
             if (normalized._priceFallbackApplied) {
                 fallbackCount++;
             }
@@ -450,19 +342,20 @@ async function syncData() {
         }
 
         console.log(
-            `[Siagold] View "${viewName}": ${rawRecords.length} registros lidos | ` +
-            `${validRecords.length} válidos para envio | ` +
-            `${fallbackCount} corrigidos com Preço Original/PMC | ` +
-            `${ignoredZeroPriceCount} ignorados (todos os preços <= 0).`
+            `[Siagold] ${rawRecords.length} lidos | ` +
+            `${validRecords.length} válidos (estoque > 0${zeroStockUpdatesAllowed > 0 ? ` + ${zeroStockUpdatesAllowed} baixas p/ 0` : ''}) | ` +
+            `${ignoredZeroStockOrInactiveCount} ignorados por estoque zerado/inativo` +
+            (fallbackCount > 0 ? ` | ${fallbackCount} corrigidos via PMC` : '') +
+            (ignoredZeroPriceCount > 0 ? ` | ${ignoredZeroPriceCount} sem preço` : '') +
+            ` [View: ${viewName}]`
         );
 
         if (validRecords.length === 0) {
-            console.log('Nenhum produto com preço válido (> 0) para sincronizar.');
+            console.log('Nenhum produto elegível para sincronizar neste ciclo.');
             setTimeout(syncData, SYNC_INTERVAL_MS);
             return;
         }
 
-        // 4. Dividir em lotes estritos de no máximo 200 produtos (BATCH_SIZE = 200)
         const batches = chunkArray(validRecords, BATCH_SIZE);
         const totalBatches = batches.length;
 
@@ -511,7 +404,6 @@ async function syncData() {
     }
 }
 
-// Inicialização
 console.log('===================================================');
 console.log('🚀 Agente de Sincronização FarmaFlow (Siagold) Iniciado');
 console.log(`📦 Envio Fracionado: lotes de até ${BATCH_SIZE} registros (timeout ${REQUEST_TIMEOUT_MS / 1000}s)`);
