@@ -4,6 +4,8 @@ const {
     parseStockValue,
     parseActiveStatus,
     getFieldIgnoreCase,
+    extractBarcode,
+    extractInternalCode,
     normalizeAndSanitizeSiagoldRecord
 } = require('../shared/priceNormalizer');
 
@@ -12,15 +14,16 @@ sql.on('error', err => {
 });
 
 function resolveRecordIdentityKey(record) {
-    const code = getFieldIgnoreCase(record, [
-        'codigo', 'cod_produto', 'CodigoProduto', 'CODIGO', 'ID_PRODUTO', 'id', 'internal_code', 'SKU', 'sku'
-    ]);
-    const ean = getFieldIgnoreCase(record, [
-        'codigo_barras', 'EAN', 'ean', 'gtin', 'CodigoBarras', 'COD_BARRAS', 'BARRAS', 'barcode'
-    ]);
-    const cleanCode = code !== undefined && code !== null ? String(code).trim() : '';
-    const cleanEan = ean !== undefined && ean !== null ? String(ean).trim() : '';
-    return cleanCode || cleanEan || null;
+    if (!record || typeof record !== 'object') return null;
+    if (record.internal_code && String(record.internal_code).trim()) {
+        return String(record.internal_code).trim();
+    }
+    if (record.barcode && String(record.barcode).trim()) {
+        return String(record.barcode).trim();
+    }
+    const bc = extractBarcode(record);
+    const code = extractInternalCode(record, bc);
+    return code || bc || null;
 }
 
 class SiagoldConnector {
@@ -41,8 +44,6 @@ class SiagoldConnector {
         };
         this.viewName = dbConfig.viewName || 'vw_FarmaFlow_Itens';
         this.branchCode = dbConfig.branchCode || null;
-        // Guarda os produtos que já possuem estoque na loja para permitir baixa (estoque -> 0)
-        // mesmo quando a View do SQL Server não possui coluna data_ultima_alteracao
         this.knownActiveProductKeys = new Set();
     }
 
@@ -71,7 +72,7 @@ class SiagoldConnector {
                     isIncrementalQuery: true
                 };
             } catch (incrementalErr) {
-                // Se a view (ex: vw_FarmaFlow_Itens) não tiver data_ultima_alteracao ou codigo_filial, faz fallback para leitura completa
+                // Fallback para leitura completa caso a view não possua data_ultima_alteracao
             }
         }
 
@@ -84,9 +85,7 @@ class SiagoldConnector {
                     records: result.recordset || [],
                     isIncrementalQuery: false
                 };
-            } catch (branchErr) {
-                // Fallback para SELECT simples caso codigo_filial não exista na view
-            }
+            } catch (branchErr) {}
         }
 
         // Tentativa 3: Leitura direta da View (ex: SELECT * FROM vw_FarmaFlow_Itens)
@@ -136,6 +135,12 @@ class SiagoldConnector {
                 throw lastQueryError;
             }
 
+            // Log de Diagnóstico das Colunas e do primeiro registro bruto da View
+            if (rawRecords.length > 0 && rawRecords[0]) {
+                console.log(`[Siagold] Colunas detectadas na View: ${Object.keys(rawRecords[0]).join(', ')}`);
+                console.log(`[Siagold] Valores brutos do 1º item:`, JSON.stringify(rawRecords[0]));
+            }
+
             let fallbackCount = 0;
             let skippedZeroPriceCount = 0;
             let skippedZeroStockOrInactiveCount = 0;
@@ -153,11 +158,6 @@ class SiagoldConnector {
                 const hasPositiveStock = normalized.stock > 0 && normalized.active !== false;
 
                 if (!hasPositiveStock) {
-                    // Regra de Filtro Inteligente:
-                    // 1. Na Carga Completa inicial (!hasValidLastSync): envia APENAS produtos ativos com estoque > 0.
-                    // 2. Na Sincronização Incremental (hasValidLastSync):
-                    //    - Se a query SQL filtrou por data_ultima_alteracao > @lastSync (isIncrementalQuery), permite enviar estoque 0 para dar baixa na loja.
-                    //    - Se a View não possui data_ultima_alteracao, permite enviar estoque 0 se o produto estava ativo em memória (knownActiveProductKeys).
                     const canSendStockOut =
                         hasValidLastSync &&
                         (isIncrementalQuery || (identityKey && this.knownActiveProductKeys.has(identityKey)));
@@ -208,5 +208,7 @@ SiagoldConnector.normalizeAndSanitizeSiagoldRecord = normalizeAndSanitizeSiagold
 SiagoldConnector.parsePriceValue = parsePriceValue;
 SiagoldConnector.parseStockValue = parseStockValue;
 SiagoldConnector.parseActiveStatus = parseActiveStatus;
+SiagoldConnector.extractBarcode = extractBarcode;
+SiagoldConnector.extractInternalCode = extractInternalCode;
 
 module.exports = SiagoldConnector;

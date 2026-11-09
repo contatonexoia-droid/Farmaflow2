@@ -3228,19 +3228,47 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
       const rawPrice = rawSaleSource !== undefined && rawSaleSource !== null && rawSaleSource !== '' ? Number(rawSaleSource) : 0;
       let validPrice = !isNaN(rawPrice) && rawPrice > 0 ? rawPrice : 0;
 
-      const rawOrigSource =
+      let rawOrigSource =
         p.original_price ??
         p.originalPrice ??
         p.preco_original ??
         p.precoOriginal ??
         p.PRECO_ORIGINAL ??
-        p.pmc ??
-        p.PMC ??
+        p.Vl_PMC ??
+        p.vl_pmc ??
+        p.VL_PMC ??
+        p['Vl. PMC'] ??
+        p.VlPMC ??
+        p.Valor_PMC ??
+        p.valor_pmc ??
+        p.Vlr_PMC ??
+        p.vlr_pmc ??
+        p.Preco_PMC ??
         p.preco_pmc ??
         p.PRECO_PMC ??
+        p.pmc ??
+        p.PMC ??
+        p.Preco_Maximo ??
+        p.preco_maximo ??
+        p.Vl_Tabela ??
         p.preco_tabela ??
         p.valor_original;
-      const rawOrigPrice = rawOrigSource !== undefined && rawOrigSource !== null && rawOrigSource !== '' ? Number(rawOrigSource) : 0;
+
+      if (rawOrigSource === undefined || rawOrigSource === null || rawOrigSource === '' || Number(rawOrigSource) <= 0) {
+        for (const k of Object.keys(p)) {
+          if (k.toLowerCase().includes('pmc')) {
+            const candidateVal = parseInovafarmaNumber(p[k], 0);
+            if (candidateVal > 0) {
+              rawOrigSource = candidateVal;
+              break;
+            }
+          }
+        }
+      }
+
+      const rawOrigPrice = rawOrigSource !== undefined && rawOrigSource !== null && rawOrigSource !== ''
+        ? parseInovafarmaNumber(rawOrigSource, 0)
+        : 0;
       const validOrigPrice = !isNaN(rawOrigPrice) && rawOrigPrice > 0 ? rawOrigPrice : 0;
 
       // Regra de Fallback Inteligente de Preço:
@@ -3293,8 +3321,34 @@ app.put("/api/v1/tenants/:tenantId/products/bulk", checkTenantAccess, async (req
         const digitsOnly = rawBc.replace(/\D/g, '');
         cleanBarcode = digitsOnly || rawBc || null;
       }
-      const cleanInternalCode = p.internal_code ?? p.internalCode ?? p.codigo ?? p.cod_produto;
-      const cleanCode = cleanInternalCode && String(cleanInternalCode).trim() !== '' ? String(cleanInternalCode).trim() : null;
+      const codeCandidates = [
+        p.internal_code,
+        p.internalCode,
+        p.codigo_interno,
+        p.cod_item,
+        p.Cod_Item,
+        p.COD_ITEM,
+        p.codigo_item,
+        p.Codigo_Item,
+        p.cod_produto,
+        p.Cod_Produto,
+        p.codigo_produto,
+        p.cod_prod,
+        p.cd_produto,
+        p.id_item,
+        p.id_produto,
+        p.codigo,
+        p.código,
+        p.cod,
+        p.sku,
+        p.referencia,
+        p.ref
+      ]
+        .filter(v => v !== undefined && v !== null && String(v).trim() !== '')
+        .map(v => String(v).trim());
+
+      const distinctCode = codeCandidates.find(c => !cleanBarcode || c !== cleanBarcode);
+      const cleanCode = distinctCode || codeCandidates[0] || null;
 
       const rawNameInput = p.name ?? p.nome ?? p.descricao_produto ?? p.descricao;
       const item: any = {
@@ -9033,8 +9087,8 @@ app.all([
 
 // ============================================================================
 // CACHE DE HASH EM MEMÓRIA POR TENANT_ID PARA DELTA SYNC DO AGENTE DESKTOP
-// Estrutura: Map<tenant_id, Map<external_id_or_ean, "${price}|${promotional_price}|${stock}|${name}">>
-// Evita esgotar o Disk IO Budget do Supabase quando o agente envia 5.769 produtos a cada 1 minuto
+// Estrutura: Map<tenant_id, Map<external_id_or_ean, "${price}|${original_price}|${promotional_price}|${stock}|${internal_code}|${name}">>
+// Evita esgotar o Disk IO Budget do Supabase quando o agente envia milhares de produtos a cada 1 minuto
 // ============================================================================
 const tenantProductHashCache = new Map<string, Map<string, string>>();
 
@@ -9044,8 +9098,11 @@ const buildProductDeltaHash = (
   stock: any,
   name: any,
   ignoreErpPrices = false,
+  originalPrice?: any,
+  internalCode?: any,
 ): string => {
   const normPrice = ignoreErpPrices ? "IGNORED" : (Number(price) || 0).toFixed(2);
+  const normOrigPrice = ignoreErpPrices ? "IGNORED" : (Number(originalPrice) || 0).toFixed(2);
   const normPromo = ignoreErpPrices
     ? "IGNORED"
     : promotionalPrice !== null &&
@@ -9054,8 +9111,9 @@ const buildProductDeltaHash = (
       ? Number(promotionalPrice).toFixed(2)
       : "0.00";
   const normStock = Math.max(0, Math.floor(Number(stock) || 0));
+  const normCode = String(internalCode || "").trim();
   const normName = String(name || "").trim().toLowerCase();
-  return `${normPrice}|${normPromo}|${normStock}|${normName}`;
+  return `${normPrice}|${normOrigPrice}|${normPromo}|${normStock}|${normCode}|${normName}`;
 };
 
 const setProductHashInTenantMap = (
@@ -9098,6 +9156,8 @@ const updateTenantDeltaCacheWithRows = (
       row.stock,
       row.name,
       ignoreErpPrices,
+      row.original_price,
+      codeKey,
     );
     setProductHashInTenantMap(tenantMap, codeKey, barcodeKey, hash);
   }
@@ -9121,7 +9181,7 @@ const getOrLoadTenantDeltaCache = async (
     while (hasMore) {
       const { data, error } = await supabaseAdmin
         .from("products")
-        .select("internal_code, barcode, price, promotional_price, stock, name")
+        .select("internal_code, barcode, price, original_price, promotional_price, stock, name")
         .eq("tenant_id", tenantId)
         .range(offset, offset + PAGE_SIZE - 1);
 
@@ -9141,6 +9201,8 @@ const getOrLoadTenantDeltaCache = async (
           row.stock,
           row.name,
           ignoreErpPrices,
+          row.original_price,
+          codeKey,
         );
         setProductHashInTenantMap(tenantMap, codeKey, barcodeKey, hash);
       }
@@ -9483,16 +9545,7 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
          await new Promise((resolve) => setImmediate(resolve));
        }
        const p = productsBatch[batchIdx];
-       // 1. Código Interno (codigo, cod_produto, Id_do_produto, SKU, Id_do_Sku, CodigoProduto, CODIGO, ID_PRODUTO, id)
-       const rawInternalCode = getValFromProduct(p, [
-         'codigo', 'cod_produto', 'Id_do_produto', 'id_do_produto', 'SKU', 'sku', 'Id_do_Sku', 'id_do_sku',
-         'CodigoProduto', 'CODIGO', 'ID_PRODUTO', 'id',
-         'internal_code', 'internalCode', 'CodigoInterno', 'codigo_interno', 'cod_interno', 'cod_prod', 'codigo_produto', 'idProduto', 'referencia', 'ref',
-         'cdigo', 'cdg', 'cd'
-       ]);
-       const internalCode = rawInternalCode !== undefined && rawInternalCode !== null ? String(rawInternalCode).trim() : "";
-
-       // 2. EAN / Código de Barras (codigo_barras, EAN, ean, gtin, CodigoBarras, COD_BARRAS, BARRAS)
+       // 1. EAN / Código de Barras (codigo_barras, EAN, ean, gtin, CodigoBarras, COD_BARRAS, BARRAS)
        const rawEan = getValFromProduct(p, [
          'codigo_barras', 'EAN', 'ean', 'gtin',
          'CodigoBarras', 'COD_BARRAS', 'BARRAS',
@@ -9500,6 +9553,36 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
          'cd barras', 'cd. barras', 'cd_barras', 'cd.barras', 'codbarras', 'cdbarras', 'ean_produto'
        ]);
        const cleanedEan = sanitizeInovafarmaEan(rawEan) || (rawEan !== undefined && rawEan !== null ? String(rawEan).trim() : "");
+
+       // 2. Código Interno (prioriza internal_code, codigo_interno, cod_item, codigo_item, cod_produto, codigo_produto, codigo, sku e evita colidir com EAN)
+       const internalCodePriorityKeys = [
+         'internal_code', 'internalCode', 'codigo_interno', 'CodigoInterno', 'cod_interno',
+         'cod_item', 'Cod_Item', 'COD_ITEM', 'codigo_item', 'Codigo_Item', 'cd_item', 'id_item', 'ID_Item', 'Id_Item',
+         'cod_produto', 'Cod_Produto', 'codigo_produto', 'CodigoProduto', 'cod_prod', 'Cod_Prod', 'cd_produto', 'Cd_Produto',
+         'id_produto', 'ID_PRODUTO', 'Id_do_produto', 'id_do_produto', 'idProduto',
+         'codigo', 'Codigo', 'CODIGO', 'código', 'Código', 'cod', 'Cod', 'COD', 'cdigo', 'cdg', 'cd',
+         'sku', 'SKU', 'Id_do_Sku', 'id_do_sku', 'referencia', 'Referencia', 'ref', 'id'
+       ];
+
+       let internalCode = "";
+       let fallbackCodeSameAsEan = "";
+       for (const candidateKey of internalCodePriorityKeys) {
+         const candidateVal = getValFromProduct(p, [candidateKey]);
+         if (candidateVal !== undefined && candidateVal !== null) {
+           const cleanCandidate = String(candidateVal).trim();
+           if (!cleanCandidate) continue;
+           if (cleanedEan && cleanCandidate === cleanedEan) {
+             if (!fallbackCodeSameAsEan) fallbackCodeSameAsEan = cleanCandidate;
+             continue;
+           }
+           internalCode = cleanCandidate;
+           break;
+         }
+       }
+       if (!internalCode) {
+         internalCode = fallbackCodeSameAsEan || cleanedEan;
+       }
+
        const ean = cleanedEan || internalCode;
        if (!ean) continue;
        
@@ -9564,22 +9647,42 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
        // 4. Preço de Venda (preco, preco_venda, Preco_Bruto; se vier <= 0 ou nulo, usa Preco_Liquido ou preco_original / PMC)
        let rawPriceBruto = parseAgentNumber(getValFromProduct(p, [
          'preco', 'preco_venda', 'Preco_Bruto', 'preco_bruto', 'PrecoBruto', 'PRECO_BRUTO',
-         'PrecoVenda', 'PRECO_VENDA', 'PRECO', 'VALOR',
+         'PrecoVenda', 'PRECO_VENDA', 'PRECO', 'VALOR', 'Vl_Venda', 'vl_venda', 'Vlr_Venda', 'vlr_venda',
          'price', 'preco_por', 'preco_unitario', 'valor', 'valor_venda', 'venda', 'preco_venda_unitario', 'MENORPRECOVENDA', 'menor_preco_venda'
        ]), 0);
        if (isNaN(rawPriceBruto) || rawPriceBruto < 0) rawPriceBruto = 0;
 
        let rawPrecoLiquidoFallback = parseAgentNumber(getValFromProduct(p, [
-         'Preco_Liquido', 'preco_liquido', 'PrecoLiquido', 'PRECO_LIQUIDO', 'PRECO_LIQUido'
+         'Preco_Liquido', 'preco_liquido', 'PrecoLiquido', 'PRECO_LIQUIDO', 'PRECO_LIQUido', 'Vl_Liquido', 'vl_liquido'
        ]), 0);
        if (isNaN(rawPrecoLiquidoFallback) || rawPrecoLiquidoFallback < 0) rawPrecoLiquidoFallback = 0;
 
        let originalPrice = parseAgentNumber(getValFromProduct(p, [
          'original_price', 'originalPrice', 'preco_original', 'Preco_Original', 'PRECO_ORIGINAL', 'PrecoOriginal',
-         'pmc', 'PMC', 'preco_pmc', 'PRECO_PMC', 'Preco_PMC', 'PrecoPmc',
-         'preco_de', 'preco_tabela', 'Preco_Tabela', 'PRECO_TABELA', 'preco_cadastro', 'preco_antigo', 'valor_original', 'preco_cheio', 'preco_maximo'
+         'Vl_PMC', 'vl_pmc', 'VL_PMC', 'Vl. PMC', 'VlPMC', 'vlpmc',
+         'Valor_PMC', 'valor_pmc', 'VALOR_PMC', 'Vlr_PMC', 'vlr_pmc', 'VLR_PMC', 'Vlr. PMC',
+         'Preco_PMC', 'preco_pmc', 'PRECO_PMC', 'PrecoPmc', 'Pr_PMC', 'pr_pmc',
+         'pmc', 'PMC', 'Preco_Consumidor', 'preco_consumidor', 'Vl_Consumidor', 'vl_consumidor',
+         'Preco_Maximo', 'preco_maximo', 'Vl_Tabela', 'vl_tabela', 'Preco_Tabela', 'preco_tabela', 'PRECO_TABELA',
+         'Preco_Fabrica', 'preco_fabrica', 'Pr_Fabrica', 'pr_fabrica',
+         'preco_de', 'preco_cadastro', 'preco_antigo', 'valor_original', 'preco_cheio'
        ]), 0);
-       if (isNaN(originalPrice) || originalPrice < 0) originalPrice = 0;
+
+       // Fallback adicional: varre qualquer chave do objeto cujo nome em lowercase contenha 'pmc'
+       if (isNaN(originalPrice) || originalPrice <= 0) {
+         originalPrice = 0;
+         if (p && typeof p === 'object') {
+           for (const key of Object.keys(p)) {
+             if (key.toLowerCase().includes('pmc')) {
+               const parsedPmc = parseAgentNumber(p[key], 0);
+               if (parsedPmc > 0) {
+                 originalPrice = parsedPmc;
+                 break;
+               }
+             }
+           }
+         }
+       }
 
        // 5. Preço Promocional bruto antes da validação
        let rawPromoPrice = parseAgentNumber(getValFromProduct(p, [
@@ -9916,6 +10019,8 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
         item.stock,
         item.name,
         ignoreErpPrices,
+        item.original_price,
+        codeKey,
       );
 
       const cachedHash =
@@ -9931,7 +10036,7 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
         }
         changedProducts.push(item);
       } else if (cachedHash !== incomingHash) {
-        // Produto JÁ existe no banco do tenant e sofreu alteração (ex: preço mudou ou estoque caiu para 0)
+        // Produto JÁ existe no banco do tenant e sofreu alteração (ex: preço, PMC/original_price, internal_code ou estoque mudou)
         changedProducts.push(item);
       } else {
         unchangedCount++;
@@ -9964,7 +10069,7 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
     );
 
     // Garante que nenhum lote enviado ao Supabase tenha chaves duplicadas para a constraint usada no ON CONFLICT
-    const deduplicateByConflictField = (rows: any[], field: 'internal_code' | 'barcode') => {
+    const deduplicateByConflictField = (rows: any[], field: 'id' | 'internal_code' | 'barcode') => {
       const map = new Map<string, any>();
       for (const row of rows) {
         const keyVal = row[field] ? String(row[field]).trim() : '';
@@ -10043,7 +10148,9 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
          if (existing) {
             // Produto JÁ EXISTE no banco do tenant: faz UPDATE normalmente (permitindo que stock vá para 0 caso tenha esgotado ou sido inativado)
             let finalPrice = item.price;
-            let finalOriginalPrice = item.original_price;
+            let finalOriginalPrice = Number(item.original_price) > 0
+              ? Number(item.original_price)
+              : (Number(existing.original_price) > 0 ? Number(existing.original_price) : 0);
             let finalPromotionalPrice = item.promotional_price;
             let finalPromotionType = item.promotion_type;
             let finalBuyX = item.buy_x;
@@ -10059,7 +10166,9 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
             
             if (ignoreErpPrices) {
                finalPrice = existing.price;
-               finalOriginalPrice = existing.original_price;
+               finalOriginalPrice = Number(existing.original_price) > 0
+                 ? Number(existing.original_price)
+                 : (Number(item.original_price) > 0 ? Number(item.original_price) : 0);
                finalPromotionalPrice = existing.promotional_price;
                finalPromotionType = existing.promotion_type;
                finalBuyX = existing.buy_x;
@@ -10098,13 +10207,28 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
             const isZeroPrice = Number(finalPrice) <= 0 || isNaN(Number(finalPrice));
             const updatedStock = _isExplicitlyInactive ? 0 : Math.max(0, Number(item.stock) || 0);
 
+            // Resolução inteligente de internal_code:
+            // Se o agente enviou um código interno real diferente do barcode (ex: '20325'), atualiza o banco (corrigindo itens que estavam com internal_code === barcode).
+            // Se o agente enviou internal_code igual ao barcode mas o banco já possuía um código interno distinto, preserva o código interno real do banco.
+            const incomingCode = item.internal_code ? String(item.internal_code).trim() : '';
+            const incomingBarcode = item.barcode ? String(item.barcode).trim() : '';
+            const existingCode = existing.internal_code ? String(existing.internal_code).trim() : '';
+            const existingBarcode = existing.barcode ? String(existing.barcode).trim() : '';
+
+            let resolvedUpdatedInternalCode = incomingCode || existingCode;
+            if (incomingCode && incomingBarcode && incomingCode !== incomingBarcode) {
+              resolvedUpdatedInternalCode = incomingCode;
+            } else if (existingCode && existingBarcode && existingCode !== existingBarcode) {
+              resolvedUpdatedInternalCode = existingCode;
+            }
+
             existingProductsPayload.push({
                ...existing,
                name: item.name || existing.name,
                barcode: item.barcode || existing.barcode,
                category: finalCategory,
                department: finalDepartment,
-               internal_code: item.internal_code || existing.internal_code,
+               internal_code: resolvedUpdatedInternalCode,
                manufacturer: item.manufacturer || existing.manufacturer,
                presentation: item.presentation || existing.presentation,
                drug_type: (item.drug_type && item.drug_type !== 'Outros') ? item.drug_type : (existing.drug_type || item.drug_type),
@@ -10185,24 +10309,33 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
       }
 
       if (existingProductsPayload.length > 0) {
-         const dedupedExistingByCode = deduplicateByConflictField(existingProductsPayload, 'internal_code');
-         const { error } = await supabaseAdmin
+         const dedupedExistingById = deduplicateByConflictField(existingProductsPayload, 'id');
+         const { error: idUpsertErr } = await supabaseAdmin
            .from('products')
-           .upsert(dedupedExistingByCode, { 
-              onConflict: 'tenant_id,internal_code', 
-              ignoreDuplicates: false 
+           .upsert(dedupedExistingById, {
+              onConflict: 'id',
+              ignoreDuplicates: false
            });
-         if (error) {
+         if (idUpsertErr) {
             const dedupedExistingByBarcode = deduplicateByConflictField(existingProductsPayload, 'barcode');
-            const { error: fallbackErr } = await supabaseAdmin
+            const { error: bcFallbackErr } = await supabaseAdmin
               .from('products')
               .upsert(dedupedExistingByBarcode, { 
                  onConflict: 'tenant_id,barcode', 
                  ignoreDuplicates: false 
               });
-            if (fallbackErr) {
-              console.error("[Integration] Existing Products Update Error:", fallbackErr);
-              throw new Error(`Database update error: ${fallbackErr.message}`);
+            if (bcFallbackErr) {
+               const dedupedExistingByCode = deduplicateByConflictField(existingProductsPayload, 'internal_code');
+               const { error: codeFallbackErr } = await supabaseAdmin
+                 .from('products')
+                 .upsert(dedupedExistingByCode, { 
+                    onConflict: 'tenant_id,internal_code', 
+                    ignoreDuplicates: false 
+                 });
+               if (codeFallbackErr) {
+                 console.error("[Integration] Existing Products Update Error:", codeFallbackErr);
+                 throw new Error(`Database update error: ${codeFallbackErr.message}`);
+               }
             }
          }
          updateTenantDeltaCacheWithRows(tenantId!, existingProductsPayload, ignoreErpPrices);

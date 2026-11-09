@@ -300,6 +300,11 @@ async function syncData() {
             return;
         }
 
+        if (rawRecords[0]) {
+            console.log(`[Siagold] Colunas detectadas na View: ${Object.keys(rawRecords[0]).join(', ')}`);
+            console.log(`[Siagold] Valores brutos do 1º item:`, JSON.stringify(rawRecords[0]));
+        }
+
         const validRecords = [];
         let fallbackCount = 0;
         let ignoredZeroPriceCount = 0;
