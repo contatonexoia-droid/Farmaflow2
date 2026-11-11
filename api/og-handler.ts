@@ -18,11 +18,11 @@ const DEFAULT_SHARE_IMAGE = 'https://farmaflow.online/preview-share.png';
 
 export function isCrawlerRequest(userAgent: string = ''): boolean {
   if (!userAgent) return false;
-  return /facebookexternalhit|whatsapp|meta-externalagent|meta-externalfetcher|facebot|twitterbot|telegrambot|linkedinbot|slackbot|discordbot|skypeuripreview|baileys|evolution/i.test(userAgent);
+  return /facebookexternalhit|whatsapp|facebot|twitterbot|linkedinbot/i.test(userAgent);
 }
 
 function detectImageType(url: string): string {
-  const lower = (url || '').toLowerCase();
+  const lower = url.toLowerCase();
   if (lower.includes('.jpg') || lower.includes('.jpeg')) return 'image/jpeg';
   if (lower.includes('.webp')) return 'image/webp';
   return 'image/png';
@@ -34,7 +34,6 @@ export function buildCrawlerHtml(store: {
   name?: string;
   razao_social?: string;
   logo_url?: string;
-  logo?: string;
   descricao?: string;
   description?: string;
   url?: string;
@@ -55,12 +54,12 @@ export function buildCrawlerHtml(store: {
       'Drogaria Explendido'
   );
 
-  let logoUrl = (store.logo_url || store.logo || '').trim();
+  let logoUrl = (store.logo_url || '').trim();
   if (logoUrl.startsWith('http://')) {
     logoUrl = logoUrl.replace('http://', 'https://');
   }
   if (!logoUrl.startsWith('https://')) {
-    logoUrl = 'https://nalshjhoiecxooejpiaw.supabase.co/storage/v1/object/public/product-images/logos/nosso-catalogo_logo_og_1794391014029.jpg';
+    logoUrl = 'https://nalshjhoiecxooejpiaw.supabase.co/storage/v1/object/public/product-images/logos/nosso-catalogo_logo_1790958337014.png';
   }
   const safeLogo = esc(logoUrl);
   const imageType = detectImageType(logoUrl);
@@ -74,9 +73,6 @@ export function buildCrawlerHtml(store: {
 <head>
   <meta charset="UTF-8">
   <title>${titleName}</title>
-  <meta name="description" content="${description}" />
-  <meta property="og:type" content="website" />
-  <meta property="og:site_name" content="${titleName}" />
   <meta property="og:title" content="${titleName}" />
   <meta property="og:description" content="${description}" />
   <meta property="og:image" content="${safeLogo}" />
@@ -84,14 +80,8 @@ export function buildCrawlerHtml(store: {
   <meta property="og:image:type" content="${imageType}" />
   <meta property="og:image:width" content="600" />
   <meta property="og:image:height" content="600" />
-  <meta property="og:image:alt" content="${titleName}" />
   <meta property="og:url" content="${currentUrl}" />
-  <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="${titleName}" />
-  <meta name="twitter:description" content="${description}" />
-  <meta name="twitter:image" content="${safeLogo}" />
-  <link rel="icon" href="${safeLogo}" />
-  <link rel="apple-touch-icon" href="${safeLogo}" />
+  <meta property="og:type" content="website" />
 </head>
 <body></body>
 </html>`;
@@ -272,9 +262,6 @@ export default async function handler(req: any, res: any) {
 <head>
   <meta charset="UTF-8">
   <title>${safeTitle}</title>
-  <meta name="description" content="${safeDesc}" />
-  <meta property="og:type" content="website" />
-  <meta property="og:site_name" content="${safeTitle}" />
   <meta property="og:title" content="${safeTitle}" />
   <meta property="og:description" content="${safeDesc}" />
   <meta property="og:image" content="${safeLogo}" />
@@ -282,14 +269,8 @@ export default async function handler(req: any, res: any) {
   <meta property="og:image:type" content="${imageType}" />
   <meta property="og:image:width" content="600" />
   <meta property="og:image:height" content="600" />
-  <meta property="og:image:alt" content="${safeTitle}" />
   <meta property="og:url" content="${safeUrl}" />
-  <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="${safeTitle}" />
-  <meta name="twitter:description" content="${safeDesc}" />
-  <meta name="twitter:image" content="${safeLogo}" />
-  <link rel="icon" href="${safeLogo}" />
-  <link rel="apple-touch-icon" href="${safeLogo}" />
+  <meta property="og:type" content="website" />
 </head>
 <body></body>
 </html>`;
