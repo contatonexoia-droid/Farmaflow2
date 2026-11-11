@@ -638,6 +638,7 @@ export const saveTenant = async (
   try {
     const payload: any = {
       id: tenant.id,
+      slug: tenant.slug || tenant.id,
       name: tenant.name,
       whatsapp: tenant.whatsapp || "",
       logo: tenant.logo_url || tenant.logo || "",

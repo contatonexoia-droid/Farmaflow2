@@ -841,6 +841,63 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
     return numbers.replace(/(\d{2})(\d{5})(\d{4})/, '($1) $2-$3');
   };
 
+  const compressLogoForWhatsAppOg = (sourceFile: File): Promise<{ blob: Blob; dataUrl: string }> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error("Falha ao ler arquivo de imagem"));
+      reader.onload = (ev) => {
+        const dataUrlSrc = ev.target?.result as string;
+        const img = new Image();
+        img.onerror = () => reject(new Error("Falha ao decodificar imagem"));
+        img.onload = () => {
+          try {
+            const maxDim = 600;
+            let targetW = img.width || 600;
+            let targetH = img.height || 600;
+            if (targetW > maxDim || targetH > maxDim) {
+              if (targetW >= targetH) {
+                targetH = Math.round((targetH * maxDim) / targetW);
+                targetW = maxDim;
+              } else {
+                targetW = Math.round((targetW * maxDim) / targetH);
+                targetH = maxDim;
+              }
+            }
+            const canvas = document.createElement("canvas");
+            canvas.width = targetW;
+            canvas.height = targetH;
+            const ctx = canvas.getContext("2d");
+            if (!ctx) {
+              reject(new Error("Contexto 2D indisponível"));
+              return;
+            }
+            // Preencher fundo branco para transparências antes de exportar JPEG leve (< 300KB exigido pelo WhatsApp)
+            ctx.fillStyle = "#FFFFFF";
+            ctx.fillRect(0, 0, targetW, targetH);
+            ctx.drawImage(img, 0, 0, targetW, targetH);
+
+            const compressedDataUrl = canvas.toDataURL("image/jpeg", 0.84);
+            canvas.toBlob(
+              (blob) => {
+                if (blob) {
+                  resolve({ blob, dataUrl: compressedDataUrl });
+                } else {
+                  reject(new Error("Falha ao comprimir logotipo"));
+                }
+              },
+              "image/jpeg",
+              0.84
+            );
+          } catch (canvasErr) {
+            reject(canvasErr);
+          }
+        };
+        img.src = dataUrlSrc;
+      };
+      reader.readAsDataURL(sourceFile);
+    });
+  };
+
   const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -850,32 +907,52 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
       return;
     }
 
-    if (file.size > 5 * 1024 * 1024) { 
-      alert("A imagem é muito grande (Máx: 5MB). Por favor, escolha uma imagem menor.");
+    if (file.size > 10 * 1024 * 1024) { 
+      alert("A imagem é muito grande (Máx: 10MB). Por favor, escolha uma imagem menor.");
       return;
     }
 
     setIsUploadingLogo(true);
     try {
-      const fileExt = file.name.split('.').pop() || 'png';
       const safeStoreId = (config.id || 'loja').replace(/[^a-zA-Z0-9_-]/g, '_');
-      const filePath = `logos/${safeStoreId}_logo_${Date.now()}.${fileExt}`;
+      let uploadBody: Blob | File = file;
+      let uploadContentType = file.type || 'image/jpeg';
+      let fileExt = (file.name.split('.').pop() || 'jpg').toLowerCase();
+      let fallbackDataUrl = '';
 
-      const { data, error } = await supabase.storage
+      // Sempre otimizar para JPEG <= 600x600 (< 100 KB) garantindo compatibilidade com o limite de 300 KB do WhatsApp Open Graph
+      try {
+        const compressed = await compressLogoForWhatsAppOg(file);
+        uploadBody = compressed.blob;
+        uploadContentType = 'image/jpeg';
+        fileExt = 'jpg';
+        fallbackDataUrl = compressed.dataUrl;
+      } catch (compErr) {
+        console.warn("Aviso ao comprimir logo no navegador, enviando arquivo original:", compErr);
+      }
+
+      const filePath = `logos/${safeStoreId}_logo_og_${Date.now()}.${fileExt}`;
+
+      const { error } = await supabase.storage
         .from('product-images')
-        .upload(filePath, file, {
-          contentType: file.type,
+        .upload(filePath, uploadBody, {
+          contentType: uploadContentType,
+          cacheControl: '86400',
           upsert: true
         });
 
       if (error) {
         console.warn("Upload direto para Supabase Storage falhou, gerando data URL:", error.message);
-        const reader = new FileReader();
-        reader.onload = (re) => {
-          const base64 = re.target?.result as string;
-          setFormData(prev => ({ ...prev, logo: base64, logo_url: base64 }));
-        };
-        reader.readAsDataURL(file);
+        if (fallbackDataUrl) {
+          setFormData(prev => ({ ...prev, logo: fallbackDataUrl, logo_url: fallbackDataUrl }));
+        } else {
+          const reader = new FileReader();
+          reader.onload = (re) => {
+            const base64 = re.target?.result as string;
+            setFormData(prev => ({ ...prev, logo: base64, logo_url: base64 }));
+          };
+          reader.readAsDataURL(file);
+        }
       } else {
         const { data: publicUrlData } = supabase.storage
           .from('product-images')
