@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { PharmacyConfig, AuthSession } from '../types';
 import { UpsellCard } from './UpsellCard';
-import { Tags, Zap, Upload, Palette, Phone, Building, Save, CheckCircle, Loader2, Type, MessageSquare, AlertTriangle, FileText, MapPin, Mail, DollarSign, BellRing, PlayCircle, Volume2, Store, CreditCard, Truck, Bot, Sparkles, Building2, ShieldCheck, UserCheck, Scale, Clock, RefreshCw, Key, Copy, Check, History, ExternalLink } from 'lucide-react';
+import { Tags, Zap, Upload, Palette, Phone, Building, Save, CheckCircle, Loader2, Type, MessageSquare, AlertTriangle, FileText, MapPin, Mail, DollarSign, BellRing, PlayCircle, Volume2, Store, CreditCard, Truck, Bot, Sparkles, Building2, ShieldCheck, UserCheck, Scale, Clock, RefreshCw, Key, Copy, Check, History, ExternalLink, QrCode } from 'lucide-react';
 import { ImageMigrationTool } from './ImageMigrationTool';
 import { ControlledProductsMigrationTool } from './ControlledProductsMigrationTool';
 import { SmartNumberInput } from './SmartNumberInput';
@@ -12,6 +12,7 @@ import { AiAgentSettings } from './AiAgentSettings';
 import { TenantSelector } from './TenantSelector';
 import { WelcomeSettings } from './WelcomeSettings';
 import { StoreShareCard } from './StoreShareCard';
+import { StoreCounterMaterials } from './StoreCounterMaterials';
 import {
   parseOperatingHoursFromText,
   buildOperatingHoursSummary,
@@ -192,7 +193,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
 
   const canSwitchStore = effectiveIsMatrixUser && networkTenants && networkTenants.length > 1 && !!onSelectTenant;
 
-  const [activeTab, setActiveTab] = useState<'geral' | 'pagamentos' | 'entrega' | 'atendimento' | 'agente_ia'>('geral');
+  const [activeTab, setActiveTab] = useState<'geral' | 'materiais_balcao' | 'pagamentos' | 'entrega' | 'atendimento' | 'agente_ia'>('geral');
   const resolveStoreErpType = (store?: Partial<PharmacyConfig> | null): string => {
     if (!store) return '';
     return String(
@@ -1126,6 +1127,12 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
               <Store size={18} /> Geral e Visual
             </button>
             <button 
+              onClick={() => setActiveTab('materiais_balcao')}
+              className={`flex items-center gap-2 px-6 py-3 rounded-2xl font-bold transition-all shrink-0 ${activeTab === 'materiais_balcao' ? 'bg-emerald-50 text-emerald-700' : 'text-gray-500 hover:bg-gray-50'}`}
+            >
+              <QrCode size={18} /> Materiais de Balcão e QR Codes
+            </button>
+            <button 
               onClick={() => setActiveTab('pagamentos')}
               className={`flex items-center gap-2 px-6 py-3 rounded-2xl font-bold transition-all shrink-0 ${activeTab === 'pagamentos' ? 'bg-emerald-50 text-emerald-700' : 'text-gray-500 hover:bg-gray-50'}`}
             >
@@ -1164,6 +1171,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
         {activeTab === 'geral' && (
           <div className="space-y-8 animate-in fade-in">
             <StoreShareCard tenant={formData} />
+            <StoreCounterMaterials tenant={formData} />
 
             <form onSubmit={handleSubmit} className="space-y-10">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
@@ -2723,6 +2731,12 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
         </form>
       </div>
       )}
+
+        {activeTab === 'materiais_balcao' && (
+          <div className="space-y-8 animate-in fade-in duration-300">
+            <StoreCounterMaterials tenant={formData} />
+          </div>
+        )}
 
         {activeTab === 'pagamentos' && (
           <div className="animate-in fade-in duration-300">

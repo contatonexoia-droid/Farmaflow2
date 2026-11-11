@@ -125,13 +125,25 @@ app.use(express.urlencoded({ limit: "50mb", extended: true }));
 // ============================================================================
 // INTERCEPTAÇÃO DO CRAWLER DE OPEN GRAPH (WhatsApp, Facebook, Twitter, LinkedIn)
 // ============================================================================
+const DEFAULT_FALLBACK_OG_LOGO = 'https://nalshjhoiecxooejpiaw.supabase.co/storage/v1/object/public/product-images/logos/nosso-catalogo_logo_og_1794391014029.jpg';
+
+function detectOgImageType(url: string = ''): string {
+  const lower = String(url || '').toLowerCase().split('?')[0];
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.svg')) return 'image/svg+xml';
+  if (lower.includes('.jpg') || lower.includes('.jpeg')) return 'image/jpeg';
+  if (lower.includes('.webp')) return 'image/webp';
+  return 'image/png';
+}
+
 app.use(async (req, res, next) => {
   // Ignora rotas de API internas (exceto /api/og) e arquivos estáticos (js, css, imagens, etc.)
   if (req.path.startsWith('/api/') && !req.path.startsWith('/api/og')) return next();
   if (/\.(js|css|png|jpg|jpeg|gif|svg|ico|json|woff|woff2|ttf|map)$/i.test(req.path)) return next();
 
   const userAgent = (req.headers['user-agent'] || '').toLowerCase();
-  const isBot = /facebookexternalhit|whatsapp|facebot|twitterbot|linkedinbot/i.test(userAgent);
+  const isBot = /facebookexternalhit|whatsapp|meta-externalagent|meta-externalfetcher|facebot|twitterbot|telegrambot|linkedinbot|slackbot|discordbot|skypeuripreview|baileys|evolution/i.test(userAgent);
 
   if (!isBot) {
     return next();
@@ -214,7 +226,7 @@ app.use(async (req, res, next) => {
       tenant = {
         name: 'Drogaria Explendido',
         trade_name: 'Drogaria Explendido',
-        logo_url: 'https://nalshjhoiecxooejpiaw.supabase.co/storage/v1/object/public/product-images/logos/nosso-catalogo_logo_1790958337014.png'
+        logo_url: DEFAULT_FALLBACK_OG_LOGO
       };
     }
 
@@ -222,29 +234,42 @@ app.use(async (req, res, next) => {
     const currentHost = (!host || host === 'localhost' || host === '127.0.0.1') ? 'drogaria-esplendido.farmaflow.online' : host;
     const currentUrl = `${proto}://${currentHost}${req.originalUrl || req.url || '/'}`;
 
-    const title = tenant.trade_name || tenant.name || 'Drogaria Explendido';
+    const title = tenant.trade_name || tenant.name || tenant.razao_social || 'Drogaria Explendido';
     const description = `Faça seu pedido online com rapidez e comodidade na ${tenant.trade_name || 'nossa drogaria'}.`;
-    let logoUrl = (tenant.logo_url || tenant.logo || 'https://nalshjhoiecxooejpiaw.supabase.co/storage/v1/object/public/product-images/logos/nosso-catalogo_logo_1790958337014.png').trim();
+    let logoUrl = (tenant.logo_url || tenant.logo || tenant.smart_banners?._regulatoryData?.logo_url || DEFAULT_FALLBACK_OG_LOGO).trim();
     if (logoUrl.startsWith('http://')) {
       logoUrl = logoUrl.replace('http://', 'https://');
     }
+    if (!logoUrl.startsWith('https://')) {
+      logoUrl = DEFAULT_FALLBACK_OG_LOGO;
+    }
+    const imageType = detectOgImageType(logoUrl);
 
-    console.log(`[CRAWLER_OG] 🤖 Scraper detectado (${userAgent.substring(0, 30)}...). Retornando meta tags para "${title}": logo=${logoUrl}`);
+    console.log(`[CRAWLER_OG] 🤖 Scraper detectado (${userAgent.substring(0, 30)}...). Retornando meta tags para "${title}": logo=${logoUrl} (${imageType})`);
 
     const html = `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
   <title>${title}</title>
+  <meta name="description" content="${description}" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="${title}" />
   <meta property="og:title" content="${title}" />
   <meta property="og:description" content="${description}" />
   <meta property="og:image" content="${logoUrl}" />
   <meta property="og:image:secure_url" content="${logoUrl}" />
-  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:type" content="${imageType}" />
   <meta property="og:image:width" content="600" />
   <meta property="og:image:height" content="600" />
+  <meta property="og:image:alt" content="${title}" />
   <meta property="og:url" content="${currentUrl}" />
-  <meta property="og:type" content="website" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="${title}" />
+  <meta name="twitter:description" content="${description}" />
+  <meta name="twitter:image" content="${logoUrl}" />
+  <link rel="icon" href="${logoUrl}" />
+  <link rel="apple-touch-icon" href="${logoUrl}" />
 </head>
 <body></body>
 </html>`;
@@ -276,12 +301,13 @@ const handleSharePreviewRoute = async (req: express.Request, res: express.Respon
 
     let tenant: any = null;
 
-    // 1. Buscar a drogaria no Supabase pelo slug usando SUPABASE_SERVICE_ROLE_KEY (supabaseAdmin)
+    // 1. Buscar a drogaria no Supabase pelo id ou slug usando SUPABASE_SERVICE_ROLE_KEY (supabaseAdmin)
     try {
       const { data } = await supabaseAdmin
         .from('tenants')
-        .select('trade_name, name, logo_url, slug, custom_domain')
-        .or(`slug.ilike.%${cleanSlug}%,slug.eq.drogaria-esplendido,id.eq.${cleanSlug}`)
+        .select('*')
+        .or(`id.eq.${cleanSlug},slug.eq.${cleanSlug},slug.ilike.%${cleanSlug}%`)
+        .limit(1)
         .maybeSingle();
 
       if (data) {
@@ -294,28 +320,33 @@ const handleSharePreviewRoute = async (req: express.Request, res: express.Respon
       try {
         const { data: allTenants } = await supabaseAdmin
           .from('tenants')
-          .select('trade_name, name, logo_url, slug, custom_domain');
+          .select('*');
         if (allTenants && allTenants.length > 0) {
           const norm = cleanSlug.replace(/-/g, '').replace(/x/g, 's');
           tenant = allTenants.find((t: any) => {
+            const i = (t.id || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '').replace(/x/g, 's');
             const s = (t.slug || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '').replace(/x/g, 's');
-            const n = (t.trade_name || t.name || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '').replace(/x/g, 's');
-            return s.includes(norm) || norm.includes(s) || n.includes(norm);
+            const n = (t.trade_name || t.name || t.razao_social || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '').replace(/x/g, 's');
+            if (i && (i === norm || i.includes(norm) || norm.includes(i))) return true;
+            if (s && (s === norm || s.includes(norm) || norm.includes(s))) return true;
+            if (n && (n === norm || n.includes(norm))) return true;
+            return false;
           });
         }
       } catch (_) {}
     }
 
-    const storeName = tenant?.trade_name || tenant?.name || 'Drogaria Explendido';
-    let logoUrl = (tenant?.logo_url || '').trim();
+    const storeName = tenant?.trade_name || tenant?.name || tenant?.razao_social || 'Drogaria Explendido';
+    let logoUrl = (tenant?.logo_url || tenant?.logo || tenant?.smart_banners?._regulatoryData?.logo_url || '').trim();
     if (logoUrl.startsWith('http://')) {
       logoUrl = logoUrl.replace('http://', 'https://');
     }
     if (!logoUrl.startsWith('https://')) {
-      logoUrl = 'https://nalshjhoiecxooejpiaw.supabase.co/storage/v1/object/public/product-images/logos/nosso-catalogo_logo_1790958337014.png';
+      logoUrl = DEFAULT_FALLBACK_OG_LOGO;
     }
+    const imageType = detectOgImageType(logoUrl);
 
-    const baseDomain = cleanSlug || 'drogaria-esplendido';
+    const baseDomain = tenant?.slug || tenant?.id || cleanSlug || 'drogaria-esplendido';
     const prodSlug = req.query?.p || req.query?.produto;
     let targetUrl = tenant?.custom_domain 
       ? `https://${tenant.custom_domain.replace(/^https?:\/\//, '')}` 
@@ -339,24 +370,29 @@ const handleSharePreviewRoute = async (req: express.Request, res: express.Respon
 <head>
   <meta charset="UTF-8">
   <title>${storeName}</title>
-  <meta name="description" content="Faça seu pedido online com rapidez na ${storeName}." />
+  <meta name="description" content="Faça seu pedido online com rapidez e comodidade na ${storeName}." />
   
   <!-- Open Graph / WhatsApp / Facebook -->
   <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="${storeName}" />
   <meta property="og:title" content="${storeName}" />
-  <meta property="og:description" content="Faça seu pedido online com rapidez e comodidade. Medicamentos e perfumaria com tele-entrega." />
+  <meta property="og:description" content="Faça seu pedido online com rapidez e comodidade na nossa drogaria." />
   <meta property="og:image" content="${logoUrl}" />
   <meta property="og:image:secure_url" content="${logoUrl}" />
-  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:type" content="${imageType}" />
   <meta property="og:image:width" content="600" />
   <meta property="og:image:height" content="600" />
+  <meta property="og:image:alt" content="${storeName}" />
   <meta property="og:url" content="${targetUrl}" />
 
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="${storeName}" />
-  <meta name="twitter:description" content="Faça seu pedido online com rapidez e comodidade." />
+  <meta name="twitter:description" content="Faça seu pedido online com rapidez e comodidade na nossa drogaria." />
   <meta name="twitter:image" content="${logoUrl}" />
+
+  <link rel="icon" href="${logoUrl}" />
+  <link rel="apple-touch-icon" href="${logoUrl}" />
 
   <!-- Redirecionamento instantâneo se um usuário humano abrir -->
   <meta http-equiv="refresh" content="0;url=${targetUrl}" />
@@ -752,7 +788,7 @@ app.get("/api/v1/resolve-tenant", async (req, res) => {
 
 const isSocialCrawler = (userAgent: string = ''): boolean => {
   if (!userAgent) return false;
-  return /whatsapp|facebookexternalhit|facebot|twitterbot|telegrambot|linkedinbot|slackbot|discordbot|skypeuripreview|googlebot|bingbot|baiduspider|yandex|crawlers|axios|node-fetch|got|undici|curl|evolution|baileys/i.test(userAgent);
+  return /whatsapp|facebookexternalhit|meta-externalagent|meta-externalfetcher|facebot|twitterbot|telegrambot|linkedinbot|slackbot|discordbot|skypeuripreview|googlebot|bingbot|baiduspider|yandex|crawlers|axios|node-fetch|got|undici|curl|evolution|baileys/i.test(userAgent);
 };
 
 interface TenantMetaRecord {
@@ -789,7 +825,7 @@ function buildTenantMetaRecordFromTenant(tenant: any, req: express.Request): Ten
   const tenantSlug = tenant.slug || tenant.id;
 
   const rawLogo = (tenant.logo_url || tenant.logo || tenant.smart_banners?._regulatoryData?.logo_url || "").trim();
-  let logoUrl = "https://farmaflow.online/preview-share.png";
+  let logoUrl = DEFAULT_FALLBACK_OG_LOGO;
   if ((rawLogo.startsWith("http://") || rawLogo.startsWith("https://")) && !rawLogo.startsWith("data:")) {
     logoUrl = rawLogo.startsWith("http://") ? rawLogo.replace("http://", "https://") : rawLogo;
   } else if (tenant.id && (rawLogo.length > 0 || tenant.logo)) {
@@ -845,7 +881,7 @@ async function getTenantMetaRecord(identifier: string, req: express.Request): Pr
 
   // Resolução do logotipo público da drogaria para Open Graph
   const rawLogo = (tenant.logo_url || tenant.logo || tenant.smart_banners?._regulatoryData?.logo_url || "").trim();
-  let logoUrl = "https://farmaflow.online/preview-share.png";
+  let logoUrl = DEFAULT_FALLBACK_OG_LOGO;
   if ((rawLogo.startsWith("http://") || rawLogo.startsWith("https://")) && !rawLogo.startsWith("data:")) {
     logoUrl = rawLogo.startsWith("http://") ? rawLogo.replace("http://", "https://") : rawLogo;
   } else if (tenant.id && (rawLogo.length > 0 || tenant.logo)) {
@@ -877,7 +913,7 @@ async function getTenantMetaRecord(identifier: string, req: express.Request): Pr
         description = `${prodData.presentation ? `${prodData.presentation}. ` : ""}Peça online na ${storeName} com entrega rápida e pagamento facilitado no WhatsApp.`;
         const prodImg = (prodData.image || prodData.image_url || "").trim();
         if ((prodImg.startsWith("http://") || prodImg.startsWith("https://")) && !prodImg.startsWith("data:")) {
-          logoUrl = prodImg;
+          logoUrl = prodImg.startsWith("http://") ? prodImg.replace("http://", "https://") : prodImg;
         }
       }
     } catch (_) {}
@@ -907,7 +943,9 @@ function generateStoreOpenGraphHtml(meta: TenantMetaRecord): string {
       .replace(/>/g, "&gt;");
 
   const titleName = esc(meta.rawTenant?.trade_name || meta.name || "Drogaria Explendido");
-  const logoUrl = esc(meta.logoUrl || "https://nalshjhoiecxooejpiaw.supabase.co/storage/v1/object/public/product-images/logos/nosso-catalogo_logo_1790958337014.png");
+  const rawLogo = meta.logoUrl || DEFAULT_FALLBACK_OG_LOGO;
+  const logoUrl = esc(rawLogo);
+  const imageType = detectOgImageType(rawLogo);
   const descName = esc(meta.rawTenant?.trade_name || "nossa drogaria");
   const descricao = esc(`Faça seu pedido online com rapidez e comodidade na ${descName}.`);
   const currentUrl = esc(meta.canonicalUrl || "https://drogaria-esplendido.farmaflow.online");
@@ -917,15 +955,24 @@ function generateStoreOpenGraphHtml(meta: TenantMetaRecord): string {
 <head>
   <meta charset="UTF-8">
   <title>${titleName}</title>
+  <meta name="description" content="${descricao}" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="${titleName}" />
   <meta property="og:title" content="${titleName}" />
   <meta property="og:description" content="${descricao}" />
   <meta property="og:image" content="${logoUrl}" />
   <meta property="og:image:secure_url" content="${logoUrl}" />
-  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:type" content="${imageType}" />
   <meta property="og:image:width" content="600" />
   <meta property="og:image:height" content="600" />
+  <meta property="og:image:alt" content="${titleName}" />
   <meta property="og:url" content="${currentUrl}" />
-  <meta property="og:type" content="website" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="${titleName}" />
+  <meta name="twitter:description" content="${descricao}" />
+  <meta name="twitter:image" content="${logoUrl}" />
+  <link rel="icon" href="${logoUrl}" />
+  <link rel="apple-touch-icon" href="${logoUrl}" />
 </head>
 <body></body>
 </html>`;
@@ -933,9 +980,10 @@ function generateStoreOpenGraphHtml(meta: TenantMetaRecord): string {
 
 function injectStoreMetaIntoHtml(html: string, meta: TenantMetaRecord): string {
   let updated = html;
-  
+  const imageType = detectOgImageType(meta.logoUrl);
+
   updated = updated.replace(/<title>.*?<\/title>/i, `<title>${meta.title}</title>`);
-  
+
   if (updated.includes('property="og:title"')) {
     updated = updated.replace(/<meta\s+property="og:title"\s+content="[^"]*"\s*\/?>/i, `<meta property="og:title" content="${meta.title}" />`);
   }
@@ -954,6 +1002,12 @@ function injectStoreMetaIntoHtml(html: string, meta: TenantMetaRecord): string {
   if (updated.includes('property="og:image:secure_url"')) {
     updated = updated.replace(/<meta\s+property="og:image:secure_url"\s+content="[^"]*"\s*\/?>/i, `<meta property="og:image:secure_url" content="${meta.logoUrl}" />`);
   }
+  if (updated.includes('property="og:image:type"')) {
+    updated = updated.replace(/<meta\s+property="og:image:type"\s+content="[^"]*"\s*\/?>/i, `<meta property="og:image:type" content="${imageType}" />`);
+  }
+  if (updated.includes('property="og:image:alt"')) {
+    updated = updated.replace(/<meta\s+property="og:image:alt"\s+content="[^"]*"\s*\/?>/i, `<meta property="og:image:alt" content="${meta.name}" />`);
+  }
   if (updated.includes('name="twitter:card"')) {
     updated = updated.replace(/<meta\s+name="twitter:card"\s+content="[^"]*"\s*\/?>/i, `<meta name="twitter:card" content="summary_large_image" />`);
   }
@@ -969,6 +1023,10 @@ function injectStoreMetaIntoHtml(html: string, meta: TenantMetaRecord): string {
   if (updated.includes('name="description"')) {
     updated = updated.replace(/<meta\s+name="description"\s+content="[^"]*"\s*\/?>/i, `<meta name="description" content="${meta.description}" />`);
   }
+  if (meta.logoUrl && !meta.logoUrl.includes("preview-share.png")) {
+    updated = updated.replace(/<link\s+rel="icon"[^>]*>/i, `<link rel="icon" type="${imageType}" href="${meta.logoUrl}" />`);
+    updated = updated.replace(/<link\s+rel="apple-touch-icon"[^>]*>/i, `<link rel="apple-touch-icon" href="${meta.logoUrl}" />`);
+  }
 
   return updated;
 }
@@ -979,11 +1037,11 @@ app.get(["/api/v1/store/:tenantId/logo.png", "/api/store-logo/:tenantId.png"], a
     const tenantId = Array.isArray(req.params.tenantId) ? req.params.tenantId[0] : String(req.params.tenantId || "");
     const meta = await getTenantMetaRecord(tenantId, req);
     const tenant = meta?.rawTenant;
+    const rawLogoStr = String(tenant?.logo_url || tenant?.logo || tenant?.smart_banners?._regulatoryData?.logo_url || "").trim();
 
-    if (tenant && tenant.logo) {
-      const logoStr = String(tenant.logo).trim();
-      if (logoStr.startsWith("data:")) {
-        const match = logoStr.match(/^data:([a-zA-Z0-9\/+-]+);base64,(.+)$/);
+    if (rawLogoStr) {
+      if (rawLogoStr.startsWith("data:")) {
+        const match = rawLogoStr.match(/^data:([a-zA-Z0-9\/+-]+);base64,(.+)$/);
         if (match) {
           const mime = match[1];
           const buf = Buffer.from(match[2], "base64");
@@ -991,18 +1049,18 @@ app.get(["/api/v1/store/:tenantId/logo.png", "/api/store-logo/:tenantId.png"], a
           res.setHeader("Cache-Control", "public, max-age=86400, stale-while-revalidate=604800");
           return res.send(buf);
         }
-      } else if (logoStr.startsWith("http://") || logoStr.startsWith("https://")) {
+      } else if (rawLogoStr.startsWith("http://") || rawLogoStr.startsWith("https://")) {
         try {
-          const fetchRes = await fetch(logoStr);
+          const fetchRes = await fetch(rawLogoStr);
           if (fetchRes.ok) {
             const buf = Buffer.from(await fetchRes.arrayBuffer());
-            const mime = fetchRes.headers.get("content-type") || "image/png";
+            const mime = fetchRes.headers.get("content-type") || detectOgImageType(rawLogoStr);
             res.setHeader("Content-Type", mime);
             res.setHeader("Cache-Control", "public, max-age=86400, stale-while-revalidate=604800");
             return res.send(buf);
           }
         } catch (_) {}
-        return res.redirect(302, logoStr);
+        return res.redirect(302, rawLogoStr);
       }
     }
 
@@ -1047,21 +1105,22 @@ app.get(["/loja/:slug", "/loja/:slug/*all", "/produto/:id", "/produto/:id/*all",
       return res.send(generateStoreOpenGraphHtml(meta));
     }
 
-    // Para navegadores regulares: serve imediatamente da memória RAM em < 5ms sem bloquear no Supabase!
     const htmlFromRam = getIndexHtmlFromRam();
     if (!htmlFromRam) return next();
 
-    const cachedTenant = getTenantFromRamCacheSync(identifier);
-    if (cachedTenant) {
-      const meta = buildTenantMetaRecordFromTenant(cachedTenant, req);
+    let tenantObj = getTenantFromRamCacheSync(identifier);
+    if (!tenantObj && identifier) {
+      tenantObj = await getTenantCachedOrFetch(identifier).catch(() => null);
+    }
+
+    if (tenantObj) {
+      const meta = buildTenantMetaRecordFromTenant(tenantObj, req);
       const injected = injectStoreMetaIntoHtml(htmlFromRam, meta);
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
       return res.send(injected);
     }
 
-    // Se ainda não estiver no cache em memória, aquece o cache em background e entrega o index.html imediatamente
-    getTenantCachedOrFetch(identifier).catch(() => {});
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     return res.send(htmlFromRam);
@@ -1095,17 +1154,20 @@ app.get("/", async (req, res, next) => {
             return res.send(generateStoreOpenGraphHtml(meta));
           }
         } else {
-          // Navegador regular: entrega da RAM imediatamente (< 5ms) sem aguardar query no Supabase
           const htmlFromRam = getIndexHtmlFromRam();
           if (htmlFromRam) {
-            const cachedTenant = getTenantFromRamCacheSync(identifier);
-            if (cachedTenant) {
-              const meta = buildTenantMetaRecordFromTenant(cachedTenant, req);
+            let tenantObj = getTenantFromRamCacheSync(identifier);
+            if (!tenantObj) {
+              tenantObj = await getTenantCachedOrFetch(identifier).catch(() => null);
+            }
+            if (tenantObj) {
+              const meta = buildTenantMetaRecordFromTenant(tenantObj, req);
               res.setHeader("Content-Type", "text/html; charset=utf-8");
+              res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
               return res.send(injectStoreMetaIntoHtml(htmlFromRam, meta));
             }
-            getTenantCachedOrFetch(identifier).catch(() => {});
             res.setHeader("Content-Type", "text/html; charset=utf-8");
+            res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
             return res.send(htmlFromRam);
           }
         }
@@ -1231,13 +1293,19 @@ app.get(["/api/v1/manifest/:tenantId", "/manifest.json"], async (req, res) => {
   try {
     const rawParam = req.params.tenantId;
     const rawQueryTenant = (req.query.tenant as string) || (req.query.tenantId as string) || (req.query.p as string);
-    const tenantQueryValue = (rawParam && rawParam !== "admin" && rawParam !== "default") ? rawParam : rawQueryTenant;
+    let tenantQueryValue = (rawParam && rawParam !== "admin" && rawParam !== "default") ? rawParam : rawQueryTenant;
+
+    if (!tenantQueryValue) {
+      const host = (req.headers["x-forwarded-host"] || req.headers.host || "").toString().split(":")[0].toLowerCase();
+      if ((host.endsWith(".farmaflow.online") || host.endsWith(".nexoia.online")) && !["www", "farmaflow", "nexoia", "app", "admin", "api", "portal"].includes(host.split(".")[0])) {
+        tenantQueryValue = host.split(".")[0];
+      }
+    }
+
     let tenantData: any = null;
 
     if (typeof tenantQueryValue === "string") {
-      // Simple sanitize to prevent injection, only allow alphanumeric, hyphens, and underscores
       const cleanedQuery = tenantQueryValue.replace(/[^a-zA-Z0-9\-_]/g, "");
-      
       if (cleanedQuery) {
         tenantData = await getTenantCachedOrFetch(cleanedQuery);
       }
@@ -1261,6 +1329,8 @@ app.get(["/api/v1/manifest/:tenantId", "/manifest.json"], async (req, res) => {
     const name = tenantData?.name || "FarmaFlow AI";
     const primaryColor = tenantData?.primary_color || tenantData?.primarycolor || "#059669";
     const segment = tenantData?.slug || tenantData?.id || "default";
+    const resolvedLogo = (tenantData?.logo_url || tenantData?.logo || "").trim();
+    const iconType = resolvedLogo ? detectOgImageType(resolvedLogo) : "image/svg+xml";
 
     res.setHeader("Content-Type", "application/manifest+json");
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
@@ -1287,15 +1357,15 @@ app.get(["/api/v1/manifest/:tenantId", "/manifest.json"], async (req, res) => {
         theme_color: primaryColor,
         icons: [
           {
-            src: tenantData?.logo || "/icon-192.svg",
+            src: resolvedLogo || "/icon-192.svg",
             sizes: "192x192",
-            type: tenantData?.logo?.endsWith(".svg") ? "image/svg+xml" : "image/png",
+            type: resolvedLogo ? iconType : "image/svg+xml",
             purpose: "any maskable"
           },
           {
-            src: tenantData?.logo || "/icon-512.svg",
+            src: resolvedLogo || "/icon-512.svg",
             sizes: "512x512",
-            type: tenantData?.logo?.endsWith(".svg") ? "image/svg+xml" : "image/png",
+            type: resolvedLogo ? iconType : "image/svg+xml",
             purpose: "any maskable"
           }
         ]
@@ -1318,15 +1388,15 @@ app.get(["/api/v1/manifest/:tenantId", "/manifest.json"], async (req, res) => {
       theme_color: primaryColor,
       icons: [
         {
-          src: tenantData?.logo || "/icon-192.svg",
+          src: resolvedLogo || "/icon-192.svg",
           sizes: "192x192",
-          type: tenantData?.logo?.endsWith(".svg") ? "image/svg+xml" : "image/png",
+          type: resolvedLogo ? iconType : "image/svg+xml",
           purpose: "any maskable"
         },
         {
-          src: tenantData?.logo || "/icon-512.svg",
+          src: resolvedLogo || "/icon-512.svg",
           sizes: "512x512",
-          type: tenantData?.logo?.endsWith(".svg") ? "image/svg+xml" : "image/png",
+          type: resolvedLogo ? iconType : "image/svg+xml",
           purpose: "any maskable"
         }
       ]
@@ -4227,6 +4297,14 @@ app.post("/api/v1/tenants/admin", async (req, res) => {
     const enrichedPayload = { ...payload };
     const pharmacyName = enrichedPayload.name || "Nossa Drogaria";
     const pharmacySlug = enrichedPayload.slug || (enrichedPayload.id ? String(enrichedPayload.id).replace(/^store_/, '') : '');
+    if (!enrichedPayload.slug && pharmacySlug) {
+      enrichedPayload.slug = pharmacySlug;
+    }
+    const resolvedLogoVal = (enrichedPayload.logo_url || enrichedPayload.logo || "").trim();
+    if (resolvedLogoVal) {
+      enrichedPayload.logo_url = resolvedLogoVal;
+      enrichedPayload.logo = resolvedLogoVal;
+    }
 
     if (!enrichedPayload.welcome_message_text) {
       enrichedPayload.welcome_message_text = `Olá! Sou o assistente virtual da ${pharmacyName}. Em que posso te ajudar hoje?`;
@@ -4566,6 +4644,51 @@ app.post("/api/v1/tenants/admin", async (req, res) => {
         }
       } catch (instErr: any) {
         console.warn("[ONBOARDING] Aviso ao criar whatsapp_instance padrão:", instErr.message);
+      }
+    }
+
+    // Atualizar imediatamente o cache em RAM de metadados/OpenGraph da loja e otimizar logo > 200KB
+    allTenantsRamCache = null;
+    if (savedTenant && targetStoreId) {
+      storeTenantInRamCache(savedTenant, [targetStoreId, savedTenant.slug || targetStoreId]);
+      const candidateLogoUrl = String(savedTenant.logo_url || savedTenant.logo || "").trim();
+      if (candidateLogoUrl.startsWith("http")) {
+        void (async () => {
+          try {
+            const checkRes = await fetch(candidateLogoUrl);
+            if (!checkRes.ok) return;
+            const origBuf = Buffer.from(await checkRes.arrayBuffer());
+            if (origBuf.length > 200 * 1024) {
+              const wsrvUrl = `https://wsrv.nl/?url=${encodeURIComponent(candidateLogoUrl)}&w=600&h=600&fit=cover&output=jpg&q=82`;
+              const optRes = await fetch(wsrvUrl);
+              if (!optRes.ok) return;
+              const optBuf = Buffer.from(await optRes.arrayBuffer());
+              const safeId = String(targetStoreId).replace(/[^a-zA-Z0-9_-]/g, "_");
+              const newPath = `logos/${safeId}_logo_og_${Date.now()}.jpg`;
+              const { error: upErr } = await supabaseAdmin.storage
+                .from("product-images")
+                .upload(newPath, optBuf, {
+                  contentType: "image/jpeg",
+                  cacheControl: "86400",
+                  upsert: true,
+                });
+              if (!upErr) {
+                const { data: pubData } = supabaseAdmin.storage.from("product-images").getPublicUrl(newPath);
+                if (pubData?.publicUrl) {
+                  await supabaseAdmin
+                    .from("tenants")
+                    .update({ logo_url: pubData.publicUrl, logo: pubData.publicUrl })
+                    .eq("id", targetStoreId);
+                  savedTenant.logo_url = pubData.publicUrl;
+                  savedTenant.logo = pubData.publicUrl;
+                  storeTenantInRamCache(savedTenant, [targetStoreId, savedTenant.slug || targetStoreId]);
+                  allTenantsRamCache = null;
+                  console.log(`[OG_LOGO_OPTIMIZER] Logo de ${targetStoreId} otimizada automaticamente (${Math.round(origBuf.length / 1024)}KB -> ${Math.round(optBuf.length / 1024)}KB): ${pubData.publicUrl}`);
+                }
+              }
+            }
+          } catch (_) {}
+        })();
       }
     }
 
@@ -14676,7 +14799,7 @@ async function startServer() {
     }));
 
     // SPA Fallback: qualquer rota GET que não comece com /api/ ou /s/ entrega o dist/index.html direto da RAM em < 5ms
-    app.get("*all", (req, res, next) => {
+    app.get("*all", async (req, res, next) => {
       if (req.path.startsWith("/api/") || req.path.startsWith("/s/")) {
         return next();
       }
@@ -14685,6 +14808,20 @@ async function startServer() {
       res.setHeader('Expires', '0');
       const htmlFromRam = getIndexHtmlFromRam();
       if (htmlFromRam) {
+        const host = (req.headers["x-forwarded-host"] || req.headers.host || "").toString().split(":")[0].toLowerCase();
+        const isSubdomain = (host.endsWith(".farmaflow.online") || host.endsWith(".nexoia.online")) && !["www", "farmaflow", "nexoia", "app", "admin", "api", "portal"].includes(host.split(".")[0]);
+        if (isSubdomain) {
+          const subdomainId = host.split(".")[0];
+          let tenantObj = getTenantFromRamCacheSync(subdomainId);
+          if (!tenantObj) {
+            tenantObj = await getTenantCachedOrFetch(subdomainId).catch(() => null);
+          }
+          if (tenantObj) {
+            const meta = buildTenantMetaRecordFromTenant(tenantObj, req);
+            res.setHeader("Content-Type", "text/html; charset=utf-8");
+            return res.send(injectStoreMetaIntoHtml(htmlFromRam, meta));
+          }
+        }
         res.setHeader("Content-Type", "text/html; charset=utf-8");
         return res.send(htmlFromRam);
       }
@@ -14694,6 +14831,67 @@ async function startServer() {
 
   app.listen(listenPort, "0.0.0.0", () => {
     console.log(`Server running on http://0.0.0.0:${listenPort}`);
+
+    // Pré-aquece o cache em RAM de todas as drogarias e garante que todas as logos tenham < 200KB para o WhatsApp Open Graph
+    void (async () => {
+      try {
+        const { data: tenants } = await supabaseAdmin.from("tenants").select("*");
+        if (Array.isArray(tenants)) {
+          allTenantsRamCache = {
+            list: tenants,
+            expiresAt: Date.now() + TENANT_RAM_CACHE_TTL_MS,
+          };
+          for (const t of tenants) {
+            const updates: Record<string, any> = {};
+            if (!t.slug && t.id) {
+              updates.slug = t.id;
+              t.slug = t.id;
+            }
+            const currentLogo = String(t.logo_url || t.logo || "").trim();
+            if (currentLogo.startsWith("http")) {
+              try {
+                const checkRes = await fetch(currentLogo);
+                if (checkRes.ok) {
+                  const origBuf = Buffer.from(await checkRes.arrayBuffer());
+                  if (origBuf.length > 200 * 1024) {
+                    const wsrvUrl = `https://wsrv.nl/?url=${encodeURIComponent(currentLogo)}&w=600&h=600&fit=cover&output=jpg&q=82`;
+                    const optRes = await fetch(wsrvUrl);
+                    if (optRes.ok) {
+                      const optBuf = Buffer.from(await optRes.arrayBuffer());
+                      const safeId = String(t.id).replace(/[^a-zA-Z0-9_-]/g, "_");
+                      const newPath = `logos/${safeId}_logo_og_${Date.now()}.jpg`;
+                      const { error: upErr } = await supabaseAdmin.storage
+                        .from("product-images")
+                        .upload(newPath, optBuf, {
+                          contentType: "image/jpeg",
+                          cacheControl: "86400",
+                          upsert: true,
+                        });
+                      if (!upErr) {
+                        const { data: pubData } = supabaseAdmin.storage.from("product-images").getPublicUrl(newPath);
+                        if (pubData?.publicUrl) {
+                          updates.logo_url = pubData.publicUrl;
+                          updates.logo = pubData.publicUrl;
+                          t.logo_url = pubData.publicUrl;
+                          t.logo = pubData.publicUrl;
+                          console.log(`[OG_BOOT_OPTIMIZER] Logo de ${t.id} otimizada para WhatsApp (${Math.round(origBuf.length / 1024)}KB -> ${Math.round(optBuf.length / 1024)}KB)`);
+                        }
+                      }
+                    }
+                  }
+                }
+              } catch (_) {}
+            }
+            if (Object.keys(updates).length > 0) {
+              await supabaseAdmin.from("tenants").update(updates).eq("id", t.id);
+            }
+            storeTenantInRamCache(t);
+          }
+        }
+      } catch (e: any) {
+        console.warn("[OG_BOOT_OPTIMIZER Warning]:", e?.message || e);
+      }
+    })();
 
     // Inicializa chaves VAPID e tabela push_subscriptions no boot
     ensurePushSubscriptionsTable()

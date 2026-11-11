@@ -166,20 +166,10 @@ function getCandidateBaseUrls() {
     const primary = sanitizeBaseUrl(rawEnv);
     const fallbacks = [
         'https://farmaflow.online/api/v1',
-        'https://farmaflow.site/api/v1',
-        'https://www.farmaflow.online/api/v1',
-        'https://www.farmaflow.site/api/v1',
-        'http://farmaflow.online/api/v1',
-        'http://farmaflow.site/api/v1'
+        'https://www.farmaflow.online/api/v1'
     ];
 
     const candidates = [primary];
-    if (primary.startsWith('https://')) {
-        const httpPrimary = primary.replace('https://', 'http://');
-        if (!candidates.includes(httpPrimary)) {
-            candidates.push(httpPrimary);
-        }
-    }
     for (const fb of fallbacks) {
         if (!candidates.includes(fb)) {
             candidates.push(fb);
@@ -191,13 +181,13 @@ function getCandidateBaseUrls() {
 let activeBaseUrl = getCandidateBaseUrls()[0];
 
 /**
- * Executa requisição POST com fallback inteligente entre os domínios da FarmaFlow
+ * Executa requisição POST com fallback inteligente apenas em caso de erro de rede/DNS/SSL
  */
 async function postWithFallback(pathSuffix, data, config = {}) {
     const candidates = getCandidateBaseUrls();
     const sortedCandidates = [activeBaseUrl, ...candidates.filter(c => c !== activeBaseUrl)];
 
-    let lastError = null;
+    let firstError = null;
     for (let i = 0; i < sortedCandidates.length; i++) {
         const baseUrl = sortedCandidates[i];
         const targetUrl = `${baseUrl}${pathSuffix.startsWith('/') ? '' : '/'}${pathSuffix}`;
@@ -218,40 +208,37 @@ async function postWithFallback(pathSuffix, data, config = {}) {
             }
             return { response, targetUrl };
         } catch (err) {
-            lastError = err;
+            if (!firstError) firstError = err;
+
             const isSslOrNetwork =
-                err.code === 'EPROTO' ||
-                err.code === 'ECONNRESET' ||
-                err.code === 'ECONNREFUSED' ||
-                err.code === 'ENOTFOUND' ||
-                err.code === 'ETIMEDOUT' ||
-                err.code === 'ECONNABORTED' ||
-                (err.message && (
-                    err.message.includes('SSL') ||
-                    err.message.includes('tlsv1') ||
-                    err.message.includes('alert') ||
-                    err.message.includes('timeout')
-                ));
+                !err.response && (
+                    err.code === 'EPROTO' ||
+                    err.code === 'ECONNRESET' ||
+                    err.code === 'ECONNREFUSED' ||
+                    err.code === 'ENOTFOUND' ||
+                    err.code === 'ETIMEDOUT' ||
+                    err.code === 'ECONNABORTED' ||
+                    err.code === 'EAI_AGAIN' ||
+                    (err.message && (
+                        err.message.includes('SSL') ||
+                        err.message.includes('tlsv1') ||
+                        err.message.includes('alert') ||
+                        err.message.includes('timeout') ||
+                        err.message.includes('socket hang up')
+                    ))
+                );
 
             if (i < sortedCandidates.length - 1 && isSslOrNetwork) {
                 console.warn(`⚠️ [REDE/SSL] Falha na URL "${targetUrl}" (${err.code || err.message}). Tentando rota alternativa...`);
                 continue;
             }
-            // Se for erro HTTP 4xx (exceto 408/413/429), não adianta tentar outra URL
-            if (
-                err.response &&
-                err.response.status >= 400 &&
-                err.response.status < 500 &&
-                err.response.status !== 408 &&
-                err.response.status !== 413 &&
-                err.response.status !== 429
-            ) {
-                break;
-            }
+
+            // Se houve resposta HTTP do servidor (ex: 4xx/5xx), não troca para outro domínio para não mascarar o erro real com 405
+            break;
         }
     }
 
-    throw lastError;
+    throw firstError;
 }
 
 async function validateToken(token) {
@@ -296,8 +283,10 @@ async function validateToken(token) {
 
 /**
  * Envia um único lote com até MAX_BATCH_RETRIES tentativas e timeout de 60s.
+ * Se o lote de 200 itens falhar após as tentativas (ex: erro em algum item específico),
+ * divide automaticamente o lote em sub-lotes menores (50 itens) para isolar e salvar todos os itens válidos.
  */
-async function sendSingleBatchWithRetry(apiKey, batch, batchNumber, totalBatches, machineId) {
+async function sendSingleBatchWithRetry(apiKey, batch, batchNumber, totalBatches, machineId, isSubBatch = false) {
     let lastBatchError = null;
 
     for (let attempt = 1; attempt <= MAX_BATCH_RETRIES; attempt++) {
@@ -324,7 +313,10 @@ async function sendSingleBatchWithRetry(apiKey, batch, batchNumber, totalBatches
             };
         } catch (error) {
             lastBatchError = error;
-            const statusInfo = error.response ? `HTTP ${error.response.status}` : (error.code || error.message);
+            const detailMsg = error.response?.data?.details || error.response?.data?.error || '';
+            const statusInfo = error.response
+                ? `HTTP ${error.response.status}${detailMsg ? ` (${detailMsg})` : ''}`
+                : (error.code || error.message);
             console.warn(
                 `⚠️ [Sincronizando] Falha no lote ${batchNumber}/${totalBatches} ` +
                 `(Tentativa ${attempt}/${MAX_BATCH_RETRIES}): ${statusInfo}`
@@ -335,6 +327,31 @@ async function sendSingleBatchWithRetry(apiKey, batch, batchNumber, totalBatches
                 console.log(`⏳ Aguardando ${retryDelay}ms antes de reenviar o lote ${batchNumber}...`);
                 await sleep(retryDelay);
             }
+        }
+    }
+
+    // Fallback de Sub-lotes: divide o lote de 200 em fatias menores de 50 registros para garantir o salvamento
+    if (!isSubBatch && batch.length > 50) {
+        console.log(`🔄 [Sincronizando] Dividindo lote ${batchNumber} em sub-lotes de 50 registros para envio seguro...`);
+        const subChunks = chunkArray(batch, 50);
+        let subSuccess = 0;
+        for (let s = 0; s < subChunks.length; s++) {
+            const subRes = await sendSingleBatchWithRetry(
+                apiKey,
+                subChunks[s],
+                `${batchNumber}.${s + 1}`,
+                totalBatches,
+                machineId,
+                true
+            );
+            if (subRes.success) subSuccess++;
+            await sleep(300);
+        }
+        if (subSuccess > 0) {
+            return {
+                success: true,
+                partialSubBatch: subSuccess < subChunks.length
+            };
         }
     }
 
