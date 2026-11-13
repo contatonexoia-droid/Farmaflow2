@@ -458,6 +458,105 @@ async function sendHeartbeat(apiKey) {
     }
 }
 
+/**
+ * Busca pedidos marcados como 'pending_erp' para esta farmácia no servidor FarmaFlow
+ */
+async function fetchPendingOrders(apiKey) {
+    const machineId = getMachineId();
+    const candidates = getCandidateBaseUrls();
+    const sortedCandidates = [activeBaseUrl, ...candidates.filter(c => c !== activeBaseUrl)];
+
+    for (let i = 0; i < sortedCandidates.length; i++) {
+        const baseUrl = sortedCandidates[i];
+        const targetUrl = `${baseUrl}/integration/orders/pending`;
+
+        try {
+            const response = await apiClient.get(targetUrl, {
+                timeout: 15000,
+                headers: {
+                    'x-api-key': apiKey,
+                    'x-machine-id': machineId,
+                    'x-agent-target': baseUrl
+                },
+                params: {
+                    apiKey,
+                    machineId
+                }
+            });
+
+            if (activeBaseUrl !== baseUrl) {
+                activeBaseUrl = baseUrl;
+            }
+            const orders = response.data?.orders || response.data?.data || [];
+            return Array.isArray(orders) ? orders : [];
+        } catch (err) {
+            const isSslOrNetwork = !err.response;
+            if (i < sortedCandidates.length - 1 && isSslOrNetwork) {
+                continue;
+            }
+            break;
+        }
+    }
+    return [];
+}
+
+/**
+ * Confirma ao servidor FarmaFlow que a Pré-Venda foi gravada com sucesso no SQL Server do PDV
+ */
+async function confirmOrderInErp(apiKey, orderId, erpResult) {
+    const machineId = getMachineId();
+    const { response } = await postWithFallback(
+        `/integration/orders/${encodeURIComponent(orderId)}/confirm`,
+        {
+            apiKey,
+            machineId,
+            machine_id: machineId,
+            orderId,
+            ...erpResult
+        },
+        {
+            headers: {
+                'x-api-key': apiKey,
+                'x-machine-id': machineId,
+                'Content-Type': 'application/json'
+            },
+            timeout: 20000
+        }
+    );
+    return response.data;
+}
+
+/**
+ * Reporta ao servidor FarmaFlow eventual erro ao gravar a Pré-Venda no PDV
+ */
+async function reportOrderErpError(apiKey, orderId, errorMessage) {
+    const machineId = getMachineId();
+    try {
+        const { response } = await postWithFallback(
+            `/integration/orders/${encodeURIComponent(orderId)}/error`,
+            {
+                apiKey,
+                machineId,
+                machine_id: machineId,
+                orderId,
+                error: String(errorMessage || 'Erro ao gravar Pré-Venda no PDV').slice(0, 1000)
+            },
+            {
+                headers: {
+                    'x-api-key': apiKey,
+                    'x-machine-id': machineId,
+                    'Content-Type': 'application/json'
+                },
+                timeout: 15000
+            }
+        );
+        return response.data;
+    } catch (e) {
+        console.error(`⚠️ Falha ao reportar erro do pedido ${orderId} para a nuvem:`, e.message);
+        return null;
+    }
+}
+
 module.exports = {
     BATCH_SIZE,
     BATCH_DELAY_MS,
@@ -466,9 +565,13 @@ module.exports = {
     validateToken,
     sendData,
     sendHeartbeat,
+    fetchPendingOrders,
+    confirmOrderInErp,
+    reportOrderErpError,
     getMachineId,
     sanitizeBaseUrl,
     activeBaseUrl,
     chunkArray,
     sleep
 };
+

@@ -1,9 +1,18 @@
 const readline = require('readline');
 const { loadConfig, saveConfig, getLastSyncDate, updateLastSyncDate } = require('./shared/state');
-const { validateToken, sendData, sendHeartbeat, BATCH_SIZE } = require('./shared/api');
+const {
+    validateToken,
+    sendData,
+    sendHeartbeat,
+    fetchPendingOrders,
+    confirmOrderInErp,
+    reportOrderErpError,
+    BATCH_SIZE
+} = require('./shared/api');
 
 const SYNC_INTERVAL_MS = 60000;
 const RETRY_INTERVAL_MS = 300000;
+const ORDER_POLL_INTERVAL_MS = 5000;
 
 async function askForToken() {
     const rl = readline.createInterface({
@@ -77,6 +86,7 @@ async function startAgent(expectedErpType, ConnectorClass) {
     }
 
     const connector = new ConnectorClass(config.dbConfig);
+    const processedOrderIds = new Map();
 
     async function heartbeatLoop() {
         try {
@@ -85,6 +95,45 @@ async function startAgent(expectedErpType, ConnectorClass) {
             console.log(`⚠️ Alerta: Não foi possível atualizar o status (heartbeat) com o servidor: ${hbError.message}`);
         }
         setTimeout(heartbeatLoop, 60000);
+    }
+
+    async function orderPollLoop() {
+        if (typeof connector.insertPreSaleOrder !== 'function') {
+            return;
+        }
+
+        try {
+            const pendingOrders = await fetchPendingOrders(config.apiKey);
+            if (Array.isArray(pendingOrders) && pendingOrders.length > 0) {
+                const nowMs = Date.now();
+                for (const [id, ts] of processedOrderIds.entries()) {
+                    if (nowMs - ts > 120000) processedOrderIds.delete(id);
+                }
+
+                for (const order of pendingOrders) {
+                    if (!order || !order.id) continue;
+                    if (processedOrderIds.has(order.id)) continue;
+
+                    console.log(`\n🛒 [PDV PRÉ-VENDA] Recebido pedido #${order.id} para gravação no PDV...`);
+                    try {
+                        const erpResult = await connector.insertPreSaleOrder(order);
+                        processedOrderIds.set(order.id, Date.now());
+                        await confirmOrderInErp(config.apiKey, order.id, erpResult);
+                        console.log(
+                            `✅ [PDV PRÉ-VENDA] Pedido #${order.id} confirmado na nuvem ` +
+                            `(Pré-Venda #${erpResult.codigoPV} • Orçamento #${erpResult.codigoOrcamento}).`
+                        );
+                    } catch (orderErr) {
+                        console.error(`❌ [PDV PRÉ-VENDA] Falha ao gravar pedido #${order.id} no banco local:`, orderErr.message);
+                        await reportOrderErpError(config.apiKey, order.id, orderErr.message);
+                    }
+                }
+            }
+        } catch (pollErr) {
+            // Silencioso em falhas transitórias de rede para não poluir o console a cada 5s
+        }
+
+        setTimeout(orderPollLoop, ORDER_POLL_INTERVAL_MS);
     }
 
     async function loop() {
@@ -127,7 +176,12 @@ async function startAgent(expectedErpType, ConnectorClass) {
 
     // Inicia os loops
     heartbeatLoop();
+    if (typeof connector.insertPreSaleOrder === 'function') {
+        console.log('🛒 Monitoramento de Pedidos para Pré-Venda do PDV ativo (a cada 5s).');
+        orderPollLoop();
+    }
     loop();
 }
 
 module.exports = { startAgent };
+

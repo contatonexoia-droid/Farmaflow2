@@ -137,6 +137,136 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
     fetchPrescriptions();
   }, [tenant?.id]);
 
+  const [livePdvMap, setLivePdvMap] = useState<
+    Record<
+      string,
+      {
+        status: OrderStatus;
+        codigoPV?: string | number;
+        codigoOrcamento?: string | number;
+        codigoVendaInova?: string | number;
+        erpError?: string;
+      }
+    >
+  >({});
+
+  const getEffectiveOrderStatus = (order: Order): OrderStatus => {
+    return livePdvMap[order.id]?.status || order.status;
+  };
+
+  const getOrderPdvLabel = (order: Order): string => {
+    const live = livePdvMap[order.id];
+    const custPdv = (order.customer as any)?._pdv || {};
+    const pv =
+      live?.codigoPV ??
+      order.codigoPV ??
+      order.codigo_pv ??
+      custPdv.codigoPV ??
+      (order.customer as any)?.codigoPV;
+    const orc =
+      live?.codigoOrcamento ??
+      order.codigoOrcamento ??
+      order.codigo_orcamento ??
+      custPdv.codigoOrcamento ??
+      (order.customer as any)?.codigoOrcamento;
+    const rawInova =
+      live?.codigoVendaInova ??
+      order.codigoVendaInova ??
+      order.codigo_venda_inova ??
+      custPdv.codigoVendaInova ??
+      (order.customer as any)?.codigoVendaInova;
+
+    if (pv && orc) {
+      return `No PDV (Pré-Venda #${pv} • Orç #${orc})`;
+    }
+    if (pv) {
+      return `No PDV (Pré-Venda #${pv})`;
+    }
+    if (rawInova && String(rawInova).toLowerCase().includes("pré-venda")) {
+      return `No PDV (${rawInova})`;
+    }
+    if (orc || rawInova) {
+      return `No PDV (Pré-Venda #${orc || rawInova})`;
+    }
+    return "No PDV (Enviado)";
+  };
+
+  const getOrderErpError = (order: Order): string | undefined => {
+    const live = livePdvMap[order.id];
+    const custPdv = (order.customer as any)?._pdv || {};
+    return (
+      live?.erpError ||
+      order.erpError ||
+      order.erp_error ||
+      custPdv.erpError ||
+      (order.customer as any)?.erpError ||
+      undefined
+    );
+  };
+
+  // Monitora em tempo real os pedidos em 'pending_erp' até que o Agente Local confirme a gravação no SQL Server
+  useEffect(() => {
+    if (!tenant?.id) return;
+
+    const hasPendingErp = (orders || []).some(
+      (o) => (livePdvMap[o.id]?.status || o.status) === "pending_erp",
+    );
+    if (!hasPendingErp) return;
+
+    let cancelled = false;
+    const timer = setInterval(async () => {
+      try {
+        const res = await fetch(
+          `/api/v1/tenants/${encodeURIComponent(tenant.id)}/orders?t=${Date.now()}`,
+        );
+        if (!res.ok || cancelled) return;
+        const freshOrders = await res.json();
+        if (!Array.isArray(freshOrders) || cancelled) return;
+
+        for (const dbOrd of freshOrders) {
+          if (!dbOrd || !dbOrd.id) continue;
+          const localStatus = livePdvMap[dbOrd.id]?.status || orders.find((o) => o.id === dbOrd.id)?.status;
+          if (localStatus === "pending_erp" && dbOrd.status !== "pending_erp") {
+            const cust = dbOrd.customer || {};
+            const pdvMeta = cust._pdv || {};
+            const nextStatus = (dbOrd.status || "enviado_ao_pdv") as OrderStatus;
+            const pv = pdvMeta.codigoPV ?? cust.codigoPV;
+            const orc = pdvMeta.codigoOrcamento ?? cust.codigoOrcamento ?? dbOrd.codigo_venda_inova;
+            const vInova = pdvMeta.codigoVendaInova ?? cust.codigoVendaInova ?? dbOrd.codigo_venda_inova;
+            const errStr = pdvMeta.erpError ?? cust.erpError;
+
+            setLivePdvMap((prev) => ({
+              ...prev,
+              [dbOrd.id]: {
+                status: nextStatus,
+                codigoPV: pv,
+                codigoOrcamento: orc,
+                codigoVendaInova: vInova,
+                erpError: errStr,
+              },
+            }));
+
+            onUpdateOrderCustomer(dbOrd.id, {
+              status: nextStatus,
+              codigoPV: pv,
+              codigoOrcamento: orc,
+              codigoVendaInova: vInova,
+              erpError: errStr,
+              customer: cust,
+            });
+          }
+        }
+      } catch (e) {
+        // Silencioso durante o polling
+      }
+    }, 3000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [tenant?.id, orders, livePdvMap, onUpdateOrderCustomer]);
+
   const sendOrderToInovafarmaErp = async (order: Order, showUiAlert = false) => {
     const resolvedTenantId = order.tenantId || tenant?.id;
     if (!resolvedTenantId) return null;
@@ -178,16 +308,50 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
   const handleSendToPDV = async (order: Order) => {
     try {
       setSendingToPDV(order.id);
+      setLivePdvMap((prev) => ({
+        ...prev,
+        [order.id]: {
+          ...prev[order.id],
+          status: "pending_erp",
+          erpError: undefined,
+        },
+      }));
+
       const data = await sendOrderToInovafarmaErp(order, true);
-      onUpdateOrderStatus(order.id, 'enviado_ao_pdv' as OrderStatus);
-      alert(
-        data?.codigoVendaInova
-          ? `Pedido enviado para a fila do caixa! (Código Inovafarma: ${data.codigoVendaInova})`
-          : 'Pedido enviado para a fila do caixa!',
-      );
+
+      if (data?.queuedForAgent || data?.status === "pending_erp") {
+        setLivePdvMap((prev) => ({
+          ...prev,
+          [order.id]: {
+            status: "pending_erp",
+            erpError: undefined,
+          },
+        }));
+        onUpdateOrderStatus(order.id, "pending_erp" as OrderStatus);
+      } else {
+        setLivePdvMap((prev) => ({
+          ...prev,
+          [order.id]: {
+            status: "enviado_ao_pdv",
+            codigoPV: data?.codigoPV,
+            codigoOrcamento: data?.codigoOrcamento,
+            codigoVendaInova: data?.codigoVendaInova,
+            erpError: undefined,
+          },
+        }));
+        onUpdateOrderStatus(order.id, "enviado_ao_pdv" as OrderStatus);
+      }
     } catch (error: any) {
       console.error(error);
-      alert(`Falha ao enviar para o PDV:\n${String(error.message || '').slice(0, 2000)}`);
+      const errMsg = String(error.message || "Falha ao enviar para o PDV").slice(0, 1000);
+      setLivePdvMap((prev) => ({
+        ...prev,
+        [order.id]: {
+          status: "erro_integracao_pdv",
+          erpError: errMsg,
+        },
+      }));
+      onUpdateOrderStatus(order.id, "erro_integracao_pdv" as OrderStatus);
     } finally {
       setSendingToPDV(null);
     }
@@ -689,7 +853,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
     reader.readAsDataURL(file);
   };
 
-  const getStatusBadge = (status: string) => {
+  const getStatusBadge = (status: string, order?: Order) => {
     switch (status) {
       case "confirmed":
         return (
@@ -709,17 +873,24 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
             <XCircle size={10} /> Cancelado
           </span>
         );
+      case "pending_erp":
+        return (
+          <span className="bg-indigo-100 text-indigo-700 px-3 py-1.5 rounded-full text-[10px] font-black uppercase flex items-center gap-1.5 w-fit border border-indigo-200">
+            <span className="animate-spin border-2 border-indigo-600 border-t-transparent rounded-full w-2.5 h-2.5"></span>
+            Enviando para o PDV...
+          </span>
+        );
       case "enviado_ao_pdv":
         return (
-          <span className="bg-indigo-100 text-indigo-700 px-3 py-1.5 rounded-full text-[10px] font-black uppercase flex items-center gap-1 w-fit border border-indigo-200">
-            <Upload size={10} /> Enviado ao PDV
+          <span className="bg-emerald-100 text-emerald-800 px-3 py-1.5 rounded-full text-[10px] font-black uppercase flex items-center gap-1 w-fit border border-emerald-300">
+            <CheckCircle size={10} /> {order ? getOrderPdvLabel(order) : "No PDV"}
           </span>
         );
       case "impresso_no_pdv":
       case "concluido_no_pdv":
         return (
           <span className="bg-emerald-100 text-emerald-700 px-3 py-1.5 rounded-full text-[10px] font-black uppercase flex items-center gap-1 w-fit border border-emerald-200">
-            <CheckCircle size={10} /> Concluído no PDV
+            <CheckCircle size={10} /> {order ? getOrderPdvLabel(order) : "Concluído no PDV"}
           </span>
         );
       case "erro_integracao_pdv":
@@ -873,7 +1044,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                       <span className="text-[10px] font-bold text-gray-400">
                         {safeDate(order.date)}
                       </span>
-                      {getStatusBadge(order.status)}
+                      {getStatusBadge(getEffectiveOrderStatus(order), order)}
                       {isPendingLongTime && (
                         <span className="text-[10px] font-black text-red-600 bg-red-100 px-2 py-1 rounded-md flex items-center gap-1">
                           <AlertTriangle size={12} /> Pendente há muito tempo
@@ -1001,27 +1172,60 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                       </div>
                     </div>
 
-                    <div className="flex flex-col sm:flex-row items-center gap-3 justify-end w-full">
-                      {(order.status === "pending" || order.status === "confirmed" || order.status === "erro_integracao_pdv") && !isDelivererMode && (
-                        <button
-                          onClick={() => handleSendToPDV(order)}
-                          disabled={sendingToPDV === order.id}
-                          className="w-full sm:w-auto px-6 py-4 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white rounded-2xl text-[11px] font-black uppercase tracking-widest transition-all shadow-lg active:scale-95 flex items-center justify-center gap-2"
-                        >
-                          {sendingToPDV === order.id ? (
-                            <span className="flex items-center gap-2">
-                              <span className="animate-spin border-2 border-white border-t-transparent rounded-full w-4 h-4"></span>
-                              Enviando...
-                            </span>
-                          ) : (
-                            <>
-                              <Upload size={16} /> Enviar para PDV
-                            </>
-                          )}
-                        </button>
-                      )}
+                    {getEffectiveOrderStatus(order) === "erro_integracao_pdv" && getOrderErpError(order) && (
+                      <div className="w-full bg-orange-50 border border-orange-200 text-orange-800 px-4 py-2.5 rounded-2xl text-xs font-bold flex items-start gap-2">
+                        <AlertTriangle size={15} className="shrink-0 mt-0.5 text-orange-600" />
+                        <span>Falha ao gravar no PDV: {getOrderErpError(order)}</span>
+                      </div>
+                    )}
 
-                      {order.status === "confirmed" ? (
+                    <div className="flex flex-col sm:flex-row items-center gap-3 justify-end w-full">
+                      {!isDelivererMode && (() => {
+                        const effStatus = getEffectiveOrderStatus(order);
+                        if (sendingToPDV === order.id || effStatus === "pending_erp") {
+                          return (
+                            <button
+                              disabled
+                              className="w-full sm:w-auto px-6 py-4 bg-indigo-500 text-white rounded-2xl text-[11px] font-black uppercase tracking-widest transition-all shadow-lg flex items-center justify-center gap-2 cursor-wait"
+                            >
+                              <span className="animate-spin border-2 border-white border-t-transparent rounded-full w-4 h-4"></span>
+                              Enviando para o PDV...
+                            </button>
+                          );
+                        }
+
+                        if (
+                          effStatus === "enviado_ao_pdv" ||
+                          effStatus === "impresso_no_pdv" ||
+                          effStatus === "concluido_no_pdv"
+                        ) {
+                          return (
+                            <div className="w-full sm:w-auto px-5 py-4 bg-emerald-50 text-emerald-800 border-2 border-emerald-200 rounded-2xl text-[11px] font-black uppercase tracking-wider flex items-center justify-center gap-2 shadow-sm">
+                              <CheckCircle size={16} className="text-emerald-600 shrink-0" />
+                              <span>{getOrderPdvLabel(order)}</span>
+                            </div>
+                          );
+                        }
+
+                        if (
+                          effStatus === "pending" ||
+                          effStatus === "confirmed" ||
+                          effStatus === "erro_integracao_pdv"
+                        ) {
+                          return (
+                            <button
+                              onClick={() => handleSendToPDV(order)}
+                              className="w-full sm:w-auto px-6 py-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl text-[11px] font-black uppercase tracking-widest transition-all shadow-lg active:scale-95 flex items-center justify-center gap-2"
+                            >
+                              <Upload size={16} /> Enviar para o PDV
+                            </button>
+                          );
+                        }
+
+                        return null;
+                      })()}
+
+                      {getEffectiveOrderStatus(order) === "confirmed" ? (
                         <button
                           onClick={() => setConferenceOrder(order)}
                           className="w-full sm:w-auto px-6 py-4 bg-emerald-500 hover:bg-emerald-600 text-white rounded-2xl text-[11px] font-black uppercase tracking-widest transition-all shadow-lg active:scale-95 flex items-center justify-center gap-2"
@@ -1035,7 +1239,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                       ) : (
                         <div className="relative w-full sm:w-auto flex-1 sm:flex-none">
                           <select
-                            value={order.status}
+                            value={getEffectiveOrderStatus(order)}
                             onChange={(e) =>
                               handleStatusChangeWrapper(
                                 order,
@@ -1046,14 +1250,17 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                           >
                             <option value="pending">Marcar: Pendente</option>
                             <option value="confirmed">Confirmar Pedido</option>
+                            {getEffectiveOrderStatus(order) === "pending_erp" && (
+                              <option value="pending_erp">Enviando para o PDV...</option>
+                            )}
                             <option value="enviado_ao_pdv">Enviado ao PDV</option>
-                            {order.status === "impresso_no_pdv" && (
+                            {getEffectiveOrderStatus(order) === "impresso_no_pdv" && (
                               <option value="impresso_no_pdv">Impresso no PDV</option>
                             )}
-                            {order.status === "concluido_no_pdv" && (
+                            {getEffectiveOrderStatus(order) === "concluido_no_pdv" && (
                               <option value="concluido_no_pdv">Concluído no PDV</option>
                             )}
-                            {order.status === "erro_integracao_pdv" && (
+                            {getEffectiveOrderStatus(order) === "erro_integracao_pdv" && (
                               <option value="erro_integracao_pdv">Erro Integração PDV</option>
                             )}
                             <option value="dispatched">

@@ -100,7 +100,7 @@ export interface CustomerInfo {
   locationUrl?: string;
 }
 
-export type OrderStatus = "pending" | "confirmed" | "dispatched" | "cancelled" | "enviado_ao_pdv" | "impresso_no_pdv" | "concluido_no_pdv" | "erro_integracao_pdv";
+export type OrderStatus = "pending" | "confirmed" | "dispatched" | "cancelled" | "pending_erp" | "enviado_ao_pdv" | "impresso_no_pdv" | "concluido_no_pdv" | "erro_integracao_pdv";
 
 export type PrescriptionStatus = "PENDING" | "APPROVED" | "REJECTED";
 
@@ -135,10 +135,16 @@ export interface Order {
   prescriptionStatus?: string;
   codigoVendaOnLine?: string;
   codigo_venda_online?: string;
-  codigoVendaInova?: string;
-  codigo_venda_inova?: string;
-  numeroNotaFiscal?: string;
-  numero_nota_fiscal?: string;
+  codigoVendaInova?: string | number;
+  codigo_venda_inova?: string | number;
+  codigoOrcamento?: string | number;
+  codigo_orcamento?: string | number;
+  codigoPV?: string | number;
+  codigo_pv?: string | number;
+  erpError?: string;
+  erp_error?: string;
+  numeroNotaFiscal?: string | number;
+  numero_nota_fiscal?: string | number;
   chaveAcessoNotaFiscal?: string;
   chave_acesso_nota_fiscal?: string;
   valorNotaFiscal?: number;

@@ -7142,22 +7142,56 @@ app.post(
       const customer = targetOrder.customers || targetOrder.customer || {};
       const items = targetOrder.order_items || targetOrder.items || [];
 
+      // Enriquecimento dos itens com internal_code e barcode reais do banco products do tenant
+      const itemProductIds = items
+        .map((it: any) => it.id || it.product_id || it.productId)
+        .filter((id: any) => typeof id === "string" && id.trim().length > 0);
+      const productLookupById = new Map<string, any>();
+      const productLookupByBarcode = new Map<string, any>();
+
+      if (itemProductIds.length > 0) {
+        try {
+          const { data: dbProds } = await supabaseAdmin
+            .from("products")
+            .select("id, name, barcode, internal_code, price, original_price")
+            .eq("tenant_id", tenant_id)
+            .in("id", itemProductIds);
+          if (Array.isArray(dbProds)) {
+            for (const p of dbProds) {
+              if (p.id) productLookupById.set(String(p.id), p);
+              if (p.barcode) productLookupByBarcode.set(String(p.barcode).trim(), p);
+            }
+          }
+        } catch (e) {}
+      }
+
       const rawItemsForVenda = items.map((item: any, idx: number) => {
+        const dbProd =
+          productLookupById.get(String(item.id || item.product_id || item.productId || "")) ||
+          productLookupByBarcode.get(String(item.barcode || item.ean || "").trim()) ||
+          item.products ||
+          item.product ||
+          {};
+
         const barcode =
+          dbProd.barcode ||
           item.products?.barcode ||
           item.barcode ||
           item.product?.barcode ||
           item.ean ||
           "";
         const internalCode =
+          dbProd.internal_code ||
           item.products?.internal_code ||
           item.internal_code ||
           item.internalCode ||
           item.product?.internalCode ||
           item.erpProductId ||
+          item.erp_product_id ||
           barcode ||
           String(idx + 1);
         const nomeProduto =
+          dbProd.name ||
           item.products?.name ||
           item.name ||
           item.productName ||
@@ -7171,51 +7205,40 @@ app.post(
           "UN";
         const quantidade = Number(item.quantity || item.quantidade || 1);
         const precoUnitario = Number(
-          item.unit_price ?? item.price ?? item.preco_unitario ?? 0,
+          item.unit_price ?? item.price ?? item.preco_unitario ?? dbProd.price ?? 0,
+        );
+        const precoOriginal = Number(
+          item.originalPrice ?? item.original_price ?? dbProd.original_price ?? precoUnitario,
         );
         const descontoUnitario = Number(
-          item.descontoUnitario ?? item.unit_discount ?? item.discount_per_unit ?? 0,
+          item.descontoUnitario ??
+            item.unit_discount ??
+            item.discount_per_unit ??
+            (item.promotionDiscount && quantidade > 0 ? Number(item.promotionDiscount) / quantidade : 0),
         );
         return {
+          id: item.id || dbProd.id || undefined,
           ean: sanitizeInovafarmaEan(barcode),
+          barcode: String(barcode || "").trim(),
           codigoProduto: String(internalCode || barcode || idx + 1).trim(),
+          internalCode: String(internalCode || "").trim(),
           nome: String(nomeProduto).trim(),
           unidadeMedida,
           quantidade,
           precoUnitario,
+          precoOriginal,
           descontoUnitario,
         };
       });
 
       // Plataforma opera exclusivamente com entrega (delivery)
-      const retirarNaLoja = false;
+      const retirarNaLoja = targetOrder.delivery_mode === "pickup" || targetOrder.deliveryMode === "pickup";
 
-      const taxaEntrega = roundCurrency(
-        Math.max(
-          0,
-          Number(
-            targetOrder.deliveryFee ??
-              targetOrder.delivery_fee ??
-              targetOrder.taxa_entrega ??
-              0,
-          ),
-        ),
-      );
-
-      const somaBrutaItens = roundCurrency(
+      const somaLiquidaItens = roundCurrency(
         rawItemsForVenda.reduce(
           (acc: number, it: any) =>
             acc + roundCurrency((it.precoUnitario - (it.descontoUnitario || 0)) * it.quantidade),
           0,
-        ),
-      );
-
-      const valorTotalPedido = roundCurrency(
-        Number(
-          targetOrder.total ??
-            targetOrder.total_amount ??
-            targetOrder.valor_total ??
-            somaBrutaItens + taxaEntrega,
         ),
       );
 
@@ -7224,10 +7247,41 @@ app.post(
           targetOrder.discount ??
             targetOrder.discount_amount ??
             targetOrder.coupon_discount ??
+            targetOrder.couponDiscount ??
+            (customer as any)?.couponDiscount ??
             targetOrder.desconto ??
             0,
         ),
       );
+
+      const valorTotalPedido = roundCurrency(
+        Number(
+          targetOrder.total ??
+            targetOrder.total_amount ??
+            targetOrder.valor_total ??
+            somaLiquidaItens,
+        ),
+      );
+
+      const inferredDeliveryFee = roundCurrency(
+        Math.max(0, valorTotalPedido - Math.max(0, somaLiquidaItens - explicitOrderDiscount)),
+      );
+
+      const taxaEntrega = roundCurrency(
+        Math.max(
+          0,
+          Number(
+            targetOrder.deliveryFee ??
+              targetOrder.delivery_fee ??
+              targetOrder.taxa_entrega ??
+              (customer as any)?.deliveryFee ??
+              inferredDeliveryFee ??
+              0,
+          ),
+        ),
+      );
+
+      const somaBrutaItens = somaLiquidaItens;
       const implicitDiscount = roundCurrency(
         Math.max(0, somaBrutaItens + taxaEntrega - valorTotalPedido),
       );
@@ -7255,6 +7309,84 @@ app.post(
           targetOrder.codigoVendaOnLine ||
           targetOrder.id,
       ).trim();
+
+      // Verifica se a loja possui Agente Local (SQL Server) ativo em agent_integrations
+      let hasLocalDesktopAgent = false;
+      try {
+        const { data: agentRow } = await supabaseAdmin
+          .from("agent_integrations")
+          .select("tenant_id, erp_type, is_active, last_seen")
+          .eq("tenant_id", tenant_id)
+          .maybeSingle();
+        if (agentRow && agentRow.tenant_id) {
+          hasLocalDesktopAgent = true;
+        }
+      } catch (e) {}
+
+      const hasWebPortalCredentials = Boolean(
+        effectiveErpToken &&
+          effectiveErpCnpj &&
+          (erpConfig.erpLogin || tenantSettings?.erp_api_login || tenantSettings?.erp_url || erpConfig.erpBaseUrl) &&
+          !hasLocalDesktopAgent
+      );
+
+      // Se a loja usa o Agente Local SQL Server (ex: INOVAFARMA_MACABU_FILIAL1A) ou não usa API web direta,
+      // enfileira o pedido imediatamente como 'pending_erp' para o agente gravar na Pré-Venda do PDV
+      if (hasLocalDesktopAgent || !hasWebPortalCredentials || body.useLocalAgent === true) {
+        const updatedCustomer = {
+          ...(typeof customer === "object" && customer !== null ? customer : {}),
+          erpError: null,
+          _pdv: {
+            ...((customer as any)?._pdv || {}),
+            status: "pending_erp",
+            queuedAt: new Date().toISOString(),
+            erpError: null,
+            taxaEntrega,
+            descontoGlobal: descontoGlobalParaDistribuir,
+            enrichedItems: rawItemsForVenda,
+          },
+        };
+
+        enqueuePendingErpOrderForTenant(tenant_id, {
+          id: targetOrder.id,
+          tenantId: tenant_id,
+          customer: updatedCustomer,
+          items: rawItemsForVenda,
+          total: valorTotalPedido,
+          taxaEntrega,
+          descontoGlobal: descontoGlobalParaDistribuir,
+          paymentMethod: formaPagamento,
+          changeFor: customer.changeFor || targetOrder.changeFor || "",
+          observation: targetOrder.observation || targetOrder.notes || targetOrder.observacao || "",
+          deliveryMode: retirarNaLoja ? "pickup" : "delivery",
+          date: targetOrder.date || targetOrder.created_at || new Date().toISOString(),
+        });
+
+        const { error: queueUpdateErr } = await supabaseAdmin
+          .from("orders")
+          .update({
+            status: "pending_erp",
+            customer: updatedCustomer,
+          })
+          .eq("id", targetOrder.id)
+          .eq("tenant_id", tenant_id);
+
+        if (queueUpdateErr) {
+          await supabaseAdmin
+            .from("orders")
+            .update({ status: "pending_erp" })
+            .eq("id", targetOrder.id)
+            .eq("tenant_id", tenant_id);
+        }
+
+        return res.json({
+          success: true,
+          queuedForAgent: true,
+          status: "pending_erp",
+          message: "Enviando para o PDV... O Agente Local gravará a Pré-Venda no InovaFarma em instantes.",
+          codigoVendaOnLine,
+        });
+      }
 
       const vendaPayload = await buildInovafarmaVendaPayload(
         {
@@ -7462,6 +7594,298 @@ app.post(
         error: errDetail,
         details: errDetail,
       });
+    }
+  },
+);
+
+// Fila em memória complementar ao status 'pending_erp' no banco para resposta instantânea ao Agente Local
+const pendingErpOrdersByTenant = new Map<string, Map<string, any>>();
+
+function enqueuePendingErpOrderForTenant(tenantId: string, orderPayload: any) {
+  if (!tenantId || !orderPayload?.id) return;
+  let map = pendingErpOrdersByTenant.get(tenantId);
+  if (!map) {
+    map = new Map<string, any>();
+    pendingErpOrdersByTenant.set(tenantId, map);
+  }
+  map.set(String(orderPayload.id), orderPayload);
+}
+
+function removePendingErpOrderForTenant(tenantId: string, orderId: string) {
+  if (!tenantId || !orderId) return;
+  const map = pendingErpOrdersByTenant.get(tenantId);
+  if (map) {
+    map.delete(String(orderId));
+  }
+}
+
+/**
+ * Rota consultada a cada 5s pelo Agente Local (agent-sync) para buscar pedidos na fila 'pending_erp'
+ */
+app.get(
+  [
+    "/api/v1/integration/orders/pending",
+    "/api/integration/orders/pending",
+  ],
+  async (req, res) => {
+    try {
+      const { tenantId } = await resolveTenantForAgent(req);
+      const effectiveTenantId =
+        tenantId ||
+        String(req.query.tenant_id || req.query.tenantId || req.headers["x-tenant-id"] || "").trim();
+
+      if (!effectiveTenantId) {
+        return res.status(401).json({ error: "Agente ou farmácia não identificada.", orders: [] });
+      }
+
+      const memMap = pendingErpOrdersByTenant.get(effectiveTenantId);
+      const resultMap = new Map<string, any>();
+
+      if (memMap) {
+        for (const [id, ord] of memMap.entries()) {
+          resultMap.set(id, ord);
+        }
+      }
+
+      // Consulta também no Supabase pedidos com status = 'pending_erp' (caso o servidor tenha reiniciado)
+      const { data: dbPendingOrders } = await supabaseAdmin
+        .from("orders")
+        .select("*")
+        .eq("tenant_id", effectiveTenantId)
+        .eq("status", "pending_erp")
+        .order("date", { ascending: true })
+        .limit(25);
+
+      if (Array.isArray(dbPendingOrders) && dbPendingOrders.length > 0) {
+        for (const dbOrd of dbPendingOrders) {
+          if (!resultMap.has(String(dbOrd.id))) {
+            const cust = dbOrd.customer || {};
+            const pdvMeta = cust._pdv || {};
+            const enrichedItems = Array.isArray(pdvMeta.enrichedItems) && pdvMeta.enrichedItems.length > 0
+              ? pdvMeta.enrichedItems
+              : (dbOrd.items || []);
+
+            resultMap.set(String(dbOrd.id), {
+              id: dbOrd.id,
+              tenantId: effectiveTenantId,
+              customer: cust,
+              items: enrichedItems,
+              total: Number(dbOrd.total) || 0,
+              taxaEntrega: Number(pdvMeta.taxaEntrega ?? cust.deliveryFee ?? 0) || 0,
+              descontoGlobal: Number(pdvMeta.descontoGlobal ?? cust.couponDiscount ?? 0) || 0,
+              paymentMethod: cust.paymentMethod || "PIX",
+              changeFor: cust.changeFor || "",
+              observation: dbOrd.observation || "",
+              deliveryMode: dbOrd.delivery_mode || "delivery",
+              date: dbOrd.date || new Date().toISOString(),
+            });
+          }
+        }
+      }
+
+      return res.json({
+        success: true,
+        orders: Array.from(resultMap.values()),
+      });
+    } catch (err: any) {
+      console.error("[AGENT ORDERS PENDING ERROR]:", err?.message);
+      return res.status(500).json({ error: err?.message || "Erro ao listar pedidos pendentes", orders: [] });
+    }
+  },
+);
+
+/**
+ * Rota chamada pelo Agente Local após gravar com sucesso a Pré-Venda nas tabelas Orcamento / Orcamento_Produto / Orcamento_PV
+ */
+app.post(
+  [
+    "/api/v1/integration/orders/:orderId/confirm",
+    "/api/integration/orders/:orderId/confirm",
+  ],
+  async (req, res) => {
+    try {
+      const orderId = String(req.params.orderId || req.body?.orderId || "").trim();
+      const { tenantId } = await resolveTenantForAgent(req);
+      const body = req.body || {};
+
+      if (!orderId) {
+        return res.status(400).json({ error: "orderId é obrigatório." });
+      }
+
+      let orderQuery = supabaseAdmin.from("orders").select("*").eq("id", orderId);
+      if (tenantId) {
+        orderQuery = orderQuery.eq("tenant_id", tenantId);
+      }
+      const { data: existingOrder } = await orderQuery.maybeSingle();
+      const effectiveTenantId = tenantId || existingOrder?.tenant_id;
+
+      if (effectiveTenantId) {
+        removePendingErpOrderForTenant(effectiveTenantId, orderId);
+      }
+
+      const codigoPV = body.codigoPV ?? body.codigo_pv ?? null;
+      const codigoOrcamento = body.codigoOrcamento ?? body.codigo_orcamento ?? null;
+      const codigoLancamento = body.codigoLancamento ?? body.codigo_lancamento ?? null;
+      const codigoEntrega = body.codigoEntrega ?? body.codigo_entrega ?? null;
+
+      const formattedBadge =
+        codigoPV && codigoOrcamento
+          ? `Pré-Venda #${codigoPV} • Orç #${codigoOrcamento}`
+          : codigoPV
+            ? `Pré-Venda #${codigoPV}`
+            : codigoOrcamento
+              ? `Orçamento #${codigoOrcamento}`
+              : "Enviado ao PDV";
+
+      const prevCustomer =
+        existingOrder?.customer && typeof existingOrder.customer === "object"
+          ? existingOrder.customer
+          : {};
+
+      const updatedCustomer = {
+        ...prevCustomer,
+        codigoOrcamento,
+        codigoPV,
+        codigoVendaInova: formattedBadge,
+        erpError: null,
+        _pdv: {
+          ...(prevCustomer._pdv || {}),
+          status: "enviado_ao_pdv",
+          codigoOrcamento,
+          codigoPV,
+          codigoLancamento,
+          codigoEntrega,
+          codigoVendaInova: formattedBadge,
+          erpError: null,
+          confirmedAt: new Date().toISOString(),
+        },
+      };
+
+      const updatePayload: Record<string, any> = {
+        status: "enviado_ao_pdv",
+        customer: updatedCustomer,
+      };
+      if (codigoOrcamento && !isNaN(Number(codigoOrcamento))) {
+        updatePayload.codigo_venda_inova = Number(codigoOrcamento);
+      }
+
+      let { error: updErr } = await supabaseAdmin
+        .from("orders")
+        .update(updatePayload)
+        .eq("id", orderId);
+
+      if (updErr) {
+        await supabaseAdmin
+          .from("orders")
+          .update({
+            status: "enviado_ao_pdv",
+            customer: updatedCustomer,
+          })
+          .eq("id", orderId);
+      }
+
+      if (effectiveTenantId) {
+        await logIntegration(
+          effectiveTenantId,
+          "/agent-sync/inovafarma/pre-venda",
+          {
+            orderId,
+            codigoPV,
+            codigoOrcamento,
+            codigoLancamento,
+            codigoEntrega,
+          },
+          "SUCCESS",
+        );
+      }
+
+      return res.json({
+        success: true,
+        orderId,
+        status: "enviado_ao_pdv",
+        codigoPV,
+        codigoOrcamento,
+        codigoVendaInova: formattedBadge,
+      });
+    } catch (err: any) {
+      console.error("[AGENT ORDER CONFIRM ERROR]:", err?.message);
+      return res.status(500).json({ error: err?.message || "Erro ao confirmar pedido do PDV" });
+    }
+  },
+);
+
+/**
+ * Rota chamada pelo Agente Local caso ocorra erro SQL ao gravar a Pré-Venda no PDV
+ */
+app.post(
+  [
+    "/api/v1/integration/orders/:orderId/error",
+    "/api/integration/orders/:orderId/error",
+  ],
+  async (req, res) => {
+    try {
+      const orderId = String(req.params.orderId || req.body?.orderId || "").trim();
+      const { tenantId } = await resolveTenantForAgent(req);
+      const errorMsg = String(req.body?.error || "Falha ao gravar Pré-Venda no banco SQL Server do PDV").slice(0, 1000);
+
+      if (!orderId) {
+        return res.status(400).json({ error: "orderId é obrigatório." });
+      }
+
+      let orderQuery = supabaseAdmin.from("orders").select("*").eq("id", orderId);
+      if (tenantId) {
+        orderQuery = orderQuery.eq("tenant_id", tenantId);
+      }
+      const { data: existingOrder } = await orderQuery.maybeSingle();
+      const effectiveTenantId = tenantId || existingOrder?.tenant_id;
+
+      if (effectiveTenantId) {
+        removePendingErpOrderForTenant(effectiveTenantId, orderId);
+      }
+
+      const prevCustomer =
+        existingOrder?.customer && typeof existingOrder.customer === "object"
+          ? existingOrder.customer
+          : {};
+
+      const updatedCustomer = {
+        ...prevCustomer,
+        erpError: errorMsg,
+        _pdv: {
+          ...(prevCustomer._pdv || {}),
+          status: "erro_integracao_pdv",
+          erpError: errorMsg,
+          failedAt: new Date().toISOString(),
+        },
+      };
+
+      await supabaseAdmin
+        .from("orders")
+        .update({
+          status: "erro_integracao_pdv",
+          customer: updatedCustomer,
+        })
+        .eq("id", orderId);
+
+      if (effectiveTenantId) {
+        await logIntegration(
+          effectiveTenantId,
+          "/agent-sync/inovafarma/pre-venda",
+          { orderId },
+          "FAILED",
+          errorMsg,
+        );
+      }
+
+      return res.json({
+        success: true,
+        orderId,
+        status: "erro_integracao_pdv",
+        error: errorMsg,
+      });
+    } catch (err: any) {
+      console.error("[AGENT ORDER ERROR REPORT EXCEPTION]:", err?.message);
+      return res.status(500).json({ error: err?.message || "Erro ao registrar falha do pedido" });
     }
   },
 );

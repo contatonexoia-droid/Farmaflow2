@@ -973,47 +973,61 @@ export const mapDbProductToApp = (p: any): Product => {
   };
 };
 
-export const mapDbOrderToApp = (o: any): Order => ({
-  id: o.id,
-  tenantId: o.tenant_id || o.tenantid,
-  items: o.items || [],
-  customer: o.customer || { name: "", phone: "", address: "" },
-  total: Number(o.total) || 0,
-  date: o.date || new Date().toISOString(),
-  status: o.status || "pending",
-  observation: o.observation || "",
-  receiptFile: o.receipt_file || o.receiptfile || "",
-  appliedCoupon: o.applied_coupon || o.appliedCoupon || undefined,
-  deliveryMode: o.delivery_mode || o.deliveryMode || "delivery",
-  couponDiscount:
-    Number(
-      o.coupon_discount ||
-        o.coupondiscount ||
-        (o.customer as any)?.couponDiscount,
-    ) || 0,
-  prescriptionStatus: o.prescription_status,
-  codigoVendaOnLine: o.codigo_venda_online || o.codigoVendaOnLine || undefined,
-  codigoVendaInova:
-    o.codigo_venda_inova !== undefined && o.codigo_venda_inova !== null
-      ? Number(o.codigo_venda_inova)
-      : o.codigoVendaInova !== undefined && o.codigoVendaInova !== null
-        ? Number(o.codigoVendaInova)
+export const mapDbOrderToApp = (o: any): Order => {
+  const cust = o.customer || { name: "", phone: "", address: "" };
+  const pdvMeta = cust?._pdv || {};
+  const rawVendaInova =
+    o.codigo_venda_inova ??
+    o.codigoVendaInova ??
+    pdvMeta.codigoVendaInova ??
+    cust?.codigoVendaInova;
+
+  return {
+    id: o.id,
+    tenantId: o.tenant_id || o.tenantid,
+    items: o.items || [],
+    customer: cust,
+    total: Number(o.total) || 0,
+    date: o.date || new Date().toISOString(),
+    status: o.status || "pending",
+    observation: o.observation || "",
+    receiptFile: o.receipt_file || o.receiptfile || "",
+    appliedCoupon: o.applied_coupon || o.appliedCoupon || undefined,
+    deliveryMode: o.delivery_mode || o.deliveryMode || "delivery",
+    couponDiscount:
+      Number(
+        o.coupon_discount ||
+          o.coupondiscount ||
+          (o.customer as any)?.couponDiscount,
+      ) || 0,
+    prescriptionStatus: o.prescription_status,
+    codigoVendaOnLine: o.codigo_venda_online || o.codigoVendaOnLine || undefined,
+    codigoVendaInova:
+      rawVendaInova !== undefined && rawVendaInova !== null && String(rawVendaInova).trim() !== ""
+        ? String(rawVendaInova).trim()
         : undefined,
-  numeroNotaFiscal:
-    o.numero_nota_fiscal !== undefined && o.numero_nota_fiscal !== null
-      ? Number(o.numero_nota_fiscal)
-      : o.numeroNotaFiscal !== undefined && o.numeroNotaFiscal !== null
-        ? Number(o.numeroNotaFiscal)
-        : undefined,
-  chaveAcessoNotaFiscal: o.chave_acesso_nota_fiscal || o.chaveAcessoNotaFiscal || undefined,
-  valorNotaFiscal:
-    o.valor_nota_fiscal !== undefined && o.valor_nota_fiscal !== null
-      ? Number(o.valor_nota_fiscal)
-      : o.valorNotaFiscal !== undefined && o.valorNotaFiscal !== null
-        ? Number(o.valorNotaFiscal)
-        : undefined,
-  divergenciaNotaFiscal: Boolean(o.divergencia_nota_fiscal || o.divergenciaNotaFiscal),
-});
+    codigoOrcamento:
+      o.codigo_orcamento ?? o.codigoOrcamento ?? pdvMeta.codigoOrcamento ?? cust?.codigoOrcamento ?? undefined,
+    codigoPV:
+      o.codigo_pv ?? o.codigoPV ?? pdvMeta.codigoPV ?? cust?.codigoPV ?? undefined,
+    erpError:
+      o.erp_error || o.erpError || pdvMeta.erpError || cust?.erpError || undefined,
+    numeroNotaFiscal:
+      o.numero_nota_fiscal !== undefined && o.numero_nota_fiscal !== null
+        ? Number(o.numero_nota_fiscal)
+        : o.numeroNotaFiscal !== undefined && o.numeroNotaFiscal !== null
+          ? Number(o.numeroNotaFiscal)
+          : undefined,
+    chaveAcessoNotaFiscal: o.chave_acesso_nota_fiscal || o.chaveAcessoNotaFiscal || undefined,
+    valorNotaFiscal:
+      o.valor_nota_fiscal !== undefined && o.valor_nota_fiscal !== null
+        ? Number(o.valor_nota_fiscal)
+        : o.valorNotaFiscal !== undefined && o.valorNotaFiscal !== null
+          ? Number(o.valorNotaFiscal)
+          : undefined,
+    divergenciaNotaFiscal: Boolean(o.divergencia_nota_fiscal || o.divergenciaNotaFiscal),
+  };
+};
 
 import localforage from "localforage";
 
