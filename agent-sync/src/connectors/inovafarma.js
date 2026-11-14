@@ -564,12 +564,18 @@ class InovaFarmaConnector {
                 `);
             }
 
-            // 6. Gravação condicional em dbo.Entrega (se houver endereço de entrega e CodigoCidade válido na base)
+            // 6. Gravação condicional em dbo.Entrega (usando as colunas reais do InovaFarma)
             let novoCodigoEntrega = null;
             if (order.deliveryMode !== 'pickup' && enderecoRua) {
                 try {
+                    const historicoEntrega = truncateStr(
+                        `${nomeCliente} | ${observacaoHeader}`,
+                        100,
+                        nomeCliente
+                    );
                     const entregaReq = new sql.Request(transaction);
-                    entregaReq.input('CodigoOrcamento', sql.BigInt, novoCodigoOrcamento);
+                    entregaReq.input('CodigoLancamento', sql.BigInt, novoCodigoLancamento);
+                    entregaReq.input('Historico', sql.VarChar(100), historicoEntrega);
                     entregaReq.input('Endereco', sql.VarChar(50), truncateStr(enderecoRua, 50, 'ENDERECO DE ENTREGA'));
                     entregaReq.input('Numero', sql.VarChar(10), truncateStr(enderecoNum, 10, 'S/N'));
                     entregaReq.input('Complemento', sql.VarChar(20), truncateStr(enderecoComp, 20, ''));
@@ -577,7 +583,6 @@ class InovaFarmaConnector {
                     entregaReq.input('CEP', sql.VarChar(9), truncateStr(cep, 9, ''));
                     entregaReq.input('Telefone', sql.VarChar(20), truncateStr(telefone, 20, ''));
                     entregaReq.input('Referencia', sql.VarChar(50), truncateStr(order.observation || '', 50, ''));
-                    entregaReq.input('Taxa', sql.Money, taxaEntrega);
 
                     const entregaRes = await entregaReq.query(`
                         DECLARE @CodigoCidadePadrao INT = NULL;
@@ -604,8 +609,9 @@ class InovaFarmaConnector {
 
                                     INSERT INTO dbo.Entrega (
                                         CodigoEntrega,
-                                        CodigoOrcamento,
-                                        CodigoCliente,
+                                        CodigoLancamento,
+                                        Historico,
+                                        Status,
                                         Endereco,
                                         Numero,
                                         Complemento,
@@ -614,15 +620,12 @@ class InovaFarmaConnector {
                                         CEP,
                                         Telefone,
                                         Referencia,
-                                        DataHora,
-                                        [DataHora Saida],
-                                        Taxa,
-                                        Status,
                                         Eliminado,
                                         rowguid
                                     ) VALUES (
                                         @NovoCodigoEntrega,
-                                        @CodigoOrcamento,
+                                        @CodigoLancamento,
+                                        @Historico,
                                         0,
                                         @Endereco,
                                         @Numero,
@@ -632,10 +635,6 @@ class InovaFarmaConnector {
                                         @CEP,
                                         @Telefone,
                                         @Referencia,
-                                        GETDATE(),
-                                        GETDATE(),
-                                        @Taxa,
-                                        0,
                                         0,
                                         NEWID()
                                     );
