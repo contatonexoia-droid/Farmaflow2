@@ -1,4 +1,7 @@
 import { DepartmentConfig } from '../types';
+import { classifyProductCategory } from '../services/categoryClassifier';
+
+export { classifyProductCategory };
 
 export const OFFICIAL_DEPARTMENTS = [
   "Medicamentos",
@@ -26,6 +29,7 @@ export const OFFICIAL_TAXONOMY: Record<OfficialDepartment, string[]> = {
     "Outros Medicamentos"
   ],
   "Saúde e Bem-Estar": [
+    "Vitaminas e Suplementos",
     "Vitaminas e Minerais",
     "Suplementos",
     "Imunidade",
@@ -54,9 +58,11 @@ export const OFFICIAL_TAXONOMY: Record<OfficialDepartment, string[]> = {
     "Higiene Íntima",
     "Cuidados Masculinos",
     "Absorventes e Cuidados Femininos",
-    "Lenços e Algodão"
+    "Lenços e Algodão",
+    "Higiene e Beleza"
   ],
   "Mamãe e Bebê": [
+    "Fraldas Infantis",
     "Fraldas",
     "Higiene do Bebê",
     "Alimentação Infantil",
@@ -64,6 +70,7 @@ export const OFFICIAL_TAXONOMY: Record<OfficialDepartment, string[]> = {
     "Cuidados com a Mamãe"
   ],
   "Saúde, Ortopedia e Primeiros Socorros": [
+    "Cuidados Adulto / Geriátrico",
     "Primeiros Socorros",
     "Aparelhos de Saúde",
     "Ortopédicos",
@@ -163,12 +170,27 @@ export interface ProductClassificationResult {
 
 /**
  * Motor Inteligente e Determinístico de Classificação Taxonômica FarmaFlow
- * Enquadra qualquer produto farmacêutico / varejo estritamente em 1 dos 8 Departamentos
+ * Enquadra qualquer produto farmacêutico / varejo estritamente em 1 dos Departamentos
  * e em 1 Subcategoria Oficial. Ignora termos genéricos de ERP ("OUTROS", "DIVERSOS", etc.)
  */
 export const classifyProductTaxonomy = (
   input: ProductClassificationInput
 ): ProductClassificationResult => {
+  // 0. Aplica primeiro o Motor Inteligente de Autocategorização por prioridades estritas (1 a 8)
+  if (input.name || input.manufacturer) {
+    const strictResult = classifyProductCategory(
+      input.name || "",
+      input.manufacturer || "",
+      input.rawCategory || ""
+    );
+    if (strictResult.priority <= 7 || strictResult.subcategory !== "Outros Medicamentos") {
+      return {
+        department: strictResult.department,
+        subcategory: strictResult.subcategory
+      };
+    }
+  }
+
   const nameNorm = normalizeTaxonomyText(input.name || "");
   const activeNorm = normalizeTaxonomyText(input.activePrinciple || "");
   const descNorm = normalizeTaxonomyText(input.description || "");

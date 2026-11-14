@@ -10,7 +10,7 @@ import { fileURLToPath } from "url";
 import crypto from "crypto";
 import { webhookQueue } from "./queue.js";
 import { setupSwagger } from "./swagger.js";
-import { getDepartmentForCategory, classifyProductTaxonomy, OFFICIAL_DEPARTMENTS, OFFICIAL_TAXONOMY } from "./lib/departments.js";
+import { getDepartmentForCategory, classifyProductTaxonomy, classifyProductCategory, OFFICIAL_DEPARTMENTS, OFFICIAL_TAXONOMY } from "./lib/departments.js";
 import multer from "multer";
 import * as XLSX from "xlsx";
 
@@ -4245,6 +4245,178 @@ app.post("/api/products/cleanup-corrupted-images", async (req, res) => {
   }
 });
 
+/**
+ * Motor Inteligente de Autocategorização em Lote (`POST /api/v1/products/auto-categorize`):
+ * Varre todos os produtos da loja (mesmo catálogos com > 10.000 produtos, paginando de 1000 em 1000),
+ * aplica `classifyProductCategory` + `classifyProductTaxonomy` (8 prioridades estritas) e atualiza em lotes no Supabase
+ * todos os produtos que estavam em categorias bagunçadas do ERP.
+ */
+app.post(
+  ["/api/v1/products/auto-categorize", "/api/products/auto-categorize"],
+  async (req, res) => {
+    try {
+      const tenantId = String(
+        req.body?.tenantId ||
+          req.body?.tenant_id ||
+          req.query?.tenantId ||
+          req.query?.tenant_id ||
+          req.headers["x-tenant-id"] ||
+          "",
+      ).trim();
+
+      if (!tenantId) {
+        return res.status(400).json({
+          success: false,
+          error: "O 'tenantId' da farmácia é obrigatório para organizar as categorias.",
+        });
+      }
+
+      const PAGE_SIZE = 1000;
+      const UPDATE_BATCH_SIZE = 200;
+      let from = 0;
+      let hasMore = true;
+      const allStoreProducts: any[] = [];
+
+      while (hasMore) {
+        const { data, error } = await supabaseAdmin
+          .from("products")
+          .select("*")
+          .eq("tenant_id", tenantId)
+          .order("id", { ascending: true })
+          .range(from, from + PAGE_SIZE - 1);
+
+        if (error) {
+          throw new Error(`Erro ao ler produtos da loja: ${error.message}`);
+        }
+
+        if (data && data.length > 0) {
+          allStoreProducts.push(...data);
+          if (data.length < PAGE_SIZE) {
+            hasMore = false;
+          } else {
+            from += PAGE_SIZE;
+          }
+        } else {
+          hasMore = false;
+        }
+      }
+
+      const rowsToUpdate: any[] = [];
+      const breakdownByCategory: Record<string, number> = {};
+      const sampleChanges: Array<{
+        id: string;
+        name: string;
+        oldCategory: string;
+        newCategory: string;
+        newDepartment: string;
+      }> = [];
+
+      for (const prod of allStoreProducts) {
+        // Respeita flag de edição manual do lojista caso exista
+        if (prod.is_manual_category === true || prod.manual_category === true) {
+          continue;
+        }
+
+        const strictRes = classifyProductCategory(
+          prod.name || "",
+          prod.manufacturer || "",
+          prod.category || "",
+        );
+
+        let targetCategory = strictRes.subcategory;
+        let targetDepartment = strictRes.department;
+
+        if (
+          strictRes.priority === 8 &&
+          strictRes.subcategory === "Outros Medicamentos" &&
+          (prod.active_principle || prod.description || prod.drug_type)
+        ) {
+          const taxRes = classifyProductTaxonomy({
+            name: prod.name || "",
+            activePrinciple: prod.active_principle || "",
+            description: prod.description || "",
+            rawCategory: prod.category || "",
+            drugType: prod.drug_type || "",
+            manufacturer: prod.manufacturer || "",
+          });
+          targetCategory = taxRes.subcategory;
+          targetDepartment = taxRes.department;
+        }
+
+        const currentCat = String(prod.category || "").trim();
+        const currentDept = String(prod.department || "").trim();
+
+        const categoryChanged = currentCat !== targetCategory;
+        const departmentChanged = Boolean(currentDept && currentDept !== targetDepartment);
+
+        if (categoryChanged || departmentChanged) {
+          const updatedRow: any = {
+            ...prod,
+            category: targetCategory,
+          };
+          if ("department" in prod) {
+            updatedRow.department = targetDepartment;
+          }
+          rowsToUpdate.push(updatedRow);
+          breakdownByCategory[targetCategory] = (breakdownByCategory[targetCategory] || 0) + 1;
+
+          if (sampleChanges.length < 25) {
+            sampleChanges.push({
+              id: prod.id,
+              name: prod.name,
+              oldCategory: currentCat || "Sem Categoria",
+              newCategory: targetCategory,
+              newDepartment: targetDepartment,
+            });
+          }
+        }
+      }
+
+      let updatedCount = 0;
+      for (let i = 0; i < rowsToUpdate.length; i += UPDATE_BATCH_SIZE) {
+        const batch = rowsToUpdate.slice(i, i + UPDATE_BATCH_SIZE);
+        const { error: upsertErr } = await supabaseAdmin
+          .from("products")
+          .upsert(batch, { onConflict: "id" });
+
+        if (upsertErr) {
+          // Fallback caso a tabela não possua alguma coluna auxiliar no upsert
+          const strippedBatch = batch.map(({ department, ...rest }) => rest);
+          const { error: retryErr } = await supabaseAdmin
+            .from("products")
+            .upsert(strippedBatch, { onConflict: "id" });
+          if (retryErr) {
+            console.error("[auto-categorize] Erro ao atualizar lote:", retryErr.message);
+          } else {
+            updatedCount += batch.length;
+          }
+        } else {
+          updatedCount += batch.length;
+        }
+      }
+
+      return res.json({
+        success: true,
+        totalScanned: allStoreProducts.length,
+        updatedCount,
+        unchangedCount: allStoreProducts.length - updatedCount,
+        breakdownByCategory,
+        sampleChanges,
+        message:
+          updatedCount > 0
+            ? `${updatedCount} de ${allStoreProducts.length} produtos foram reorganizados nas categorias corretas!`
+            : `Todos os ${allStoreProducts.length} produtos já estavam com as categorias organizadas corretamente!`,
+      });
+    } catch (error: any) {
+      console.error("[API auto-categorize] Erro inesperado:", error);
+      return res.status(500).json({
+        success: false,
+        error: error?.message || "Erro ao reorganizar categorias automaticamente.",
+      });
+    }
+  },
+);
+
 app.get("/api/v1/products/:id", async (req, res) => {
   try {
     const rawId = req.params.id;
@@ -6554,24 +6726,16 @@ app.post(
         },
         (name, category) => {
           try {
-            const classified = classifyProductTaxonomy({
-              name,
-              rawCategory: category || "",
-            });
-            const isGenericCat =
-              !category ||
-              ["geral", "outros", "diversos", "sem grupo"].includes(
-                String(category).trim().toLowerCase(),
-              );
+            const strictClassified = classifyProductCategory(name, undefined, category || "");
             return {
-              department: classified.department,
-              category: !isGenericCat ? category : classified.subcategory,
-              subcategory: classified.subcategory,
+              department: strictClassified.department,
+              category: strictClassified.subcategory,
+              subcategory: strictClassified.subcategory,
             };
           } catch {
             return {
               department: "Medicamentos",
-              category: category || "Geral",
+              category: "Outros Medicamentos",
               subcategory: "Outros Medicamentos",
             };
           }
@@ -10494,49 +10658,30 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
          normClassStr.includes('tarja preta') ||
          normClassStr.includes('antimicrobiano');
 
-       // Classificação taxonômica oficial + heurística por nome caso categoria/grupo venha vazio ou genérico
-       const classified = classifyProductTaxonomy({
-         name: name,
-         activePrinciple: rawActivePrinciple,
-         description: rawDescription,
-         rawCategory: rawCategory,
-         drugType: resolvedDrugType || rawClassificacao,
-         manufacturer: rawManufacturer
-       });
+       // Motor Inteligente de Autocategorização (8 prioridades estritas sobre nome e fabricante)
+       const strictCategoryRes = classifyProductCategory(
+         name,
+         rawManufacturer ? String(rawManufacturer) : "",
+         rawCategory ? String(rawCategory) : "",
+       );
 
-       const isGenericRawCat = !rawCategory || [
-         'geral', 'outros', 'outro', 'diversos', 'sem grupo', 'sem secao', 'sem categoria', 'padrao', 'padrão', 'nao cadastrado', 'não cadastrado', 'n/a', 'null', 'undefined'
-       ].includes(String(rawCategory).trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""));
+       let finalSubcategory = strictCategoryRes.subcategory;
+       let finalDepartment = strictCategoryRes.department;
 
-       let finalSubcategory = classified.subcategory;
-       let finalDepartment = classified.department;
-       if (finalSubcategory === 'Outros Medicamentos') {
-         const normalizedHelper = normalizeInovafarmaProduct(
-           {
-             CODIGOPRODUTO: internalCode || ean,
-             CODIGOBARRAS: ean,
-             DESCRICAO: name,
-             PRINCIPIOATIVO: rawActivePrinciple ? String(rawActivePrinciple) : '',
-             GRUPO: !isGenericRawCat ? String(rawCategory).trim() : '',
-           },
-           tenantId,
-         );
-         if (normalizedHelper && normalizedHelper.category && normalizedHelper.category !== 'Medicamentos') {
-           finalSubcategory = normalizedHelper.category;
-           if (normalizedHelper.category === 'Perfumaria') {
-             finalDepartment = 'Dermocosméticos e Beleza';
-           } else if (normalizedHelper.category === 'Higiene') {
-             finalDepartment = 'Higiene e Cuidados Pessoais';
-           } else if (normalizedHelper.category === 'Suplementos') {
-             finalDepartment = 'Saúde e Bem-Estar';
-           } else if (normalizedHelper.category === 'Primeiros Socorros') {
-             finalDepartment = 'Saúde, Ortopedia e Primeiros Socorros';
-           } else if (normalizedHelper.category === 'Conveniência') {
-             finalDepartment = 'Conveniência';
-           }
-         } else if (!isGenericRawCat) {
-           finalSubcategory = String(rawCategory).trim();
-         }
+       if (
+         strictCategoryRes.priority === 8 &&
+         strictCategoryRes.subcategory === "Outros Medicamentos"
+       ) {
+         const classified = classifyProductTaxonomy({
+           name: name,
+           activePrinciple: rawActivePrinciple,
+           description: rawDescription,
+           rawCategory: rawCategory,
+           drugType: resolvedDrugType || rawClassificacao,
+           manufacturer: rawManufacturer,
+         });
+         finalSubcategory = classified.subcategory;
+         finalDepartment = classified.department;
        }
 
        const pbmClean = rawListaPbm !== undefined && rawListaPbm !== null ? String(rawListaPbm).trim() : '';
@@ -10743,11 +10888,15 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
               ? item.image.trim()
               : existing.image;
 
-            const isGenericCategory = !existing.category || 
-              ['outros', 'outros medicamentos', 'medicamentos', 'diversos', 'geral', 'sem categoria', 'nao cadastrado', 'não cadastrado', 'padrao', 'padrão'].includes(String(existing.category).trim().toLowerCase());
-            
-            const finalCategory = isGenericCategory ? item.category : existing.category;
-            const finalDepartment = (!existing.department || isGenericCategory) ? item.department : existing.department;
+            const isManuallyCategorized =
+              existing.is_manual_category === true || existing.manual_category === true;
+
+            const finalCategory = isManuallyCategorized
+              ? existing.category
+              : (item.category || existing.category);
+            const finalDepartment = isManuallyCategorized
+              ? existing.department
+              : (item.department || existing.department);
 
             const isZeroPrice = Number(finalPrice) <= 0 || isNaN(Number(finalPrice));
             const updatedStock = _isExplicitlyInactive ? 0 : Math.max(0, Number(item.stock) || 0);
@@ -15106,7 +15255,14 @@ async function runInovafarmaAutoSyncScheduler(triggerSource = "cron_15m"): Promi
               cumulativeUpdated: cumUpdated,
               cumulativeSkipped: cumSkipped,
             },
-            classifyProductTaxonomy,
+            (name, category) => {
+              const c = classifyProductCategory(name, undefined, category || "");
+              return {
+                department: c.department,
+                category: c.subcategory,
+                subcategory: c.subcategory,
+              };
+            },
           );
 
           cumReceived += Number(batchResult.receivedCount ?? batchResult.totalFetched ?? 0);

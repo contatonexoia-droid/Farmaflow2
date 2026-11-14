@@ -17,7 +17,7 @@ import Select from 'react-select';
 import Fuse from 'fuse.js';
 import ProductScanner from './ProductScanner';
 import { SmartNumberInput } from './SmartNumberInput';
-import { getDepartmentForCategory, DEPARTMENT_MAPPING, OFFICIAL_DEPARTMENTS, OFFICIAL_TAXONOMY, classifyProductTaxonomy } from '../lib/departments';
+import { getDepartmentForCategory, DEPARTMENT_MAPPING, OFFICIAL_DEPARTMENTS, OFFICIAL_TAXONOMY, classifyProductTaxonomy, classifyProductCategory } from '../lib/departments';
 import { getStoreUrl } from '../lib/store';
 import { AdminDepartmentManager } from './AdminDepartmentManager';
 import { DynamicFlyerGenerator } from './DynamicFlyerGenerator';
@@ -662,8 +662,90 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
     return false;
   }, [isSuperAdmin]);
   const [isCleaningCorruptedImages, setIsCleaningCorruptedImages] = useState(false);
+  const [isAutoCategorizing, setIsAutoCategorizing] = useState(false);
+  const [autoCategorizeFeedback, setAutoCategorizeFeedback] = useState<{
+    type: 'success' | 'error';
+    message: string;
+    totalScanned?: number;
+    updatedCount?: number;
+    breakdownByCategory?: Record<string, number>;
+  } | null>(null);
   const [isPushModalOpen, setIsPushModalOpen] = useState(false);
   const [pushTargetProduct, setPushTargetProduct] = useState<Product | null>(null);
+
+  const handleAutoCategorizeProducts = async () => {
+    if (!tenant?.id || isAutoCategorizing) return;
+    setIsAutoCategorizing(true);
+    setAutoCategorizeFeedback(null);
+
+    try {
+      const response = await fetch('/api/v1/products/auto-categorize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tenantId: tenant.id }),
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.success === false) {
+        throw new Error(data.error || 'Falha ao organizar categorias automaticamente.');
+      }
+
+      // Atualiza imediatamente o estado local dos produtos na tela com o classificador
+      const updatedLocalProducts = (products || []).map((prod) => {
+        const strictRes = classifyProductCategory(
+          prod.name || '',
+          prod.manufacturer || '',
+          prod.category || '',
+        );
+        let nextCat = strictRes.subcategory;
+        if (
+          strictRes.priority === 8 &&
+          strictRes.subcategory === 'Outros Medicamentos' &&
+          (prod.activePrinciple || prod.description || prod.drugType)
+        ) {
+          const taxRes = classifyProductTaxonomy({
+            name: prod.name || '',
+            activePrinciple: prod.activePrinciple || '',
+            description: prod.description || '',
+            rawCategory: prod.category || '',
+            drugType: prod.drugType || '',
+            manufacturer: prod.manufacturer || '',
+          });
+          nextCat = taxRes.subcategory;
+        }
+        return {
+          ...prod,
+          category: nextCat,
+        };
+      });
+
+      onProductsStateUpdate(updatedLocalProducts);
+
+      // Sincroniza o cache local/IndexedDB em background sem travar a UI
+      void getProductsByTenant(tenant.id, (fresh) => {
+        if (Array.isArray(fresh) && fresh.length > 0) {
+          onProductsStateUpdate(fresh);
+        }
+      }, true, undefined, true);
+
+      setAutoCategorizeFeedback({
+        type: 'success',
+        message:
+          data.message ||
+          `${data.updatedCount || 0} de ${data.totalScanned || products.length} produtos foram reorganizados com sucesso!`,
+        totalScanned: data.totalScanned ?? products.length,
+        updatedCount: data.updatedCount ?? 0,
+        breakdownByCategory: data.breakdownByCategory || {},
+      });
+    } catch (err: any) {
+      setAutoCategorizeFeedback({
+        type: 'error',
+        message: err?.message || 'Erro ao reorganizar categorias dos produtos.',
+      });
+    } finally {
+      setIsAutoCategorizing(false);
+    }
+  };
   const [searchTerm, setSearchTerm] = useState('');
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
   const [filterDepartment, setFilterDepartment] = useState('Todos');
@@ -4118,6 +4200,23 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                     <button onClick={() => setIsDepartmentManagerOpen(true)} title="Aqui você pode criar, renomear ou excluir seus departamentos e subcategorias." className="flex-1 md:flex-none px-5 py-4 rounded-xl font-bold text-xs uppercase tracking-wide flex items-center justify-center gap-2 bg-blue-50 text-blue-600 border border-blue-100 text-center leading-tight whitespace-nowrap">
                         <Layers size={18} /> Gerenciar Departamentos
                     </button>
+                    <button
+                        onClick={handleAutoCategorizeProducts}
+                        disabled={isAutoCategorizing}
+                        title="Reorganizar automaticamente as categorias de todos os produtos da loja (Fraldas Infantis vs Adulto, Shampoos, Conveniência, Vitaminas e Medicamentos)"
+                        className="flex-1 md:flex-none px-5 py-4 rounded-xl font-bold text-xs uppercase tracking-wide flex items-center justify-center gap-2 bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 disabled:opacity-60 transition-all whitespace-nowrap"
+                    >
+                        {isAutoCategorizing ? (
+                            <>
+                                <Loader2 size={18} className="animate-spin text-indigo-600" />
+                                Organizando Categorias...
+                            </>
+                        ) : (
+                            <>
+                                <Wand2 size={18} /> Organizar Categorias (IA/Auto)
+                            </>
+                        )}
+                    </button>
                     {onNavigateToPriceTags && (
                         <button onClick={onNavigateToPriceTags} title="Gerar e imprimir etiquetas de gôndola, faixas e cartazes de preços" className="flex-1 md:flex-none px-5 py-4 rounded-xl font-bold text-xs uppercase tracking-wide flex items-center justify-center gap-2 bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 whitespace-nowrap">
                             <Printer size={18} /> Gerar Etiquetas
@@ -4139,6 +4238,56 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                 </div>
             </div>
         </div>
+
+        {autoCategorizeFeedback && (
+            <div
+                className={`mb-4 p-4 rounded-2xl border flex flex-col gap-3 ${
+                    autoCategorizeFeedback.type === 'success'
+                        ? 'bg-indigo-50/90 border-indigo-200 text-indigo-950'
+                        : 'bg-red-50 border-red-200 text-red-800'
+                }`}
+            >
+                <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-center gap-2.5">
+                        {autoCategorizeFeedback.type === 'success' ? (
+                            <CheckCircle2 size={20} className="text-indigo-600 shrink-0" />
+                        ) : (
+                            <AlertCircle size={20} className="text-red-600 shrink-0" />
+                        )}
+                        <div>
+                            <p className="font-black text-sm">{autoCategorizeFeedback.message}</p>
+                            {typeof autoCategorizeFeedback.totalScanned === 'number' && (
+                                <p className="text-xs font-bold text-indigo-700/80 mt-0.5">
+                                    Total analisado: {autoCategorizeFeedback.totalScanned} produtos • Reorganizados: {autoCategorizeFeedback.updatedCount || 0} produtos
+                                </p>
+                            )}
+                        </div>
+                    </div>
+                    <button
+                        onClick={() => setAutoCategorizeFeedback(null)}
+                        className="p-1.5 rounded-lg hover:bg-black/5 text-gray-500"
+                    >
+                        <X size={16} />
+                    </button>
+                </div>
+
+                {autoCategorizeFeedback.breakdownByCategory &&
+                    Object.keys(autoCategorizeFeedback.breakdownByCategory).length > 0 && (
+                        <div className="flex flex-wrap gap-1.5 pt-1">
+                            {Object.entries(autoCategorizeFeedback.breakdownByCategory)
+                                .sort((a, b) => b[1] - a[1])
+                                .map(([catName, count]) => (
+                                    <span
+                                        key={catName}
+                                        className="px-2.5 py-1 bg-white rounded-lg border border-indigo-100 text-[11px] font-black text-indigo-800 shadow-sm"
+                                    >
+                                        {catName}: {count}
+                                    </span>
+                                ))}
+                        </div>
+                    )}
+            </div>
+        )}
 
         {filterPrescription === 'Retenção de Receita' && (
             <div className="mb-4 bg-amber-50 text-amber-700 p-3 rounded-xl border border-amber-200 flex items-center gap-3">
