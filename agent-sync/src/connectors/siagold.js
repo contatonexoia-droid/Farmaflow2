@@ -652,122 +652,20 @@ class SiagoldConnector {
                 `);
             }
 
-            // Passo 5: Insere em dbo.Orcamento_Venda e dbo.Orcamento_PV amarrando @NovoCodigoOrcamento e @NovoCodigoLancamento
-            try {
-                const ovMetaReq = new sql.Request(transaction);
-                const ovColsRes = await ovMetaReq.query(`
-                    SELECT
-                        c.name AS colName,
-                        LOWER(t.name) AS typeName,
-                        c.is_nullable AS isNullable,
-                        c.is_identity AS isIdentity,
-                        c.is_computed AS isComputed
-                    FROM sys.columns c
-                    JOIN sys.types t ON c.user_type_id = t.user_type_id
-                    WHERE c.object_id = OBJECT_ID('dbo.Orcamento_Venda')
-                    ORDER BY c.column_id ASC;
-                `);
-                const ovCols = ovColsRes?.recordset || [];
-                if (ovCols.length > 0) {
-                    const insertColNames = [];
-                    const insertValExprs = [];
-                    for (const col of ovCols) {
-                        if (col.isIdentity || col.isComputed) continue;
-                        const colName = col.colName;
-                        const colLower = String(colName).toLowerCase();
-                        const typeLower = String(col.typeName || '').toLowerCase();
-
-                        if (colLower === 'codigoorcamento') {
-                            insertColNames.push(`[${colName}]`);
-                            insertValExprs.push('@CodigoOrcamento');
-                        } else if (colLower === 'codigolancamento' || colLower === 'codigovenda') {
-                            insertColNames.push(`[${colName}]`);
-                            insertValExprs.push('@CodigoLancamento');
-                        } else if (colLower === 'codigopv') {
-                            insertColNames.push(`[${colName}]`);
-                            insertValExprs.push('@CodigoPV');
-                        } else if (colLower === 'rowguid' || typeLower === 'uniqueidentifier') {
-                            insertColNames.push(`[${colName}]`);
-                            insertValExprs.push('NEWID()');
-                        } else if (colLower === 'codigoorcamentovenda' || colLower === 'codigoorcamento_venda') {
-                            insertColNames.push(`[${colName}]`);
-                            insertValExprs.push(`ISNULL((SELECT MAX([${colName}]) FROM dbo.Orcamento_Venda WITH (UPDLOCK, HOLDLOCK)), 1) + 10`);
-                        } else if (colLower === 'codigofuncionario' || colLower === 'codigovendedor') {
-                            insertColNames.push(`[${colName}]`);
-                            insertValExprs.push('@CodigoFuncionario');
-                        } else if (colLower === 'codigousuario') {
-                            insertColNames.push(`[${colName}]`);
-                            insertValExprs.push('@CodigoUsuario');
-                        } else if (colLower === 'codigoempresa' || colLower === 'codigofilial') {
-                            insertColNames.push(`[${colName}]`);
-                            insertValExprs.push('1');
-                        } else if (colLower === 'codigocliente') {
-                            insertColNames.push(`[${colName}]`);
-                            insertValExprs.push('0');
-                        } else if (typeLower.includes('date') || typeLower.includes('time')) {
-                            insertColNames.push(`[${colName}]`);
-                            insertValExprs.push('GETDATE()');
-                        } else if (!col.isNullable) {
-                            insertColNames.push(`[${colName}]`);
-                            if (typeLower.includes('char') || typeLower.includes('text')) {
-                                insertValExprs.push("''");
-                            } else {
-                                insertValExprs.push('0');
-                            }
-                        }
-                    }
-
-                    if (insertColNames.length > 0) {
-                        const ovInsertReq = new sql.Request(transaction);
-                        ovInsertReq.input('CodigoOrcamento', sql.BigInt, novoCodigoOrcamento);
-                        ovInsertReq.input('CodigoLancamento', sql.BigInt, novoCodigoLancamento);
-                        ovInsertReq.input('CodigoPV', sql.Int, novoCodigoPV);
-                        ovInsertReq.input('CodigoFuncionario', sql.Int, codigoFuncionarioFinal);
-                        ovInsertReq.input('CodigoUsuario', sql.Int, codigoUsuarioFinal);
-
-                        await ovInsertReq.query(`
-                            INSERT INTO dbo.Orcamento_Venda (
-                                ${insertColNames.join(', ')}
-                            ) VALUES (
-                                ${insertValExprs.join(', ')}
-                            );
-                        `);
-                    }
-                }
-            } catch (ovErr) {
-                console.warn('⚠️ Aviso ao inserir em dbo.Orcamento_Venda:', ovErr.message);
-            }
-
+            // Passo 5: Insere em dbo.Orcamento_PV amarrando @NovoCodigoOrcamento e @NovoCodigoPV
             const pvInsertReq = new sql.Request(transaction);
             pvInsertReq.input('CodigoOrcamento', sql.BigInt, novoCodigoOrcamento);
-            pvInsertReq.input('CodigoLancamento', sql.BigInt, novoCodigoLancamento);
             pvInsertReq.input('CodigoPV', sql.Int, novoCodigoPV);
             await pvInsertReq.query(`
-                IF EXISTS (
-                    SELECT 1 FROM sys.columns
-                    WHERE object_id = OBJECT_ID('dbo.Orcamento_PV')
-                      AND LOWER(name) = 'codigolancamento'
-                )
-                BEGIN
-                    EXEC sp_executesql
-                        N'INSERT INTO dbo.Orcamento_PV (CodigoOrcamento, CodigoLancamento, CodigoPV, rowguid) VALUES (@pOrc, @pLanc, @pPV, NEWID())',
-                        N'@pOrc BIGINT, @pLanc BIGINT, @pPV INT',
-                        @pOrc = @CodigoOrcamento,
-                        @pLanc = @CodigoLancamento,
-                        @pPV = @CodigoPV;
-                END
-                ELSE
-                BEGIN
-                    INSERT INTO dbo.Orcamento_PV (
-                        CodigoOrcamento,
-                        CodigoPV,
-                        rowguid
-                    ) VALUES (
-                        @CodigoOrcamento,
-                        @CodigoPV,
-                        NEWID()
-                    );
-                END
+                INSERT INTO dbo.Orcamento_PV (
+                    CodigoOrcamento,
+                    CodigoPV,
+                    rowguid
+                ) VALUES (
+                    @CodigoOrcamento,
+                    @CodigoPV,
+                    NEWID()
+                );
             `);
 
             // 6. Gravação condicional em dbo.Entrega (usando as colunas reais do InovaFarma)
