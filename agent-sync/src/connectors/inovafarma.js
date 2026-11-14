@@ -1,4 +1,6 @@
 const sql = require('mssql');
+const { normalizeAndSanitizeSiagoldRecord } = require('../shared/priceNormalizer');
+const { loadSyncCache, extractProductKey } = require('../shared/state');
 
 sql.on('error', err => {
     console.error('Erro global na conexão MSSQL (InovaFarma):', err.message);
@@ -36,6 +38,8 @@ class InovaFarmaConnector {
             server: dbConfig.server || 'localhost',
             port: Number(dbConfig.port) || 1433,
             database: dbConfig.database || 'INOVAFARMA',
+            connectionTimeout: 30000,
+            requestTimeout: 60000,
             options: {
                 encrypt: false,
                 trustServerCertificate: true,
@@ -49,46 +53,108 @@ class InovaFarmaConnector {
             dbConfig.codigoFuncionario ||
             process.env.DEFAULT_FUNCIONARIO_ID ||
             null;
+        this.knownActiveProductKeys = new Set();
+        this._hasLoggedViewColumns = false;
+    }
+
+    async queryViewRecords(pool, viewName) {
+        if (this.branchCode) {
+            try {
+                const request = pool.request().input('branchCode', sql.VarChar, String(this.branchCode));
+                const result = await request.query(`SELECT * FROM ${viewName} WHERE codigo_filial = @branchCode`);
+                return result.recordset || [];
+            } catch (branchErr) {
+                // Fallback se a view não possuir codigo_filial
+            }
+        }
+
+        const result = await pool.request().query(`SELECT * FROM ${viewName}`);
+        return result.recordset || [];
     }
 
     /**
-     * Repassador universal: ao executar o SELECT na View do ERP,
-     * envia no JSON todas as colunas retornadas pela View para o servidor,
-     * sem descartar colunas extras.
+     * Lê os registros da View do InovaFarma sem depender de `data_ultima_alteracao > @lastSync`
+     * (pois diversas Views usam GETDATE() como data_ultima_alteracao).
+     * O Delta Sync real é calculado em memória e persistido em `farmaflow_sync_cache.json`.
      */
-    async getChangedRecords(lastSyncDate) {
+    async getChangedRecords(lastSyncDate, syncOptions = {}) {
         let pool;
         try {
             pool = await sql.connect(this.dbConfig);
 
-            let query = `SELECT * FROM ${this.viewName}`;
-            const request = pool.request();
-            const conditions = [];
+            const syncCacheItems = syncOptions.syncCacheItems || loadSyncCache().items || {};
 
-            if (lastSyncDate && lastSyncDate !== '1970-01-01T00:00:00.000Z') {
-                conditions.push(`(data_ultima_alteracao IS NULL OR data_ultima_alteracao > @lastSync)`);
-                request.input('lastSync', sql.DateTime, new Date(lastSyncDate));
+            const candidateViews = Array.from(new Set([
+                this.viewName,
+                'VW_INTEGRACAO_FARMAFLOW',
+                'vw_FarmaFlow_Itens'
+            ].filter(Boolean)));
+
+            let rawRecords = [];
+            let lastQueryError = null;
+            let usedView = this.viewName;
+
+            for (const candidateView of candidateViews) {
+                try {
+                    rawRecords = await this.queryViewRecords(pool, candidateView);
+                    usedView = candidateView;
+                    lastQueryError = null;
+                    break;
+                } catch (err) {
+                    lastQueryError = err;
+                }
             }
 
-            if (this.branchCode) {
-                conditions.push(`codigo_filial = @branchCode`);
-                request.input('branchCode', sql.VarChar, this.branchCode);
+            if (lastQueryError && rawRecords.length === 0) {
+                throw lastQueryError;
             }
 
-            if (conditions.length > 0) {
-                query += ` WHERE ${conditions.join(' AND ')}`;
+            if (!this._hasLoggedViewColumns && rawRecords.length > 0 && rawRecords[0]) {
+                console.log(`[InovaFarma] Colunas detectadas na View (${usedView}): ${Object.keys(rawRecords[0]).join(', ')}`);
+                this._hasLoggedViewColumns = true;
             }
 
-            try {
-                const orderedQuery = query + ` ORDER BY data_ultima_alteracao ASC`;
-                const result = await request.query(orderedQuery);
-                return result.recordset || [];
-            } catch (queryErr) {
-                // Fallback resiliente: se a View não tiver a coluna data_ultima_alteracao
-                const simpleQuery = `SELECT * FROM ${this.viewName}`;
-                const simpleResult = await pool.request().query(simpleQuery);
-                return simpleResult.recordset || [];
+            const sanitizedRecords = [];
+            let skippedZeroStockOrInactiveCount = 0;
+            let skippedZeroPriceCount = 0;
+
+            for (const row of rawRecords) {
+                const normalized = normalizeAndSanitizeSiagoldRecord(row);
+                if (!normalized) {
+                    skippedZeroPriceCount++;
+                    continue;
+                }
+
+                const identityKey = extractProductKey(normalized);
+                const hasPositiveStock = normalized.stock > 0 && normalized.active !== false;
+
+                if (!hasPositiveStock) {
+                    const cachedSig = identityKey ? syncCacheItems[identityKey] : null;
+                    const wasPositiveInCache = Boolean(cachedSig && !String(cachedSig).startsWith('0|'));
+                    const wasKnownActiveInMemory = Boolean(identityKey && this.knownActiveProductKeys.has(identityKey));
+
+                    if (!wasPositiveInCache && !wasKnownActiveInMemory) {
+                        skippedZeroStockOrInactiveCount++;
+                        continue;
+                    }
+
+                    if (identityKey) {
+                        this.knownActiveProductKeys.delete(identityKey);
+                    }
+                } else if (identityKey) {
+                    this.knownActiveProductKeys.add(identityKey);
+                }
+
+                delete normalized._priceFallbackApplied;
+                sanitizedRecords.push(normalized);
             }
+
+            sanitizedRecords.totalRead = rawRecords.length;
+            sanitizedRecords.usedView = usedView;
+            sanitizedRecords.skippedZeroStockOrInactiveCount = skippedZeroStockOrInactiveCount;
+            sanitizedRecords.skippedZeroPriceCount = skippedZeroPriceCount;
+
+            return sanitizedRecords;
         } finally {
             if (pool) {
                 try {

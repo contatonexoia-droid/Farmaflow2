@@ -1,5 +1,14 @@
 const readline = require('readline');
-const { loadConfig, saveConfig, getLastSyncDate, updateLastSyncDate } = require('./shared/state');
+const {
+    loadConfig,
+    saveConfig,
+    getLastSyncDate,
+    updateLastSyncDate,
+    loadSyncCache,
+    saveSyncCache,
+    extractProductKey,
+    buildProductSignature
+} = require('./shared/state');
 const {
     validateToken,
     sendData,
@@ -13,6 +22,7 @@ const {
 const SYNC_INTERVAL_MS = 60000;
 const RETRY_INTERVAL_MS = 300000;
 const ORDER_POLL_INTERVAL_MS = 5000;
+const FULL_SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000; // Full Sync programado a cada 6 horas
 
 async function askForToken() {
     const rl = readline.createInterface({
@@ -51,6 +61,7 @@ async function startAgent(expectedErpType, ConnectorClass) {
     console.log('===================================================');
     console.log(`🚀 Agente FarmaFlow Iniciado (Módulo: ${expectedErpType.toUpperCase()})`);
     console.log(`📦 Envio Fracionado Ativo: lotes de até ${BATCH_SIZE} produtos`);
+    console.log(`🧠 Delta Sync Inteligente por Hash Ativo (farmaflow_sync_cache.json)`);
     console.log('===================================================\n');
 
     let config = loadConfig();
@@ -63,7 +74,11 @@ async function startAgent(expectedErpType, ConnectorClass) {
         try {
             const apiConfig = await validateToken(token);
 
-            if (apiConfig.erpType !== expectedErpType) {
+            const isSqlServerCompatible =
+                (expectedErpType === 'siagold' || expectedErpType === 'inovafarma') &&
+                (apiConfig.erpType === 'siagold' || apiConfig.erpType === 'inovafarma');
+
+            if (apiConfig.erpType !== expectedErpType && !isSqlServerCompatible) {
                 console.error(`❌ Erro: Este instalador é para ${expectedErpType}, mas seu token retornou ${apiConfig.erpType}.`);
                 console.error(`Por favor, baixe o instalador correto no painel.`);
                 process.exit(1);
@@ -87,6 +102,7 @@ async function startAgent(expectedErpType, ConnectorClass) {
 
     const connector = new ConnectorClass(config.dbConfig);
     const processedOrderIds = new Map();
+    const syncCache = loadSyncCache();
 
     async function heartbeatLoop() {
         try {
@@ -140,30 +156,93 @@ async function startAgent(expectedErpType, ConnectorClass) {
         try {
             console.log(`\n[${new Date().toISOString()}] Verificando atualizações no banco...`);
             const lastSync = getLastSyncDate();
+            const nowMs = Date.now();
+            const cachedKeysCount = Object.keys(syncCache.items || {}).length;
+            const isFullSyncDue =
+                cachedKeysCount === 0 ||
+                !syncCache.lastFullSyncAt ||
+                (nowMs - Number(syncCache.lastFullSyncAt) >= FULL_SYNC_INTERVAL_MS);
 
-            const records = await connector.getChangedRecords(lastSync);
+            const records = await connector.getChangedRecords(lastSync, {
+                syncCacheItems: syncCache.items,
+                isFullSyncDue
+            });
 
-            if (records && records.length > 0) {
-                const totalBatches = Math.ceil(records.length / BATCH_SIZE);
+            const validRecords = Array.isArray(records) ? records : [];
+            const totalRead = typeof records?.totalRead === 'number' ? records.totalRead : validRecords.length;
+
+            // Filtra os registros usando o Delta Sync Inteligente por Hash (estoque|preco|preco_promocional|nome)
+            const recordsToSend = [];
+            const pendingSignatures = new Map();
+
+            for (const record of validRecords) {
+                const key = extractProductKey(record);
+                const sig = buildProductSignature(record);
+
+                if (!key) {
+                    recordsToSend.push(record);
+                    continue;
+                }
+
+                const prevSig = syncCache.items[key];
+                const stockVal = Number(record.stock ?? record.estoque ?? 0);
+                const isActive = record.active !== false;
+
+                if (isFullSyncDue) {
+                    // No Full Sync (1ª execução ou a cada 6h), envia todos os produtos válidos com estoque > 0
+                    // ou produtos que estavam ativos no cache e zeraram estoque
+                    if ((stockVal > 0 && isActive) || (prevSig && prevSig !== sig)) {
+                        recordsToSend.push(record);
+                        pendingSignatures.set(key, sig);
+                    }
+                } else {
+                    // No Delta Sync (a cada 60s), envia APENAS produtos cujo estoque, preço, promoção ou nome mudaram
+                    if (!prevSig) {
+                        if (stockVal > 0 && isActive) {
+                            recordsToSend.push(record);
+                            pendingSignatures.set(key, sig);
+                        }
+                    } else if (prevSig !== sig) {
+                        recordsToSend.push(record);
+                        pendingSignatures.set(key, sig);
+                    }
+                }
+            }
+
+            if (recordsToSend.length === 0) {
                 console.log(
-                    `Encontrados ${records.length} registros válidos para envio ` +
-                    `(${totalBatches} lotes de até ${BATCH_SIZE} produtos).`
+                    `[Sincronizando] ${totalRead} lidos | 0 alterados desde o último ciclo. Nenhum lote precisou ser enviado.`
+                );
+            } else {
+                const totalBatches = Math.ceil(recordsToSend.length / BATCH_SIZE);
+                const syncModeLabel = isFullSyncDue
+                    ? (cachedKeysCount === 0 ? 'Carga Inicial Completa' : 'Full Sync Programado 6h')
+                    : 'Delta Sync Inteligente';
+
+                console.log(
+                    `[Sincronizando] ${totalRead} lidos | ${recordsToSend.length} alterados desde o último ciclo (${syncModeLabel} - ${totalBatches} lotes de até ${BATCH_SIZE} produtos).`
                 );
 
-                const syncResult = await sendData(config.apiKey, records);
+                const syncResult = await sendData(config.apiKey, recordsToSend);
 
                 if (!syncResult || syncResult.failedBatches === 0) {
-                    const nextSyncIso = resolveMaxSyncDate(records);
+                    for (const [key, sig] of pendingSignatures.entries()) {
+                        syncCache.items[key] = sig;
+                    }
+                    if (isFullSyncDue) {
+                        syncCache.lastFullSyncAt = Date.now();
+                    }
+                    saveSyncCache(syncCache);
+
+                    const nextSyncIso = resolveMaxSyncDate(recordsToSend);
                     updateLastSyncDate(nextSyncIso);
-                    console.log('✅ Todos os lotes foram sincronizados com sucesso.');
+                    console.log(`✅ Todos os ${totalBatches} lotes (${recordsToSend.length} produtos) foram sincronizados e salvos no cache local.`);
                 } else {
                     console.warn(
                         `⚠️ Sincronização concluída parcialmente (${syncResult.successBatches}/${syncResult.totalBatches} lotes). ` +
-                        `A data de corte será mantida para reprocessar os lotes pendentes no próximo ciclo.`
+                        `Os itens pendentes serão reenviados no próximo ciclo.`
                     );
                 }
-            } else {
-                console.log('Tudo atualizado. Nenhum registro pendente para envio.');
             }
 
             setTimeout(loop, SYNC_INTERVAL_MS);
@@ -184,4 +263,3 @@ async function startAgent(expectedErpType, ConnectorClass) {
 }
 
 module.exports = { startAgent };
-
