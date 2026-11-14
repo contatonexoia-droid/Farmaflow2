@@ -3875,11 +3875,15 @@ app.get(["/api/v1/tenants/:tenantId/products", "/api/products", "/api/store/:slu
     }
     const uniqueProducts = Array.from(uniqueMap.values());
 
-    // Set Cache-Control Headers for Vercel Edge caching
-    res.setHeader(
-      "Cache-Control",
-      "public, s-maxage=60, stale-while-revalidate=300",
-    );
+    // Se for requisição administrativa ou com cache-buster (?t=...), desativa cache para refletir alterações na hora
+    if (isAdmin || req.query.t || req.query.nocache) {
+      res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0");
+    } else {
+      res.setHeader(
+        "Cache-Control",
+        "public, s-maxage=60, stale-while-revalidate=300",
+      );
+    }
     res.json({ data: uniqueProducts, total: uniqueProducts.length });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
@@ -4247,9 +4251,8 @@ app.post("/api/products/cleanup-corrupted-images", async (req, res) => {
 
 /**
  * Motor Inteligente de Autocategorização em Lote (`POST /api/v1/products/auto-categorize`):
- * Varre todos os produtos da loja (mesmo catálogos com > 10.000 produtos, paginando de 1000 em 1000),
- * aplica `classifyProductCategory` + `classifyProductTaxonomy` (8 prioridades estritas) e atualiza em lotes no Supabase
- * todos os produtos que estavam em categorias bagunçadas do ERP.
+ * Reavalia TODOS os produtos da loja do zero (ignorando categorias erradas previamente salvas como "Snacks" ou "Produtos para o Dia a Dia"),
+ * aplica a Regra de Ouro de blindagem de medicamentos/laboratórios e atualiza no Supabase todos os produtos cuja categoria mudou.
  */
 app.post(
   ["/api/v1/products/auto-categorize", "/api/products/auto-categorize"],
@@ -4272,7 +4275,7 @@ app.post(
       }
 
       const PAGE_SIZE = 1000;
-      const UPDATE_BATCH_SIZE = 200;
+      const ID_CHUNK_SIZE = 400;
       let from = 0;
       let hasMore = true;
       const allStoreProducts: any[] = [];
@@ -4280,7 +4283,7 @@ app.post(
       while (hasMore) {
         const { data, error } = await supabaseAdmin
           .from("products")
-          .select("*")
+          .select("id, name, manufacturer, category, active_principle, description, drug_type")
           .eq("tenant_id", tenantId)
           .order("id", { ascending: true })
           .range(from, from + PAGE_SIZE - 1);
@@ -4301,8 +4304,9 @@ app.post(
         }
       }
 
-      const rowsToUpdate: any[] = [];
+      const idsByTargetCategory = new Map<string, string[]>();
       const breakdownByCategory: Record<string, number> = {};
+      const updatedBreakdownByCategory: Record<string, number> = {};
       const sampleChanges: Array<{
         id: string;
         name: string;
@@ -4312,55 +4316,33 @@ app.post(
       }> = [];
 
       for (const prod of allStoreProducts) {
-        // Respeita flag de edição manual do lojista caso exista
-        if (prod.is_manual_category === true || prod.manual_category === true) {
-          continue;
-        }
-
+        // Reavalia do zero ignorando prod.category antigo (que pode estar sujo com "Snacks" ou "Produtos para o Dia a Dia")
         const strictRes = classifyProductCategory(
           prod.name || "",
           prod.manufacturer || "",
-          prod.category || "",
+          "",
+          prod.active_principle || "",
+          prod.description || "",
+          prod.drug_type || "",
         );
 
-        let targetCategory = strictRes.subcategory;
-        let targetDepartment = strictRes.department;
+        const targetCategory = strictRes.subcategory;
+        const targetDepartment = strictRes.department;
 
-        if (
-          strictRes.priority === 8 &&
-          strictRes.subcategory === "Outros Medicamentos" &&
-          (prod.active_principle || prod.description || prod.drug_type)
-        ) {
-          const taxRes = classifyProductTaxonomy({
-            name: prod.name || "",
-            activePrinciple: prod.active_principle || "",
-            description: prod.description || "",
-            rawCategory: prod.category || "",
-            drugType: prod.drug_type || "",
-            manufacturer: prod.manufacturer || "",
-          });
-          targetCategory = taxRes.subcategory;
-          targetDepartment = taxRes.department;
-        }
+        breakdownByCategory[targetCategory] = (breakdownByCategory[targetCategory] || 0) + 1;
 
         const currentCat = String(prod.category || "").trim();
-        const currentDept = String(prod.department || "").trim();
-
-        const categoryChanged = currentCat !== targetCategory;
-        const departmentChanged = Boolean(currentDept && currentDept !== targetDepartment);
-
-        if (categoryChanged || departmentChanged) {
-          const updatedRow: any = {
-            ...prod,
-            category: targetCategory,
-          };
-          if ("department" in prod) {
-            updatedRow.department = targetDepartment;
+        if (currentCat !== targetCategory) {
+          let list = idsByTargetCategory.get(targetCategory);
+          if (!list) {
+            list = [];
+            idsByTargetCategory.set(targetCategory, list);
           }
-          rowsToUpdate.push(updatedRow);
-          breakdownByCategory[targetCategory] = (breakdownByCategory[targetCategory] || 0) + 1;
+          list.push(prod.id);
+          updatedBreakdownByCategory[targetCategory] =
+            (updatedBreakdownByCategory[targetCategory] || 0) + 1;
 
-          if (sampleChanges.length < 25) {
+          if (sampleChanges.length < 30) {
             sampleChanges.push({
               id: prod.id,
               name: prod.name,
@@ -4373,25 +4355,23 @@ app.post(
       }
 
       let updatedCount = 0;
-      for (let i = 0; i < rowsToUpdate.length; i += UPDATE_BATCH_SIZE) {
-        const batch = rowsToUpdate.slice(i, i + UPDATE_BATCH_SIZE);
-        const { error: upsertErr } = await supabaseAdmin
-          .from("products")
-          .upsert(batch, { onConflict: "id" });
-
-        if (upsertErr) {
-          // Fallback caso a tabela não possua alguma coluna auxiliar no upsert
-          const strippedBatch = batch.map(({ department, ...rest }) => rest);
-          const { error: retryErr } = await supabaseAdmin
+      for (const [targetCat, productIds] of idsByTargetCategory.entries()) {
+        for (let i = 0; i < productIds.length; i += ID_CHUNK_SIZE) {
+          const idChunk = productIds.slice(i, i + ID_CHUNK_SIZE);
+          const { error: updateErr } = await supabaseAdmin
             .from("products")
-            .upsert(strippedBatch, { onConflict: "id" });
-          if (retryErr) {
-            console.error("[auto-categorize] Erro ao atualizar lote:", retryErr.message);
+            .update({ category: targetCat })
+            .eq("tenant_id", tenantId)
+            .in("id", idChunk);
+
+          if (updateErr) {
+            console.error(
+              `[auto-categorize] Erro ao atualizar categoria "${targetCat}" (${idChunk.length} itens):`,
+              updateErr.message,
+            );
           } else {
-            updatedCount += batch.length;
+            updatedCount += idChunk.length;
           }
-        } else {
-          updatedCount += batch.length;
         }
       }
 
@@ -4401,11 +4381,12 @@ app.post(
         updatedCount,
         unchangedCount: allStoreProducts.length - updatedCount,
         breakdownByCategory,
+        updatedBreakdownByCategory,
         sampleChanges,
         message:
           updatedCount > 0
-            ? `${updatedCount} de ${allStoreProducts.length} produtos foram reorganizados nas categorias corretas!`
-            : `Todos os ${allStoreProducts.length} produtos já estavam com as categorias organizadas corretamente!`,
+            ? `${allStoreProducts.length} produtos analisados do zero (${updatedCount} tiveram a categoria corrigida no banco de dados)!`
+            : `Todos os ${allStoreProducts.length} produtos foram reavaliados do zero e já estão nas categorias corretas!`,
       });
     } catch (error: any) {
       console.error("[API auto-categorize] Erro inesperado:", error);

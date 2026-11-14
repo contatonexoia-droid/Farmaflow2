@@ -690,49 +690,37 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
         throw new Error(data.error || 'Falha ao organizar categorias automaticamente.');
       }
 
-      // Atualiza imediatamente o estado local dos produtos na tela com o classificador
+      // Reavalia TODOS os produtos em memória do zero (sem usar prod.category antigo que podia estar em Snacks/Dia a Dia)
       const updatedLocalProducts = (products || []).map((prod) => {
         const strictRes = classifyProductCategory(
           prod.name || '',
           prod.manufacturer || '',
-          prod.category || '',
+          '',
+          prod.activePrinciple || '',
+          prod.description || '',
+          prod.drugType || '',
         );
-        let nextCat = strictRes.subcategory;
-        if (
-          strictRes.priority === 8 &&
-          strictRes.subcategory === 'Outros Medicamentos' &&
-          (prod.activePrinciple || prod.description || prod.drugType)
-        ) {
-          const taxRes = classifyProductTaxonomy({
-            name: prod.name || '',
-            activePrinciple: prod.activePrinciple || '',
-            description: prod.description || '',
-            rawCategory: prod.category || '',
-            drugType: prod.drugType || '',
-            manufacturer: prod.manufacturer || '',
-          });
-          nextCat = taxRes.subcategory;
-        }
         return {
           ...prod,
-          category: nextCat,
+          category: strictRes.subcategory,
         };
       });
 
       onProductsStateUpdate(updatedLocalProducts);
 
-      // Sincroniza o cache local/IndexedDB em background sem travar a UI
+      // Atualiza o cache local/IndexedDB em background para vitrine e admin refletirem na hora
       void getProductsByTenant(tenant.id, (fresh) => {
         if (Array.isArray(fresh) && fresh.length > 0) {
           onProductsStateUpdate(fresh);
         }
       }, true, undefined, true);
+      void getProductsByTenant(tenant.id, undefined, true, undefined, false);
 
       setAutoCategorizeFeedback({
         type: 'success',
         message:
           data.message ||
-          `${data.updatedCount || 0} de ${data.totalScanned || products.length} produtos foram reorganizados com sucesso!`,
+          `${data.totalScanned || products.length} produtos reavaliados (${data.updatedCount || 0} categorias corrigidas no banco)!`,
         totalScanned: data.totalScanned ?? products.length,
         updatedCount: data.updatedCount ?? 0,
         breakdownByCategory: data.breakdownByCategory || {},

@@ -879,19 +879,26 @@ export const deleteTenant = async (id: string) => {
 export const mapDbProductToApp = (p: any): Product => {
   const rawCategory = String(p.category || "").trim();
   const normCategory = rawCategory.toLowerCase();
-  const isGenericCategory =
+  const shouldReclassify =
     !rawCategory ||
     normCategory === "geral" ||
     normCategory === "outros" ||
     normCategory === "outros medicamentos" ||
-    normCategory === "diversos";
+    normCategory === "diversos" ||
+    normCategory === "snacks" ||
+    normCategory === "produtos para o dia a dia" ||
+    normCategory === "alimentos e bebidas" ||
+    normCategory === "conveniencia" ||
+    normCategory === "conveniência";
 
-  const resolvedCategory = isGenericCategory
+  const resolvedCategory = shouldReclassify
     ? classifyProductTaxonomy({
         name: p.name || "",
         activePrinciple: p.active_principle || p.activeprinciple || "",
         description: p.description || "",
-      }).subcategory || "Geral"
+        manufacturer: p.manufacturer || "",
+        drugType: p.drug_type || p.drugtype || "",
+      }).subcategory || "Outros Medicamentos"
     : rawCategory;
 
   const rawSalePrice = Number(p.price ?? p.preco_venda) || 0;
@@ -965,9 +972,9 @@ export const mapDbProductToApp = (p: any): Product => {
   continuous_use_days: Number(p.continuous_use_days || p.continuoususedays) || undefined,
   erpProductId:
     p.erp_product_id !== undefined && p.erp_product_id !== null
-      ? Number(p.erp_product_id)
+      ? String(p.erp_product_id)
       : p.internal_code && /^\d+$/.test(String(p.internal_code))
-        ? Number(p.internal_code)
+        ? String(p.internal_code)
         : undefined,
     unitMeasure: p.unit_measure || p.unidade_medida || undefined,
   };
