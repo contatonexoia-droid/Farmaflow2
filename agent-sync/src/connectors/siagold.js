@@ -462,18 +462,28 @@ class SiagoldConnector {
             headerReq.input('Observacao', sql.VarChar(200), observacaoHeader);
             headerReq.input('NomeCliente', sql.VarChar(100), nomeCliente);
 
+            // Passo 1, 2 e 3: Calcula novos IDs (+10), insere primeiro na tabela pai dbo.Lancamento e depois em dbo.Orcamento
             const headerSqlResult = await headerReq.query(`
-                DECLARE @NovoCodigoOrcamento BIGINT;
                 DECLARE @NovoCodigoLancamento BIGINT;
+                DECLARE @NovoCodigoOrcamento BIGINT;
                 DECLARE @BaseCodigoOrcamentoID BIGINT;
                 DECLARE @NovoCodigoPV INT;
                 DECLARE @StepPV INT = 1;
                 DECLARE @CodigoFuncionarioFinal INT;
+                DECLARE @CodigoUsuarioFinal INT = NULL;
+
+                IF OBJECT_ID('dbo.Lancamento', 'U') IS NOT NULL
+                BEGIN
+                    SELECT @NovoCodigoLancamento = ISNULL(MAX(CodigoLancamento), 1) + 10
+                    FROM dbo.Lancamento WITH (UPDLOCK, HOLDLOCK);
+                END
+                ELSE
+                BEGIN
+                    SELECT @NovoCodigoLancamento = ISNULL(MAX(CodigoLancamento), 1) + 10
+                    FROM dbo.Orcamento WITH (UPDLOCK, HOLDLOCK);
+                END
 
                 SELECT @NovoCodigoOrcamento = ISNULL(MAX(CodigoOrcamento), 1) + 10
-                FROM dbo.Orcamento WITH (UPDLOCK, HOLDLOCK);
-
-                SELECT @NovoCodigoLancamento = ISNULL(MAX(CodigoLancamento), 1) + 10
                 FROM dbo.Orcamento WITH (UPDLOCK, HOLDLOCK);
 
                 SELECT @BaseCodigoOrcamentoID = ISNULL(MAX(CodigoOrcamentoID), 1)
@@ -497,6 +507,31 @@ class SiagoldConnector {
                     FROM dbo.Orcamento
                     WHERE CodigoFuncionario IS NOT NULL AND CodigoFuncionario > 0
                     ORDER BY CodigoOrcamento DESC;
+                END
+
+                IF OBJECT_ID('dbo.Lancamento', 'U') IS NOT NULL
+                BEGIN
+                    SELECT TOP 1 @CodigoUsuarioFinal = CodigoUsuario
+                    FROM dbo.Lancamento
+                    WHERE CodigoUsuario IS NOT NULL AND CodigoUsuario > 0
+                    ORDER BY CodigoLancamento DESC;
+
+                    IF @CodigoUsuarioFinal IS NULL
+                        SET @CodigoUsuarioFinal = 241;
+
+                    INSERT INTO dbo.Lancamento (
+                        CodigoLancamento,
+                        CodigoEmpresa,
+                        DataLancamento,
+                        CodigoUsuario,
+                        rowguid
+                    ) VALUES (
+                        @NovoCodigoLancamento,
+                        1,
+                        GETDATE(),
+                        @CodigoUsuarioFinal,
+                        NEWID()
+                    );
                 END
 
                 INSERT INTO dbo.Orcamento (
@@ -527,22 +562,13 @@ class SiagoldConnector {
                     GETDATE()
                 );
 
-                INSERT INTO dbo.Orcamento_PV (
-                    CodigoOrcamento,
-                    CodigoPV,
-                    rowguid
-                ) VALUES (
-                    @NovoCodigoOrcamento,
-                    @NovoCodigoPV,
-                    NEWID()
-                );
-
                 SELECT
                     @NovoCodigoOrcamento AS CodigoOrcamento,
                     @NovoCodigoLancamento AS CodigoLancamento,
                     @BaseCodigoOrcamentoID AS BaseCodigoOrcamentoID,
                     @NovoCodigoPV AS CodigoPV,
-                    @CodigoFuncionarioFinal AS CodigoFuncionario;
+                    @CodigoFuncionarioFinal AS CodigoFuncionario,
+                    @CodigoUsuarioFinal AS CodigoUsuario;
             `);
 
             const idsRow = headerSqlResult?.recordset?.[0];
@@ -553,9 +579,11 @@ class SiagoldConnector {
             const novoCodigoOrcamento = Number(idsRow.CodigoOrcamento);
             const novoCodigoLancamento = Number(idsRow.CodigoLancamento);
             const novoCodigoPV = Number(idsRow.CodigoPV);
+            const codigoFuncionarioFinal = idsRow.CodigoFuncionario || null;
+            const codigoUsuarioFinal = idsRow.CodigoUsuario || 241;
             let currentCodigoOrcamentoID = Number(idsRow.BaseCodigoOrcamentoID);
 
-            // 5. Insere cada item em dbo.Orcamento_Produto somando +10 ao CodigoOrcamentoID
+            // Passo 4: Insere cada item em dbo.Orcamento_Produto somando +10 ao CodigoOrcamentoID
             for (const item of preparedItems) {
                 currentCodigoOrcamentoID += 10;
                 const itemReq = new sql.Request(transaction);
@@ -599,6 +627,124 @@ class SiagoldConnector {
                     );
                 `);
             }
+
+            // Passo 5: Insere em dbo.Orcamento_Venda e dbo.Orcamento_PV amarrando @NovoCodigoOrcamento
+            try {
+                const ovMetaReq = new sql.Request(transaction);
+                const ovColsRes = await ovMetaReq.query(`
+                    SELECT
+                        c.name AS colName,
+                        LOWER(t.name) AS typeName,
+                        c.is_nullable AS isNullable,
+                        c.is_identity AS isIdentity,
+                        c.is_computed AS isComputed
+                    FROM sys.columns c
+                    JOIN sys.types t ON c.user_type_id = t.user_type_id
+                    WHERE c.object_id = OBJECT_ID('dbo.Orcamento_Venda')
+                    ORDER BY c.column_id ASC;
+                `);
+                const ovCols = ovColsRes?.recordset || [];
+                if (ovCols.length > 0) {
+                    let sampleRow = null;
+                    try {
+                        const sampleRes = await new sql.Request(transaction).query(`
+                            SELECT TOP 1 * FROM dbo.Orcamento_Venda WITH (UPDLOCK, HOLDLOCK) ORDER BY 1 DESC
+                        `);
+                        sampleRow = sampleRes?.recordset?.[0] || null;
+                    } catch (e) {}
+
+                    const insertColNames = [];
+                    const insertValExprs = [];
+                    for (const col of ovCols) {
+                        if (col.isIdentity || col.isComputed) continue;
+                        const colName = col.colName;
+                        const colLower = String(colName).toLowerCase();
+                        const typeLower = String(col.typeName || '').toLowerCase();
+
+                        if (colLower === 'codigoorcamento') {
+                            insertColNames.push(`[${colName}]`);
+                            insertValExprs.push('@CodigoOrcamento');
+                        } else if (colLower === 'codigolancamento') {
+                            insertColNames.push(`[${colName}]`);
+                            insertValExprs.push('@CodigoLancamento');
+                        } else if (colLower === 'codigopv') {
+                            insertColNames.push(`[${colName}]`);
+                            insertValExprs.push('@CodigoPV');
+                        } else if (colLower === 'rowguid' || typeLower === 'uniqueidentifier') {
+                            insertColNames.push(`[${colName}]`);
+                            insertValExprs.push('NEWID()');
+                        } else if (colLower === 'codigovenda' || colLower === 'codigoorcamentovenda' || colLower === 'codigoorcamento_venda') {
+                            const sampleVal = sampleRow ? sampleRow[colName] : undefined;
+                            if (col.isNullable && sampleVal === null) {
+                                insertColNames.push(`[${colName}]`);
+                                insertValExprs.push('NULL');
+                            } else if (sampleVal === 0) {
+                                insertColNames.push(`[${colName}]`);
+                                insertValExprs.push('0');
+                            } else {
+                                insertColNames.push(`[${colName}]`);
+                                insertValExprs.push(`ISNULL((SELECT MAX([${colName}]) FROM dbo.Orcamento_Venda WITH (UPDLOCK, HOLDLOCK)), 1) + 10`);
+                            }
+                        } else if (colLower === 'codigofuncionario' || colLower === 'codigovendedor') {
+                            insertColNames.push(`[${colName}]`);
+                            insertValExprs.push('@CodigoFuncionario');
+                        } else if (colLower === 'codigousuario') {
+                            insertColNames.push(`[${colName}]`);
+                            insertValExprs.push('@CodigoUsuario');
+                        } else if (colLower === 'codigoempresa' || colLower === 'codigofilial') {
+                            insertColNames.push(`[${colName}]`);
+                            insertValExprs.push('1');
+                        } else if (colLower === 'codigocliente') {
+                            insertColNames.push(`[${colName}]`);
+                            insertValExprs.push('0');
+                        } else if (typeLower.includes('date') || typeLower.includes('time')) {
+                            insertColNames.push(`[${colName}]`);
+                            insertValExprs.push('GETDATE()');
+                        } else if (!col.isNullable) {
+                            insertColNames.push(`[${colName}]`);
+                            if (typeLower.includes('char') || typeLower.includes('text')) {
+                                insertValExprs.push("''");
+                            } else {
+                                insertValExprs.push('0');
+                            }
+                        }
+                    }
+
+                    if (insertColNames.length > 0) {
+                        const ovInsertReq = new sql.Request(transaction);
+                        ovInsertReq.input('CodigoOrcamento', sql.BigInt, novoCodigoOrcamento);
+                        ovInsertReq.input('CodigoLancamento', sql.BigInt, novoCodigoLancamento);
+                        ovInsertReq.input('CodigoPV', sql.Int, novoCodigoPV);
+                        ovInsertReq.input('CodigoFuncionario', sql.Int, codigoFuncionarioFinal);
+                        ovInsertReq.input('CodigoUsuario', sql.Int, codigoUsuarioFinal);
+
+                        await ovInsertReq.query(`
+                            INSERT INTO dbo.Orcamento_Venda (
+                                ${insertColNames.join(', ')}
+                            ) VALUES (
+                                ${insertValExprs.join(', ')}
+                            );
+                        `);
+                    }
+                }
+            } catch (ovErr) {
+                console.warn('⚠️ Aviso ao inserir em dbo.Orcamento_Venda:', ovErr.message);
+            }
+
+            const pvInsertReq = new sql.Request(transaction);
+            pvInsertReq.input('CodigoOrcamento', sql.BigInt, novoCodigoOrcamento);
+            pvInsertReq.input('CodigoPV', sql.Int, novoCodigoPV);
+            await pvInsertReq.query(`
+                INSERT INTO dbo.Orcamento_PV (
+                    CodigoOrcamento,
+                    CodigoPV,
+                    rowguid
+                ) VALUES (
+                    @CodigoOrcamento,
+                    @CodigoPV,
+                    NEWID()
+                );
+            `);
 
             // 6. Gravação condicional em dbo.Entrega (usando as colunas reais do InovaFarma)
             let novoCodigoEntrega = null;
