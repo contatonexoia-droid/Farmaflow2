@@ -7116,7 +7116,7 @@ app.post(
         return res.status(400).json({ error: "O 'tenant_id' da farmácia é obrigatório." });
       }
 
-      // 1. Busca configurações da farmácia no Supabase e resolve token dinâmico (com cache de 30 dias)
+      // 1. Busca configurações da farmácia no Supabase
       const { data: tenantSettings } = await supabaseAdmin
         .from("tenants")
         .select("*")
@@ -7124,10 +7124,45 @@ app.post(
         .maybeSingle();
 
       const erpConfig = extractTenantErpConfig(tenantSettings || {});
-      let effectiveErpToken = tenantSettings?.integration_token || "";
+      const rawConfiguredLogin = String(
+        body.erpLogin ||
+          tenantSettings?.erp_api_login ||
+          tenantSettings?.smart_banners?._erpCredentials?.erp_login ||
+          erpConfig.erpLogin ||
+          "",
+      ).trim();
+      const rawConfiguredPassword = String(
+        body.erpPassword ||
+          tenantSettings?.erp_api_password ||
+          tenantSettings?.smart_banners?._erpCredentials?.erp_password ||
+          erpConfig.erp_password ||
+          "",
+      ).trim();
       let effectiveErpCnpj = sanitizeCnpj(
         body.cnpj || erpConfig.erpCnpj || tenantSettings?.cnpj || "",
       );
+
+      // Identifica se a loja possui credenciais REAIS e completas do Portal PS (não homologação padrão)
+      const isHomologationPlaceholder =
+        !rawConfiguredLogin ||
+        !rawConfiguredPassword ||
+        rawConfiguredLogin.toLowerCase() === "homologacao@inovafarma.com.br" ||
+        effectiveErpCnpj === "02433981097173";
+
+      const isMacabuStore =
+        /macabu/i.test(String(tenantSettings?.slug || "")) ||
+        /macabu/i.test(String(tenantSettings?.name || ""));
+
+      const canAttemptPortalPsWebApi = Boolean(
+        !isMacabuStore &&
+          !isHomologationPlaceholder &&
+          rawConfiguredLogin &&
+          rawConfiguredPassword &&
+          effectiveErpCnpj &&
+          body.forcePortalPs === true,
+      );
+
+      let effectiveErpToken = "";
       let effectiveErpBaseUrl =
         body.erpBaseUrl || body.erpUrl || erpConfig.erpBaseUrl || INOVAFARMA_DEFAULT_API_URL;
       let effectiveErpRouteId =
@@ -7135,7 +7170,7 @@ app.post(
       let effectiveErpApiKey =
         body.apiKey || body.erpApiKey || erpConfig.erpApiKey || "";
 
-      if (tenantSettings) {
+      if (canAttemptPortalPsWebApi && tenantSettings) {
         try {
           const resolvedAuth = await resolveTenantInovafarmaToken({
             supabaseClient: supabaseAdmin,
@@ -7152,86 +7187,10 @@ app.post(
           effectiveErpApiKey = resolvedAuth.apiKey;
         } catch (authErr: any) {
           console.warn(
-            "[Inovafarma Venda] Aviso ao resolver token via POST /api/login, tentando fallback token:",
+            "[Inovafarma Venda] Sem autenticação web Portal PS, utilizando fila do Agente Local (pending_erp):",
             authErr?.message,
           );
         }
-      }
-
-      // Caso o body já traga um payload direto de venda (ex: teste ou chamada direta para /api/integration/inovafarma/venda)
-      if (!order_id && Array.isArray(body.itens) && body.itens.length > 0) {
-        const vendaPayload = await buildInovafarmaVendaPayload(
-          {
-            ent: body.ent ?? body.entidade ?? body.codigoEmpresa ?? effectiveErpCnpj ?? "1",
-            cnpj: effectiveErpCnpj,
-            pedidoId: body.codigoVendaOnLine || body.numeroPedido || body.pedidoId,
-            codigoVendaOnLine: body.codigoVendaOnLine || body.numeroPedido || body.pedidoId,
-            vendedor: body.vendedor,
-            retirarNaLoja: body.retirarNaLoja ?? body.entrega?.retirarNaLoja ?? false,
-            cliente: body.cliente,
-            itens: body.itens,
-            descontoGlobal: body.descontoGlobal ?? body.desconto ?? 0,
-            taxaEntrega: body.taxaEntrega ?? body.entrega?.taxa ?? 0,
-            pagamentos: body.pagamentos,
-            formaPagamentoPadrao: body.formaPagamento,
-            observacao: body.observacao,
-          },
-          {
-            baseUrl: effectiveErpBaseUrl,
-            routeId: effectiveErpRouteId,
-            token: effectiveErpToken,
-            cnpj: effectiveErpCnpj,
-            apiKey: effectiveErpApiKey || undefined,
-          },
-        );
-
-        if (effectiveErpToken && effectiveErpCnpj) {
-          const sent = await sendInovafarmaVenda({
-            baseUrl: effectiveErpBaseUrl,
-            routeId: effectiveErpRouteId,
-            token: effectiveErpToken,
-            cnpj: effectiveErpCnpj,
-            apiKey: effectiveErpApiKey || undefined,
-            tenantId: tenant_id,
-            supabaseClient: supabaseAdmin,
-            venda: {
-              ent: vendaPayload.ent,
-              cnpj: vendaPayload.cnpj,
-              pedidoId: vendaPayload.codigoVendaOnLine,
-              codigoVendaOnLine: vendaPayload.codigoVendaOnLine,
-              vendedor: vendaPayload.vendedor,
-              retirarNaLoja: vendaPayload.entrega.retirarNaLoja,
-              cliente: vendaPayload.cliente,
-              itens: vendaPayload.itens,
-              taxaEntrega: vendaPayload.taxaEntrega,
-              pagamentos: vendaPayload.pagamentos,
-              observacao: vendaPayload.observacao,
-            },
-          });
-          await logIntegration(
-            tenant_id,
-            sent.endpointUsed,
-            vendaPayload,
-            "SUCCESS",
-          );
-          return res.json({
-            success: true,
-            message: sent.alreadyExistsInErp
-              ? "Venda já constava registrada no PDV Inovafarma (idempotência /vendaporid)."
-              : "Venda enviada com sucesso ao PDV Inovafarma.",
-            alreadyExists: sent.alreadyExistsInErp,
-            codigoVendaOnLine: sent.codigoVendaOnLine,
-            codigoVendaInova: sent.codigoVendaInova,
-            payload_enviado: vendaPayload,
-            erp_response: sent.response,
-          });
-        }
-
-        return res.json({
-          success: true,
-          message: "Payload de venda validado conforme regras do Inovafarma (POST /Venda).",
-          payload_enviado: vendaPayload,
-        });
       }
 
       if (!order_id) {
@@ -7376,7 +7335,6 @@ app.post(
         };
       });
 
-      // Plataforma opera exclusivamente com entrega (delivery)
       const retirarNaLoja = targetOrder.delivery_mode === "pickup" || targetOrder.deliveryMode === "pickup";
 
       const somaLiquidaItens = roundCurrency(
@@ -7455,29 +7413,11 @@ app.post(
           targetOrder.id,
       ).trim();
 
-      // Verifica se a loja possui Agente Local (SQL Server) ativo em agent_integrations
-      let hasLocalDesktopAgent = false;
-      try {
-        const { data: agentRow } = await supabaseAdmin
-          .from("agent_integrations")
-          .select("tenant_id, erp_type, is_active, last_seen")
-          .eq("tenant_id", tenant_id)
-          .maybeSingle();
-        if (agentRow && agentRow.tenant_id) {
-          hasLocalDesktopAgent = true;
-        }
-      } catch (e) {}
-
-      const hasWebPortalCredentials = Boolean(
-        effectiveErpToken &&
-          effectiveErpCnpj &&
-          (erpConfig.erpLogin || tenantSettings?.erp_api_login || tenantSettings?.erp_url || erpConfig.erpBaseUrl) &&
-          !hasLocalDesktopAgent
-      );
-
-      // Se a loja usa o Agente Local SQL Server (ex: INOVAFARMA_MACABU_FILIAL1A) ou não usa API web direta,
-      // enfileira o pedido imediatamente como 'pending_erp' para o agente gravar na Pré-Venda do PDV
-      if (hasLocalDesktopAgent || !hasWebPortalCredentials || body.useLocalAgent === true) {
+      /**
+       * Enfileira o pedido para o Agente Local SQL Server (`status = 'pending_erp'`)
+       * e responde HTTP 200 imediatamente.
+       */
+      const enqueueAndRespondForLocalAgent = async () => {
         const updatedCustomer = {
           ...(typeof customer === "object" && customer !== null ? customer : {}),
           erpError: null,
@@ -7524,214 +7464,167 @@ app.post(
             .eq("tenant_id", tenant_id);
         }
 
-        return res.json({
+        return res.status(200).json({
           success: true,
           queuedForAgent: true,
+          mode: "agent_queue",
           status: "pending_erp",
-          message: "Enviando para o PDV... O Agente Local gravará a Pré-Venda no InovaFarma em instantes.",
+          message: "Pedido enviado para a fila do Agente Local (PDV)",
           codigoVendaOnLine,
         });
+      };
+
+      // REGRA PRIORITÁRIA: Sempre envia para a fila do Agente Local (pending_erp),
+      // exceto se o Portal PS foi explicitamente forçado e tem login/senha reais configurados.
+      if (!canAttemptPortalPsWebApi || !effectiveErpToken) {
+        return await enqueueAndRespondForLocalAgent();
       }
 
-      const vendaPayload = await buildInovafarmaVendaPayload(
-        {
-          ent: body.ent ?? body.entidade ?? body.codigoEmpresa ?? effectiveErpCnpj ?? "1",
-          cnpj: effectiveErpCnpj,
-          pedidoId: codigoVendaOnLine,
-          codigoVendaOnLine,
-          vendedor: rawVendedor,
-          retirarNaLoja: false,
-          cliente: {
-            nome:
-              customer.name ||
-              customer.nome ||
-              targetOrder.customer_name ||
-              "Cliente Consumidor",
-            cpf: customer.cpf || targetOrder.customer_cpf || "",
-            telefone:
-              customer.phone ||
-              customer.telefone ||
-              targetOrder.customer_phone ||
-              "",
-            endereco: {
-              logradouro:
-                customer.address ||
-                customer.street ||
-                customer.rua ||
-                targetOrder.address ||
-                tenantSettings?.street ||
-                tenantSettings?.full_address ||
-                "ENDERECO DE ENTREGA",
-              numero:
-                customer.address_number ||
-                customer.addressNumber ||
-                customer.number ||
-                customer.numero ||
-                "S/N",
-              bairro:
-                customer.neighborhood ||
-                customer.bairro ||
-                tenantSettings?.neighborhood ||
-                "CENTRO",
-              cidade:
-                customer.city ||
-                customer.cidade ||
-                tenantSettings?.city ||
-                "CIDADE",
-              uf:
-                customer.state ||
-                customer.uf ||
-                tenantSettings?.state ||
-                "SP",
-              cep:
-                customer.cep ||
-                customer.zipCode ||
-                tenantSettings?.cep ||
-                "00000000",
+      try {
+        const vendaPayload = await buildInovafarmaVendaPayload(
+          {
+            ent: body.ent ?? body.entidade ?? body.codigoEmpresa ?? effectiveErpCnpj ?? "1",
+            cnpj: effectiveErpCnpj,
+            pedidoId: codigoVendaOnLine,
+            codigoVendaOnLine,
+            vendedor: rawVendedor,
+            retirarNaLoja: false,
+            cliente: {
+              nome:
+                customer.name ||
+                customer.nome ||
+                targetOrder.customer_name ||
+                "Cliente Consumidor",
+              cpf: customer.cpf || targetOrder.customer_cpf || "",
+              telefone:
+                customer.phone ||
+                customer.telefone ||
+                targetOrder.customer_phone ||
+                "",
+              endereco: {
+                logradouro:
+                  customer.address ||
+                  customer.street ||
+                  customer.rua ||
+                  targetOrder.address ||
+                  tenantSettings?.street ||
+                  tenantSettings?.full_address ||
+                  "ENDERECO DE ENTREGA",
+                numero:
+                  customer.address_number ||
+                  customer.addressNumber ||
+                  customer.number ||
+                  customer.numero ||
+                  "S/N",
+                bairro:
+                  customer.neighborhood ||
+                  customer.bairro ||
+                  tenantSettings?.neighborhood ||
+                  "CENTRO",
+                cidade:
+                  customer.city ||
+                  customer.cidade ||
+                  tenantSettings?.city ||
+                  "CIDADE",
+                uf:
+                  customer.state ||
+                  customer.uf ||
+                  tenantSettings?.state ||
+                  "SP",
+                cep:
+                  customer.cep ||
+                  customer.zipCode ||
+                  tenantSettings?.cep ||
+                  "00000000",
+              },
             },
+            itens: rawItemsForVenda,
+            descontoGlobal: descontoGlobalParaDistribuir,
+            taxaEntrega,
+            pagamentos: Array.isArray(body.pagamentos)
+              ? body.pagamentos
+              : undefined,
+            formaPagamentoPadrao: formaPagamento,
+            observacao: targetOrder.observation || targetOrder.notes || targetOrder.observacao || undefined,
           },
-          itens: rawItemsForVenda,
-          descontoGlobal: descontoGlobalParaDistribuir,
-          taxaEntrega,
-          pagamentos: Array.isArray(body.pagamentos)
-            ? body.pagamentos
-            : undefined,
-          formaPagamentoPadrao: formaPagamento,
-          observacao: targetOrder.observation || targetOrder.notes || targetOrder.observacao || undefined,
-        },
-        {
-          baseUrl: effectiveErpBaseUrl,
-          routeId: effectiveErpRouteId,
-          token: effectiveErpToken,
-          cnpj: effectiveErpCnpj,
-          apiKey: effectiveErpApiKey || undefined,
-        },
-      );
-
-      let erpResponseData: any = null;
-      let codigoVendaInova: string | null = null;
-      let erpErrorDetails: string | null = null;
-      if (
-        effectiveErpToken &&
-        effectiveErpCnpj &&
-        (tenantSettings?.erp_type === "inovafarma" || tenantSettings?.erp_url || erpConfig.erpBaseUrl)
-      ) {
-        try {
-          const sent = await sendInovafarmaVenda({
+          {
             baseUrl: effectiveErpBaseUrl,
             routeId: effectiveErpRouteId,
             token: effectiveErpToken,
             cnpj: effectiveErpCnpj,
             apiKey: effectiveErpApiKey || undefined,
-            tenantId: tenant_id,
-            supabaseClient: supabaseAdmin,
-            venda: {
-              ent: vendaPayload.ent,
-              cnpj: vendaPayload.cnpj,
-              pedidoId: vendaPayload.codigoVendaOnLine,
-              codigoVendaOnLine: vendaPayload.codigoVendaOnLine,
-              vendedor: vendaPayload.vendedor,
-              retirarNaLoja: false,
-              cliente: vendaPayload.cliente,
-              itens: vendaPayload.itens,
-              taxaEntrega: vendaPayload.taxaEntrega,
-              pagamentos: vendaPayload.pagamentos,
-              observacao: vendaPayload.observacao,
-            },
-          });
-          erpResponseData = sent.response;
-          codigoVendaInova = sent.codigoVendaInova || null;
-          await logIntegration(
-            targetOrder.tenant_id,
-            sent.endpointUsed,
-            vendaPayload,
-            "SUCCESS",
-          );
-        } catch (erpErr: any) {
-          erpErrorDetails = String(erpErr?.message || "Erro ao transmitir POST /Venda ao Inovafarma").slice(0, 2000);
-          await logIntegration(
-            targetOrder.tenant_id,
-            `/api/v1/${effectiveErpRouteId}/Venda`,
-            vendaPayload,
-            "FAILED",
-            erpErrorDetails,
-          );
-          console.warn("Aviso ao transmitir POST /Venda ao Inovafarma:", erpErrorDetails);
+          },
+        );
+
+        const sent = await sendInovafarmaVenda({
+          baseUrl: effectiveErpBaseUrl,
+          routeId: effectiveErpRouteId,
+          token: effectiveErpToken,
+          cnpj: effectiveErpCnpj,
+          apiKey: effectiveErpApiKey || undefined,
+          tenantId: tenant_id,
+          supabaseClient: supabaseAdmin,
+          venda: {
+            ent: vendaPayload.ent,
+            cnpj: vendaPayload.cnpj,
+            pedidoId: vendaPayload.codigoVendaOnLine,
+            codigoVendaOnLine: vendaPayload.codigoVendaOnLine,
+            vendedor: vendaPayload.vendedor,
+            retirarNaLoja: false,
+            cliente: vendaPayload.cliente,
+            itens: vendaPayload.itens,
+            taxaEntrega: vendaPayload.taxaEntrega,
+            pagamentos: vendaPayload.pagamentos,
+            observacao: vendaPayload.observacao,
+          },
+        });
+
+        const codigoVendaInova = sent.codigoVendaInova || null;
+        await logIntegration(
+          targetOrder.tenant_id,
+          sent.endpointUsed,
+          vendaPayload,
+          "SUCCESS",
+        );
+
+        const orderUpdatePayload: Record<string, any> = {
+          status: "enviado_ao_pdv",
+          codigo_venda_online: vendaPayload.codigoVendaOnLine,
+        };
+        if (codigoVendaInova) {
+          orderUpdatePayload.codigo_venda_inova = codigoVendaInova;
         }
-      }
 
-      // Compatibilidade adicional com erp_webhook_url se configurado para outros ERPs
-      if (tenantSettings?.erp_webhook_url) {
-        try {
-          const cleanCnpj = sanitizeCnpj(tenantSettings.cnpj || "");
-          const tokenSecret =
-            tenantSettings.erp_webhook_secret ||
-            tenantSettings.integration_token ||
-            "";
-          const webhookResponse = await fetch(tenantSettings.erp_webhook_url, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              ...(tokenSecret ? { Authorization: `Bearer ${tokenSecret}` } : {}),
-              ...(cleanCnpj ? { cnpj: cleanCnpj } : {}),
-            },
-            body: JSON.stringify(vendaPayload),
-          });
-          if (!webhookResponse.ok) {
-            console.error(
-              `Erro ao enviar payload ao Webhook ERP. Status: ${webhookResponse.status}`,
-            );
-          }
-        } catch (err) {
-          console.error("Falha na requisição para o Webhook do ERP", err);
-        }
-      }
-
-      const orderUpdatePayload: Record<string, any> = {
-        status: "enviado_ao_pdv",
-        codigo_venda_online: vendaPayload.codigoVendaOnLine,
-      };
-      if (codigoVendaInova) {
-        orderUpdatePayload.codigo_venda_inova = codigoVendaInova;
-      }
-
-      let { error: updateError } = await supabaseAdmin
-        .from("orders")
-        .update(orderUpdatePayload)
-        .eq("id", targetOrder.id)
-        .eq("tenant_id", targetOrder.tenant_id);
-
-      if (updateError && (updateError.code === "42703" || updateError.message?.includes("does not exist"))) {
-        const fallbackUpdate = await supabaseAdmin
+        let { error: updateError } = await supabaseAdmin
           .from("orders")
-          .update({ status: "enviado_ao_pdv" })
+          .update(orderUpdatePayload)
           .eq("id", targetOrder.id)
           .eq("tenant_id", targetOrder.tenant_id);
-        updateError = fallbackUpdate.error;
-      }
 
-      if (updateError) {
-        console.error(
-          "Erro ao atualizar status do pedido no Supabase:",
-          updateError,
-        );
-        return res.status(500).json({
-          error: "Falha ao atualizar status do pedido para enviado_ao_pdv",
+        if (updateError && (updateError.code === "42703" || updateError.message?.includes("does not exist"))) {
+          await supabaseAdmin
+            .from("orders")
+            .update({ status: "enviado_ao_pdv" })
+            .eq("id", targetOrder.id)
+            .eq("tenant_id", targetOrder.tenant_id);
+        }
+
+        return res.json({
+          success: true,
+          erpSent: true,
+          message: "Pedido enviado ao PDV Inovafarma com sucesso",
+          codigoVendaOnLine: vendaPayload.codigoVendaOnLine,
+          codigoVendaInova,
+          payload_enviado: vendaPayload,
+          erp_response: sent.response,
         });
+      } catch (portalPsError: any) {
+        console.warn(
+          "[Inovafarma Venda] Falha na chamada Portal PS, redirecionando pedido automaticamente para a fila do Agente Local (pending_erp):",
+          portalPsError?.message,
+        );
+        return await enqueueAndRespondForLocalAgent();
       }
-
-      return res.json({
-        success: !erpErrorDetails,
-        erpSent: !erpErrorDetails,
-        message: erpErrorDetails
-          ? `Pedido marcado como ENVIADO AO PDV, mas houve erro na resposta do Inovafarma: ${erpErrorDetails}`
-          : "Pedido enviado ao PDV Inovafarma com sucesso",
-        ...(erpErrorDetails ? { erpError: erpErrorDetails, details: erpErrorDetails } : {}),
-        codigoVendaOnLine: vendaPayload.codigoVendaOnLine,
-        codigoVendaInova,
-        payload_enviado: vendaPayload,
-        erp_response: erpResponseData,
-      });
     } catch (error: any) {
       const errDetail = String(error?.message || "Erro interno no servidor").slice(0, 2000);
       console.error("Erro ao processar integração ERP (POST /Venda):", errDetail);
@@ -7775,12 +7668,29 @@ app.get(
   async (req, res) => {
     try {
       const { tenantId } = await resolveTenantForAgent(req);
-      const effectiveTenantId =
+      let effectiveTenantId =
         tenantId ||
         String(req.query.tenant_id || req.query.tenantId || req.headers["x-tenant-id"] || "").trim();
 
+      // Fallback: se o token x-api-key do agente ainda não bateu diretamente mas há uma única farmácia com pedido 'pending_erp' (ex: Drogaria Macabú)
       if (!effectiveTenantId) {
-        return res.status(401).json({ error: "Agente ou farmácia não identificada.", orders: [] });
+        if (pendingErpOrdersByTenant.size === 1) {
+          effectiveTenantId = Array.from(pendingErpOrdersByTenant.keys())[0];
+        } else {
+          const { data: anyPending } = await supabaseAdmin
+            .from("orders")
+            .select("tenant_id")
+            .eq("status", "pending_erp")
+            .order("date", { ascending: false })
+            .limit(1);
+          if (anyPending && anyPending.length > 0 && anyPending[0].tenant_id) {
+            effectiveTenantId = String(anyPending[0].tenant_id);
+          }
+        }
+      }
+
+      if (!effectiveTenantId) {
+        return res.json({ success: true, orders: [] });
       }
 
       const memMap = pendingErpOrdersByTenant.get(effectiveTenantId);
@@ -7792,7 +7702,7 @@ app.get(
         }
       }
 
-      // Consulta também no Supabase pedidos com status = 'pending_erp' (caso o servidor tenha reiniciado)
+      // Consulta também no Supabase pedidos com status = 'pending_erp' (caso o servidor tenha reiniciado ou em múltiplas instâncias)
       const { data: dbPendingOrders } = await supabaseAdmin
         .from("orders")
         .select("*")
@@ -7806,9 +7716,49 @@ app.get(
           if (!resultMap.has(String(dbOrd.id))) {
             const cust = dbOrd.customer || {};
             const pdvMeta = cust._pdv || {};
-            const enrichedItems = Array.isArray(pdvMeta.enrichedItems) && pdvMeta.enrichedItems.length > 0
-              ? pdvMeta.enrichedItems
-              : (dbOrd.items || []);
+            let enrichedItems =
+              Array.isArray(pdvMeta.enrichedItems) && pdvMeta.enrichedItems.length > 0
+                ? pdvMeta.enrichedItems
+                : (dbOrd.items || []);
+
+            // Se os itens vieram direto do banco sem codigoProduto/ean enriquecidos, enriquece a partir da tabela products
+            const needsEnrichment = enrichedItems.some(
+              (it: any) => !it.codigoProduto && !it.internalCode && !it.internal_code,
+            );
+            if (needsEnrichment && enrichedItems.length > 0) {
+              const prodIds = enrichedItems
+                .map((it: any) => it.id || it.product_id || it.productId)
+                .filter(Boolean);
+              const prodMap = new Map<string, any>();
+              if (prodIds.length > 0) {
+                const { data: pRows } = await supabaseAdmin
+                  .from("products")
+                  .select("id, name, barcode, internal_code, price, original_price")
+                  .eq("tenant_id", effectiveTenantId)
+                  .in("id", prodIds);
+                if (Array.isArray(pRows)) {
+                  for (const pr of pRows) {
+                    if (pr.id) prodMap.set(String(pr.id), pr);
+                  }
+                }
+              }
+              enrichedItems = enrichedItems.map((it: any, idx: number) => {
+                const p = prodMap.get(String(it.id || it.product_id || it.productId || "")) || {};
+                const bc = p.barcode || it.barcode || it.ean || "";
+                const ic = p.internal_code || it.internalCode || it.internal_code || bc || String(idx + 1);
+                return {
+                  ...it,
+                  ean: String(bc).replace(/\D/g, ""),
+                  barcode: String(bc).trim(),
+                  codigoProduto: String(ic).trim(),
+                  internalCode: String(ic).trim(),
+                  nome: String(p.name || it.name || it.nome || `Item #${idx + 1}`).trim(),
+                  quantidade: Number(it.quantity ?? it.quantidade ?? 1),
+                  precoUnitario: Number(it.price ?? it.precoUnitario ?? p.price ?? 0),
+                  precoOriginal: Number(it.originalPrice ?? it.precoOriginal ?? p.original_price ?? it.price ?? 0),
+                };
+              });
+            }
 
             resultMap.set(String(dbOrd.id), {
               id: dbOrd.id,
@@ -9248,13 +9198,13 @@ async function resolveTenantForAgent(req: express.Request): Promise<AgentTenantR
     // 1. Busca por integration_token na tabela tenants
     for (const key of keyArray) {
       try {
-        const { data: byToken } = await supabaseAdmin
+        const { data: byTokenRows } = await supabaseAdmin
           .from('tenants')
           .select('*')
           .eq('integration_token', key)
-          .maybeSingle();
-        if (byToken) {
-          foundTenant = byToken;
+          .limit(1);
+        if (byTokenRows && byTokenRows.length > 0) {
+          foundTenant = byTokenRows[0];
           break;
         }
       } catch (e) {}
@@ -9264,13 +9214,13 @@ async function resolveTenantForAgent(req: express.Request): Promise<AgentTenantR
     if (!foundTenant) {
       for (const key of keyArray) {
         try {
-          const { data: bySlug } = await supabaseAdmin
+          const { data: bySlugRows } = await supabaseAdmin
             .from('tenants')
             .select('*')
             .eq('slug', key)
-            .maybeSingle();
-          if (bySlug) {
-            foundTenant = bySlug;
+            .limit(1);
+          if (bySlugRows && bySlugRows.length > 0) {
+            foundTenant = bySlugRows[0];
             break;
           }
         } catch (e) {}
@@ -9281,13 +9231,13 @@ async function resolveTenantForAgent(req: express.Request): Promise<AgentTenantR
     if (!foundTenant) {
       for (const key of keyArray) {
         try {
-          const { data: byId } = await supabaseAdmin
+          const { data: byIdRows } = await supabaseAdmin
             .from('tenants')
             .select('*')
             .eq('id', key)
-            .maybeSingle();
-          if (byId) {
-            foundTenant = byId;
+            .limit(1);
+          if (byIdRows && byIdRows.length > 0) {
+            foundTenant = byIdRows[0];
             break;
           }
         } catch (e) {}
@@ -9299,20 +9249,21 @@ async function resolveTenantForAgent(req: express.Request): Promise<AgentTenantR
   if (!foundTenant && lookupKeys.size > 0) {
     for (const key of Array.from(lookupKeys)) {
       try {
-        const { data: tokenRow } = await supabaseAdmin
+        const { data: tokenRows } = await supabaseAdmin
           .from('activation_tokens')
           .select('tenant_id, token')
           .eq('token', key)
-          .maybeSingle();
+          .limit(1);
+        const tokenRow = tokenRows?.[0];
         if (tokenRow?.tenant_id) {
           matchedToken = tokenRow.token;
-          const { data: t } = await supabaseAdmin
+          const { data: tRows } = await supabaseAdmin
             .from('tenants')
             .select('*')
             .eq('id', tokenRow.tenant_id)
-            .maybeSingle();
-          if (t) {
-            foundTenant = t;
+            .limit(1);
+          if (tRows && tRows.length > 0) {
+            foundTenant = tRows[0];
             break;
           }
         }
@@ -9324,20 +9275,21 @@ async function resolveTenantForAgent(req: express.Request): Promise<AgentTenantR
   if (!foundTenant && lookupKeys.size > 0) {
     for (const key of Array.from(lookupKeys)) {
       try {
-        const { data: agentRow } = await supabaseAdmin
+        const { data: agentRows } = await supabaseAdmin
           .from('agent_integrations')
           .select('tenant_id, activation_token')
           .or(`activation_token.eq.${key},tenant_id.eq.${key}`)
-          .maybeSingle();
+          .limit(1);
+        const agentRow = agentRows?.[0];
         if (agentRow?.tenant_id) {
           if (!matchedToken && agentRow.activation_token) matchedToken = agentRow.activation_token;
-          const { data: t } = await supabaseAdmin
+          const { data: tRows } = await supabaseAdmin
             .from('tenants')
             .select('*')
             .eq('id', agentRow.tenant_id)
-            .maybeSingle();
-          if (t) {
-            foundTenant = t;
+            .limit(1);
+          if (tRows && tRows.length > 0) {
+            foundTenant = tRows[0];
             break;
           }
         }

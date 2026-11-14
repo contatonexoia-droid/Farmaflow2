@@ -319,7 +319,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
 
       const data = await sendOrderToInovafarmaErp(order, true);
 
-      if (data?.queuedForAgent || data?.status === "pending_erp") {
+      if (data?.queuedForAgent || data?.mode === "agent_queue" || data?.status === "pending_erp") {
         setLivePdvMap((prev) => ({
           ...prev,
           [order.id]: {
