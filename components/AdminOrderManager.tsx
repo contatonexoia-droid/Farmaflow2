@@ -81,6 +81,14 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
   const [editingOrder, setEditingOrder] = useState<Order | null>(null);
   const [conferenceOrder, setConferenceOrder] = useState<Order | null>(null);
   const [sendingToPDV, setSendingToPDV] = useState<string | null>(null);
+  const [pdvSellerModalOrder, setPdvSellerModalOrder] = useState<Order | null>(null);
+  const [sellerCodeInput, setSellerCodeInput] = useState<string>(() => {
+    try {
+      return localStorage.getItem("farmaflow_last_seller_code") || "";
+    } catch {
+      return "";
+    }
+  });
   const [prescriptionsMap, setPrescriptionsMap] = useState<Record<string, string>>({});
 
   useEffect(() => {
@@ -173,9 +181,14 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
       live?.codigoVendaInova ??
       order.codigoVendaInova ??
       order.codigo_venda_inova ??
+      custPdv.erpOrderId ??
       custPdv.codigoVendaInova ??
+      (order.customer as any)?.erpOrderId ??
       (order.customer as any)?.codigoVendaInova;
 
+    if (rawInova && /cesta\s*#/i.test(String(rawInova))) {
+      return `No PDV (${rawInova})`;
+    }
     if (pv && orc) {
       return `No PDV (Pré-Venda #${pv} • Orç #${orc})`;
     }
@@ -267,9 +280,15 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
     };
   }, [tenant?.id, orders, livePdvMap, onUpdateOrderCustomer]);
 
-  const sendOrderToInovafarmaErp = async (order: Order, showUiAlert = false) => {
+  const sendOrderToInovafarmaErp = async (
+    order: Order,
+    showUiAlert = false,
+    sellerCode?: string,
+  ) => {
     const resolvedTenantId = order.tenantId || tenant?.id;
     if (!resolvedTenantId) return null;
+
+    const cleanSellerCode = String(sellerCode ?? "").replace(/\D/g, "").trim();
 
     console.log(
       `[FarmaFlow Debug]: Enviando pedido ${order.id} para o PDV / Inovafarma (POST /api/integration/inovafarma/venda)...`,
@@ -280,7 +299,11 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ order_id: order.id, tenant_id: resolvedTenantId }),
+      body: JSON.stringify({
+        order_id: order.id,
+        tenant_id: resolvedTenantId,
+        sellerCode: cleanSellerCode || undefined,
+      }),
     });
 
     const data = await response.json().catch(() => ({}));
@@ -305,8 +328,30 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
     return data;
   };
 
-  const handleSendToPDV = async (order: Order) => {
+  const openPdvSellerModal = (order: Order) => {
     try {
+      const saved = localStorage.getItem("farmaflow_last_seller_code") || "";
+      setSellerCodeInput(saved);
+    } catch {
+      // ignore
+    }
+    setPdvSellerModalOrder(order);
+  };
+
+  const handleSendToPDV = async (order: Order, sellerCodeOverride?: string) => {
+    try {
+      const cleanSellerCode = String(
+        sellerCodeOverride ?? sellerCodeInput ?? "",
+      )
+        .replace(/\D/g, "")
+        .trim();
+      try {
+        localStorage.setItem("farmaflow_last_seller_code", cleanSellerCode);
+      } catch {
+        // ignore
+      }
+
+      setPdvSellerModalOrder(null);
       setSendingToPDV(order.id);
       setLivePdvMap((prev) => ({
         ...prev,
@@ -317,7 +362,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
         },
       }));
 
-      const data = await sendOrderToInovafarmaErp(order, true);
+      const data = await sendOrderToInovafarmaErp(order, true, cleanSellerCode);
 
       if (data?.queuedForAgent || data?.mode === "agent_queue" || data?.status === "pending_erp") {
         setLivePdvMap((prev) => ({
@@ -335,7 +380,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
             status: "enviado_ao_pdv",
             codigoPV: data?.codigoPV,
             codigoOrcamento: data?.codigoOrcamento,
-            codigoVendaInova: data?.codigoVendaInova,
+            codigoVendaInova: data?.erpOrderId || data?.codigoVendaInova,
             erpError: undefined,
           },
         }));
@@ -1214,7 +1259,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                         ) {
                           return (
                             <button
-                              onClick={() => handleSendToPDV(order)}
+                              onClick={() => openPdvSellerModal(order)}
                               className="w-full sm:w-auto px-6 py-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl text-[11px] font-black uppercase tracking-widest transition-all shadow-lg active:scale-95 flex items-center justify-center gap-2"
                             >
                               <Upload size={16} /> Enviar para o PDV
@@ -1370,6 +1415,80 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
           </div>
         )}
       </div>
+
+      {pdvSellerModalOrder && (
+        <div className="fixed inset-0 z-[110] bg-gray-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-md mx-auto rounded-[2.5rem] shadow-2xl p-8 animate-in zoom-in-95">
+            <div className="flex justify-between items-start mb-5">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center shrink-0">
+                  <Upload size={22} />
+                </div>
+                <div>
+                  <h3 className="text-lg font-black text-gray-900 leading-tight">
+                    Enviar Pedido para o PDV
+                  </h3>
+                  <p className="text-xs text-gray-500 font-bold">
+                    {pdvSellerModalOrder.customer?.name || "Cliente"} • R${" "}
+                    {(pdvSellerModalOrder.total || 0).toFixed(2)}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPdvSellerModalOrder(null)}
+                className="p-2 text-gray-400 hover:text-gray-600 rounded-full hover:bg-gray-100 transition-colors"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleSendToPDV(pdvSellerModalOrder, sellerCodeInput);
+              }}
+              className="space-y-5"
+            >
+              <div>
+                <label className="block text-[11px] font-black text-gray-700 uppercase tracking-wider mb-2">
+                  Código do Vendedor no ERP (ex: 91, 781)
+                </label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  autoFocus
+                  placeholder="Ex: 91, 781 (ou deixe em branco para padrão)"
+                  value={sellerCodeInput}
+                  onChange={(e) =>
+                    setSellerCodeInput(e.target.value.replace(/\D/g, ""))
+                  }
+                  className="w-full px-4 py-3.5 bg-gray-50 border-2 border-gray-200 focus:border-indigo-500 focus:bg-white rounded-2xl outline-none font-black text-gray-900 text-base transition-all"
+                />
+                <p className="text-[11px] text-gray-400 font-medium mt-1.5">
+                  O código informado fica salvo neste computador para agilizar os próximos envios.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setPdvSellerModalOrder(null)}
+                  className="py-3.5 bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-2xl font-bold text-xs uppercase tracking-wider transition-all"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="py-3.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl font-black text-xs uppercase tracking-wider shadow-lg shadow-indigo-200 active:scale-95 transition-all flex items-center justify-center gap-2"
+                >
+                  <Upload size={15} /> Confirmar Envio
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {showCleanupModal && (
         <div className="fixed inset-0 z-[100] bg-gray-900/60 backdrop-blur-sm flex items-center justify-center p-4">

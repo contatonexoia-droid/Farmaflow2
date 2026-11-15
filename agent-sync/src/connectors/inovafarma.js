@@ -264,7 +264,7 @@ class InovaFarmaConnector {
                 throw new Error('O pedido não possui itens para enviar à Pré-Venda do InovaFarma.');
             }
 
-            // 1. Resolve e valida o CodigoProduto (INT) de cada item antes de abrir a transação com lock
+            // 1. Resolve e valida o CodigoProduto (INT) e metadados (PrecoCusto, Unidade, CodigoGrupoInventario) de cada item
             const preparedItems = [];
             for (let i = 0; i < rawItems.length; i++) {
                 const it = rawItems[i];
@@ -315,6 +315,68 @@ class InovaFarmaConnector {
                     );
                 }
 
+                // Busca PrecoCusto, Unidade e CodigoGrupoInventario em dbo.Produto
+                let precoCustoProd = 0;
+                let unidadeProd = truncateStr(it.unidadeMedida || it.unitMeasure || 'UN', 5, 'UN');
+                let codigoGrupoInventarioProd = null;
+
+                try {
+                    const prodMetaReq = pool.request();
+                    prodMetaReq.input('codProd', sql.Int, resolvedCodigoProduto);
+                    const prodMetaRes = await prodMetaReq.query(`
+                        DECLARE @PrecoCusto MONEY = 0;
+                        DECLARE @UnidadeProd VARCHAR(5) = 'UN';
+                        DECLARE @CodGrupoInv INT = NULL;
+
+                        IF OBJECT_ID('dbo.Produto', 'U') IS NOT NULL
+                        BEGIN
+                            IF COL_LENGTH('dbo.Produto', 'PrecoCusto') IS NOT NULL
+                            BEGIN
+                                EXEC sp_executesql
+                                    N'SELECT TOP 1 @pCusto = ISNULL(PrecoCusto, 0) FROM dbo.Produto WITH (NOLOCK) WHERE CodigoProduto = @pCod',
+                                    N'@pCod INT, @pCusto MONEY OUTPUT',
+                                    @pCod = @codProd,
+                                    @pCusto = @PrecoCusto OUTPUT;
+                            END
+
+                            IF COL_LENGTH('dbo.Produto', 'Unidade') IS NOT NULL
+                            BEGIN
+                                EXEC sp_executesql
+                                    N'SELECT TOP 1 @pUnid = LEFT(ISNULL(LTRIM(RTRIM(Unidade)), ''UN''), 5) FROM dbo.Produto WITH (NOLOCK) WHERE CodigoProduto = @pCod',
+                                    N'@pCod INT, @pUnid VARCHAR(5) OUTPUT',
+                                    @pCod = @codProd,
+                                    @pUnid = @UnidadeProd OUTPUT;
+                            END
+
+                            IF COL_LENGTH('dbo.Produto', 'CodigoGrupoInventario') IS NOT NULL
+                            BEGIN
+                                EXEC sp_executesql
+                                    N'SELECT TOP 1 @pGrupo = CodigoGrupoInventario FROM dbo.Produto WITH (NOLOCK) WHERE CodigoProduto = @pCod',
+                                    N'@pCod INT, @pGrupo INT OUTPUT',
+                                    @pCod = @codProd,
+                                    @pGrupo = @CodGrupoInv OUTPUT;
+                            END
+                        END
+
+                        SELECT
+                            @PrecoCusto AS PrecoCusto,
+                            @UnidadeProd AS Unidade,
+                            @CodGrupoInv AS CodigoGrupoInventario;
+                    `);
+                    const metaRow = prodMetaRes?.recordset?.[0];
+                    if (metaRow) {
+                        precoCustoProd = roundMoney(metaRow.PrecoCusto ?? 0);
+                        if (metaRow.Unidade && String(metaRow.Unidade).trim()) {
+                            unidadeProd = truncateStr(metaRow.Unidade, 5, 'UN');
+                        }
+                        if (metaRow.CodigoGrupoInventario !== null && metaRow.CodigoGrupoInventario !== undefined) {
+                            codigoGrupoInventarioProd = Number(metaRow.CodigoGrupoInventario);
+                        }
+                    }
+                } catch (metaErr) {
+                    // Fallback seguro
+                }
+
                 const quantidade = Math.max(1, Number(it.quantidade ?? it.quantity ?? 1));
                 const precoLiquidoUnit = roundMoney(it.precoUnitario ?? it.price ?? it.unit_price ?? 0);
                 const precoBrutoUnit = roundMoney(
@@ -324,21 +386,25 @@ class InovaFarmaConnector {
                             ? Number(it.originalPrice)
                             : precoLiquidoUnit + roundMoney(it.descontoUnitario ?? 0))
                 );
+                const descontoUnit = roundMoney(Math.max(0, precoBrutoUnit - precoLiquidoUnit));
 
                 const itemTotalBruto = roundMoney(precoBrutoUnit * quantidade);
                 const itemTotalLiquido = roundMoney(precoLiquidoUnit * quantidade);
                 const itemTotalDesconto = roundMoney(Math.max(0, itemTotalBruto - itemTotalLiquido));
-                const unidade = truncateStr(it.unidadeMedida || it.unitMeasure || 'UN', 5, 'UN');
 
                 preparedItems.push({
                     codigoProduto: resolvedCodigoProduto,
                     nome: itemName,
                     quantidade,
                     preco: precoLiquidoUnit,
+                    precoBrutoUnit,
+                    descontoUnit,
+                    precoCusto: precoCustoProd,
+                    codigoGrupoInventario: codigoGrupoInventarioProd,
                     totalBruto: itemTotalBruto,
                     totalDesconto: itemTotalDesconto,
                     totalLiquido: itemTotalLiquido,
-                    unidade
+                    unidade: unidadeProd || 'UN'
                 });
             }
 
@@ -411,67 +477,108 @@ class InovaFarmaConnector {
             await transaction.begin(sql.ISOLATION_LEVEL.READ_COMMITTED);
 
             const headerReq = new sql.Request(transaction);
+            const rawOrderSeller =
+                order.sellerCode ??
+                order.erp_seller_code ??
+                order.seller_code ??
+                customer.sellerCode ??
+                customer.erp_seller_code ??
+                customer._pdv?.sellerCode ??
+                customer._pdv?.erp_seller_code;
+            const parsedOrderSellerDigits =
+                rawOrderSeller !== undefined && rawOrderSeller !== null
+                    ? String(rawOrderSeller).replace(/\D/g, '').trim()
+                    : '';
+            const orderSellerId =
+                parsedOrderSellerDigits !== '' && Number(parsedOrderSellerDigits) > 0
+                    ? Number(parsedOrderSellerDigits)
+                    : null;
+
             const configuredFuncId =
                 this.defaultFuncionarioId && !isNaN(Number(this.defaultFuncionarioId)) && Number(this.defaultFuncionarioId) > 0
                     ? Number(this.defaultFuncionarioId)
                     : null;
 
+            headerReq.input('OrderSellerCode', sql.Int, orderSellerId);
             headerReq.input('ConfiguredFuncionario', sql.Int, configuredFuncId);
             headerReq.input('TotalBruto', sql.Money, headerTotalBruto);
             headerReq.input('TotalDesconto', sql.Money, headerTotalDesconto);
             headerReq.input('TotalLiquido', sql.Money, headerTotalLiquido);
-            headerReq.input('Observacao', sql.VarChar(200), observacaoHeader);
-            headerReq.input('NomeCliente', sql.VarChar(100), nomeCliente);
 
-            // Passo 1, 2 e 3: Calcula novos IDs (+10), insere primeiro na tabela pai dbo.Lancamento e depois em dbo.Orcamento
-            const headerSqlResult = await headerReq.query(`
+            // Passo 1 e 2: Grava dbo.Lancamento e dbo.Venda (Pré-Venda ativa com Status = 0 e Cesta de 4 dígitos)
+            const vendaHeaderRes = await headerReq.query(`
                 DECLARE @NovoCodigoLancamento BIGINT;
-                DECLARE @NovoCodigoOrcamento BIGINT;
-                DECLARE @BaseCodigoOrcamentoID BIGINT;
-                DECLARE @NovoCodigoPV INT;
-                DECLARE @StepPV INT = 1;
-                DECLARE @CodigoFuncionarioFinal INT;
+                DECLARE @NovoCodigoVenda BIGINT = NULL;
+                DECLARE @BaseCodigoVendaID BIGINT = 1;
+                DECLARE @NumeroCesta INT = NULL;
+                DECLARE @CodigoFuncionarioVenda INT = NULL;
                 DECLARE @CodigoUsuarioFinal INT = NULL;
                 DECLARE @OperacaoFinal INT = 1;
                 DECLARE @CodigoEstacaoFinal INT = 521;
+
+                IF @OrderSellerCode IS NOT NULL AND @OrderSellerCode > 0
+                BEGIN
+                    IF OBJECT_ID('dbo.Funcionario', 'U') IS NOT NULL
+                    BEGIN
+                        SELECT TOP 1 @CodigoFuncionarioVenda = CodigoFuncionario
+                        FROM dbo.Funcionario
+                        WHERE CodigoFuncionario = @OrderSellerCode;
+
+                        IF @CodigoFuncionarioVenda IS NULL
+                           AND NOT EXISTS (
+                               SELECT 1
+                               FROM sys.foreign_keys
+                               WHERE parent_object_id = OBJECT_ID('dbo.Venda')
+                                 AND referenced_object_id = OBJECT_ID('dbo.Funcionario')
+                           )
+                        BEGIN
+                            SET @CodigoFuncionarioVenda = @OrderSellerCode;
+                        END
+                    END
+                    ELSE
+                    BEGIN
+                        SET @CodigoFuncionarioVenda = @OrderSellerCode;
+                    END
+                END
+
+                IF @CodigoFuncionarioVenda IS NULL AND @ConfiguredFuncionario IS NOT NULL AND @ConfiguredFuncionario > 0
+                BEGIN
+                    SET @CodigoFuncionarioVenda = @ConfiguredFuncionario;
+                END
+
+                IF @CodigoFuncionarioVenda IS NULL AND OBJECT_ID('dbo.Venda', 'U') IS NOT NULL
+                BEGIN
+                    SELECT TOP 1 @CodigoFuncionarioVenda = CodigoFuncionario
+                    FROM dbo.Venda
+                    WHERE CodigoFuncionario IS NOT NULL AND CodigoFuncionario > 0
+                    ORDER BY CodigoVenda DESC;
+                END
+
+                IF @CodigoFuncionarioVenda IS NULL AND OBJECT_ID('dbo.Funcionario', 'U') IS NOT NULL
+                BEGIN
+                    SELECT TOP 1 @CodigoFuncionarioVenda = CodigoFuncionario
+                    FROM dbo.Funcionario
+                    WHERE CodigoFuncionario IS NOT NULL AND CodigoFuncionario > 0
+                    ORDER BY CodigoFuncionario ASC;
+                END
+
+                IF @CodigoFuncionarioVenda IS NULL
+                    SET @CodigoFuncionarioVenda = 781;
 
                 IF OBJECT_ID('dbo.Lancamento', 'U') IS NOT NULL
                 BEGIN
                     SELECT @NovoCodigoLancamento = ISNULL(MAX(CodigoLancamento), 1) + 10
                     FROM dbo.Lancamento WITH (UPDLOCK, HOLDLOCK);
                 END
+                ELSE IF OBJECT_ID('dbo.Venda', 'U') IS NOT NULL
+                BEGIN
+                    SELECT @NovoCodigoLancamento = ISNULL(MAX(CodigoLancamento), 1) + 10
+                    FROM dbo.Venda WITH (UPDLOCK, HOLDLOCK);
+                END
                 ELSE
                 BEGIN
                     SELECT @NovoCodigoLancamento = ISNULL(MAX(CodigoLancamento), 1) + 10
                     FROM dbo.Orcamento WITH (UPDLOCK, HOLDLOCK);
-                END
-
-                SELECT @NovoCodigoOrcamento = ISNULL(MAX(CodigoOrcamento), 1) + 10
-                FROM dbo.Orcamento WITH (UPDLOCK, HOLDLOCK);
-
-                SELECT @BaseCodigoOrcamentoID = ISNULL(MAX(CodigoOrcamentoID), 1)
-                FROM dbo.Orcamento_Produto WITH (UPDLOCK, HOLDLOCK);
-
-                -- Verifica dinamicamente se CodigoPV cresce de +10 ou +1 na base da filial
-                DECLARE @Pv1 INT = NULL, @Pv2 INT = NULL;
-                SELECT TOP 1 @Pv1 = CodigoPV FROM dbo.Orcamento_PV WITH (UPDLOCK, HOLDLOCK) ORDER BY CodigoPV DESC;
-                IF @Pv1 IS NOT NULL
-                BEGIN
-                    SELECT TOP 1 @Pv2 = CodigoPV FROM dbo.Orcamento_PV WHERE CodigoPV < @Pv1 ORDER BY CodigoPV DESC;
-                    IF @Pv2 IS NOT NULL AND (@Pv1 - @Pv2) = 10
-                        SET @StepPV = 10;
-                END
-
-                SET @NovoCodigoPV = ISNULL(@Pv1, 0) + @StepPV;
-
-                -- Resolve CodigoFuncionario (Opção 2: configurado, ou último funcionário válido de Orcamento, ou NULL)
-                SET @CodigoFuncionarioFinal = @ConfiguredFuncionario;
-                IF @CodigoFuncionarioFinal IS NULL
-                BEGIN
-                    SELECT TOP 1 @CodigoFuncionarioFinal = CodigoFuncionario
-                    FROM dbo.Orcamento
-                    WHERE CodigoFuncionario IS NOT NULL AND CodigoFuncionario > 0
-                    ORDER BY CodigoOrcamento DESC;
                 END
 
                 IF OBJECT_ID('dbo.Lancamento', 'U') IS NOT NULL
@@ -519,119 +626,296 @@ class InovaFarmaConnector {
                     );
                 END
 
-                INSERT INTO dbo.Orcamento (
-                    CodigoOrcamento,
-                    CodigoCliente,
-                    CodigoLancamento,
-                    TotalBruto,
-                    TotalDesconto,
-                    TotalLiquido,
-                    Observacao,
-                    CodigoFuncionario,
-                    Eliminado,
-                    NomeCliente,
-                    rowguid,
-                    DataUltimaAtualizacao
-                ) VALUES (
-                    @NovoCodigoOrcamento,
-                    0,
-                    @NovoCodigoLancamento,
-                    @TotalBruto,
-                    @TotalDesconto,
-                    @TotalLiquido,
-                    @Observacao,
-                    @CodigoFuncionarioFinal,
-                    0,
-                    @NomeCliente,
-                    NEWID(),
-                    GETDATE()
-                );
+                IF OBJECT_ID('dbo.Venda', 'U') IS NOT NULL AND OBJECT_ID('dbo.Venda_Produto', 'U') IS NOT NULL
+                BEGIN
+                    SELECT @NovoCodigoVenda = ISNULL(MAX(CodigoVenda), 1) + 10
+                    FROM dbo.Venda WITH (UPDLOCK, HOLDLOCK);
 
-                SELECT
-                    @NovoCodigoOrcamento AS CodigoOrcamento,
-                    @NovoCodigoLancamento AS CodigoLancamento,
-                    @BaseCodigoOrcamentoID AS BaseCodigoOrcamentoID,
-                    @NovoCodigoPV AS CodigoPV,
-                    @CodigoFuncionarioFinal AS CodigoFuncionario,
-                    @CodigoUsuarioFinal AS CodigoUsuario,
-                    @OperacaoFinal AS Operacao,
-                    @CodigoEstacaoFinal AS CodigoEstacao;
-            `);
+                    SELECT @BaseCodigoVendaID = ISNULL(MAX(CodigoVendaID), 1)
+                    FROM dbo.Venda_Produto WITH (UPDLOCK, HOLDLOCK);
 
-            const idsRow = headerSqlResult?.recordset?.[0];
-            if (!idsRow || !idsRow.CodigoOrcamento) {
-                throw new Error('Falha ao gerar CodigoOrcamento na tabela dbo.Orcamento.');
-            }
+                    SET @NumeroCesta = CAST(((CAST(@NovoCodigoVenda AS BIGINT) / 10) % 9000) + 1000 AS INT);
 
-            const novoCodigoOrcamento = Number(idsRow.CodigoOrcamento);
-            const novoCodigoLancamento = Number(idsRow.CodigoLancamento);
-            const novoCodigoPV = Number(idsRow.CodigoPV);
-            const codigoFuncionarioFinal = idsRow.CodigoFuncionario || null;
-            const codigoUsuarioFinal = idsRow.CodigoUsuario || 241;
-            let currentCodigoOrcamentoID = Number(idsRow.BaseCodigoOrcamentoID);
-
-            // Passo 4: Insere cada item em dbo.Orcamento_Produto somando +10 ao CodigoOrcamentoID
-            for (const item of preparedItems) {
-                currentCodigoOrcamentoID += 10;
-                const itemReq = new sql.Request(transaction);
-                itemReq.input('CodigoOrcamentoID', sql.BigInt, currentCodigoOrcamentoID);
-                itemReq.input('CodigoOrcamento', sql.BigInt, novoCodigoOrcamento);
-                itemReq.input('CodigoProduto', sql.Int, item.codigoProduto);
-                itemReq.input('Quantidade', sql.Numeric(18, 4), item.quantidade);
-                itemReq.input('Preco', sql.Money, item.preco);
-                itemReq.input('TotalBruto', sql.Money, item.totalBruto);
-                itemReq.input('TotalDesconto', sql.Money, item.totalDesconto);
-                itemReq.input('TotalLiquido', sql.Money, item.totalLiquido);
-                itemReq.input('Unidade', sql.VarChar(5), item.unidade);
-
-                await itemReq.query(`
-                    INSERT INTO dbo.Orcamento_Produto (
-                        CodigoOrcamentoID,
-                        CodigoOrcamento,
-                        CodigoProduto,
-                        Quantidade,
-                        Preco,
+                    INSERT INTO dbo.Venda (
+                        CodigoVenda,
+                        CodigoEmpresa,
+                        CodigoLancamento,
+                        CodigoFuncionario,
+                        CodigoConvenio,
+                        DataVenda,
+                        CodigoCadastro,
+                        Cupom,
+                        Estoque,
                         TotalBruto,
                         TotalDesconto,
                         TotalLiquido,
-                        Fracao,
-                        Unidade,
+                        Troco,
+                        Cesta,
+                        Eliminado,
+                        PedidoAntigo,
                         rowguid,
-                        CodigoProdutoKit
+                        Status,
+                        CodigoAbertura
                     ) VALUES (
-                        @CodigoOrcamentoID,
-                        @CodigoOrcamento,
-                        @CodigoProduto,
-                        @Quantidade,
-                        @Preco,
+                        @NovoCodigoVenda,
+                        1,
+                        @NovoCodigoLancamento,
+                        @CodigoFuncionarioVenda,
+                        NULL,
+                        GETDATE(),
+                        0,
+                        NULL,
+                        1,
                         @TotalBruto,
                         @TotalDesconto,
                         @TotalLiquido,
-                        1,
-                        @Unidade,
+                        0.00,
+                        @NumeroCesta,
+                        0,
+                        NULL,
                         NEWID(),
+                        0,
                         NULL
                     );
-                `);
-            }
+                END
 
-            // Passo 5: Insere em dbo.Orcamento_PV amarrando @NovoCodigoOrcamento e @NovoCodigoPV
-            const pvInsertReq = new sql.Request(transaction);
-            pvInsertReq.input('CodigoOrcamento', sql.BigInt, novoCodigoOrcamento);
-            pvInsertReq.input('CodigoPV', sql.Int, novoCodigoPV);
-            await pvInsertReq.query(`
-                INSERT INTO dbo.Orcamento_PV (
-                    CodigoOrcamento,
-                    CodigoPV,
-                    rowguid
-                ) VALUES (
-                    @CodigoOrcamento,
-                    @CodigoPV,
-                    NEWID()
-                );
+                SELECT
+                    @NovoCodigoLancamento AS CodigoLancamento,
+                    @NovoCodigoVenda AS CodigoVenda,
+                    @BaseCodigoVendaID AS BaseCodigoVendaID,
+                    @NumeroCesta AS NumeroCesta,
+                    @CodigoFuncionarioVenda AS CodigoFuncionario;
             `);
 
-            // 6. Gravação condicional em dbo.Entrega (usando as colunas reais do InovaFarma)
+            const vendaRow = vendaHeaderRes?.recordset?.[0] || {};
+            const novoCodigoLancamento = Number(vendaRow.CodigoLancamento);
+            const novoCodigoVenda = vendaRow.CodigoVenda ? Number(vendaRow.CodigoVenda) : null;
+            const numeroCesta = vendaRow.NumeroCesta ? Number(vendaRow.NumeroCesta) : null;
+            const codigoFuncionarioVenda = vendaRow.CodigoFuncionario ? Number(vendaRow.CodigoFuncionario) : 781;
+            let currentCodigoVendaID = Number(vendaRow.BaseCodigoVendaID || 1);
+
+            // Passo 3: Insere cada item em dbo.Venda_Produto somando +10 ao CodigoVendaID
+            if (novoCodigoVenda) {
+                for (const item of preparedItems) {
+                    currentCodigoVendaID += 10;
+                    const vpReq = new sql.Request(transaction);
+                    vpReq.input('CodigoVendaID', sql.BigInt, currentCodigoVendaID);
+                    vpReq.input('CodigoVenda', sql.BigInt, novoCodigoVenda);
+                    vpReq.input('CodigoFuncionario', sql.Int, codigoFuncionarioVenda);
+                    vpReq.input('CodigoProduto', sql.Int, item.codigoProduto);
+                    vpReq.input('Quantidade', sql.Numeric(18, 4), item.quantidade);
+                    vpReq.input('PrecoUnitario', sql.Money, item.precoBrutoUnit);
+                    vpReq.input('DescontoUnitario', sql.Money, item.descontoUnit);
+                    vpReq.input('Total', sql.Money, item.totalLiquido);
+                    vpReq.input('PrecoCusto', sql.Money, item.precoCusto);
+                    vpReq.input('TotalDesconto', sql.Money, item.totalDesconto);
+                    vpReq.input('Unidade', sql.VarChar(5), item.unidade || 'UN');
+                    vpReq.input('CodigoGrupoInventario', sql.Int, item.codigoGrupoInventario ?? null);
+
+                    await vpReq.query(`
+                        INSERT INTO dbo.Venda_Produto (
+                            CodigoVendaID,
+                            CodigoVenda,
+                            CodigoFuncionario,
+                            CodigoProduto,
+                            Quantidade,
+                            PrecoUnitario,
+                            DescontoUnitario,
+                            Total,
+                            Comissao,
+                            PrecoCusto,
+                            TotalIncentivo,
+                            TotalDesconto,
+                            CodigoPromocao,
+                            DescontoCoberto,
+                            Fracao,
+                            Unidade,
+                            DescontoNegociado,
+                            DescontoOferecido,
+                            PrecoCustoMedio,
+                            CodigoOferta,
+                            CodigoRegra,
+                            rowguid,
+                            TotalArredondamento,
+                            CodigoGrupoInventario,
+                            CodigoProdutoKit
+                        ) VALUES (
+                            @CodigoVendaID,
+                            @CodigoVenda,
+                            @CodigoFuncionario,
+                            @CodigoProduto,
+                            @Quantidade,
+                            @PrecoUnitario,
+                            @DescontoUnitario,
+                            @Total,
+                            0.00,
+                            @PrecoCusto,
+                            0.00,
+                            @TotalDesconto,
+                            NULL,
+                            0.00,
+                            1,
+                            @Unidade,
+                            0.00,
+                            0.00,
+                            0.00,
+                            NULL,
+                            NULL,
+                            NEWID(),
+                            0.00,
+                            @CodigoGrupoInventario,
+                            NULL
+                        );
+                    `);
+                }
+            }
+
+            // Passo 4: Mantém gravação em dbo.Orcamento, dbo.Orcamento_Produto e dbo.Orcamento_PV (dentro de TRY/CATCH para compatibilidade)
+            let novoCodigoOrcamento = null;
+            let novoCodigoPV = null;
+            try {
+                const orcReq = new sql.Request(transaction);
+                orcReq.input('NovoCodigoLancamento', sql.BigInt, novoCodigoLancamento);
+                orcReq.input('CodigoFuncionario', sql.Int, codigoFuncionarioVenda);
+                orcReq.input('TotalBruto', sql.Money, headerTotalBruto);
+                orcReq.input('TotalDesconto', sql.Money, headerTotalDesconto);
+                orcReq.input('TotalLiquido', sql.Money, headerTotalLiquido);
+                orcReq.input('Observacao', sql.VarChar(200), observacaoHeader);
+                orcReq.input('NomeCliente', sql.VarChar(100), nomeCliente);
+
+                const orcHeaderRes = await orcReq.query(`
+                    DECLARE @NovoCodigoOrcamento BIGINT = NULL;
+                    DECLARE @BaseCodigoOrcamentoID BIGINT = 1;
+                    DECLARE @NovoCodigoPV INT = NULL;
+                    DECLARE @StepPV INT = 1;
+
+                    IF OBJECT_ID('dbo.Orcamento', 'U') IS NOT NULL
+                       AND OBJECT_ID('dbo.Orcamento_Produto', 'U') IS NOT NULL
+                       AND OBJECT_ID('dbo.Orcamento_PV', 'U') IS NOT NULL
+                    BEGIN
+                        BEGIN TRY
+                            SELECT @NovoCodigoOrcamento = ISNULL(MAX(CodigoOrcamento), 1) + 10
+                            FROM dbo.Orcamento WITH (UPDLOCK, HOLDLOCK);
+
+                            SELECT @BaseCodigoOrcamentoID = ISNULL(MAX(CodigoOrcamentoID), 1)
+                            FROM dbo.Orcamento_Produto WITH (UPDLOCK, HOLDLOCK);
+
+                            DECLARE @Pv1 INT = NULL, @Pv2 INT = NULL;
+                            SELECT TOP 1 @Pv1 = CodigoPV FROM dbo.Orcamento_PV WITH (UPDLOCK, HOLDLOCK) ORDER BY CodigoPV DESC;
+                            IF @Pv1 IS NOT NULL
+                            BEGIN
+                                SELECT TOP 1 @Pv2 = CodigoPV FROM dbo.Orcamento_PV WHERE CodigoPV < @Pv1 ORDER BY CodigoPV DESC;
+                                IF @Pv2 IS NOT NULL AND (@Pv1 - @Pv2) = 10
+                                    SET @StepPV = 10;
+                            END
+
+                            SET @NovoCodigoPV = ISNULL(@Pv1, 0) + @StepPV;
+
+                            INSERT INTO dbo.Orcamento (
+                                CodigoOrcamento,
+                                CodigoCliente,
+                                CodigoLancamento,
+                                TotalBruto,
+                                TotalDesconto,
+                                TotalLiquido,
+                                Observacao,
+                                CodigoFuncionario,
+                                Eliminado,
+                                NomeCliente,
+                                rowguid,
+                                DataUltimaAtualizacao
+                            ) VALUES (
+                                @NovoCodigoOrcamento,
+                                0,
+                                @NovoCodigoLancamento,
+                                @TotalBruto,
+                                @TotalDesconto,
+                                @TotalLiquido,
+                                @Observacao,
+                                @CodigoFuncionario,
+                                0,
+                                @NomeCliente,
+                                NEWID(),
+                                GETDATE()
+                            );
+
+                            INSERT INTO dbo.Orcamento_PV (
+                                CodigoOrcamento,
+                                CodigoPV,
+                                rowguid
+                            ) VALUES (
+                                @NovoCodigoOrcamento,
+                                @NovoCodigoPV,
+                                NEWID()
+                            );
+                        END TRY
+                        BEGIN CATCH
+                            SET @NovoCodigoOrcamento = NULL;
+                            SET @NovoCodigoPV = NULL;
+                        END CATCH
+                    END
+
+                    SELECT
+                        @NovoCodigoOrcamento AS CodigoOrcamento,
+                        @BaseCodigoOrcamentoID AS BaseCodigoOrcamentoID,
+                        @NovoCodigoPV AS CodigoPV;
+                `);
+
+                const orcRow = orcHeaderRes?.recordset?.[0] || {};
+                if (orcRow.CodigoOrcamento) {
+                    novoCodigoOrcamento = Number(orcRow.CodigoOrcamento);
+                    novoCodigoPV = orcRow.CodigoPV ? Number(orcRow.CodigoPV) : null;
+                    let currentCodigoOrcamentoID = Number(orcRow.BaseCodigoOrcamentoID || 1);
+
+                    for (const item of preparedItems) {
+                        currentCodigoOrcamentoID += 10;
+                        const itemReq = new sql.Request(transaction);
+                        itemReq.input('CodigoOrcamentoID', sql.BigInt, currentCodigoOrcamentoID);
+                        itemReq.input('CodigoOrcamento', sql.BigInt, novoCodigoOrcamento);
+                        itemReq.input('CodigoProduto', sql.Int, item.codigoProduto);
+                        itemReq.input('Quantidade', sql.Numeric(18, 4), item.quantidade);
+                        itemReq.input('Preco', sql.Money, item.preco);
+                        itemReq.input('TotalBruto', sql.Money, item.totalBruto);
+                        itemReq.input('TotalDesconto', sql.Money, item.totalDesconto);
+                        itemReq.input('TotalLiquido', sql.Money, item.totalLiquido);
+                        itemReq.input('Unidade', sql.VarChar(5), item.unidade || 'UN');
+
+                        await itemReq.query(`
+                            INSERT INTO dbo.Orcamento_Produto (
+                                CodigoOrcamentoID,
+                                CodigoOrcamento,
+                                CodigoProduto,
+                                Quantidade,
+                                Preco,
+                                TotalBruto,
+                                TotalDesconto,
+                                TotalLiquido,
+                                Fracao,
+                                Unidade,
+                                rowguid,
+                                CodigoProdutoKit
+                            ) VALUES (
+                                @CodigoOrcamentoID,
+                                @CodigoOrcamento,
+                                @CodigoProduto,
+                                @Quantidade,
+                                @Preco,
+                                @TotalBruto,
+                                @TotalDesconto,
+                                @TotalLiquido,
+                                1,
+                                @Unidade,
+                                NEWID(),
+                                NULL
+                            );
+                        `);
+                    }
+                }
+            } catch (orcErr) {
+                console.warn('⚠️ Aviso: Gravação complementar em dbo.Orcamento ignorada:', orcErr.message);
+            }
+
+            // 5. Gravação condicional em dbo.Entrega (usando as colunas reais do InovaFarma)
             let novoCodigoEntrega = null;
             if (order.deliveryMode !== 'pickup' && enderecoRua) {
                 try {
@@ -722,18 +1006,27 @@ class InovaFarmaConnector {
 
             await transaction.commit();
 
+            const erpOrderId =
+                numeroCesta && novoCodigoVenda
+                    ? `Cesta #${numeroCesta} (Venda #${novoCodigoVenda})`
+                    : novoCodigoPV && novoCodigoOrcamento
+                        ? `Pré-Venda #${novoCodigoPV} • Orç #${novoCodigoOrcamento}`
+                        : `Venda #${novoCodigoVenda || novoCodigoOrcamento}`;
+
             console.log(
-                `✅ [PRÉ-VENDA INOVAFARMA] Pedido #${shortOrderId} inserido com sucesso! ` +
-                `CodigoPV: #${novoCodigoPV} | CodigoOrcamento: #${novoCodigoOrcamento} | Itens: ${preparedItems.length}`
+                `[PRÉ-VENDA PDV] Pedido inserido com sucesso! Cesta: #${numeroCesta} | CodigoVenda: #${novoCodigoVenda} | Orçamento: #${novoCodigoOrcamento}`
             );
 
             return {
                 success: true,
+                erpOrderId,
+                numeroCesta,
+                codigoVenda: novoCodigoVenda,
                 codigoOrcamento: novoCodigoOrcamento,
                 codigoLancamento: novoCodigoLancamento,
                 codigoPV: novoCodigoPV,
                 codigoEntrega: novoCodigoEntrega,
-                codigoFuncionario: idsRow.CodigoFuncionario || null,
+                codigoFuncionario: codigoFuncionarioVenda,
                 totalLiquido: headerTotalLiquido,
                 itemsCount: preparedItems.length
             };

@@ -7391,7 +7391,28 @@ app.post(
       const descontoGlobalParaDistribuir =
         explicitOrderDiscount > 0 ? explicitOrderDiscount : implicitDiscount;
 
+      const rawSellerCodeInput =
+        body.sellerCode ??
+        body.seller_code ??
+        body.erp_seller_code ??
+        body.vendedor ??
+        targetOrder.erp_seller_code ??
+        targetOrder.seller_code ??
+        (customer as any)?.sellerCode ??
+        (customer as any)?.erp_seller_code ??
+        (customer as any)?._pdv?.sellerCode;
+
+      const parsedSellerDigits =
+        rawSellerCodeInput !== undefined && rawSellerCodeInput !== null
+          ? String(rawSellerCodeInput).replace(/\D/g, "").trim()
+          : "";
+      const normalizedSellerCode =
+        parsedSellerDigits !== "" && Number(parsedSellerDigits) > 0
+          ? Number(parsedSellerDigits)
+          : null;
+
       const rawVendedor =
+        normalizedSellerCode ??
         body.vendedor ??
         targetOrder.seller_code ??
         targetOrder.seller_cpf ??
@@ -7420,6 +7441,7 @@ app.post(
       const enqueueAndRespondForLocalAgent = async () => {
         const updatedCustomer = {
           ...(typeof customer === "object" && customer !== null ? customer : {}),
+          ...(normalizedSellerCode ? { sellerCode: normalizedSellerCode, erp_seller_code: normalizedSellerCode } : {}),
           erpError: null,
           _pdv: {
             ...((customer as any)?._pdv || {}),
@@ -7429,6 +7451,7 @@ app.post(
             taxaEntrega,
             descontoGlobal: descontoGlobalParaDistribuir,
             enrichedItems: rawItemsForVenda,
+            ...(normalizedSellerCode ? { sellerCode: normalizedSellerCode, erp_seller_code: normalizedSellerCode } : {}),
           },
         };
 
@@ -7445,23 +7468,41 @@ app.post(
           observation: targetOrder.observation || targetOrder.notes || targetOrder.observacao || "",
           deliveryMode: retirarNaLoja ? "pickup" : "delivery",
           date: targetOrder.date || targetOrder.created_at || new Date().toISOString(),
+          sellerCode: normalizedSellerCode,
+          erp_seller_code: normalizedSellerCode,
         });
+
+        const updatePayloadWithSeller: Record<string, any> = {
+          status: "pending_erp",
+          customer: updatedCustomer,
+        };
+        if (normalizedSellerCode) {
+          updatePayloadWithSeller.erp_seller_code = String(normalizedSellerCode);
+        }
 
         const { error: queueUpdateErr } = await supabaseAdmin
           .from("orders")
-          .update({
-            status: "pending_erp",
-            customer: updatedCustomer,
-          })
+          .update(updatePayloadWithSeller)
           .eq("id", targetOrder.id)
           .eq("tenant_id", tenant_id);
 
         if (queueUpdateErr) {
-          await supabaseAdmin
+          const { error: fallbackCustomerErr } = await supabaseAdmin
             .from("orders")
-            .update({ status: "pending_erp" })
+            .update({
+              status: "pending_erp",
+              customer: updatedCustomer,
+            })
             .eq("id", targetOrder.id)
             .eq("tenant_id", tenant_id);
+
+          if (fallbackCustomerErr) {
+            await supabaseAdmin
+              .from("orders")
+              .update({ status: "pending_erp" })
+              .eq("id", targetOrder.id)
+              .eq("tenant_id", tenant_id);
+          }
         }
 
         return res.status(200).json({
@@ -7471,6 +7512,7 @@ app.post(
           status: "pending_erp",
           message: "Pedido enviado para a fila do Agente Local (PDV)",
           codigoVendaOnLine,
+          sellerCode: normalizedSellerCode,
         });
       };
 
@@ -7760,6 +7802,15 @@ app.get(
               });
             }
 
+            const resolvedOrderSellerCode =
+              dbOrd.erp_seller_code ??
+              dbOrd.seller_code ??
+              pdvMeta.sellerCode ??
+              pdvMeta.erp_seller_code ??
+              cust.sellerCode ??
+              cust.erp_seller_code ??
+              null;
+
             resultMap.set(String(dbOrd.id), {
               id: dbOrd.id,
               tenantId: effectiveTenantId,
@@ -7773,6 +7824,8 @@ app.get(
               observation: dbOrd.observation || "",
               deliveryMode: dbOrd.delivery_mode || "delivery",
               date: dbOrd.date || new Date().toISOString(),
+              sellerCode: resolvedOrderSellerCode,
+              erp_seller_code: resolvedOrderSellerCode,
             });
           }
         }
@@ -7818,19 +7871,26 @@ app.post(
         removePendingErpOrderForTenant(effectiveTenantId, orderId);
       }
 
+      const erpOrderId = body.erpOrderId ?? body.erp_order_id ?? null;
+      const numeroCesta = body.numeroCesta ?? body.numero_cesta ?? body.cesta ?? null;
+      const codigoVenda = body.codigoVenda ?? body.codigo_venda ?? null;
       const codigoPV = body.codigoPV ?? body.codigo_pv ?? null;
       const codigoOrcamento = body.codigoOrcamento ?? body.codigo_orcamento ?? null;
       const codigoLancamento = body.codigoLancamento ?? body.codigo_lancamento ?? null;
       const codigoEntrega = body.codigoEntrega ?? body.codigo_entrega ?? null;
 
       const formattedBadge =
-        codigoPV && codigoOrcamento
-          ? `Pré-Venda #${codigoPV} • Orç #${codigoOrcamento}`
-          : codigoPV
-            ? `Pré-Venda #${codigoPV}`
-            : codigoOrcamento
-              ? `Orçamento #${codigoOrcamento}`
-              : "Enviado ao PDV";
+        erpOrderId
+          ? String(erpOrderId)
+          : numeroCesta && codigoVenda
+            ? `Cesta #${numeroCesta} (Venda #${codigoVenda})`
+            : codigoPV && codigoOrcamento
+              ? `Pré-Venda #${codigoPV} • Orç #${codigoOrcamento}`
+              : codigoPV
+                ? `Pré-Venda #${codigoPV}`
+                : codigoOrcamento
+                  ? `Orçamento #${codigoOrcamento}`
+                  : "Enviado ao PDV";
 
       const prevCustomer =
         existingOrder?.customer && typeof existingOrder.customer === "object"
@@ -7839,6 +7899,9 @@ app.post(
 
       const updatedCustomer = {
         ...prevCustomer,
+        erpOrderId: formattedBadge,
+        numeroCesta,
+        codigoVenda,
         codigoOrcamento,
         codigoPV,
         codigoVendaInova: formattedBadge,
@@ -7846,6 +7909,9 @@ app.post(
         _pdv: {
           ...(prevCustomer._pdv || {}),
           status: "enviado_ao_pdv",
+          erpOrderId: formattedBadge,
+          numeroCesta,
+          codigoVenda,
           codigoOrcamento,
           codigoPV,
           codigoLancamento,
@@ -7860,8 +7926,9 @@ app.post(
         status: "enviado_ao_pdv",
         customer: updatedCustomer,
       };
-      if (codigoOrcamento && !isNaN(Number(codigoOrcamento))) {
-        updatePayload.codigo_venda_inova = Number(codigoOrcamento);
+      const numericVendaRef = codigoVenda ?? codigoOrcamento;
+      if (numericVendaRef && !isNaN(Number(numericVendaRef))) {
+        updatePayload.codigo_venda_inova = Number(numericVendaRef);
       }
 
       let { error: updErr } = await supabaseAdmin
@@ -7885,6 +7952,9 @@ app.post(
           "/agent-sync/inovafarma/pre-venda",
           {
             orderId,
+            erpOrderId: formattedBadge,
+            numeroCesta,
+            codigoVenda,
             codigoPV,
             codigoOrcamento,
             codigoLancamento,
@@ -7898,6 +7968,9 @@ app.post(
         success: true,
         orderId,
         status: "enviado_ao_pdv",
+        erpOrderId: formattedBadge,
+        numeroCesta,
+        codigoVenda,
         codigoPV,
         codigoOrcamento,
         codigoVendaInova: formattedBadge,

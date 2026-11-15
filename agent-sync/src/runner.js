@@ -135,9 +135,13 @@ async function startAgent(expectedErpType, ConnectorClass) {
                         const erpResult = await connector.insertPreSaleOrder(order);
                         processedOrderIds.set(order.id, Date.now());
                         await confirmOrderInErp(config.apiKey, order.id, erpResult);
+                        const summaryLabel =
+                            erpResult.erpOrderId ||
+                            (erpResult.numeroCesta && erpResult.codigoVenda
+                                ? `Cesta #${erpResult.numeroCesta} (Venda #${erpResult.codigoVenda})`
+                                : `Pré-Venda #${erpResult.codigoPV} • Orçamento #${erpResult.codigoOrcamento}`);
                         console.log(
-                            `✅ [PDV PRÉ-VENDA] Pedido #${order.id} confirmado na nuvem ` +
-                            `(Pré-Venda #${erpResult.codigoPV} • Orçamento #${erpResult.codigoOrcamento}).`
+                            `✅ [PDV PRÉ-VENDA] Pedido #${order.id} confirmado na nuvem (${summaryLabel}).`
                         );
                     } catch (orderErr) {
                         console.error(`❌ [PDV PRÉ-VENDA] Falha ao gravar pedido #${order.id} no banco local:`, orderErr.message);
