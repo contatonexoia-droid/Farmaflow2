@@ -513,7 +513,149 @@ class SiagoldConnector {
             }
             const observacaoHeader = truncateStr(obsParts.join(' | '), 200, `FF #${shortOrderId}`);
 
-            // 4. Inicia a transação SQL Server com UPDLOCK, HOLDLOCK
+            // 4. Consulta metadados reais das colunas de dbo.Lancamento, dbo.Venda e dbo.Venda_Produto
+            const getTableColumnsMeta = async (fullTableName) => {
+                try {
+                    const colReq = new sql.Request(pool);
+                    colReq.input('TableName', sql.NVarChar(128), fullTableName);
+                    const colRes = await colReq.query(`
+                        SELECT
+                            c.name,
+                            LOWER(t.name) AS type_name,
+                            c.is_nullable,
+                            c.default_object_id
+                        FROM sys.columns c
+                        INNER JOIN sys.types t ON c.user_type_id = t.user_type_id
+                        WHERE c.object_id = OBJECT_ID(@TableName)
+                          AND c.is_identity = 0
+                          AND c.is_computed = 0
+                          AND LOWER(t.name) NOT IN ('timestamp', 'rowversion')
+                        ORDER BY c.column_id ASC
+                    `);
+                    return colRes?.recordset || [];
+                } catch (_) {
+                    return [];
+                }
+            };
+
+            const getNotNullFallbackExpr = (typeName) => {
+                const t = String(typeName || '').toLowerCase();
+                if (['int', 'bigint', 'smallint', 'tinyint', 'decimal', 'numeric', 'money', 'smallmoney', 'float', 'real', 'bit'].includes(t)) {
+                    return '0';
+                }
+                if (['varchar', 'char', 'nvarchar', 'nchar', 'text', 'ntext'].includes(t)) {
+                    return "''";
+                }
+                if (['datetime', 'smalldatetime', 'date', 'datetime2', 'datetimeoffset', 'time'].includes(t)) {
+                    return 'GETDATE()';
+                }
+                if (t === 'uniqueidentifier') {
+                    return 'NEWID()';
+                }
+                if (['binary', 'varbinary', 'image'].includes(t)) {
+                    return '0x0';
+                }
+                return '0';
+            };
+
+            const buildDynamicInsertQuery = (fullTableName, colsMeta, primaryMap) => {
+                if (!Array.isArray(colsMeta) || colsMeta.length === 0) return null;
+                const lowerMap = new Map();
+                for (const [k, v] of Object.entries(primaryMap)) {
+                    lowerMap.set(String(k).toLowerCase(), v);
+                }
+
+                const insertCols = [];
+                const insertVals = [];
+
+                for (const col of colsMeta) {
+                    const colName = col.name;
+                    const lowerName = String(colName).toLowerCase();
+                    const isNotNullWithoutDefault = !col.is_nullable && Number(col.default_object_id || 0) === 0;
+
+                    if (lowerMap.has(lowerName)) {
+                        let expr = lowerMap.get(lowerName);
+                        if (expr === 'NULL' && isNotNullWithoutDefault) {
+                            expr = getNotNullFallbackExpr(col.type_name);
+                        }
+                        insertCols.push(`[${colName}]`);
+                        insertVals.push(expr);
+                    } else if (isNotNullWithoutDefault) {
+                        insertCols.push(`[${colName}]`);
+                        insertVals.push(getNotNullFallbackExpr(col.type_name));
+                    }
+                }
+
+                if (insertCols.length === 0) return null;
+                return `INSERT INTO ${fullTableName} (${insertCols.join(', ')}) VALUES (${insertVals.join(', ')});`;
+            };
+
+            const [lancamentoColsMeta, vendaColsMeta, vendaProdutoColsMeta] = await Promise.all([
+                getTableColumnsMeta('dbo.Lancamento'),
+                getTableColumnsMeta('dbo.Venda'),
+                getTableColumnsMeta('dbo.Venda_Produto'),
+            ]);
+
+            const hasLancamentoCol = (colName) =>
+                lancamentoColsMeta.some((c) => String(c.name).toLowerCase() === String(colName).toLowerCase());
+
+            const lancamentoInsertSql = buildDynamicInsertQuery('dbo.Lancamento', lancamentoColsMeta, {
+                CodigoLancamento: '@NovoCodigoLancamento',
+                CodigoEmpresa: '1',
+                DataLancamento: 'GETDATE()',
+                CodigoUsuario: '@CodigoUsuarioFinal',
+                Operacao: '@OperacaoFinal',
+                CodigoEstacao: '@CodigoEstacaoFinal',
+                rowguid: 'NEWID()',
+            });
+
+            const vendaInsertSql = buildDynamicInsertQuery('dbo.Venda', vendaColsMeta, {
+                CodigoVenda: '@NovoCodigoVenda',
+                CodigoEmpresa: '1',
+                CodigoLancamento: '@NovoCodigoLancamento',
+                CodigoFuncionario: '@CodigoFuncionarioVenda',
+                CodigoConvenio: 'NULL',
+                DataVenda: 'GETDATE()',
+                CodigoCadastro: '0',
+                Cupom: 'NULL',
+                Estoque: '1',
+                TotalBruto: '@TotalBruto',
+                TotalDesconto: '@TotalDesconto',
+                TotalLiquido: '@TotalLiquido',
+                Troco: '0.00',
+                Cesta: '@NumeroCesta',
+                Eliminado: '0',
+                PedidoAntigo: 'NULL',
+                rowguid: 'NEWID()',
+                Status: '0',
+                CodigoAbertura: 'NULL',
+            });
+
+            const isGrupoInvNotNull = vendaProdutoColsMeta.some(
+                (c) =>
+                    String(c.name).toLowerCase() === 'codigogrupoinventario' &&
+                    !c.is_nullable &&
+                    Number(c.default_object_id || 0) === 0
+            );
+
+            const vendaProdutoInsertSql = buildDynamicInsertQuery('dbo.Venda_Produto', vendaProdutoColsMeta, {
+                CodigoVendaID: '@CodigoVendaID',
+                CodigoVenda: '@CodigoVenda',
+                CodigoFuncionario: '@CodigoFuncionario',
+                CodigoProduto: '@CodigoProduto',
+                Quantidade: '@Quantidade',
+                PrecoUnitario: '@PrecoUnitario',
+                DescontoUnitario: '@DescontoUnitario',
+                Total: '@Total',
+                PrecoCusto: '@PrecoCusto',
+                TotalDesconto: '@TotalDesconto',
+                Fracao: '1',
+                Unidade: '@Unidade',
+                rowguid: 'NEWID()',
+                CodigoGrupoInventario: isGrupoInvNotNull ? 'ISNULL(@CodigoGrupoInventario, 0)' : '@CodigoGrupoInventario',
+            });
+
+            // 5. Inicia a transação SQL Server com UPDLOCK, HOLDLOCK
             transaction = new sql.Transaction(pool);
             await transaction.begin(sql.ISOLATION_LEVEL.READ_COMMITTED);
 
@@ -553,7 +695,7 @@ class SiagoldConnector {
                 DECLARE @BaseCodigoVendaID BIGINT = 1;
                 DECLARE @NumeroCesta INT = NULL;
                 DECLARE @CodigoFuncionarioVenda INT = NULL;
-                DECLARE @CodigoUsuarioFinal INT = NULL;
+                DECLARE @CodigoUsuarioFinal INT = 241;
                 DECLARE @OperacaoFinal INT = 1;
                 DECLARE @CodigoEstacaoFinal INT = 521;
 
@@ -622,51 +764,38 @@ class SiagoldConnector {
                     FROM dbo.Orcamento WITH (UPDLOCK, HOLDLOCK);
                 END
 
+                ${lancamentoInsertSql ? `
                 IF OBJECT_ID('dbo.Lancamento', 'U') IS NOT NULL
                 BEGIN
+                    ${hasLancamentoCol('CodigoUsuario') ? `
                     SELECT TOP 1 @CodigoUsuarioFinal = CodigoUsuario
                     FROM dbo.Lancamento
                     WHERE CodigoUsuario IS NOT NULL AND CodigoUsuario > 0
                     ORDER BY CodigoLancamento DESC;
+                    IF @CodigoUsuarioFinal IS NULL SET @CodigoUsuarioFinal = 241;
+                    ` : ''}
 
-                    IF @CodigoUsuarioFinal IS NULL
-                        SET @CodigoUsuarioFinal = 241;
-
+                    ${hasLancamentoCol('Operacao') ? `
                     SELECT TOP 1 @OperacaoFinal = Operacao
                     FROM dbo.Lancamento
                     WHERE Operacao IS NOT NULL
                     ORDER BY CodigoLancamento DESC;
+                    IF @OperacaoFinal IS NULL SET @OperacaoFinal = 1;
+                    ` : ''}
 
-                    IF @OperacaoFinal IS NULL
-                        SET @OperacaoFinal = 1;
-
+                    ${hasLancamentoCol('CodigoEstacao') ? `
                     SELECT TOP 1 @CodigoEstacaoFinal = CodigoEstacao
                     FROM dbo.Lancamento
                     WHERE CodigoEstacao IS NOT NULL AND CodigoEstacao > 0
                     ORDER BY CodigoLancamento DESC;
+                    IF @CodigoEstacaoFinal IS NULL SET @CodigoEstacaoFinal = 521;
+                    ` : ''}
 
-                    IF @CodigoEstacaoFinal IS NULL
-                        SET @CodigoEstacaoFinal = 521;
-
-                    INSERT INTO dbo.Lancamento (
-                        CodigoLancamento,
-                        CodigoEmpresa,
-                        DataLancamento,
-                        CodigoUsuario,
-                        Operacao,
-                        CodigoEstacao,
-                        rowguid
-                    ) VALUES (
-                        @NovoCodigoLancamento,
-                        1,
-                        GETDATE(),
-                        @CodigoUsuarioFinal,
-                        @OperacaoFinal,
-                        @CodigoEstacaoFinal,
-                        NEWID()
-                    );
+                    ${lancamentoInsertSql}
                 END
+                ` : ''}
 
+                ${vendaInsertSql && vendaProdutoInsertSql ? `
                 IF OBJECT_ID('dbo.Venda', 'U') IS NOT NULL AND OBJECT_ID('dbo.Venda_Produto', 'U') IS NOT NULL
                 BEGIN
                     SELECT @NovoCodigoVenda = ISNULL(MAX(CodigoVenda), 1) + 10
@@ -677,48 +806,9 @@ class SiagoldConnector {
 
                     SET @NumeroCesta = CAST(((CAST(@NovoCodigoVenda AS BIGINT) / 10) % 9000) + 1000 AS INT);
 
-                    INSERT INTO dbo.Venda (
-                        CodigoVenda,
-                        CodigoEmpresa,
-                        CodigoLancamento,
-                        CodigoFuncionario,
-                        CodigoConvenio,
-                        DataVenda,
-                        CodigoCadastro,
-                        Cupom,
-                        Estoque,
-                        TotalBruto,
-                        TotalDesconto,
-                        TotalLiquido,
-                        Troco,
-                        Cesta,
-                        Eliminado,
-                        PedidoAntigo,
-                        rowguid,
-                        Status,
-                        CodigoAbertura
-                    ) VALUES (
-                        @NovoCodigoVenda,
-                        1,
-                        @NovoCodigoLancamento,
-                        @CodigoFuncionarioVenda,
-                        NULL,
-                        GETDATE(),
-                        0,
-                        NULL,
-                        1,
-                        @TotalBruto,
-                        @TotalDesconto,
-                        @TotalLiquido,
-                        0.00,
-                        @NumeroCesta,
-                        0,
-                        NULL,
-                        NEWID(),
-                        0,
-                        NULL
-                    );
+                    ${vendaInsertSql}
                 END
+                ` : ''}
 
                 SELECT
                     @NovoCodigoLancamento AS CodigoLancamento,
@@ -735,8 +825,8 @@ class SiagoldConnector {
             const codigoFuncionarioVenda = vendaRow.CodigoFuncionario ? Number(vendaRow.CodigoFuncionario) : 781;
             let currentCodigoVendaID = Number(vendaRow.BaseCodigoVendaID || 1);
 
-            // Passo 3: Insere cada item em dbo.Venda_Produto somando +10 ao CodigoVendaID
-            if (novoCodigoVenda) {
+            // Passo 3: Insere cada item em dbo.Venda_Produto dinamicamente somando +10 ao CodigoVendaID
+            if (novoCodigoVenda && vendaProdutoInsertSql) {
                 for (const item of preparedItems) {
                     currentCodigoVendaID += 10;
                     const vpReq = new sql.Request(transaction);
@@ -753,61 +843,7 @@ class SiagoldConnector {
                     vpReq.input('Unidade', sql.VarChar(5), item.unidade || 'UN');
                     vpReq.input('CodigoGrupoInventario', sql.Int, item.codigoGrupoInventario ?? null);
 
-                    await vpReq.query(`
-                        INSERT INTO dbo.Venda_Produto (
-                            CodigoVendaID,
-                            CodigoVenda,
-                            CodigoFuncionario,
-                            CodigoProduto,
-                            Quantidade,
-                            PrecoUnitario,
-                            DescontoUnitario,
-                            Total,
-                            Comissao,
-                            PrecoCusto,
-                            TotalIncentivo,
-                            TotalDesconto,
-                            CodigoPromocao,
-                            DescontoCoberto,
-                            Fracao,
-                            Unidade,
-                            DescontoNegociado,
-                            DescontoOferecido,
-                            PrecoCustoMedio,
-                            CodigoOferta,
-                            CodigoRegra,
-                            rowguid,
-                            TotalArredondamento,
-                            CodigoGrupoInventario,
-                            CodigoProdutoKit
-                        ) VALUES (
-                            @CodigoVendaID,
-                            @CodigoVenda,
-                            @CodigoFuncionario,
-                            @CodigoProduto,
-                            @Quantidade,
-                            @PrecoUnitario,
-                            @DescontoUnitario,
-                            @Total,
-                            0.00,
-                            @PrecoCusto,
-                            0.00,
-                            @TotalDesconto,
-                            NULL,
-                            0.00,
-                            1,
-                            @Unidade,
-                            0.00,
-                            0.00,
-                            0.00,
-                            NULL,
-                            NULL,
-                            NEWID(),
-                            0.00,
-                            @CodigoGrupoInventario,
-                            NULL
-                        );
-                    `);
+                    await vpReq.query(vendaProdutoInsertSql);
                 }
             }
 
