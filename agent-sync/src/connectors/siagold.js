@@ -604,7 +604,7 @@ class SiagoldConnector {
                 CodigoEmpresa: '1',
                 DataLancamento: 'GETDATE()',
                 CodigoUsuario: '@CodigoUsuarioFinal',
-                Operacao: '@OperacaoFinal',
+                Operacao: '1',
                 CodigoEstacao: '@CodigoEstacaoFinal',
                 rowguid: 'NEWID()',
             });
@@ -695,9 +695,9 @@ class SiagoldConnector {
                 DECLARE @BaseCodigoVendaID BIGINT = 1;
                 DECLARE @NumeroCesta INT = NULL;
                 DECLARE @CodigoFuncionarioVenda INT = NULL;
-                DECLARE @CodigoUsuarioFinal INT = 241;
+                DECLARE @CodigoUsuarioFinal INT = NULL;
                 DECLARE @OperacaoFinal INT = 1;
-                DECLARE @CodigoEstacaoFinal INT = 521;
+                DECLARE @CodigoEstacaoFinal INT = NULL;
 
                 IF @OrderSellerCode IS NOT NULL AND @OrderSellerCode > 0
                 BEGIN
@@ -733,20 +733,20 @@ class SiagoldConnector {
                 BEGIN
                     SELECT TOP 1 @CodigoFuncionarioVenda = CodigoFuncionario
                     FROM dbo.Venda
-                    WHERE CodigoFuncionario IS NOT NULL AND CodigoFuncionario > 0
+                    WHERE Cesta IS NOT NULL AND CodigoFuncionario IS NOT NULL
                     ORDER BY CodigoVenda DESC;
-                END
 
-                IF @CodigoFuncionarioVenda IS NULL AND OBJECT_ID('dbo.Funcionario', 'U') IS NOT NULL
-                BEGIN
-                    SELECT TOP 1 @CodigoFuncionarioVenda = CodigoFuncionario
-                    FROM dbo.Funcionario
-                    WHERE CodigoFuncionario IS NOT NULL AND CodigoFuncionario > 0
-                    ORDER BY CodigoFuncionario ASC;
+                    IF @CodigoFuncionarioVenda IS NULL
+                    BEGIN
+                        SELECT TOP 1 @CodigoFuncionarioVenda = CodigoFuncionario
+                        FROM dbo.Venda
+                        WHERE CodigoFuncionario IS NOT NULL AND CodigoFuncionario > 0
+                        ORDER BY CodigoVenda DESC;
+                    END
                 END
 
                 IF @CodigoFuncionarioVenda IS NULL
-                    SET @CodigoFuncionarioVenda = 781;
+                    SET @CodigoFuncionarioVenda = 91;
 
                 IF OBJECT_ID('dbo.Lancamento', 'U') IS NOT NULL
                 BEGIN
@@ -767,29 +767,22 @@ class SiagoldConnector {
                 ${lancamentoInsertSql ? `
                 IF OBJECT_ID('dbo.Lancamento', 'U') IS NOT NULL
                 BEGIN
-                    ${hasLancamentoCol('CodigoUsuario') ? `
-                    SELECT TOP 1 @CodigoUsuarioFinal = CodigoUsuario
-                    FROM dbo.Lancamento
-                    WHERE CodigoUsuario IS NOT NULL AND CodigoUsuario > 0
-                    ORDER BY CodigoLancamento DESC;
+                    ${hasLancamentoCol('CodigoUsuario') && hasLancamentoCol('CodigoEstacao') && hasLancamentoCol('Operacao') ? `
+                    IF OBJECT_ID('dbo.Venda', 'U') IS NOT NULL
+                    BEGIN
+                        SELECT TOP 1
+                            @CodigoUsuarioFinal = l.CodigoUsuario,
+                            @CodigoEstacaoFinal = l.CodigoEstacao
+                        FROM dbo.Lancamento l
+                        INNER JOIN dbo.Venda v ON v.CodigoLancamento = l.CodigoLancamento
+                        WHERE l.Operacao = 1 AND l.CodigoEstacao IS NOT NULL
+                        ORDER BY l.CodigoLancamento DESC;
+                    END
+                    ` : ''}
+
+                    SET @OperacaoFinal = 1;
                     IF @CodigoUsuarioFinal IS NULL SET @CodigoUsuarioFinal = 241;
-                    ` : ''}
-
-                    ${hasLancamentoCol('Operacao') ? `
-                    SELECT TOP 1 @OperacaoFinal = Operacao
-                    FROM dbo.Lancamento
-                    WHERE Operacao IS NOT NULL
-                    ORDER BY CodigoLancamento DESC;
-                    IF @OperacaoFinal IS NULL SET @OperacaoFinal = 1;
-                    ` : ''}
-
-                    ${hasLancamentoCol('CodigoEstacao') ? `
-                    SELECT TOP 1 @CodigoEstacaoFinal = CodigoEstacao
-                    FROM dbo.Lancamento
-                    WHERE CodigoEstacao IS NOT NULL AND CodigoEstacao > 0
-                    ORDER BY CodigoLancamento DESC;
-                    IF @CodigoEstacaoFinal IS NULL SET @CodigoEstacaoFinal = 521;
-                    ` : ''}
+                    IF @CodigoEstacaoFinal IS NULL SET @CodigoEstacaoFinal = 411;
 
                     ${lancamentoInsertSql}
                 END
@@ -822,7 +815,7 @@ class SiagoldConnector {
             const novoCodigoLancamento = Number(vendaRow.CodigoLancamento);
             const novoCodigoVenda = vendaRow.CodigoVenda ? Number(vendaRow.CodigoVenda) : null;
             const numeroCesta = vendaRow.NumeroCesta ? Number(vendaRow.NumeroCesta) : null;
-            const codigoFuncionarioVenda = vendaRow.CodigoFuncionario ? Number(vendaRow.CodigoFuncionario) : 781;
+            const codigoFuncionarioVenda = vendaRow.CodigoFuncionario ? Number(vendaRow.CodigoFuncionario) : 91;
             let currentCodigoVendaID = Number(vendaRow.BaseCodigoVendaID || 1);
 
             // Passo 3: Insere cada item em dbo.Venda_Produto dinamicamente somando +10 ao CodigoVendaID
