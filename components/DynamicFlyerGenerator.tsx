@@ -8,7 +8,16 @@ interface FlyerProduct {
     name: string;
     category: string;
     price: number;
+    regularPrice?: number;
     originalPrice?: number;
+    original_price?: number;
+    pmc_price?: number;
+    pmcPrice?: number;
+    promotionalPrice?: number | null;
+    promotional_price?: number | null;
+    promo_price?: number | null;
+    promoPrice?: number | null;
+    sale_price?: number | null;
     promotionType?: 'DISCOUNT' | 'BUY_X_PAY_Y' | 'NONE' | 'DISCOUNT_ON_QTY';
     buyX?: number;
     payY?: number;
@@ -16,6 +25,60 @@ interface FlyerProduct {
     isHighlight?: boolean;
     badgeText?: string;
 }
+
+export const resolveFlyerProductPricing = (p: any) => {
+    const parseNum = (val: any): number => {
+        if (val === null || val === undefined || val === '') return 0;
+        if (typeof val === 'number') return Number.isFinite(val) ? val : 0;
+        const cleaned = String(val).replace(',', '.').replace(/[^\d.-]/g, '');
+        const parsed = parseFloat(cleaned);
+        return Number.isFinite(parsed) ? parsed : 0;
+    };
+
+    const salePrice = parseNum(p?.regularPrice ?? p?.price);
+
+    const promoCandidates = [
+        p?.promotional_price,
+        p?.promo_price,
+        p?.promotionalPrice,
+        p?.promoPrice,
+        p?.sale_price,
+    ];
+
+    let validPromoPrice = 0;
+    for (const candidate of promoCandidates) {
+        const val = parseNum(candidate);
+        if (val > 0 && (salePrice <= 0 || val < salePrice)) {
+            validPromoPrice = val;
+            break;
+        }
+    }
+
+    const finalPrice = validPromoPrice > 0 ? validPromoPrice : salePrice;
+
+    const rawOriginal =
+        parseNum(p?.original_price) ||
+        parseNum(p?.originalPrice) ||
+        parseNum(p?.pmc_price) ||
+        parseNum(p?.pmcPrice) ||
+        salePrice;
+
+    const baseOriginalPrice = rawOriginal > 0 ? Math.max(rawOriginal, salePrice) : salePrice;
+    const hasDiscount = baseOriginalPrice > finalPrice && finalPrice > 0;
+    const discountPercent =
+        hasDiscount && baseOriginalPrice > 0
+            ? Math.round(((baseOriginalPrice - finalPrice) / baseOriginalPrice) * 100)
+            : 0;
+
+    return {
+        finalPrice,
+        baseOriginalPrice,
+        salePrice,
+        validPromoPrice,
+        hasDiscount,
+        discountPercent,
+    };
+};
 
 interface FlyerConfig {
     themeColor: string;
@@ -68,7 +131,11 @@ export const DynamicFlyerGenerator: React.FC<DynamicFlyerGeneratorProps> = ({ in
                 const mergedProducts = initialConfig.productsArray.map(p => {
                     const draftedProduct = parsed.productsArray?.find((dp: any) => dp.id === p.id);
                     if (draftedProduct) {
-                        return { ...p, isHighlight: draftedProduct.isHighlight, badgeText: draftedProduct.badgeText };
+                        return {
+                            ...p,
+                            isHighlight: Boolean(draftedProduct.isHighlight),
+                            badgeText: draftedProduct.badgeText || p.badgeText
+                        };
                     }
                     return p;
                 });
@@ -389,37 +456,49 @@ export const DynamicFlyerGenerator: React.FC<DynamicFlyerGeneratorProps> = ({ in
                             )}
 
                             <div className="space-y-2 max-h-[300px] overflow-y-auto custom-scrollbar pr-2">
-                                {config.productsArray.map((p) => (
-                                    <div key={p.id} className="bg-white border rounded-lg p-3 flex flex-col gap-2">
-                                        <div className="flex items-center gap-3">
-                                            <div className="w-10 h-10 shrink-0 bg-gray-50 rounded p-1">
-                                                <img src={getProductDisplayImage(p)} className="w-full h-full object-contain" crossOrigin="anonymous" />
+                                {config.productsArray.map((p) => {
+                                    const { finalPrice, baseOriginalPrice, hasDiscount } = resolveFlyerProductPricing(p);
+                                    return (
+                                        <div key={p.id} className="bg-white border rounded-lg p-3 flex flex-col gap-2">
+                                            <div className="flex items-center gap-3">
+                                                <div className="w-10 h-10 shrink-0 bg-gray-50 rounded p-1">
+                                                    <img src={getProductDisplayImage(p)} className="w-full h-full object-contain" crossOrigin="anonymous" />
+                                                </div>
+                                                <div className="flex-1 min-w-0">
+                                                    <p className="text-[10px] font-bold truncate text-gray-900">{p.name}</p>
+                                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                                        {hasDiscount && (
+                                                            <span className="text-[9px] text-gray-400 line-through font-semibold">
+                                                                De R$ {baseOriginalPrice.toFixed(2).replace('.', ',')}
+                                                            </span>
+                                                        )}
+                                                        <span className={`text-[10px] font-black ${hasDiscount ? 'text-red-600' : 'text-gray-600'}`}>
+                                                            {hasDiscount ? 'Por ' : ''}R$ {finalPrice.toFixed(2).replace('.', ',')}
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                                <button 
+                                                    onClick={() => toggleHighlight(p.id)}
+                                                    className={`p-1.5 rounded-full ${p.isHighlight ? 'bg-yellow-100 text-yellow-600' : 'bg-gray-100 text-gray-400 hover:bg-gray-200'}`}
+                                                    title="Destacar Produto"
+                                                >
+                                                    <Star size={14} fill={p.isHighlight ? "currentColor" : "none"} />
+                                                </button>
                                             </div>
-                                            <div className="flex-1 min-w-0">
-                                                <p className="text-[10px] font-bold truncate text-gray-900">{p.name}</p>
-                                                <p className="text-[9px] text-gray-500">R$ {p.price.toFixed(2)}</p>
-                                            </div>
-                                            <button 
-                                                onClick={() => toggleHighlight(p.id)}
-                                                className={`p-1.5 rounded-full ${p.isHighlight ? 'bg-yellow-100 text-yellow-600' : 'bg-gray-100 text-gray-400 hover:bg-gray-200'}`}
-                                                title="Destacar Produto"
-                                            >
-                                                <Star size={14} fill={p.isHighlight ? "currentColor" : "none"} />
-                                            </button>
+                                            {p.isHighlight && (
+                                                <div className="mt-1">
+                                                    <input 
+                                                        type="text"
+                                                        value={p.badgeText || ''}
+                                                        onChange={(e) => handleBadgeChange(p.id, e.target.value)}
+                                                        placeholder="Badge ex: Leve 3 por R$ 19,98"
+                                                        className="w-full text-[10px] font-bold border rounded px-2 py-1 outline-none"
+                                                    />
+                                                </div>
+                                            )}
                                         </div>
-                                        {p.isHighlight && (
-                                            <div className="mt-1">
-                                                <input 
-                                                    type="text"
-                                                    value={p.badgeText || ''}
-                                                    onChange={(e) => handleBadgeChange(p.id, e.target.value)}
-                                                    placeholder="Badge ex: Leve 3 por R$ 19,98"
-                                                    className="w-full text-[10px] font-bold border rounded px-2 py-1 outline-none"
-                                                />
-                                            </div>
-                                        )}
-                                    </div>
-                                ))}
+                                    );
+                                })}
                             </div>
                         </div>
                     </div>
@@ -467,7 +546,7 @@ export const DynamicFlyerGenerator: React.FC<DynamicFlyerGeneratorProps> = ({ in
                             <div className="px-6 py-4 flex-1 flex flex-col gap-4 relative z-10">
                                 <div className="grid grid-cols-3 gap-4 mt-2">
                                     {config.productsArray.map(p => {
-                                        const hasDiscount = Boolean(p.originalPrice && p.originalPrice > p.price);
+                                        const { finalPrice, baseOriginalPrice, hasDiscount } = resolveFlyerProductPricing(p);
                                         const isKit = p.promotionType === 'BUY_X_PAY_Y';
                                         const img = getProductDisplayImage(p);
                                         return (
@@ -487,14 +566,15 @@ export const DynamicFlyerGenerator: React.FC<DynamicFlyerGeneratorProps> = ({ in
                                                     <span className="text-[8px] font-black uppercase text-gray-400 block mb-0.5 tracking-widest">{p.category}</span>
                                                     <div className="font-black text-gray-800 text-sm mb-2 leading-tight line-clamp-2 h-10 flex items-center justify-center">{p.name}</div>
                                                     
-                                                    <div className={`rounded-xl p-2 border ${p.isHighlight ? 'bg-green-50 border-green-200' : 'bg-gray-50 border-gray-100'}`}>
+                                                    <div className={`rounded-xl px-2 py-1.5 border flex flex-col items-center justify-center min-h-[52px] ${p.isHighlight ? 'bg-green-50 border-green-200' : 'bg-gray-50 border-gray-100'}`}>
                                                         {hasDiscount ? (
-                                                            <p className="text-[10px] text-gray-500 font-bold line-through mb-[-2px]">
-                                                                De R$ {p.originalPrice?.toFixed(2).replace('.', ',')}
+                                                            <p className="text-[10px] leading-tight text-gray-500 font-bold line-through mb-0.5 whitespace-nowrap">
+                                                                De R$ {baseOriginalPrice.toFixed(2).replace('.', ',')}
                                                             </p>
                                                         ) : null}
-                                                        <div className={`text-2xl font-black tracking-tighter ${p.isHighlight ? 'text-green-600' : (hasDiscount ? 'text-red-600' : 'text-gray-900')}`}>
-                                                            R$ {p.price.toFixed(2).replace('.', ',')}
+                                                        <div className={`text-2xl leading-none font-black tracking-tighter whitespace-nowrap ${p.isHighlight ? 'text-green-600' : (hasDiscount ? 'text-red-600' : 'text-gray-900')}`}>
+                                                            {hasDiscount ? <span className="text-xs font-extrabold uppercase mr-1 align-middle">Por</span> : null}
+                                                            R$ {finalPrice.toFixed(2).replace('.', ',')}
                                                         </div>
                                                     </div>
                                                 </div>

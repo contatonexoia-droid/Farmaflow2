@@ -20,7 +20,7 @@ import { SmartNumberInput } from './SmartNumberInput';
 import { getDepartmentForCategory, DEPARTMENT_MAPPING, OFFICIAL_DEPARTMENTS, OFFICIAL_TAXONOMY, classifyProductTaxonomy, classifyProductCategory } from '../lib/departments';
 import { getStoreUrl } from '../lib/store';
 import { AdminDepartmentManager } from './AdminDepartmentManager';
-import { DynamicFlyerGenerator } from './DynamicFlyerGenerator';
+import { DynamicFlyerGenerator, resolveFlyerProductPricing } from './DynamicFlyerGenerator';
 import { PushNotificationModal } from './PushNotificationModal';
 import { getTenants, getProductsByTenant, saveProductsByTenant } from '../services/storage';
 import { supabase } from '../services/supabase';
@@ -2180,12 +2180,15 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                         let img = getProductDisplayImage(p);
                         if (!img) img = GENERIC_PLACEHOLDER;
 
+                        const pricing = resolveFlyerProductPricing(p);
                         const isKit = p.promotionType === 'BUY_X_PAY_Y';
-                        const hasDiscount = p.promotionType === 'DISCOUNT';
+                        const hasDiscount = pricing.hasDiscount;
                         
                         let badgeHtml = '';
                         if (isKit) {
                             badgeHtml = `<div class="card-badge" style="background: #9333ea;">Leve ${p.buyX} Pague ${p.payY}</div>`;
+                        } else if (hasDiscount && pricing.discountPercent > 5) {
+                            badgeHtml = `<div class="card-badge" style="background: #ef4444;">${pricing.discountPercent}% OFF</div>`;
                         } else if (hasDiscount) {
                             badgeHtml = `<div class="card-badge" style="background: #ef4444;">Oferta</div>`;
                         }
@@ -2199,8 +2202,8 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                             <span class="card-cat">${p.category}</span>
                             <div class="card-title">${p.name}</div>
                             <div class="price-container">
-                                ${hasDiscount && p.originalPrice ? `<div class="old-price">De R$ ${p.originalPrice.toFixed(2).replace('.', ',')}</div>` : ''}
-                                <div class="price-val" style="${hasDiscount ? 'color: #dc2626;' : 'color: #be123c;'}">R$ ${p.price.toFixed(2).replace('.', ',')}</div>
+                                ${hasDiscount ? `<div class="old-price">De R$ ${pricing.baseOriginalPrice.toFixed(2).replace('.', ',')}</div>` : ''}
+                                <div class="price-val" style="${hasDiscount ? 'color: #dc2626;' : 'color: #be123c;'}">${hasDiscount ? '<span style="font-size: 13px; text-transform: uppercase; margin-right: 4px;">Por</span>' : ''}R$ ${pricing.finalPrice.toFixed(2).replace('.', ',')}</div>
                             </div>
                         </div>
                         `;
@@ -4332,10 +4335,24 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                         </div>
                         <h3 className="font-bold text-gray-900 leading-snug line-clamp-2 text-xs md:text-sm mb-2">{product.name}</h3>
                         <div className="flex justify-between items-end mt-auto pt-2 border-t border-gray-50">
-                            <div>
-                                <p className="text-[9px] font-bold text-gray-400 uppercase leading-none">Preço</p>
-                                <p className="text-sm md:text-base font-black text-gray-900">R$ {product.price.toFixed(2)}</p>
-                            </div>
+                            {(() => {
+                                const pricing = resolveFlyerProductPricing(product);
+                                return (
+                                    <div>
+                                        <p className="text-[9px] font-bold text-gray-400 uppercase leading-none">
+                                            {pricing.hasDiscount ? 'Preço Promocional' : 'Preço'}
+                                        </p>
+                                        {pricing.hasDiscount && (
+                                            <p className="text-[10px] font-bold text-gray-400 line-through leading-tight mt-0.5">
+                                                De R$ {pricing.baseOriginalPrice.toFixed(2).replace('.', ',')}
+                                            </p>
+                                        )}
+                                        <p className={`text-sm md:text-base font-black ${pricing.hasDiscount ? 'text-emerald-600' : 'text-gray-900'}`}>
+                                            {pricing.hasDiscount ? 'Por ' : ''}R$ {pricing.finalPrice.toFixed(2).replace('.', ',')}
+                                        </p>
+                                    </div>
+                                );
+                            })()}
                             <div className="flex flex-col items-end gap-1">
                                 <div className={`text-[10px] font-bold px-1.5 py-0.5 rounded-md transition-all duration-500 ${(product as any)._justUpdated ? 'bg-orange-100 text-orange-600 scale-110' : product.stock > 0 ? 'bg-gray-100 text-gray-600' : 'bg-red-100 text-red-600'}`}>
                                     {product.stock} un
@@ -4416,21 +4433,30 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                     bannerTitle: tenant.bannerTitle || 'OFERTAS ESPECIAIS',
                     subTitle: tenant.bannerSubtitle || 'Aqui você encontra saúde e bem estar!',
                     productsArray: getFlyerItems().map(p => {
+                        const pricing = resolveFlyerProductPricing(p);
                         let badgeText = '';
                         if (p.promotionType === 'BUY_X_PAY_Y' && p.buyX && p.payY) {
                             badgeText = `Leve ${p.buyX} Pague ${p.payY}`;
-                        } else if (p.originalPrice && p.originalPrice > p.price) {
-                            const percent = Math.round(((p.originalPrice - p.price) / p.originalPrice) * 100);
-                            if (percent > 5) {
-                                badgeText = `${percent}% OFF`;
-                            }
+                        } else if (pricing.hasDiscount && pricing.discountPercent > 5) {
+                            badgeText = `${pricing.discountPercent}% OFF`;
+                        } else if (pricing.hasDiscount) {
+                            badgeText = 'OFERTA';
                         }
                         return {
                             id: p.id,
                             name: p.name,
                             category: p.category,
-                            price: p.price,
-                            originalPrice: p.originalPrice,
+                            price: pricing.finalPrice,
+                            regularPrice: p.price,
+                            originalPrice: pricing.baseOriginalPrice,
+                            original_price: (p as any).original_price,
+                            pmc_price: (p as any).pmc_price,
+                            pmcPrice: (p as any).pmcPrice,
+                            promotionalPrice: pricing.validPromoPrice > 0 ? pricing.validPromoPrice : p.promotionalPrice,
+                            promotional_price: (p as any).promotional_price,
+                            promo_price: (p as any).promo_price,
+                            promoPrice: (p as any).promoPrice,
+                            sale_price: (p as any).sale_price,
                             promotionType: p.promotionType,
                             buyX: p.buyX,
                             payY: p.payY,
