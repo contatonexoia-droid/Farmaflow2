@@ -549,14 +549,28 @@ class InovaFarmaConnector {
                 return `INSERT INTO ${fullTableName} (${insertCols.join(', ')}) VALUES (${insertVals.join(', ')});`;
             };
 
-            const [lancamentoColsMeta, vendaColsMeta, vendaProdutoColsMeta] = await Promise.all([
+            const [
+                lancamentoColsMeta,
+                vendaColsMeta,
+                vendaProdutoColsMeta,
+                financeiroPendenteColsMeta,
+                vendaPagamentoColsMeta,
+            ] = await Promise.all([
                 getTableColumnsMeta('dbo.Lancamento'),
                 getTableColumnsMeta('dbo.Venda'),
                 getTableColumnsMeta('dbo.Venda_Produto'),
+                getTableColumnsMeta('dbo.Financeiro_Pendente'),
+                getTableColumnsMeta('dbo.Venda_Pagamento'),
             ]);
 
             const hasLancamentoCol = (colName) =>
                 lancamentoColsMeta.some((c) => String(c.name).toLowerCase() === String(colName).toLowerCase());
+
+            const hasFinPendCol = (colName) =>
+                financeiroPendenteColsMeta.some((c) => String(c.name).toLowerCase() === String(colName).toLowerCase());
+
+            const hasVendaPagCol = (colName) =>
+                vendaPagamentoColsMeta.some((c) => String(c.name).toLowerCase() === String(colName).toLowerCase());
 
             const lancamentoInsertSql = buildDynamicInsertQuery('dbo.Lancamento', lancamentoColsMeta, {
                 CodigoLancamento: '@NovoCodigoLancamento',
@@ -612,6 +626,35 @@ class InovaFarmaConnector {
                 Unidade: '@Unidade',
                 rowguid: 'NEWID()',
                 CodigoGrupoInventario: isGrupoInvNotNull ? 'ISNULL(@CodigoGrupoInventario, 0)' : '@CodigoGrupoInventario',
+            });
+
+            const financeiroPendenteInsertSql = buildDynamicInsertQuery('dbo.Financeiro_Pendente', financeiroPendenteColsMeta, {
+                CodigoPendente: '@NovoCodigoPendente',
+                CodigoLancamento: '@NovoCodigoLancamento',
+                CodigoOperacao: '1',
+                CodigoGrupo: '1',
+                Historico: '@HistoricoPendente',
+                Valor: '@TotalLiquido',
+                CodigoEspecie: '1',
+                Parcela: '1',
+                CodigoPBM: 'NULL',
+                Entrega: 'NULL',
+                Cesta: '@CestaPendente',
+                CodigoFuncionario: '@CodigoFuncionario',
+                Troco: '0.00',
+                CodigoLancamentoConferencia: 'NULL',
+                rowguid: 'NEWID()',
+                DataEfetivacao: 'NULL',
+            });
+
+            const vendaPagamentoInsertSql = buildDynamicInsertQuery('dbo.Venda_Pagamento', vendaPagamentoColsMeta, {
+                CodigoVendaID: '@NovoCodigoVendaPagID',
+                CodigoVenda: '@NovoCodigoVenda',
+                CodigoPagamento: '1',
+                CodigoPlano: '1',
+                Valor: '@TotalLiquido',
+                Parcela: '1',
+                rowguid: 'NEWID()',
             });
 
             // 5. Inicia a transação SQL Server com UPDLOCK, HOLDLOCK
@@ -797,6 +840,81 @@ class InovaFarmaConnector {
 
                     await vpReq.query(vendaProdutoInsertSql);
                 }
+            }
+
+            // Passo 3.1: Gravação em dbo.Financeiro_Pendente e dbo.Venda_Pagamento (alimentam "Lançamentos Pendentes" do Caixa)
+            if (novoCodigoVenda && (financeiroPendenteInsertSql || vendaPagamentoInsertSql)) {
+                const rawCustomerName = String(
+                    order.customer_name ||
+                    customer.name ||
+                    customer.nome ||
+                    order.customerName ||
+                    'CONSUMIDOR'
+                ).trim();
+                const historicoClientePendente = truncateStr(
+                    (rawCustomerName || 'CONSUMIDOR').toUpperCase(),
+                    50,
+                    'CONSUMIDOR'
+                );
+
+                const finCestaCol = financeiroPendenteColsMeta.find((c) => String(c.name).toLowerCase() === 'cesta');
+                const isFinCestaText =
+                    finCestaCol &&
+                    ['varchar', 'char', 'nvarchar', 'nchar', 'text', 'ntext'].includes(String(finCestaCol.type_name).toLowerCase());
+
+                const finPagReq = new sql.Request(transaction);
+                finPagReq.input('NovoCodigoLancamento', sql.BigInt, novoCodigoLancamento);
+                finPagReq.input('NovoCodigoVenda', sql.BigInt, novoCodigoVenda);
+                finPagReq.input('HistoricoPendente', sql.VarChar(50), historicoClientePendente);
+                finPagReq.input('TotalLiquido', sql.Money, headerTotalLiquido);
+                if (isFinCestaText) {
+                    finPagReq.input('CestaPendente', sql.VarChar(20), numeroCesta !== null ? String(numeroCesta) : null);
+                } else {
+                    finPagReq.input('CestaPendente', sql.Int, numeroCesta);
+                }
+                finPagReq.input('CodigoFuncionario', sql.Int, codigoFuncionarioVenda);
+
+                await finPagReq.query(`
+                    ${financeiroPendenteInsertSql ? `
+                    IF OBJECT_ID('dbo.Financeiro_Pendente', 'U') IS NOT NULL
+                    BEGIN
+                        DECLARE @NovoCodigoPendente BIGINT = 11;
+                        ${hasFinPendCol('CodigoPendente') ? `
+                        DECLARE @Pend1 BIGINT = NULL, @Pend2 BIGINT = NULL, @StepPend BIGINT = 10;
+                        SELECT TOP 1 @Pend1 = CodigoPendente FROM dbo.Financeiro_Pendente WITH (UPDLOCK, HOLDLOCK) ORDER BY CodigoPendente DESC;
+                        IF @Pend1 IS NOT NULL
+                        BEGIN
+                            SELECT TOP 1 @Pend2 = CodigoPendente FROM dbo.Financeiro_Pendente WHERE CodigoPendente < @Pend1 ORDER BY CodigoPendente DESC;
+                            IF @Pend2 IS NOT NULL AND (@Pend1 - @Pend2) > 0
+                                SET @StepPend = (@Pend1 - @Pend2);
+                            SET @NovoCodigoPendente = @Pend1 + @StepPend;
+                        END
+                        ` : ''}
+
+                        ${financeiroPendenteInsertSql}
+                    END
+                    ` : ''}
+
+                    ${vendaPagamentoInsertSql ? `
+                    IF OBJECT_ID('dbo.Venda_Pagamento', 'U') IS NOT NULL
+                    BEGIN
+                        DECLARE @NovoCodigoVendaPagID BIGINT = 11;
+                        ${hasVendaPagCol('CodigoVendaID') ? `
+                        DECLARE @Vp1 BIGINT = NULL, @Vp2 BIGINT = NULL, @StepVp BIGINT = 10;
+                        SELECT TOP 1 @Vp1 = CodigoVendaID FROM dbo.Venda_Pagamento WITH (UPDLOCK, HOLDLOCK) ORDER BY CodigoVendaID DESC;
+                        IF @Vp1 IS NOT NULL
+                        BEGIN
+                            SELECT TOP 1 @Vp2 = CodigoVendaID FROM dbo.Venda_Pagamento WHERE CodigoVendaID < @Vp1 ORDER BY CodigoVendaID DESC;
+                            IF @Vp2 IS NOT NULL AND (@Vp1 - @Vp2) > 0
+                                SET @StepVp = (@Vp1 - @Vp2);
+                            SET @NovoCodigoVendaPagID = @Vp1 + @StepVp;
+                        END
+                        ` : ''}
+
+                        ${vendaPagamentoInsertSql}
+                    END
+                    ` : ''}
+                `);
             }
 
             // Passo 4: Mantém gravação em dbo.Orcamento, dbo.Orcamento_Produto e dbo.Orcamento_PV (dentro de TRY/CATCH para compatibilidade)
