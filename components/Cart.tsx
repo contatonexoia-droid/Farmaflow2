@@ -486,14 +486,7 @@ export const Cart: React.FC<CartProps> = ({
   };
 
   const maskText = (text: string) => {
-    if (!text) return "";
-    if (text.length <= 3) return text.substring(0, 1) + "***";
-    if (text.length <= 5) return text.substring(0, 2) + "***";
-    const parts = text.split(" ");
-    if (parts.length > 1) {
-      return parts[0].substring(0, 3) + "*** " + parts[parts.length - 1];
-    }
-    return text.substring(0, 3) + "***";
+    return text || "";
   };
 
   useEffect(() => {
@@ -511,22 +504,30 @@ export const Cart: React.FC<CartProps> = ({
           console.log("[CRM Lookup] Resultado:", data);
 
           if (res.ok && data && data.found && data.data) {
-            const hasValidName = data.data.customer_name && !isPickupOrInvalidAddress(data.data.customer_name);
+            const rawName = String(data.data.customer_name || "").replace(/\*+/g, "").trim();
+            const rawStreet = String(data.data.street || "").trim();
+            const rawNeighborhood = String(data.data.neighborhood || "").trim();
+            const hasValidName =
+              Boolean(rawName) &&
+              !String(data.data.customer_name || "").includes("*") &&
+              !isPickupOrInvalidAddress(rawName);
             const hasValidAddress =
               data.hasAddress !== false &&
-              data.data.street &&
-              !isPickupOrInvalidAddress(data.data.street) &&
-              !isPickupOrInvalidAddress(data.data.neighborhood);
+              Boolean(rawStreet) &&
+              !rawStreet.includes("*") &&
+              !rawNeighborhood.includes("*") &&
+              !isPickupOrInvalidAddress(rawStreet) &&
+              !isPickupOrInvalidAddress(rawNeighborhood);
 
             if (hasValidName || hasValidAddress) {
               const rData: Partial<CustomerInfo> = {
                 name: hasValidName ? data.data.customer_name : "",
-                cep: hasValidAddress && data.data.cep && !isPickupOrInvalidAddress(data.data.cep) ? data.data.cep : "",
+                cep: hasValidAddress && data.data.cep && !String(data.data.cep).includes("*") && !isPickupOrInvalidAddress(data.data.cep) ? data.data.cep : "",
                 address: hasValidAddress ? data.data.street : "",
                 neighborhood: hasValidAddress ? (data.data.neighborhood || "") : "",
                 city: hasValidAddress ? (data.data.city || "") : "",
                 addressNumber: hasValidAddress ? (data.data.number || "") : "",
-                complement: hasValidAddress ? (data.data.complement || "") : "",
+                complement: hasValidAddress && data.data.complement && !String(data.data.complement).includes("*") ? (data.data.complement || "") : "",
               };
 
               setRealCustomerData(rData);
@@ -534,14 +535,14 @@ export const Cart: React.FC<CartProps> = ({
 
               setCustomer((prev) => ({
                 ...prev,
-                name: hasValidName ? maskText(rData.name || "") : prev.name,
+                name: hasValidName ? (rData.name || "") : prev.name,
                 ...(hasValidAddress ? {
-                  cep: rData.cep ? maskText(rData.cep) : "",
-                  address: maskText(rData.address || ""),
+                  cep: rData.cep || "",
+                  address: rData.address || "",
                   addressNumber: rData.addressNumber || "",
-                  neighborhood: maskText(rData.neighborhood || ""),
+                  neighborhood: rData.neighborhood || "",
                   city: rData.city || "",
-                  complement: rData.complement ? maskText(rData.complement) : "",
+                  complement: rData.complement || "",
                 } : {}),
               }));
 
@@ -587,12 +588,12 @@ export const Cart: React.FC<CartProps> = ({
         if (hasSavedRealAddress) {
           return {
             ...prev,
-            cep: realCustomerData.cep ? maskText(realCustomerData.cep) : prev.cep,
-            address: maskText(realCustomerData.address || ""),
+            cep: realCustomerData.cep || prev.cep,
+            address: realCustomerData.address || "",
             addressNumber: realCustomerData.addressNumber || prev.addressNumber,
-            neighborhood: maskText(realCustomerData.neighborhood || ""),
+            neighborhood: realCustomerData.neighborhood || "",
             city: realCustomerData.city || prev.city,
-            complement: realCustomerData.complement ? maskText(realCustomerData.complement) : prev.complement,
+            complement: realCustomerData.complement || prev.complement,
           };
         }
 
@@ -937,15 +938,15 @@ export const Cart: React.FC<CartProps> = ({
         }));
         setEditedFields((prev) => ({
           ...prev,
-          address: true,
-          neighborhood: true,
+          ...(data.logradouro ? { address: true } : {}),
+          ...(data.bairro ? { neighborhood: true } : {}),
           city: true,
           cep: true,
         }));
         setErrors((prev) => ({
           ...prev,
-          address: false,
-          neighborhood: false,
+          ...(data.logradouro ? { address: false } : {}),
+          ...(data.bairro ? { neighborhood: false } : {}),
           city: false,
         }));
 
@@ -1748,15 +1749,6 @@ export const Cart: React.FC<CartProps> = ({
                     placeholder="Como devemos lhe chamar?"
                     className={getInputClass("name")}
                     value={getDisplayValue("name")}
-                    onFocus={() => {
-                      if (
-                        realCustomerData &&
-                        realCustomerData.name &&
-                        !editedFields.name
-                      ) {
-                        handleFieldChange("name", "");
-                      }
-                    }}
                     onChange={(e) => handleFieldChange("name", e.target.value)}
                   />
                 </div>
@@ -1861,15 +1853,6 @@ export const Cart: React.FC<CartProps> = ({
                         placeholder="00000-000"
                         className="flex-1 bg-white border-2 border-gray-50 rounded-2xl py-4 px-6 focus:border-emerald-500 outline-none text-black font-bold placeholder:text-gray-300"
                         value={getDisplayValue("cep")}
-                        onFocus={() => {
-                          if (
-                            realCustomerData &&
-                            realCustomerData.cep &&
-                            !editedFields.cep
-                          ) {
-                            handleFieldChange("cep", "");
-                          }
-                        }}
                         onChange={(e) => {
                           handleFieldChange("cep", e.target.value);
                           setCepError("");
@@ -1912,15 +1895,6 @@ export const Cart: React.FC<CartProps> = ({
                     placeholder="Nome da rua"
                     className={getInputClass("address")}
                     value={getDisplayValue("address")}
-                    onFocus={() => {
-                      if (
-                        realCustomerData &&
-                        realCustomerData.address &&
-                        !editedFields.address
-                      ) {
-                        handleFieldChange("address", "");
-                      }
-                    }}
                     onChange={(e) =>
                       handleFieldChange("address", e.target.value)
                     }
@@ -1951,15 +1925,6 @@ export const Cart: React.FC<CartProps> = ({
                       caretColor: "#000000",
                     }}
                     value={getDisplayValue("addressNumber")}
-                    onFocus={() => {
-                      if (
-                        realCustomerData &&
-                        realCustomerData.addressNumber &&
-                        !editedFields.addressNumber
-                      ) {
-                        handleFieldChange("addressNumber", "");
-                      }
-                    }}
                     onChange={(e) =>
                       handleFieldChange("addressNumber", e.target.value)
                     }
@@ -1975,15 +1940,6 @@ export const Cart: React.FC<CartProps> = ({
                   placeholder="Apto, Bloco, Casa..."
                   className="w-full bg-white border-2 border-gray-50 rounded-2xl py-4 px-6 focus:border-emerald-500 outline-none text-black font-bold placeholder:text-gray-300"
                   value={getDisplayValue("complement") || ""}
-                  onFocus={() => {
-                    if (
-                      realCustomerData &&
-                      realCustomerData.complement &&
-                      !editedFields.complement
-                    ) {
-                      handleFieldChange("complement", "");
-                    }
-                  }}
                   onChange={(e) =>
                     handleFieldChange("complement", e.target.value)
                   }
@@ -2018,13 +1974,6 @@ export const Cart: React.FC<CartProps> = ({
                           value={getDisplayValue("neighborhood")}
                           onFocus={() => {
                             setNeighborhoodDropdownOpen(true);
-                            if (
-                              realCustomerData &&
-                              realCustomerData.neighborhood &&
-                              !editedFields.neighborhood
-                            ) {
-                              handleFieldChange("neighborhood", "");
-                            }
                           }}
                           onChange={(e) => {
                             handleFieldChange("neighborhood", e.target.value);
@@ -2141,15 +2090,6 @@ export const Cart: React.FC<CartProps> = ({
                       placeholder="Bairro"
                       className={getInputClass("neighborhood")}
                       value={getDisplayValue("neighborhood")}
-                      onFocus={() => {
-                        if (
-                          realCustomerData &&
-                          realCustomerData.neighborhood &&
-                          !editedFields.neighborhood
-                        ) {
-                          handleFieldChange("neighborhood", "");
-                        }
-                      }}
                       onChange={(e) =>
                         handleFieldChange("neighborhood", e.target.value)
                       }
@@ -2169,15 +2109,6 @@ export const Cart: React.FC<CartProps> = ({
                     placeholder="Cidade"
                     className={getInputClass("city")}
                     value={getDisplayValue("city")}
-                    onFocus={() => {
-                      if (
-                        realCustomerData &&
-                        realCustomerData.city &&
-                        !editedFields.city
-                      ) {
-                        handleFieldChange("city", "");
-                      }
-                    }}
                     onChange={(e) => handleFieldChange("city", e.target.value)}
                   />
                 </div>

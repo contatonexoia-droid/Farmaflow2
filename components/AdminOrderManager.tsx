@@ -170,13 +170,22 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
       order.codigoPV ??
       order.codigo_pv ??
       custPdv.codigoPV ??
-      (order.customer as any)?.codigoPV;
+      custPdv.codigoVenda ??
+      (order.customer as any)?.codigoPV ??
+      (order.customer as any)?.codigoVenda;
     const orc =
       live?.codigoOrcamento ??
       order.codigoOrcamento ??
       order.codigo_orcamento ??
       custPdv.codigoOrcamento ??
       (order.customer as any)?.codigoOrcamento;
+    const cesta =
+      custPdv.numeroCesta ??
+      custPdv.cesta ??
+      (order as any)?.numeroCesta ??
+      (order as any)?.cesta ??
+      (order.customer as any)?.numeroCesta ??
+      (order.customer as any)?.cesta;
     const rawInova =
       live?.codigoVendaInova ??
       order.codigoVendaInova ??
@@ -186,22 +195,69 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
       (order.customer as any)?.erpOrderId ??
       (order.customer as any)?.codigoVendaInova;
 
-    if (rawInova && /cesta\s*#/i.test(String(rawInova))) {
-      return `No PDV (${rawInova})`;
+    const rawStr = rawInova ? String(rawInova) : "";
+    const cestaMatch = rawStr.match(/cesta\s*#?\s*(\d+)/i);
+    const vendaMatch = rawStr.match(/(?:venda|pré-venda|pre-venda|pv)\s*#?\s*(\d+)/i);
+
+    const finalCesta = cesta || (cestaMatch ? cestaMatch[1] : undefined);
+    const finalVenda = pv || (vendaMatch ? vendaMatch[1] : undefined);
+
+    if (finalCesta && finalVenda) {
+      return `NO PDV (CESTA #${finalCesta} • VENDA #${finalVenda})`;
     }
-    if (pv && orc) {
-      return `No PDV (Pré-Venda #${pv} • Orç #${orc})`;
+    if (finalCesta && orc) {
+      return `NO PDV (CESTA #${finalCesta} • VENDA #${orc})`;
     }
-    if (pv) {
-      return `No PDV (Pré-Venda #${pv})`;
+    if (finalCesta) {
+      return `NO PDV (CESTA #${finalCesta})`;
     }
-    if (rawInova && String(rawInova).toLowerCase().includes("pré-venda")) {
-      return `No PDV (${rawInova})`;
+    if (rawInova && /cesta\s*#/i.test(rawStr)) {
+      return `NO PDV (${rawStr.toUpperCase()})`;
+    }
+    if (finalVenda && orc && String(finalVenda) !== String(orc)) {
+      return `NO PDV (VENDA #${finalVenda} • ORÇ #${orc})`;
+    }
+    if (finalVenda) {
+      return `NO PDV (VENDA #${finalVenda})`;
+    }
+    if (rawInova && rawStr.toLowerCase().includes("pré-venda")) {
+      return `NO PDV (${rawStr.toUpperCase()})`;
     }
     if (orc || rawInova) {
-      return `No PDV (Pré-Venda #${orc || rawInova})`;
+      return `NO PDV (VENDA #${orc || rawInova})`;
     }
-    return "No PDV (Enviado)";
+    return "NO PDV (ENVIADO)";
+  };
+
+  const getCustomerAddressParts = (order: Order) => {
+    const cust = (order.customer || {}) as any;
+    const street = String(
+      cust.realAddress || cust.address || cust.street || cust.logradouro || ""
+    ).trim();
+    const number = String(
+      cust.addressNumber || cust.number || cust.numero || "S/N"
+    ).trim();
+    const complement = String(
+      cust.realComplement || cust.complement || cust.complemento || ""
+    ).trim();
+    const reference = String(
+      cust.reference || cust.referencia || cust.referencePoint || cust.pontoReferencia || ""
+    ).trim();
+    const neighborhood = String(
+      cust.realNeighborhood || cust.neighborhood || cust.bairro || ""
+    ).trim();
+    const city = String(cust.city || cust.cidade || "").trim();
+    const cep = String(cust.realCep || cust.cep || "").trim();
+
+    return {
+      street: street || "Endereço não informado",
+      number: number || "S/N",
+      complement,
+      reference,
+      neighborhood: neighborhood || "-",
+      city: city || "-",
+      cep: cep && cep.toLowerCase() !== "não informado" && cep.toLowerCase() !== "retirada" ? cep : "",
+    };
   };
 
   const getOrderErpError = (order: Order): string | undefined => {
@@ -927,15 +983,17 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
         );
       case "enviado_ao_pdv":
         return (
-          <span className="bg-emerald-100 text-emerald-800 px-3 py-1.5 rounded-full text-[10px] font-black uppercase flex items-center gap-1 w-fit border border-emerald-300">
-            <CheckCircle size={10} /> {order ? getOrderPdvLabel(order) : "No PDV"}
+          <span className="bg-emerald-100 text-emerald-800 px-3 py-1.5 rounded-full text-[10px] font-black uppercase flex items-center gap-1.5 w-fit border border-emerald-300 whitespace-nowrap">
+            <CheckCircle size={11} className="shrink-0" />{" "}
+            <span>{order ? getOrderPdvLabel(order) : "NO PDV"}</span>
           </span>
         );
       case "impresso_no_pdv":
       case "concluido_no_pdv":
         return (
-          <span className="bg-emerald-100 text-emerald-700 px-3 py-1.5 rounded-full text-[10px] font-black uppercase flex items-center gap-1 w-fit border border-emerald-200">
-            <CheckCircle size={10} /> {order ? getOrderPdvLabel(order) : "Concluído no PDV"}
+          <span className="bg-emerald-100 text-emerald-700 px-3 py-1.5 rounded-full text-[10px] font-black uppercase flex items-center gap-1.5 w-fit border border-emerald-200 whitespace-nowrap">
+            <CheckCircle size={11} className="shrink-0" />{" "}
+            <span>{order ? getOrderPdvLabel(order) : "CONCLUÍDO NO PDV"}</span>
           </span>
         );
       case "erro_integracao_pdv":
@@ -1080,98 +1138,112 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                 key={order.id}
                 className={`bg-white p-6 rounded-[2.5rem] shadow-sm border ${order.prescriptionStatus === "REJECTED" ? "border-red-500 bg-red-50 opacity-80" : isPendingLongTime ? "border-red-300 bg-red-50/20" : "border-gray-100"} hover:shadow-xl transition-all group overflow-hidden`}
               >
-                <div className="flex flex-col lg:flex-row justify-between gap-6">
-                  <div className="flex-1 space-y-4">
+                <div className="flex flex-col lg:flex-row justify-between gap-6 items-stretch">
+                  <div className="flex-1 min-w-0 space-y-4">
                     <div className="flex flex-wrap items-center gap-3">
-                      <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest bg-gray-50 px-2 py-1 rounded-md">
+                      <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest bg-gray-50 px-2 py-1 rounded-md whitespace-nowrap">
                         ID: {order.id}
                       </span>
-                      <span className="text-[10px] font-bold text-gray-400">
+                      <span className="text-[10px] font-bold text-gray-400 whitespace-nowrap">
                         {safeDate(order.date)}
                       </span>
                       {getStatusBadge(getEffectiveOrderStatus(order), order)}
                       {isPendingLongTime && (
-                        <span className="text-[10px] font-black text-red-600 bg-red-100 px-2 py-1 rounded-md flex items-center gap-1">
+                        <span className="text-[10px] font-black text-red-600 bg-red-100 px-2 py-1 rounded-md flex items-center gap-1 whitespace-nowrap">
                           <AlertTriangle size={12} /> Pendente há muito tempo
                         </span>
                       )}
                       
                       {order.prescriptionStatus === "PENDING" && (
-                        <span className="text-[10px] font-black text-amber-700 bg-amber-100 px-2 py-1 rounded-md flex items-center gap-1 border border-amber-200">
+                        <span className="text-[10px] font-black text-amber-700 bg-amber-100 px-2 py-1 rounded-md flex items-center gap-1 border border-amber-200 whitespace-nowrap">
                           Receita em análise
                         </span>
                       )}
                       {order.prescriptionStatus === "APPROVED" && (
-                        <span className="text-[10px] font-black text-emerald-700 bg-emerald-100 px-2 py-1 rounded-md flex items-center gap-1 border border-emerald-200">
+                        <span className="text-[10px] font-black text-emerald-700 bg-emerald-100 px-2 py-1 rounded-md flex items-center gap-1 border border-emerald-200 whitespace-nowrap">
                           Receita Aprovada
                         </span>
                       )}
                       {order.prescriptionStatus === "REJECTED" && (
-                        <span className="text-[10px] font-black text-red-700 bg-red-100 px-2 py-1 rounded-md flex items-center gap-1 border border-red-200">
+                        <span className="text-[10px] font-black text-red-700 bg-red-100 px-2 py-1 rounded-md flex items-center gap-1 border border-red-200 whitespace-nowrap">
                           Receita Reprovada
                         </span>
                       )}
                       {(order.receiptFile || prescriptionsMap[order.id]) && (
-                        <span className="text-[10px] font-black text-blue-600 bg-blue-50 px-2 py-1 rounded-md flex items-center gap-1 border border-blue-100">
+                        <span className="text-[10px] font-black text-blue-600 bg-blue-50 px-2 py-1 rounded-md flex items-center gap-1 border border-blue-100 whitespace-nowrap">
                           <FileText size={12} /> Receita Anexada
                         </span>
                       )}
                     </div>
 
-                    <div>
-                      <h3 className="text-xl font-black text-gray-900">
+                    <div className="min-w-0">
+                      <h3 className="text-xl font-black text-gray-900 break-normal">
                         {order.customer?.name || "Cliente sem nome"}
                       </h3>
                       <div className="flex items-center gap-2 text-emerald-600 text-xs font-black mt-1">
-                        <Phone size={14} /> {order.customer?.phone || "-"}
+                        <Phone size={14} className="shrink-0" />{" "}
+                        <span>{order.customer?.phone || "-"}</span>
                       </div>
                     </div>
 
-                    <div className="bg-gray-50/80 p-4 rounded-2xl border border-gray-100 flex items-start gap-3">
-                      <div className="p-2 bg-white rounded-xl text-gray-400 shadow-sm border border-gray-50">
+                    <div className="w-full max-w-2xl bg-gray-50/80 p-4 rounded-2xl border border-gray-100 flex items-start gap-3">
+                      <div className="p-2 bg-white rounded-xl text-gray-400 shadow-sm border border-gray-50 shrink-0">
                         <MapPin size={16} />
                       </div>
-                      <p className="text-sm text-gray-700 font-bold leading-relaxed">
+                      <div className="text-sm text-gray-700 font-bold leading-relaxed flex-1 min-w-0 break-normal">
                         {order.deliveryMode === "pickup" ? (
-                          <span className="bg-blue-100 text-blue-800 font-black px-2 py-1 rounded-md text-xs uppercase tracking-wider border border-blue-200">
+                          <span className="bg-blue-100 text-blue-800 font-black px-2 py-1 rounded-md text-xs uppercase tracking-wider border border-blue-200 inline-block">
                             Retirada na Loja
                           </span>
                         ) : (
-                          <>
-                            {order.customer?.address || "Endereço não informado"},{" "}
-                            {order.customer?.addressNumber || "S/N"}
-                            <br />
-                            {order.customer?.neighborhood || "-"} —{" "}
-                            {order.customer?.city || "-"}
-                          </>
+                          (() => {
+                            const addr = getCustomerAddressParts(order);
+                            return (
+                              <div className="space-y-0.5">
+                                <p className="text-gray-800 font-extrabold">
+                                  {addr.street}, {addr.number}
+                                  {addr.complement ? ` — ${addr.complement}` : ""}
+                                </p>
+                                <p className="text-gray-600 font-bold">
+                                  {addr.neighborhood}, {addr.city}
+                                  {addr.cep ? ` • CEP: ${addr.cep}` : ""}
+                                </p>
+                                {addr.reference && (
+                                  <p className="text-xs text-gray-500 font-semibold">
+                                    Ref.: {addr.reference}
+                                  </p>
+                                )}
+                              </div>
+                            );
+                          })()
                         )}
-                      </p>
+                      </div>
                     </div>
                     {order.observation && (
-                      <div className="bg-yellow-50 p-3 rounded-xl border border-yellow-100 text-xs text-yellow-800 font-medium flex items-start gap-2">
+                      <div className="w-full max-w-2xl bg-yellow-50 p-3 rounded-xl border border-yellow-100 text-xs text-yellow-800 font-medium flex items-start gap-2">
                         <FileText size={14} className="mt-0.5 shrink-0" />{" "}
-                        {order.observation}
+                        <span className="flex-1 min-w-0 break-normal">{order.observation}</span>
                       </div>
                     )}
 
-                    <div className="flex flex-wrap gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <button
                         onClick={() => setViewingOrder(order)}
-                        className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl text-xs font-black uppercase tracking-widest transition-all flex items-center gap-2 active:scale-95"
+                        className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl text-xs font-black uppercase tracking-widest transition-all flex items-center gap-2 active:scale-95 whitespace-nowrap shrink-0"
                       >
-                        <Eye size={14} /> Ver Detalhes
+                        <Eye size={14} className="shrink-0" /> Ver Detalhes
                       </button>
                       <button
                         onClick={() => handleEditClick(order)}
-                        className="px-4 py-2 bg-blue-50 hover:bg-blue-100 text-blue-600 rounded-xl text-xs font-black uppercase tracking-widest transition-all flex items-center gap-2 active:scale-95 border border-blue-100"
+                        className="px-4 py-2 bg-blue-50 hover:bg-blue-100 text-blue-600 rounded-xl text-xs font-black uppercase tracking-widest transition-all flex items-center gap-2 active:scale-95 border border-blue-100 whitespace-nowrap shrink-0"
                       >
-                        <Edit3 size={14} /> Editar
+                        <Edit3 size={14} className="shrink-0" /> Editar
                       </button>
                       <button
                         onClick={() => onDeleteOrder(order.id)}
-                        className="px-4 py-2 bg-red-50 hover:bg-red-100 text-red-600 rounded-xl text-xs font-black uppercase tracking-widest transition-all flex items-center gap-2 active:scale-95 border border-red-100"
+                        className="px-4 py-2 bg-red-50 hover:bg-red-100 text-red-600 rounded-xl text-xs font-black uppercase tracking-widest transition-all flex items-center gap-2 active:scale-95 border border-red-100 whitespace-nowrap shrink-0"
                       >
-                        <Trash2 size={14} /> Excluir
+                        <Trash2 size={14} className="shrink-0" /> Excluir
                       </button>
 
                       {isPendingLongTime && order.customer?.phone && (
@@ -1179,9 +1251,9 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                           href={`https://wa.me/55${order.customer.phone.replace(/\D/g, "")}?text=${encodeURIComponent(`Olá ${order.customer.name}, vimos que você iniciou um pedido de ${order.items[0]?.name}${order.items.length > 1 ? " e outros itens" : ""}. Teve alguma dúvida com o PIX? Posso te ajudar?`)}`}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="px-4 py-2 bg-green-500 hover:bg-green-600 text-white rounded-xl text-xs font-black uppercase tracking-widest transition-all flex items-center gap-2 active:scale-95 shadow-sm"
+                          className="px-4 py-2 bg-green-500 hover:bg-green-600 text-white rounded-xl text-xs font-black uppercase tracking-widest transition-all flex items-center gap-2 active:scale-95 shadow-sm whitespace-nowrap shrink-0"
                         >
-                          <Phone size={14} /> Recuperar Venda (WhatsApp)
+                          <Phone size={14} className="shrink-0" /> Recuperar Venda (WhatsApp)
                         </a>
                       )}
 
@@ -1191,7 +1263,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                             onClick={() =>
                               handleSendDeliveryNotification(order)
                             }
-                            className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-xl text-xs font-black uppercase tracking-widest transition-all flex items-center gap-2 active:scale-95 shadow-sm"
+                            className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-xl text-xs font-black uppercase tracking-widest transition-all flex items-center gap-2 active:scale-95 shadow-sm whitespace-nowrap shrink-0"
                           >
                             <span>🛵</span> Notificar Entrega (WhatsApp)
                           </button>
@@ -1199,41 +1271,41 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                     </div>
                   </div>
 
-                  <div className="flex flex-col justify-between items-stretch lg:items-end gap-6 lg:min-w-[320px]">
+                  <div className="flex flex-col justify-between items-stretch lg:items-end gap-6 shrink-0">
                     <div className="text-left lg:text-right bg-emerald-50/30 p-4 rounded-3xl border border-emerald-50/50">
                       <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">
                         Total do Pedido
                       </p>
-                      <p className="text-3xl font-black text-emerald-600 tracking-tight">
+                      <p className="text-3xl font-black text-emerald-600 tracking-tight whitespace-nowrap">
                         R$ {(order.total || 0).toFixed(2)}
                       </p>
                       <div className="flex items-center lg:justify-end gap-2 text-[10px] text-gray-500 font-black uppercase mt-1">
-                        <span className="bg-white px-2 py-0.5 rounded-md border border-gray-100">
+                        <span className="bg-white px-2 py-0.5 rounded-md border border-gray-100 whitespace-nowrap">
                           {(order.items || []).length} ITENS
                         </span>
-                        <span className="bg-white px-2 py-0.5 rounded-md border border-gray-100">
+                        <span className="bg-white px-2 py-0.5 rounded-md border border-gray-100 whitespace-nowrap">
                           {order.customer?.paymentMethod || "PIX"}
                         </span>
                       </div>
                     </div>
 
                     {getEffectiveOrderStatus(order) === "erro_integracao_pdv" && getOrderErpError(order) && (
-                      <div className="w-full bg-orange-50 border border-orange-200 text-orange-800 px-4 py-2.5 rounded-2xl text-xs font-bold flex items-start gap-2">
+                      <div className="w-full max-w-md bg-orange-50 border border-orange-200 text-orange-800 px-4 py-2.5 rounded-2xl text-xs font-bold flex items-start gap-2">
                         <AlertTriangle size={15} className="shrink-0 mt-0.5 text-orange-600" />
                         <span>Falha ao gravar no PDV: {getOrderErpError(order)}</span>
                       </div>
                     )}
 
-                    <div className="flex flex-col sm:flex-row items-center gap-3 justify-end w-full">
+                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between lg:justify-end gap-3 flex-wrap w-full">
                       {!isDelivererMode && (() => {
                         const effStatus = getEffectiveOrderStatus(order);
                         if (sendingToPDV === order.id || effStatus === "pending_erp") {
                           return (
                             <button
                               disabled
-                              className="w-full sm:w-auto px-6 py-4 bg-indigo-500 text-white rounded-2xl text-[11px] font-black uppercase tracking-widest transition-all shadow-lg flex items-center justify-center gap-2 cursor-wait"
+                              className="w-full sm:w-auto px-5 py-4 bg-indigo-500 text-white rounded-2xl text-[11px] font-black uppercase tracking-widest transition-all shadow-lg flex items-center justify-center gap-2 cursor-wait whitespace-nowrap shrink-0"
                             >
-                              <span className="animate-spin border-2 border-white border-t-transparent rounded-full w-4 h-4"></span>
+                              <span className="animate-spin border-2 border-white border-t-transparent rounded-full w-4 h-4 shrink-0"></span>
                               Enviando para o PDV...
                             </button>
                           );
@@ -1245,7 +1317,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                           effStatus === "concluido_no_pdv"
                         ) {
                           return (
-                            <div className="w-full sm:w-auto px-5 py-4 bg-emerald-50 text-emerald-800 border-2 border-emerald-200 rounded-2xl text-[11px] font-black uppercase tracking-wider flex items-center justify-center gap-2 shadow-sm">
+                            <div className="w-full sm:w-auto px-5 py-4 bg-emerald-50 text-emerald-800 border-2 border-emerald-200 rounded-2xl text-[11px] font-black uppercase tracking-wider flex items-center justify-center gap-2 shadow-sm whitespace-nowrap shrink-0">
                               <CheckCircle size={16} className="text-emerald-600 shrink-0" />
                               <span>{getOrderPdvLabel(order)}</span>
                             </div>
@@ -1260,9 +1332,9 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                           return (
                             <button
                               onClick={() => openPdvSellerModal(order)}
-                              className="w-full sm:w-auto px-6 py-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl text-[11px] font-black uppercase tracking-widest transition-all shadow-lg active:scale-95 flex items-center justify-center gap-2"
+                              className="w-full sm:w-auto px-6 py-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl text-[11px] font-black uppercase tracking-widest transition-all shadow-lg active:scale-95 flex items-center justify-center gap-2 whitespace-nowrap shrink-0"
                             >
-                              <Upload size={16} /> Enviar para o PDV
+                              <Upload size={16} className="shrink-0" /> Enviar para o PDV
                             </button>
                           );
                         }
@@ -1273,16 +1345,16 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                       {getEffectiveOrderStatus(order) === "confirmed" ? (
                         <button
                           onClick={() => setConferenceOrder(order)}
-                          className="w-full sm:w-auto px-6 py-4 bg-emerald-500 hover:bg-emerald-600 text-white rounded-2xl text-[11px] font-black uppercase tracking-widest transition-all shadow-lg active:scale-95 flex items-center justify-center gap-2"
+                          className="w-full sm:w-auto px-6 py-4 bg-emerald-500 hover:bg-emerald-600 text-white rounded-2xl text-[11px] font-black uppercase tracking-widest transition-all shadow-lg active:scale-95 flex items-center justify-center gap-2 whitespace-nowrap shrink-0"
                         >
-                          <Package size={16} /> Iniciar Conferência
+                          <Package size={16} className="shrink-0" /> Iniciar Conferência
                         </button>
                       ) : isDelivererMode ? (
-                        <div className="flex-1 sm:flex-none py-4 px-6 bg-gray-100 text-gray-400 font-bold text-center rounded-2xl flex items-center justify-center text-[13px] tracking-wide">
+                        <div className="flex-1 sm:flex-none py-4 px-6 bg-gray-100 text-gray-400 font-bold text-center rounded-2xl flex items-center justify-center text-[13px] tracking-wide whitespace-nowrap shrink-0">
                           Somente Leitura
                         </div>
                       ) : (
-                        <div className="relative w-full sm:w-auto flex-1 sm:flex-none">
+                        <div className="relative w-full sm:w-auto shrink-0">
                           <select
                             value={getEffectiveOrderStatus(order)}
                             onChange={(e) =>
@@ -1291,7 +1363,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                                 e.target.value as OrderStatus,
                               )
                             }
-                            className="appearance-none bg-gray-900 text-white pl-5 pr-12 py-4 rounded-2xl text-[11px] font-black uppercase tracking-widest cursor-pointer hover:bg-gray-800 transition-all w-full outline-none border border-gray-700 active:scale-95 shadow-lg shadow-gray-200"
+                            className="appearance-none bg-gray-900 text-white pl-5 pr-11 py-4 rounded-2xl text-[11px] font-black uppercase tracking-widest cursor-pointer hover:bg-gray-800 transition-all w-full outline-none border border-gray-700 active:scale-95 shadow-lg shadow-gray-200 whitespace-nowrap"
                           >
                             <option value="pending">Marcar: Pendente</option>
                             <option value="confirmed">Confirmar Pedido</option>
@@ -1320,7 +1392,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                         </div>
                       )}
 
-                      <div className="flex flex-wrap gap-2 justify-between sm:justify-end w-full sm:w-auto mt-4 sm:mt-0">
+                      <div className="flex flex-wrap gap-2 justify-between sm:justify-end w-full sm:w-auto">
                         {(() => {
                           const activeReceiptFile = order.receiptFile || prescriptionsMap[order.id];
                           return activeReceiptFile ? (
@@ -1591,21 +1663,34 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                     size={16}
                     className="text-emerald-500 mt-1 shrink-0"
                   />
-                  <p className="text-sm text-gray-700 font-medium leading-relaxed min-w-0 flex-1 break-words">
+                  <div className="text-sm text-gray-700 font-medium leading-relaxed min-w-0 flex-1 break-normal">
                     {viewingOrder.deliveryMode === "pickup" ? (
-                      <span className="bg-blue-100 text-blue-800 font-black px-2 py-1 rounded-md text-xs uppercase tracking-wider border border-blue-200">
+                      <span className="bg-blue-100 text-blue-800 font-black px-2 py-1 rounded-md text-xs uppercase tracking-wider border border-blue-200 inline-block">
                         Retirada na Loja
                       </span>
                     ) : (
-                      <>
-                        {viewingOrder.customer?.address},{" "}
-                        {viewingOrder.customer?.addressNumber || "S/N"}
-                        <br />
-                        {viewingOrder.customer?.neighborhood} —{" "}
-                        {viewingOrder.customer?.city}
-                      </>
+                      (() => {
+                        const addr = getCustomerAddressParts(viewingOrder);
+                        return (
+                          <div className="space-y-0.5">
+                            <p className="text-gray-800 font-bold">
+                              {addr.street}, {addr.number}
+                              {addr.complement ? ` — ${addr.complement}` : ""}
+                            </p>
+                            <p className="text-gray-600 font-semibold">
+                              {addr.neighborhood}, {addr.city}
+                              {addr.cep ? ` • CEP: ${addr.cep}` : ""}
+                            </p>
+                            {addr.reference && (
+                              <p className="text-xs text-gray-500 font-medium">
+                                Ref.: {addr.reference}
+                              </p>
+                            )}
+                          </div>
+                        );
+                      })()
                     )}
-                  </p>
+                  </div>
                 </div>
               </div>
 
