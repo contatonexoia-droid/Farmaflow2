@@ -1,3 +1,6 @@
+try {
+    require('dotenv').config();
+} catch (e) {}
 const readline = require('readline');
 const {
     loadConfig,
@@ -259,9 +262,15 @@ async function startAgent(expectedErpType, ConnectorClass) {
 
     // Inicia os loops
     heartbeatLoop();
-    if (typeof connector.insertPreSaleOrder === 'function') {
-        console.log('🛒 Monitoramento de Pedidos para Pré-Venda do PDV ativo (a cada 5s).');
+    const enablePdvPreSale =
+        String(process.env.ENABLE_PDV_PRESALE || config?.enablePdvPreSale || '')
+            .trim()
+            .toLowerCase() === 'true';
+    if (enablePdvPreSale && typeof connector.insertPreSaleOrder === 'function') {
+        console.log('🛒 Monitoramento de Pedidos para Pré-Venda do PDV ativo (ENABLE_PDV_PRESALE=true, a cada 5s).');
         orderPollLoop();
+    } else {
+        console.log('ℹ️ Modo Sincronização de Catálogo/Estoque (vw_FarmaFlow_Itens -> Nuvem). Pré-Venda PDV desativada por padrão.');
     }
     loop();
 }

@@ -158,8 +158,23 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
     >
   >({});
 
+  const isPdvPreSaleEnabled = Boolean(
+    (tenant as any)?.enablePdvPreSale || (tenant as any)?.enable_pdv_presale
+  );
+
   const getEffectiveOrderStatus = (order: Order): OrderStatus => {
-    return livePdvMap[order.id]?.status || order.status;
+    const rawStatus = livePdvMap[order.id]?.status || order.status;
+    if (
+      !isPdvPreSaleEnabled &&
+      (rawStatus === "enviado_ao_pdv" ||
+        rawStatus === "impresso_no_pdv" ||
+        rawStatus === "concluido_no_pdv" ||
+        rawStatus === "pending_erp" ||
+        rawStatus === "erro_integracao_pdv")
+    ) {
+      return "confirmed";
+    }
+    return rawStatus;
   };
 
   const getOrderPdvLabel = (order: Order): string => {
@@ -275,7 +290,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
 
   // Monitora em tempo real os pedidos em 'pending_erp' até que o Agente Local confirme a gravação no SQL Server
   useEffect(() => {
-    if (!tenant?.id) return;
+    if (!tenant?.id || !isPdvPreSaleEnabled) return;
 
     const hasPendingErp = (orders || []).some(
       (o) => (livePdvMap[o.id]?.status || o.status) === "pending_erp",
@@ -1289,7 +1304,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                       </div>
                     </div>
 
-                    {getEffectiveOrderStatus(order) === "erro_integracao_pdv" && getOrderErpError(order) && (
+                    {isPdvPreSaleEnabled && getEffectiveOrderStatus(order) === "erro_integracao_pdv" && getOrderErpError(order) && (
                       <div className="w-full max-w-md bg-orange-50 border border-orange-200 text-orange-800 px-4 py-2.5 rounded-2xl text-xs font-bold flex items-start gap-2">
                         <AlertTriangle size={15} className="shrink-0 mt-0.5 text-orange-600" />
                         <span>Falha ao gravar no PDV: {getOrderErpError(order)}</span>
@@ -1297,7 +1312,7 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                     )}
 
                     <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between lg:justify-end gap-3 flex-wrap w-full">
-                      {!isDelivererMode && (() => {
+                      {isPdvPreSaleEnabled && !isDelivererMode && (() => {
                         const effStatus = getEffectiveOrderStatus(order);
                         if (sendingToPDV === order.id || effStatus === "pending_erp") {
                           return (
@@ -1367,17 +1382,19 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                           >
                             <option value="pending">Marcar: Pendente</option>
                             <option value="confirmed">Confirmar Pedido</option>
-                            {getEffectiveOrderStatus(order) === "pending_erp" && (
+                            {isPdvPreSaleEnabled && getEffectiveOrderStatus(order) === "pending_erp" && (
                               <option value="pending_erp">Enviando para o PDV...</option>
                             )}
-                            <option value="enviado_ao_pdv">Enviado ao PDV</option>
-                            {getEffectiveOrderStatus(order) === "impresso_no_pdv" && (
+                            {isPdvPreSaleEnabled && (
+                              <option value="enviado_ao_pdv">Enviado ao PDV</option>
+                            )}
+                            {isPdvPreSaleEnabled && getEffectiveOrderStatus(order) === "impresso_no_pdv" && (
                               <option value="impresso_no_pdv">Impresso no PDV</option>
                             )}
-                            {getEffectiveOrderStatus(order) === "concluido_no_pdv" && (
+                            {isPdvPreSaleEnabled && getEffectiveOrderStatus(order) === "concluido_no_pdv" && (
                               <option value="concluido_no_pdv">Concluído no PDV</option>
                             )}
-                            {getEffectiveOrderStatus(order) === "erro_integracao_pdv" && (
+                            {isPdvPreSaleEnabled && getEffectiveOrderStatus(order) === "erro_integracao_pdv" && (
                               <option value="erro_integracao_pdv">Erro Integração PDV</option>
                             )}
                             <option value="dispatched">
