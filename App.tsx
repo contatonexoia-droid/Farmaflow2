@@ -71,6 +71,8 @@ import { supabase } from "./services/supabase";
 import {
   getStoreUrl,
   getStoreSlug,
+  getStoreBasePath,
+  getProductFriendlyPath,
   findProductBySlugOrId,
   extractProductLookupToken,
   getProductShareUrl,
@@ -869,21 +871,20 @@ const App: React.FC = () => {
   const handleCloseProductModal = useCallback(() => {
     setSelectedProduct(null);
     try {
-      if (typeof window !== "undefined" && /\/produto\//i.test(window.location.pathname)) {
-        const host = window.location.hostname.toLowerCase();
-        const isSubdomain =
-          (host.endsWith(".farmaflow.online") || host.endsWith(".nexoia.online")) &&
-          !["www", "farmaflow", "nexoia", "app", "admin", "api", "portal"].includes(host.split(".")[0]);
-        const tenantSlug = getStoreSlug(currentTenant || undefined);
-        const nextPath = isSubdomain && !window.location.pathname.startsWith("/loja/")
-          ? "/"
-          : tenantSlug
-            ? `/loja/${tenantSlug}`
-            : "/";
-        window.history.replaceState(window.history.state, "", nextPath);
+      if (typeof window !== "undefined") {
+        const basePath = getStoreBasePath(currentTenant || undefined);
+        const currentUrl = window.location.pathname + window.location.search;
+        const hasProductQuery = /[?&](produto|product|prod|oferta)=/i.test(window.location.search);
+        if (
+          /\/produto\//i.test(window.location.pathname) ||
+          hasProductQuery ||
+          currentUrl !== basePath
+        ) {
+          window.history.replaceState({ view: ViewMode.CATALOG, adminTab }, "", basePath);
+        }
       }
     } catch (_) {}
-  }, [currentTenant]);
+  }, [currentTenant, adminTab]);
 
   const handleShareProductOffer = useCallback(async (product: Product) => {
     try {
@@ -1014,6 +1015,29 @@ const App: React.FC = () => {
 
   const handleProductClick = useCallback((product: Product) => {
     setSelectedProduct(product);
+    try {
+      if (typeof window !== "undefined" && product) {
+        const targetPath = getProductFriendlyPath(currentTenant || undefined, product);
+        const currentFullPath = window.location.pathname + window.location.search;
+        if (targetPath && currentFullPath !== targetPath) {
+          // Se já estamos em uma URL de produto (ex.: trocando de variação/sugestão no modal), substitui; caso contrário, pushState para o botão Voltar fechar o modal
+          if (/\/produto\//i.test(window.location.pathname)) {
+            window.history.replaceState(
+              { isModal: true, productId: product.id, view, adminTab },
+              "",
+              targetPath,
+            );
+          } else {
+            window.history.pushState(
+              { isModal: true, productId: product.id, view, adminTab },
+              "",
+              targetPath,
+            );
+          }
+        }
+      }
+    } catch (_) {}
+
     if (productModalScrollRef.current) {
       productModalScrollRef.current.scrollTo({ top: 0, behavior: "smooth" });
     }
@@ -1023,7 +1047,8 @@ const App: React.FC = () => {
     }
     
     // On-demand fetch of detailed product properties (payload reduction pattern)
-    fetch(`/api/v1/products/${encodeURIComponent(product.id)}`)
+    const detailTenantQuery = currentTenant?.id ? `?tenantId=${encodeURIComponent(currentTenant.id)}` : "";
+    fetch(`/api/v1/products/${encodeURIComponent(product.id)}${detailTenantQuery}`)
       .then(res => {
         if (!res.ok) throw new Error("Failed to fetch product details");
         return res.json();
@@ -1063,7 +1088,7 @@ const App: React.FC = () => {
         })
       }).catch(err => console.warn("Analytics tracking failed:", err));
     }
-  }, [currentTenant?.id]);
+  }, [currentTenant, view, adminTab]);
 
   // --- DEEP LINKING (Direct Product Modal & Search from AI Agent / WhatsApp Links) ---
   const deepLinkProcessedRef = useRef<string | null>(null);
@@ -1097,9 +1122,9 @@ const App: React.FC = () => {
           deepLinkProcessedRef.current = `prod_${prodParam}`;
           sessionStorage.removeItem("ff_deeplink_produto");
           handleProductClick(targetProd);
-        } else {
-          // Se não encontrou na lista carregada no cliente, busca direto na API da loja
-          const tenantQuery = currentTenant?.id ? `?tenantId=${encodeURIComponent(currentTenant.id)}` : "";
+        } else if (currentTenant?.id) {
+          // Aguarda a identificação da drogaria (subdomínio ou /loja/:slug) antes de buscar o item na API para manter isolamento multitenant
+          const tenantQuery = `?tenantId=${encodeURIComponent(currentTenant.id)}`;
           const { raw, token } = extractProductLookupToken(cleanParam);
           const primaryLookup = token && token !== raw ? token : raw;
 
@@ -1213,9 +1238,15 @@ const App: React.FC = () => {
         return;
       }
 
-      // Se houver um produto selecionado (modal de detalhes), fechamos
+      // Se houver um produto selecionado (modal de detalhes), fechamos e garantimos retorno à URL base da loja
       if (selectedProduct) {
         setSelectedProduct(null);
+        try {
+          if (/\/produto\//i.test(window.location.pathname)) {
+            const basePath = getStoreBasePath(currentTenant || undefined);
+            window.history.replaceState({ view: ViewMode.CATALOG, adminTab }, "", basePath);
+          }
+        } catch (_) {}
         return;
       }
 
@@ -1238,17 +1269,15 @@ const App: React.FC = () => {
 
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
-  }, [selectedProduct, zoomImage, isSidebarOpen, view, adminTab]);
+  }, [selectedProduct, zoomImage, isSidebarOpen, view, adminTab, currentTenant]);
 
-  // Sincroniza o estado atual com a URL/History quando algo "navegável" muda
+  // Sincroniza o estado atual com a URL/History quando zoom ou sidebar abre (selectedProduct já atualiza o histórico com a URL amigável)
   useEffect(() => {
-    const hasModalOpen = !!selectedProduct || !!zoomImage || isSidebarOpen;
-
-    // Se abrimos um modal, empurramos um estado para o histórico para que o 'back' possa fechá-lo
-    if (hasModalOpen) {
+    const hasOverlayOpen = !!zoomImage || isSidebarOpen;
+    if (hasOverlayOpen) {
       window.history.pushState({ isModal: true, view, adminTab }, "");
     }
-  }, [selectedProduct, zoomImage, isSidebarOpen]);
+  }, [zoomImage, isSidebarOpen]);
 
   const handleLogout = async () => {
     try {
@@ -2443,7 +2472,9 @@ const App: React.FC = () => {
     if (currentTenant && currentTenant.name) {
       const loc = [currentTenant.neighborhood, currentTenant.city, currentTenant.state].filter(Boolean).join(" - ");
       const pageTitle = `${currentTenant.name}${loc ? ` (${loc})` : ""} - Farmácia Online & Delivery`;
-      document.title = pageTitle;
+      if (!selectedProduct) {
+        document.title = pageTitle;
+      }
 
       const desc =
         currentTenant.bannerSubtitle ||
@@ -2854,12 +2885,13 @@ const App: React.FC = () => {
                   .trim()
                   .replace(/\s+/g, "-")
               : tenant.id;
-            // Preservação de integridade: se não estiver no /loja/slug/ nem em /loja/slug/produto/..., força para elegância do PWA preservando query params
+            // Preservação de integridade: se não estiver no /loja/slug/ nem em rota de produto, força para elegância do PWA preservando query params
             const currentSearch = window.location.search || "";
             if (
               window.location.pathname !== `/loja/${targetSlug}/` &&
               window.location.pathname !== `/loja/${targetSlug}` &&
-              !window.location.pathname.startsWith(`/loja/${targetSlug}/produto/`)
+              !window.location.pathname.startsWith(`/loja/${targetSlug}/produto/`) &&
+              !window.location.pathname.startsWith(`/produto/`)
             ) {
               window.history.replaceState(
                 { view: ViewMode.CATALOG, adminTab: "dashboard" },

@@ -189,14 +189,65 @@ export const findProductBySlugOrId = <T extends ProductSlugInput>(
   return products.find((p) => p.name && p.name.toLowerCase().includes(lowerRaw));
 };
 
+export const isStoreSubdomainHost = (hostname?: string): boolean => {
+  const rawHost = (
+    hostname ||
+    (typeof window !== 'undefined' ? window.location.hostname : '') ||
+    ''
+  )
+    .toLowerCase()
+    .split(':')[0]
+    .trim();
+
+  if (
+    !rawHost ||
+    rawHost === 'localhost' ||
+    rawHost === '127.0.0.1' ||
+    rawHost.includes('run.app')
+  ) {
+    return false;
+  }
+
+  const reserved = ['www', 'farmaflow', 'nexoia', 'app', 'admin', 'api', 'portal'];
+  if (rawHost.endsWith('.farmaflow.online') || rawHost.endsWith('.nexoia.online')) {
+    const sub = rawHost.split('.')[0];
+    return Boolean(sub && !reserved.includes(sub));
+  }
+
+  // Domínio próprio dedicado da drogaria (não é o domínio raiz do SaaS)
+  if (rawHost !== 'farmaflow.online' && rawHost !== 'nexoia.online') {
+    return true;
+  }
+
+  return false;
+};
+
+export const getStoreBasePath = (
+  tenant?: Partial<PharmacyConfig> & { subdomain?: string; id?: string; name?: string },
+  hostname?: string
+): string => {
+  if (isStoreSubdomainHost(hostname)) {
+    return '/';
+  }
+  const tenantSlug = getStoreSlug(tenant);
+  return tenantSlug ? `/loja/${encodeURIComponent(tenantSlug)}` : '/';
+};
+
 export const getProductFriendlyPath = (
   tenant?: Partial<PharmacyConfig> & { subdomain?: string; id?: string; name?: string },
-  product?: ProductSlugInput | null
+  product?: ProductSlugInput | null,
+  hostname?: string
 ): string => {
-  const tenantSlug = getStoreSlug(tenant);
-  if (!tenantSlug) return '/';
-  if (!product) return `/loja/${encodeURIComponent(tenantSlug)}`;
+  const onSubdomain = isStoreSubdomainHost(hostname);
+  if (!product) {
+    return getStoreBasePath(tenant, hostname);
+  }
   const productSlug = buildProductSlug(product);
+  if (onSubdomain) {
+    return `/produto/${encodeURIComponent(productSlug)}`;
+  }
+  const tenantSlug = getStoreSlug(tenant);
+  if (!tenantSlug) return `/produto/${encodeURIComponent(productSlug)}`;
   return `/loja/${encodeURIComponent(tenantSlug)}/produto/${encodeURIComponent(productSlug)}`;
 };
 
@@ -204,11 +255,13 @@ export const getProductShareUrl = (
   tenant?: Partial<PharmacyConfig> & { subdomain?: string; id?: string; name?: string },
   product?: ProductSlugInput | null
 ): string => {
-  const path = getProductFriendlyPath(tenant, product);
   if (typeof window !== 'undefined' && window.location?.origin) {
+    const path = getProductFriendlyPath(tenant, product, window.location.hostname);
     return `${window.location.origin}${path}`;
   }
   const base = getStoreUrl(tenant).replace(/\/+$/, '');
-  return `${base}${path}`;
+  const productSlug = product ? buildProductSlug(product) : '';
+  return productSlug ? `${base}/produto/${encodeURIComponent(productSlug)}` : base;
 };
+
 
