@@ -196,7 +196,7 @@ export const PushNotificationModal: React.FC<PushNotificationModalProps> = ({
   const targetUrl = useMemo(() => {
     const baseStorePath = cleanSlug ? `/loja/${cleanSlug}` : '/loja';
     if (selectedProduct?.id) {
-      return `${baseStorePath}?product=${encodeURIComponent(selectedProduct.id)}`;
+      return `${baseStorePath}?produto=${encodeURIComponent(selectedProduct.id)}`;
     }
     return baseStorePath;
   }, [cleanSlug, selectedProduct]);

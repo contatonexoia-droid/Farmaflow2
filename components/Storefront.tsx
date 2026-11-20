@@ -3229,8 +3229,9 @@ export const Storefront: React.FC<StorefrontProps> = ({
   }, [debouncedSearchTerm, validStoreProducts, activePromotions]);
 
   const urlBase64ToUint8Array = useCallback((base64String: string) => {
-    const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
-    const base64 = (base64String + padding)
+    const clean = String(base64String || "").trim();
+    const padding = "=".repeat((4 - (clean.length % 4)) % 4);
+    const base64 = (clean + padding)
       .replace(/-/g, "+")
       .replace(/_/g, "/");
     const rawData = window.atob(base64);
@@ -3317,6 +3318,48 @@ export const Storefront: React.FC<StorefrontProps> = ({
     [isRealPushEndpoint]
   );
 
+  const subscribeWithVapidKey = useCallback(
+    async (
+      registration: ServiceWorkerRegistration,
+      expectedKeyBytes: Uint8Array
+    ): Promise<PushSubscription | null> => {
+      try {
+        return await Promise.race([
+          registration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: expectedKeyBytes,
+          }),
+          new Promise<PushSubscription | null>((resolve) =>
+            setTimeout(() => resolve(null), 4000)
+          ),
+        ]);
+      } catch (subErr: any) {
+        // Caso o navegador ainda mantenha uma subscrição com applicationServerKey antiga (InvalidStateError)
+        if (
+          subErr?.name === "InvalidStateError" ||
+          String(subErr?.message || "").toLowerCase().includes("different")
+        ) {
+          const staleSub = await registration.pushManager.getSubscription().catch(() => null);
+          if (staleSub) {
+            await staleSub.unsubscribe().catch(() => {});
+            await new Promise((resolve) => setTimeout(resolve, 150));
+          }
+          return await Promise.race([
+            registration.pushManager.subscribe({
+              userVisibleOnly: true,
+              applicationServerKey: expectedKeyBytes,
+            }),
+            new Promise<PushSubscription | null>((resolve) =>
+              setTimeout(() => resolve(null), 4000)
+            ),
+          ]);
+        }
+        throw subErr;
+      }
+    },
+    []
+  );
+
   const triggerSilentPushOnAddToCart = useCallback(() => {
     if (
       typeof window === "undefined" ||
@@ -3370,10 +3413,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
           sub = null;
         }
         if (!sub) {
-          sub = await registration.pushManager.subscribe({
-            userVisibleOnly: true,
-            applicationServerKey: expectedKeyBytes,
-          });
+          sub = await subscribeWithVapidKey(registration, expectedKeyBytes);
         }
         if (!sub) return;
 
@@ -3387,6 +3427,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
     urlBase64ToUint8Array,
     isRealPushEndpoint,
     areApplicationServerKeysEqual,
+    subscribeWithVapidKey,
     upsertRealPushSubscription,
   ]);
 
@@ -3702,16 +3743,12 @@ export const Storefront: React.FC<StorefrontProps> = ({
               if (needsResubscribe) {
                 if (currentSub) {
                   await currentSub.unsubscribe().catch(() => {});
+                  await new Promise((resolve) => setTimeout(resolve, 100));
                 }
-                const freshSub = await Promise.race([
-                  registration.pushManager.subscribe({
-                    userVisibleOnly: true,
-                    applicationServerKey: expectedKeyBytes,
-                  }),
-                  new Promise<PushSubscription | null>((resolve) =>
-                    setTimeout(() => resolve(null), 4000)
-                  ),
-                ]);
+                const freshSub = await subscribeWithVapidKey(
+                  registration,
+                  expectedKeyBytes
+                );
 
                 if (freshSub && isRealPushEndpoint(freshSub.endpoint)) {
                   const synced = await upsertRealPushSubscription(tenant.id, freshSub);
@@ -3891,15 +3928,10 @@ export const Storefront: React.FC<StorefrontProps> = ({
       }
 
       if (!existingSub) {
-        existingSub = await Promise.race([
-          registration.pushManager.subscribe({
-            userVisibleOnly: true,
-            applicationServerKey: expectedKeyBytes,
-          }),
-          new Promise<PushSubscription | null>((resolve) =>
-            setTimeout(() => resolve(null), 4000)
-          ),
-        ]);
+        existingSub = await subscribeWithVapidKey(
+          registration,
+          expectedKeyBytes
+        );
       }
 
       if (!existingSub || !isRealPushEndpoint(existingSub.endpoint)) {
@@ -3928,6 +3960,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
     urlBase64ToUint8Array,
     isRealPushEndpoint,
     areApplicationServerKeysEqual,
+    subscribeWithVapidKey,
     upsertRealPushSubscription,
   ]);
 
@@ -3962,7 +3995,9 @@ export const Storefront: React.FC<StorefrontProps> = ({
         return;
       }
 
-      fetch(`/api/v1/products/${encodeURIComponent(cleanId)}`)
+      // Se a lista de produtos ainda está vazia no primeiro render, também tenta buscar na API filtrando pela loja
+      const tenantQuery = tenant?.id ? `?tenantId=${encodeURIComponent(tenant.id)}` : "";
+      fetch(`/api/v1/products/${encodeURIComponent(cleanId)}${tenantQuery}`)
         .then((res) => (res.ok ? res.json() : null))
         .then((dbProd) => {
           if (dbProd && dbProd.id) {
@@ -3975,7 +4010,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
         })
         .catch(() => {});
     },
-    [products, onProductClick]
+    [products, onProductClick, tenant?.id]
   );
 
   useEffect(() => {
@@ -3985,9 +4020,9 @@ export const Storefront: React.FC<StorefrontProps> = ({
       try {
         const urlObj = new URL(urlStr || window.location.href, window.location.origin);
         const fromQuery =
+          urlObj.searchParams.get("produto") ||
           urlObj.searchParams.get("product") ||
           urlObj.searchParams.get("oferta") ||
-          urlObj.searchParams.get("produto") ||
           urlObj.searchParams.get("prod") ||
           urlObj.searchParams.get("p_id") ||
           urlObj.searchParams.get("item");
@@ -4036,9 +4071,9 @@ export const Storefront: React.FC<StorefrontProps> = ({
             const parsedUrl = new URL(data.url, window.location.origin);
             if (!targetProductId) {
               targetProductId =
+                parsedUrl.searchParams.get("produto") ||
                 parsedUrl.searchParams.get("product") ||
                 parsedUrl.searchParams.get("oferta") ||
-                parsedUrl.searchParams.get("produto") ||
                 parsedUrl.searchParams.get("prod");
             }
             const nextRelativeUrl = parsedUrl.pathname + parsedUrl.search;

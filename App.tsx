@@ -1009,8 +1009,9 @@ const App: React.FC = () => {
           sessionStorage.removeItem("ff_deeplink_produto");
           handleProductClick(targetProd);
         } else {
-          // Se não encontrou na lista carregada no cliente, busca direto na API
-          fetch(`/api/v1/products/${encodeURIComponent(cleanParam)}`)
+          // Se não encontrou na lista carregada no cliente, busca direto na API da loja
+          const tenantQuery = currentTenant?.id ? `?tenantId=${encodeURIComponent(currentTenant.id)}` : "";
+          fetch(`/api/v1/products/${encodeURIComponent(cleanParam)}${tenantQuery}`)
             .then((res) => (res.ok ? res.json() : null))
             .then((dbProd) => {
               if (dbProd && dbProd.id) {
@@ -1073,7 +1074,8 @@ const App: React.FC = () => {
           if (found) {
             handleProductClick(found);
           } else {
-            fetch(`/api/v1/products/${encodeURIComponent(cleanId)}`)
+            const tenantQuery = currentTenant?.id ? `?tenantId=${encodeURIComponent(currentTenant.id)}` : "";
+            fetch(`/api/v1/products/${encodeURIComponent(cleanId)}${tenantQuery}`)
               .then((res) => (res.ok ? res.json() : null))
               .then((dbProd) => {
                 if (dbProd && dbProd.id) {
@@ -1089,7 +1091,7 @@ const App: React.FC = () => {
     return () => {
       navigator.serviceWorker.removeEventListener("message", handleSwMessage);
     };
-  }, [products, handleProductClick]);
+  }, [products, handleProductClick, currentTenant?.id]);
 
   // --- NATIVE BACK BUTTON HANDLING (Browser History Sync) ---
   useEffect(() => {

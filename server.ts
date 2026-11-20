@@ -4402,36 +4402,45 @@ app.post(
 app.get("/api/v1/products/:id", async (req, res) => {
   try {
     const rawId = req.params.id;
-    // 1. Tenta buscar por ID direto
-    const { data: byId, error: errId } = await supabase
+    const tenantId = String(req.query.tenantId || req.query.tenant_id || "").trim();
+
+    // 1. Tenta buscar por ID direto (filtrando por tenantId se informado)
+    let idQuery = supabase
       .from("products")
       .select("*")
-      .eq("id", rawId)
-      .maybeSingle();
+      .eq("id", rawId);
+    if (tenantId) {
+      idQuery = idQuery.eq("tenant_id", tenantId);
+    }
+    const { data: byId, error: errId } = await idQuery.maybeSingle();
 
     if (!errId && byId) {
       return res.json(byId);
     }
 
     // 2. Fallback: Tenta por internal_code ou barcode
-    const { data: byCode } = await supabase
+    let codeQuery = supabase
       .from("products")
       .select("*")
-      .or(`internal_code.eq.${rawId},barcode.eq.${rawId}`)
-      .limit(1)
-      .maybeSingle();
+      .or(`internal_code.eq.${rawId},barcode.eq.${rawId}`);
+    if (tenantId) {
+      codeQuery = codeQuery.eq("tenant_id", tenantId);
+    }
+    const { data: byCode } = await codeQuery.limit(1).maybeSingle();
 
     if (byCode) {
       return res.json(byCode);
     }
 
     // 3. Fallback: Tenta por aproximação de nome
-    const { data: byName } = await supabase
+    let nameQuery = supabase
       .from("products")
       .select("*")
-      .ilike("name", `%${rawId}%`)
-      .limit(1)
-      .maybeSingle();
+      .ilike("name", `%${rawId}%`);
+    if (tenantId) {
+      nameQuery = nameQuery.eq("tenant_id", tenantId);
+    }
+    const { data: byName } = await nameQuery.limit(1).maybeSingle();
 
     if (byName) {
       return res.json(byName);
@@ -15083,7 +15092,7 @@ app.post(["/api/v1/push/send", "/api/push/send"], async (req, res) => {
         }
         if (!resolvedTargetUrl) {
           resolvedTargetUrl = resolvedProductId
-            ? `/loja/${resolvedTenantSlug}?product=${encodeURIComponent(resolvedProductId)}`
+            ? `/loja/${resolvedTenantSlug}?produto=${encodeURIComponent(resolvedProductId)}`
             : `/loja/${resolvedTenantSlug}`;
         }
       }
@@ -15091,16 +15100,16 @@ app.post(["/api/v1/push/send", "/api/push/send"], async (req, res) => {
 
     if (!resolvedTargetUrl) {
       resolvedTargetUrl = resolvedProductId
-        ? `/loja/${resolvedTenantSlug}?product=${encodeURIComponent(resolvedProductId)}`
+        ? `/loja/${resolvedTenantSlug}?produto=${encodeURIComponent(resolvedProductId)}`
         : `/loja/${resolvedTenantSlug}`;
     } else if (
       resolvedProductId &&
-      !resolvedTargetUrl.includes("product=") &&
       !resolvedTargetUrl.includes("produto=") &&
+      !resolvedTargetUrl.includes("product=") &&
       !resolvedTargetUrl.includes("oferta=")
     ) {
       const sep = resolvedTargetUrl.includes("?") ? "&" : "?";
-      resolvedTargetUrl = `${resolvedTargetUrl}${sep}product=${encodeURIComponent(resolvedProductId)}`;
+      resolvedTargetUrl = `${resolvedTargetUrl}${sep}produto=${encodeURIComponent(resolvedProductId)}`;
     }
 
     const result = await sendPromotionalPushToTenant(supabaseAdmin, {

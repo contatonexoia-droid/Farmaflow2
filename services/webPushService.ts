@@ -103,31 +103,7 @@ export async function getOrInitVapidKeys(
     return cachedVapidKeys;
   }
 
-  // 2. Arquivo local persistido (vapid_keys.json)
-  try {
-    if (fs.existsSync(LOCAL_VAPID_FILE)) {
-      const raw = fs.readFileSync(LOCAL_VAPID_FILE, "utf-8");
-      const parsed = JSON.parse(raw);
-      if (parsed?.publicKey && parsed?.privateKey) {
-        cachedVapidKeys = {
-          publicKey: String(parsed.publicKey).trim(),
-          privateKey: String(parsed.privateKey).trim(),
-          subject: parsed.subject || subject,
-        };
-        webPush.setVapidDetails(
-          cachedVapidKeys.subject,
-          cachedVapidKeys.publicKey,
-          cachedVapidKeys.privateKey
-        );
-        isVapidConfigured = true;
-        return cachedVapidKeys;
-      }
-    }
-  } catch (err) {
-    console.warn("[WebPush] Aviso ao ler vapid_keys.json local:", err);
-  }
-
-  // 3. Configuração global no Supabase Storage
+  // 2. Configuração global no Supabase Storage (fonte compartilhada entre instâncias)
   try {
     const { data, error } = await supabaseAdmin.storage
       .from(STORAGE_BUCKET)
@@ -159,6 +135,42 @@ export async function getOrInitVapidKeys(
       }
     }
   } catch (_) {}
+
+  // 3. Arquivo local persistido (vapid_keys.json)
+  try {
+    if (fs.existsSync(LOCAL_VAPID_FILE)) {
+      const raw = fs.readFileSync(LOCAL_VAPID_FILE, "utf-8");
+      const parsed = JSON.parse(raw);
+      if (parsed?.publicKey && parsed?.privateKey) {
+        cachedVapidKeys = {
+          publicKey: String(parsed.publicKey).trim(),
+          privateKey: String(parsed.privateKey).trim(),
+          subject: parsed.subject || subject,
+        };
+        try {
+          await supabaseAdmin.storage
+            .from(STORAGE_BUCKET)
+            .upload(
+              STORAGE_VAPID_PATH,
+              JSON.stringify(cachedVapidKeys, null, 2),
+              {
+                contentType: "application/json",
+                upsert: true,
+              }
+            );
+        } catch (_) {}
+        webPush.setVapidDetails(
+          cachedVapidKeys.subject,
+          cachedVapidKeys.publicKey,
+          cachedVapidKeys.privateKey
+        );
+        isVapidConfigured = true;
+        return cachedVapidKeys;
+      }
+    }
+  } catch (err) {
+    console.warn("[WebPush] Aviso ao ler vapid_keys.json local:", err);
+  }
 
   // 4. Gera novo par de chaves VAPID válido e persiste globalmente
   const generated = webPush.generateVAPIDKeys();
@@ -546,16 +558,16 @@ export async function sendPromotionalPushToTenant(
   if (!resolvedUrl) {
     const baseStoreUrl = cleanSlug ? `/loja/${cleanSlug}` : "/";
     resolvedUrl = cleanProductId
-      ? `${baseStoreUrl}?product=${encodeURIComponent(cleanProductId)}`
+      ? `${baseStoreUrl}?produto=${encodeURIComponent(cleanProductId)}`
       : baseStoreUrl;
   } else if (
     cleanProductId &&
-    !resolvedUrl.includes("product=") &&
     !resolvedUrl.includes("produto=") &&
+    !resolvedUrl.includes("product=") &&
     !resolvedUrl.includes("oferta=")
   ) {
     const sep = resolvedUrl.includes("?") ? "&" : "?";
-    resolvedUrl = `${resolvedUrl}${sep}product=${encodeURIComponent(cleanProductId)}`;
+    resolvedUrl = `${resolvedUrl}${sep}produto=${encodeURIComponent(cleanProductId)}`;
   }
 
   const payloadString = JSON.stringify({
@@ -566,12 +578,14 @@ export async function sendPromotionalPushToTenant(
     image: params.imageUrl || undefined,
     imageUrl: params.imageUrl || undefined,
     url: resolvedUrl,
+    link: resolvedUrl,
     targetUrl: resolvedUrl,
     tenantId: params.tenantId,
     tenantSlug: cleanSlug || null,
     productId: cleanProductId || null,
     data: {
       url: resolvedUrl,
+      link: resolvedUrl,
       targetUrl: resolvedUrl,
       tenantId: params.tenantId,
       tenantSlug: cleanSlug || null,
@@ -630,14 +644,14 @@ export async function sendPromotionalPushToTenant(
           statusCode === 410
         ) {
           removedCount++;
-          console.warn(
-            `[WebPush] Removendo assinatura inválida/expirada (HTTP ${statusCode}) [endpoint=${sub.endpoint.slice(0, 60)}...]: ${errDetail}`
+          console.log(
+            `[WebPush] Assinatura inválida/expirada removida automaticamente (HTTP ${statusCode}) [endpoint=${sub.endpoint.slice(0, 60)}...]`
           );
           await removePushSubscriptionByEndpoint(supabaseAdmin, sub.endpoint);
         } else {
           failedCount++;
           console.warn(
-            `[WebPush] Falha ao enviar para endpoint (HTTP ${statusCode || "N/A"}) [endpoint=${sub.endpoint.slice(0, 60)}...]: ${errDetail}`
+            `[WebPush] Falha no envio para endpoint (HTTP ${statusCode || "N/A"}) [endpoint=${sub.endpoint.slice(0, 60)}...]: ${errDetail}`
           );
         }
       }

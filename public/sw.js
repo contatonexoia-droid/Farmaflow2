@@ -1,4 +1,4 @@
-const CACHE_NAME = "farmaflow-v6";
+const CACHE_NAME = "farmaflow-v7";
 const STATIC_ASSETS = ["/icon-192.svg", "/icon-512.svg"];
 
 self.addEventListener("install", (event) => {
@@ -87,20 +87,22 @@ self.addEventListener("push", function (event) {
 
   let targetUrl =
     nestedData.url ||
+    nestedData.link ||
     nestedData.targetUrl ||
     data.url ||
+    data.link ||
     data.targetUrl ||
     (tenantSlug ? `/loja/${tenantSlug}` : "/");
 
   if (
     productId &&
     targetUrl &&
-    !String(targetUrl).includes("product=") &&
     !String(targetUrl).includes("produto=") &&
+    !String(targetUrl).includes("product=") &&
     !String(targetUrl).includes("oferta=")
   ) {
     const sep = String(targetUrl).includes("?") ? "&" : "?";
-    targetUrl = `${targetUrl}${sep}product=${encodeURIComponent(productId)}`;
+    targetUrl = `${targetUrl}${sep}produto=${encodeURIComponent(productId)}`;
   }
 
   const iconUrl = data.icon || data.iconUrl || "/icon-192.svg";
@@ -117,6 +119,7 @@ self.addEventListener("push", function (event) {
     renotify: true,
     data: {
       url: targetUrl,
+      link: targetUrl,
       targetUrl: targetUrl,
       tenantId: tenantId,
       tenantSlug: tenantSlug,
@@ -143,7 +146,9 @@ self.addEventListener("notificationclick", function (event) {
   const rawUrl =
     (typeof notificationData === "string"
       ? notificationData
-      : notificationData.url || notificationData.targetUrl) || "/";
+      : notificationData.url ||
+        notificationData.link ||
+        notificationData.targetUrl) || "/";
   const productId =
     typeof notificationData === "object"
       ? notificationData.productId || null
@@ -156,11 +161,11 @@ self.addEventListener("notificationclick", function (event) {
   const resolvedUrlObj = new URL(rawUrl, self.location.origin);
   if (
     productId &&
-    !resolvedUrlObj.searchParams.has("product") &&
     !resolvedUrlObj.searchParams.has("produto") &&
+    !resolvedUrlObj.searchParams.has("product") &&
     !resolvedUrlObj.searchParams.has("oferta")
   ) {
-    resolvedUrlObj.searchParams.set("product", String(productId));
+    resolvedUrlObj.searchParams.set("produto", String(productId));
   }
   const targetUrl = resolvedUrlObj.href;
 
@@ -171,21 +176,27 @@ self.addEventListener("notificationclick", function (event) {
         includeUncontrolled: true,
       });
 
-      const existingClient =
-        windowClients.find(
-          (c) =>
-            c.url &&
-            c.url.startsWith(self.location.origin) &&
-            !c.url.includes("/admin")
-        ) || windowClients[0];
+      const existingClient = windowClients.find(
+        (c) =>
+          c.url &&
+          c.url.startsWith(self.location.origin) &&
+          !c.url.includes("/admin")
+      );
 
       if (existingClient) {
-        if (
-          "navigate" in existingClient &&
-          typeof existingClient.navigate === "function"
-        ) {
+        let navigatedClient = existingClient;
+        let didNavigate = false;
+        let sameStorePath = false;
+        try {
+          sameStorePath =
+            new URL(existingClient.url).pathname === resolvedUrlObj.pathname;
+        } catch (_) {}
+
+        if (typeof existingClient.navigate === "function") {
           try {
-            await existingClient.navigate(targetUrl);
+            const resClient = await existingClient.navigate(targetUrl);
+            if (resClient) navigatedClient = resClient;
+            didNavigate = true;
           } catch (_) {}
         }
 
@@ -197,8 +208,8 @@ self.addEventListener("notificationclick", function (event) {
         };
 
         try {
-          existingClient.postMessage(msgPayload);
-          existingClient.postMessage({
+          navigatedClient.postMessage(msgPayload);
+          navigatedClient.postMessage({
             ...msgPayload,
             type: "PUSH_NOTIFICATION_CLICK",
           });
@@ -206,13 +217,18 @@ self.addEventListener("notificationclick", function (event) {
 
         setTimeout(() => {
           try {
-            existingClient.postMessage(msgPayload);
+            navigatedClient.postMessage(msgPayload);
           } catch (_) {}
-        }, 600);
+        }, 500);
 
-        if ("focus" in existingClient) {
+        if (!didNavigate && !sameStorePath && self.clients.openWindow) {
+          await self.clients.openWindow(targetUrl);
+          return;
+        }
+
+        if (typeof navigatedClient.focus === "function") {
           try {
-            await existingClient.focus();
+            await navigatedClient.focus();
           } catch (_) {}
         }
         return;
