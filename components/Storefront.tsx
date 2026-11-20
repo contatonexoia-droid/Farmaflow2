@@ -3241,6 +3241,82 @@ export const Storefront: React.FC<StorefrontProps> = ({
     return outputArray;
   }, []);
 
+  const isRealPushEndpoint = useCallback((endpoint?: string | null): boolean => {
+    const clean = String(endpoint || "").trim();
+    if (!clean) return false;
+    if (!clean.startsWith("https://")) return false;
+    const lower = clean.toLowerCase();
+    if (
+      lower.includes("preview-fallback.farmaflow.local") ||
+      /^https:\/\/[^/]+\.local(\/|$)/i.test(lower)
+    ) {
+      return false;
+    }
+    return true;
+  }, []);
+
+  const areApplicationServerKeysEqual = useCallback(
+    (sub: PushSubscription | null, expectedKeyBytes: Uint8Array): boolean => {
+      try {
+        const currentKeyBuffer = sub?.options?.applicationServerKey;
+        if (!currentKeyBuffer) return false;
+        const currentBytes = new Uint8Array(currentKeyBuffer);
+        if (currentBytes.byteLength !== expectedKeyBytes.byteLength) {
+          return false;
+        }
+        for (let i = 0; i < expectedKeyBytes.byteLength; i++) {
+          if (currentBytes[i] !== expectedKeyBytes[i]) return false;
+        }
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    []
+  );
+
+  const upsertRealPushSubscription = useCallback(
+    async (targetTenantId: string, sub: PushSubscription): Promise<boolean> => {
+      const subJson = sub.toJSON();
+      if (
+        !isRealPushEndpoint(subJson?.endpoint) ||
+        !subJson?.keys?.p256dh ||
+        !subJson?.keys?.auth
+      ) {
+        return false;
+      }
+
+      const res = await fetch("/api/v1/push/subscribe", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          tenantId: targetTenantId,
+          subscription: subJson,
+          userAgent:
+            typeof navigator !== "undefined" ? navigator.userAgent : "FarmaFlow-PWA",
+        }),
+      });
+
+      if (!res.ok) return false;
+
+      try {
+        if (subJson.endpoint) {
+          (window as any).currentPushEndpoint = subJson.endpoint;
+          localStorage.setItem(`ff_push_endpoint_${targetTenantId}`, subJson.endpoint);
+          localStorage.setItem("ff_push_endpoint", subJson.endpoint);
+        }
+        localStorage.setItem(`push_subscribed_${targetTenantId}`, "true");
+        localStorage.setItem(`ff_push_subscribed_${targetTenantId}`, "true");
+      } catch (_) {}
+
+      return true;
+    },
+    [isRealPushEndpoint]
+  );
+
   const triggerSilentPushOnAddToCart = useCallback(() => {
     if (
       typeof window === "undefined" ||
@@ -3283,41 +3359,36 @@ export const Storefront: React.FC<StorefrontProps> = ({
         const keyData = await keyRes.json();
         if (!keyData?.publicKey) return;
 
+        const expectedKeyBytes = urlBase64ToUint8Array(keyData.publicKey);
         let sub = await registration.pushManager.getSubscription();
+        if (
+          sub &&
+          (!isRealPushEndpoint(sub.endpoint) ||
+            !areApplicationServerKeysEqual(sub, expectedKeyBytes))
+        ) {
+          await sub.unsubscribe().catch(() => {});
+          sub = null;
+        }
         if (!sub) {
           sub = await registration.pushManager.subscribe({
             userVisibleOnly: true,
-            applicationServerKey: urlBase64ToUint8Array(keyData.publicKey),
+            applicationServerKey: expectedKeyBytes,
           });
         }
         if (!sub) return;
 
-        const subJson = sub.toJSON();
-        await fetch("/api/v1/push/subscribe", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "application/json",
-          },
-          body: JSON.stringify({
-            tenantId: tenant.id,
-            subscription: subJson,
-            userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "FarmaFlow-PWA",
-          }),
-        });
-
-        if (subJson?.endpoint) {
-          (window as any).currentPushEndpoint = subJson.endpoint;
-          localStorage.setItem(`ff_push_endpoint_${tenant.id}`, subJson.endpoint);
-          localStorage.setItem("ff_push_endpoint", subJson.endpoint);
-        }
-        localStorage.setItem(`push_subscribed_${tenant.id}`, "true");
-        localStorage.setItem(`ff_push_subscribed_${tenant.id}`, "true");
+        await upsertRealPushSubscription(tenant.id, sub);
       } catch (_) {
         // Silencioso: nunca trava nem interfere na adição ao carrinho
       }
     })();
-  }, [tenant?.id, urlBase64ToUint8Array]);
+  }, [
+    tenant?.id,
+    urlBase64ToUint8Array,
+    isRealPushEndpoint,
+    areApplicationServerKeysEqual,
+    upsertRealPushSubscription,
+  ]);
 
   const handleAddToCartWrapper = useCallback((product: Product) => {
     onAddToCart(product, false, false);
@@ -3538,16 +3609,12 @@ export const Storefront: React.FC<StorefrontProps> = ({
 
     const verifyAndSyncPushSubscription = async () => {
       let hasLocalSub = false;
-      let hasDismissed = false;
       let storedEndpoint = "";
 
       try {
         hasLocalSub =
           localStorage.getItem(`push_subscribed_${tenant.id}`) === "true" ||
           localStorage.getItem(`ff_push_subscribed_${tenant.id}`) === "true";
-        hasDismissed =
-          localStorage.getItem(`push_dismissed_${tenant.id}`) === "true" ||
-          sessionStorage.getItem(`ff_push_banner_dismissed_${tenant.id}`) === "true";
         storedEndpoint =
           String(
             (window as any).currentPushEndpoint ||
@@ -3557,40 +3624,123 @@ export const Storefront: React.FC<StorefrontProps> = ({
           ).trim();
       } catch (_) {}
 
-      let swEndpoint = "";
+      // Remove imediatamente vestígios antigos de preview-fallback
+      if (storedEndpoint && !isRealPushEndpoint(storedEndpoint)) {
+        await clearLocalPushStateAndUnsubscribe();
+        storedEndpoint = "";
+        hasLocalSub = false;
+      }
+
       const supportsNativeSw =
         "serviceWorker" in navigator &&
         "PushManager" in window &&
         "Notification" in window;
 
-      if (supportsNativeSw) {
-        try {
-          const swReg = await navigator.serviceWorker
-            .register("/sw.js", { scope: "/" })
-            .catch(() => null);
-          if (swReg) {
-            void swReg.update().catch(() => {});
-          }
-          const registration = await Promise.race([
-            navigator.serviceWorker.ready,
-            new Promise<ServiceWorkerRegistration | null>((resolve) =>
-              setTimeout(() => resolve(null), 4000)
-            ),
-          ]);
-          if (registration && registration.pushManager) {
-            const subscription = await registration.pushManager.getSubscription();
-            if (subscription && subscription.endpoint) {
-              swEndpoint = subscription.endpoint;
-              (window as any).currentPushEndpoint = swEndpoint;
-            }
-          }
-        } catch (_) {}
+      if (!supportsNativeSw) {
+        if (hasLocalSub) {
+          await clearLocalPushStateAndUnsubscribe();
+        }
+        return;
       }
 
-      const activeEndpoint = swEndpoint || storedEndpoint;
+      if (Notification.permission === "denied") {
+        await clearLocalPushStateAndUnsubscribe();
+        return;
+      }
 
-      // Se não há endpoint ativo nem no Service Worker nem armazenado localmente,
-      // mas havia estado local de inscrito preso no navegador, limpa tudo imediatamente
+      let registration: ServiceWorkerRegistration | null = null;
+      let currentSub: PushSubscription | null = null;
+      let swEndpoint = "";
+
+      try {
+        const swReg = await navigator.serviceWorker
+          .register("/sw.js", { scope: "/" })
+          .catch(() => null);
+        if (swReg) {
+          void swReg.update().catch(() => {});
+        }
+        registration = await Promise.race([
+          navigator.serviceWorker.ready,
+          new Promise<ServiceWorkerRegistration | null>((resolve) =>
+            setTimeout(() => resolve(null), 4000)
+          ),
+        ]);
+        if (registration && registration.pushManager) {
+          currentSub = await registration.pushManager.getSubscription();
+          if (currentSub?.endpoint) {
+            swEndpoint = currentSub.endpoint;
+          }
+        }
+      } catch (_) {}
+
+      // Re-inscrição automática silenciosa sempre que Notification.permission === 'granted'
+      if (
+        Notification.permission === "granted" &&
+        registration &&
+        registration.pushManager
+      ) {
+        try {
+          const keyRes = await Promise.race([
+            fetch(
+              `/api/v1/push/vapid-public-key?tenantId=${encodeURIComponent(tenant.id)}`,
+              { headers: { Accept: "application/json" } }
+            ),
+            new Promise<Response>((_, reject) =>
+              setTimeout(() => reject(new Error("VAPID_TIMEOUT")), 4000)
+            ),
+          ]);
+          const keyCt = (keyRes.headers.get("content-type") || "").toLowerCase();
+          if (keyRes.ok && keyCt.includes("application/json")) {
+            const keyData = await keyRes.json();
+            if (keyData?.publicKey) {
+              const expectedKeyBytes = urlBase64ToUint8Array(keyData.publicKey);
+              const needsResubscribe =
+                !currentSub ||
+                !isRealPushEndpoint(currentSub.endpoint) ||
+                !areApplicationServerKeysEqual(currentSub, expectedKeyBytes);
+
+              if (needsResubscribe) {
+                if (currentSub) {
+                  await currentSub.unsubscribe().catch(() => {});
+                }
+                const freshSub = await Promise.race([
+                  registration.pushManager.subscribe({
+                    userVisibleOnly: true,
+                    applicationServerKey: expectedKeyBytes,
+                  }),
+                  new Promise<PushSubscription | null>((resolve) =>
+                    setTimeout(() => resolve(null), 4000)
+                  ),
+                ]);
+
+                if (freshSub && isRealPushEndpoint(freshSub.endpoint)) {
+                  const synced = await upsertRealPushSubscription(tenant.id, freshSub);
+                  if (!isCancelled && synced) {
+                    setIsPushSubscribed(true);
+                    setShowPushBanner(false);
+                  }
+                  return;
+                }
+              } else if (currentSub && isRealPushEndpoint(currentSub.endpoint)) {
+                const existsInDb = await checkEndpointExistsInDatabase(currentSub.endpoint);
+                if (!existsInDb) {
+                  const synced = await upsertRealPushSubscription(tenant.id, currentSub);
+                  if (!isCancelled && synced) {
+                    setIsPushSubscribed(true);
+                    setShowPushBanner(false);
+                  }
+                  return;
+                }
+              }
+            }
+          }
+        } catch (silentErr) {
+          console.warn("[WebPush] Aviso na re-inscrição silenciosa:", silentErr);
+        }
+      }
+
+      const activeEndpoint = isRealPushEndpoint(swEndpoint) ? swEndpoint : "";
+
       if (!activeEndpoint) {
         if (hasLocalSub) {
           await clearLocalPushStateAndUnsubscribe();
@@ -3602,18 +3752,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
         return;
       }
 
-      // Se a permissão do navegador foi revogada pelo usuário, limpa também
-      if (
-        supportsNativeSw &&
-        swEndpoint &&
-        typeof Notification !== "undefined" &&
-        Notification.permission === "denied"
-      ) {
-        await clearLocalPushStateAndUnsubscribe();
-        return;
-      }
-
-      // Valida no Supabase se o endpoint atual realmente existe ativo na tabela push_subscriptions
+      // Valida no Supabase se o endpoint real atual existe ativo na tabela push_subscriptions
       const existsInSupabase = await checkEndpointExistsInDatabase(activeEndpoint);
 
       if (isCancelled) return;
@@ -3628,7 +3767,6 @@ export const Storefront: React.FC<StorefrontProps> = ({
         setIsPushSubscribed(true);
         setShowPushBanner(false);
       } else {
-        // O registo não existe mais no Supabase: executa desinscrição local automática e apaga o sinal de alerta
         await clearLocalPushStateAndUnsubscribe();
       }
     };
@@ -3651,7 +3789,13 @@ export const Storefront: React.FC<StorefrontProps> = ({
       clearTimeout(deferTimer);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [tenant?.id]);
+  }, [
+    tenant?.id,
+    urlBase64ToUint8Array,
+    isRealPushEndpoint,
+    areApplicationServerKeysEqual,
+    upsertRealPushSubscription,
+  ]);
 
   const handleDismissPushBanner = useCallback(
     (e?: React.MouseEvent) => {
@@ -3673,146 +3817,119 @@ export const Storefront: React.FC<StorefrontProps> = ({
 
     setIsSubscribingPush(true);
 
-    const markSubscribedAndHideBanner = (endpoint?: string) => {
-      try {
-        if (endpoint) {
-          (window as any).currentPushEndpoint = endpoint;
-          localStorage.setItem(`ff_push_endpoint_${tenant.id}`, endpoint);
-          localStorage.setItem("ff_push_endpoint", endpoint);
-        }
-        localStorage.setItem(`push_subscribed_${tenant.id}`, "true");
-        localStorage.setItem(`ff_push_subscribed_${tenant.id}`, "true");
-      } catch (_) {}
-      setIsPushSubscribed(true);
-      setShowPushBanner(false);
-    };
-
-    const getOrCreateFallbackSubscription = () => {
-      let deviceId = "device";
-      try {
-        const savedId = localStorage.getItem("ff_push_device_id");
-        if (savedId) {
-          deviceId = savedId;
-        } else {
-          deviceId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-          localStorage.setItem("ff_push_device_id", deviceId);
-        }
-      } catch (_) {}
-      return {
-        endpoint: `https://preview-fallback.farmaflow.local/push/${encodeURIComponent(tenant.id)}/${deviceId}`,
-        keys: {
-          p256dh: "BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQtUbVlUls0VJXg7A8u-Ts1XbjhazAkj7I99e8QcYP7DkM",
-          auth: "tBHItJI5svbpez7KI4CCXg",
-        },
-      };
-    };
-
     try {
-      let subscriptionPayload: any = null;
-
       const canUseNativePush =
         typeof window !== "undefined" &&
         "serviceWorker" in navigator &&
         "PushManager" in window &&
         "Notification" in window;
 
-      if (canUseNativePush) {
-        try {
-          // 1. Solicita permissão com timeout de 4s para nunca travar em iframes
-          const permission = await Promise.race([
-            Notification.requestPermission(),
-            new Promise<NotificationPermission>((resolve) =>
-              setTimeout(() => resolve("default"), 4000)
-            ),
-          ]);
-
-          if (permission === "granted") {
-            // 2. Registra explicitamente o Service Worker e aguarda ready com timeout de 4s
-            const regPromise = navigator.serviceWorker
-              .register("/sw.js", { scope: "/" })
-              .then(() => navigator.serviceWorker.ready);
-
-            const registration = await Promise.race([
-              regPromise,
-              new Promise<ServiceWorkerRegistration | null>((resolve) =>
-                setTimeout(() => resolve(null), 4000)
-              ),
-            ]);
-
-            if (registration && registration.pushManager) {
-              const keyRes = await Promise.race([
-                fetch(
-                  `/api/v1/push/vapid-public-key?tenantId=${encodeURIComponent(tenant.id)}`,
-                  { headers: { Accept: "application/json" } }
-                ),
-                new Promise<Response>((_, reject) =>
-                  setTimeout(() => reject(new Error("VAPID_TIMEOUT")), 4000)
-                ),
-              ]);
-
-              const keyCt = (keyRes.headers.get("content-type") || "").toLowerCase();
-              if (keyRes.ok && keyCt.includes("application/json")) {
-                const keyData = await keyRes.json();
-                if (keyData?.publicKey) {
-                  let existingSub = await registration.pushManager.getSubscription();
-                  if (!existingSub) {
-                    existingSub = await Promise.race([
-                      registration.pushManager.subscribe({
-                        userVisibleOnly: true,
-                        applicationServerKey: urlBase64ToUint8Array(keyData.publicKey),
-                      }),
-                      new Promise<PushSubscription | null>((resolve) =>
-                        setTimeout(() => resolve(null), 4000)
-                      ),
-                    ]);
-                  }
-                  if (existingSub) {
-                    subscriptionPayload = existingSub.toJSON();
-                  }
-                }
-              }
-            }
-          }
-        } catch (nativeErr) {
-          console.warn(
-            "[WebPush] Ambiente de preview/iframe restringiu Push nativo, aplicando fallback:",
-            nativeErr
-          );
-        }
+      if (!canUseNativePush) {
+        toast.error("Seu navegador não suporta notificações Web Push nativas neste ambiente.");
+        return;
       }
 
-      // Se o navegador/iframe bloqueou a inscrição nativa, usa o fallback de inscrição
-      if (!subscriptionPayload) {
-        subscriptionPayload = getOrCreateFallbackSubscription();
+      const permission = await Promise.race([
+        Notification.requestPermission(),
+        new Promise<NotificationPermission>((resolve) =>
+          setTimeout(() => resolve("default"), 4000)
+        ),
+      ]);
+
+      if (permission !== "granted") {
+        toast.error("Permissão de notificações não concedida no navegador.");
+        return;
       }
 
-      try {
-        await fetch("/api/v1/push/subscribe", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "application/json",
-          },
-          body: JSON.stringify({
-            tenantId: tenant.id,
-            subscription: subscriptionPayload,
-            userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "FarmaFlow-PWA",
+      const regPromise = navigator.serviceWorker
+        .register("/sw.js", { scope: "/" })
+        .then(() => navigator.serviceWorker.ready);
+
+      const registration = await Promise.race([
+        regPromise,
+        new Promise<ServiceWorkerRegistration | null>((resolve) =>
+          setTimeout(() => resolve(null), 4000)
+        ),
+      ]);
+
+      if (!registration || !registration.pushManager) {
+        toast.error("Não foi possível inicializar o Service Worker para notificações.");
+        return;
+      }
+
+      const keyRes = await Promise.race([
+        fetch(
+          `/api/v1/push/vapid-public-key?tenantId=${encodeURIComponent(tenant.id)}`,
+          { headers: { Accept: "application/json" } }
+        ),
+        new Promise<Response>((_, reject) =>
+          setTimeout(() => reject(new Error("VAPID_TIMEOUT")), 4000)
+        ),
+      ]);
+
+      const keyCt = (keyRes.headers.get("content-type") || "").toLowerCase();
+      if (!keyRes.ok || !keyCt.includes("application/json")) {
+        toast.error("Não foi possível obter a chave de notificações da loja.");
+        return;
+      }
+
+      const keyData = await keyRes.json();
+      if (!keyData?.publicKey) {
+        toast.error("Chave pública VAPID indisponível.");
+        return;
+      }
+
+      const expectedKeyBytes = urlBase64ToUint8Array(keyData.publicKey);
+      let existingSub = await registration.pushManager.getSubscription();
+      if (
+        existingSub &&
+        (!isRealPushEndpoint(existingSub.endpoint) ||
+          !areApplicationServerKeysEqual(existingSub, expectedKeyBytes))
+      ) {
+        await existingSub.unsubscribe().catch(() => {});
+        existingSub = null;
+      }
+
+      if (!existingSub) {
+        existingSub = await Promise.race([
+          registration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: expectedKeyBytes,
           }),
-        });
-      } catch (apiErr) {
-        console.warn("[WebPush] Aviso ao sincronizar inscrição no backend:", apiErr);
+          new Promise<PushSubscription | null>((resolve) =>
+            setTimeout(() => resolve(null), 4000)
+          ),
+        ]);
       }
 
-      markSubscribedAndHideBanner(subscriptionPayload?.endpoint);
+      if (!existingSub || !isRealPushEndpoint(existingSub.endpoint)) {
+        toast.error("O navegador não retornou uma inscrição Push real válida.");
+        return;
+      }
+
+      const saved = await upsertRealPushSubscription(tenant.id, existingSub);
+      if (!saved) {
+        toast.error("Falha ao registrar inscrição Push no servidor.");
+        return;
+      }
+
+      setIsPushSubscribed(true);
+      setShowPushBanner(false);
       toast.success("✅ Alertas de ofertas ativados!");
     } catch (err: any) {
-      console.warn("[WebPush] Fallback de ativação concluído:", err);
-      markSubscribedAndHideBanner();
-      toast.success("✅ Alertas de ofertas ativados!");
+      console.warn("[WebPush] Falha ao ativar notificações nativas:", err);
+      toast.error("Não foi possível ativar notificações neste navegador.");
     } finally {
       setIsSubscribingPush(false);
     }
-  }, [tenant?.id, isSubscribingPush, urlBase64ToUint8Array]);
+  }, [
+    tenant?.id,
+    isSubscribingPush,
+    urlBase64ToUint8Array,
+    isRealPushEndpoint,
+    areApplicationServerKeysEqual,
+    upsertRealPushSubscription,
+  ]);
 
   // Abre diretamente o modal de detalhes do produto via URL (?product= / ?oferta=) ou clique na notificação Push do Service Worker (NOTIFICATION_CLICK)
   const processedDeepLinkProductRef = useRef<string | null>(null);

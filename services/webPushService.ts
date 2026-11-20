@@ -218,6 +218,20 @@ function saveLocalSubscriptions(rows: PushSubscriptionRow[]): void {
   } catch (_) {}
 }
 
+export function isValidRealPushEndpoint(endpoint: string): boolean {
+  const clean = String(endpoint || "").trim();
+  if (!clean) return false;
+  if (!clean.startsWith("https://")) return false;
+  const lower = clean.toLowerCase();
+  if (
+    lower.includes("preview-fallback.farmaflow.local") ||
+    /^https:\/\/[^/]+\.local(\/|$)/i.test(lower)
+  ) {
+    return false;
+  }
+  return true;
+}
+
 /**
  * Registra ou atualiza uma inscrição Web Push isolada por tenant_id
  */
@@ -238,6 +252,16 @@ export async function savePushSubscription(
   const cleanP256dh = String(params.p256dh || "").trim();
   const cleanAuth = String(params.auth || "").trim();
   const cleanUa = String(params.userAgent || "").trim();
+
+  if (!isValidRealPushEndpoint(cleanEndpoint)) {
+    throw new Error(
+      "Endpoint Web Push inválido ou fictício (preview-fallback bloqueado)."
+    );
+  }
+  if (!cleanP256dh || !cleanAuth) {
+    throw new Error("Chaves p256dh e auth são obrigatórias para inscrição Web Push.");
+  }
+
   const nowIso = new Date().toISOString();
 
   const row: PushSubscriptionRow = {
@@ -323,6 +347,8 @@ export async function getTenantPushSubscriptions(
   const byEndpoint = new Map<string, PushSubscriptionRow>();
   let supabaseQuerySucceeded = false;
 
+  const invalidEndpointsToPurge: string[] = [];
+
   try {
     const { data, error } = await supabaseAdmin
       .from("push_subscriptions")
@@ -332,11 +358,17 @@ export async function getTenantPushSubscriptions(
     if (!error && Array.isArray(data)) {
       supabaseQuerySucceeded = true;
       for (const item of data) {
-        if (item?.endpoint && item?.p256dh && item?.auth) {
-          byEndpoint.set(String(item.endpoint), {
+        const ep = String(item?.endpoint || "").trim();
+        if (!ep) continue;
+        if (!isValidRealPushEndpoint(ep)) {
+          invalidEndpointsToPurge.push(ep);
+          continue;
+        }
+        if (item?.p256dh && item?.auth) {
+          byEndpoint.set(ep, {
             id: item.id || crypto.randomUUID(),
             tenant_id: String(item.tenant_id || cleanTenantId),
-            endpoint: String(item.endpoint),
+            endpoint: ep,
             p256dh: String(item.p256dh),
             auth: String(item.auth),
             user_agent: item.user_agent || null,
@@ -349,10 +381,23 @@ export async function getTenantPushSubscriptions(
     console.warn("[WebPush] Aviso ao consultar push_subscriptions no Supabase:", err?.message || err);
   }
 
+  if (invalidEndpointsToPurge.length > 0) {
+    console.warn(
+      `[WebPush] Removendo ${invalidEndpointsToPurge.length} endpoint(s) fictício(s)/inválido(s) do tenant ${cleanTenantId}.`
+    );
+    await Promise.all(
+      invalidEndpointsToPurge.map((ep) =>
+        removePushSubscriptionByEndpoint(supabaseAdmin, ep)
+      )
+    );
+  }
+
   if (supabaseQuerySucceeded) {
-    // Mantém o arquivo espelho sincronizado com o Supabase (removendo registros que foram apagados no banco)
+    // Mantém o arquivo espelho sincronizado com o Supabase (removendo registros inválidos ou apagados)
     const allLocal = loadLocalSubscriptions();
-    const otherTenantsLocal = allLocal.filter((r) => r.tenant_id !== cleanTenantId);
+    const otherTenantsLocal = allLocal.filter(
+      (r) => r.tenant_id !== cleanTenantId && isValidRealPushEndpoint(r.endpoint)
+    );
     const updatedLocal = [...otherTenantsLocal, ...Array.from(byEndpoint.values())];
     if (updatedLocal.length !== allLocal.length) {
       saveLocalSubscriptions(updatedLocal);
@@ -362,7 +407,11 @@ export async function getTenantPushSubscriptions(
 
   // Fallback apenas se a tabela não existir ou o Supabase estiver inacessível
   const localRows = loadLocalSubscriptions().filter(
-    (r) => r.tenant_id === cleanTenantId && r.endpoint && r.p256dh && r.auth
+    (r) =>
+      r.tenant_id === cleanTenantId &&
+      isValidRealPushEndpoint(r.endpoint) &&
+      r.p256dh &&
+      r.auth
   );
   for (const item of localRows) {
     if (!byEndpoint.has(item.endpoint)) {
@@ -385,7 +434,7 @@ export async function verifyPushSubscriptionExists(
 
   const cleanTenantId = String(tenantId || "").trim();
   const cleanEndpoint = String(endpoint || "").trim();
-  if (!cleanEndpoint) return false;
+  if (!isValidRealPushEndpoint(cleanEndpoint)) return false;
 
   try {
     let query = supabaseAdmin
@@ -475,6 +524,8 @@ export async function sendPromotionalPushToTenant(
   failedCount: number;
   removedCount: number;
   totalSubscribers: number;
+  errorStatuses: number[];
+  summary: string;
 }> {
   await getOrInitVapidKeys(supabaseAdmin);
 
@@ -486,6 +537,7 @@ export async function sendPromotionalPushToTenant(
   let sentCount = 0;
   let failedCount = 0;
   let removedCount = 0;
+  const errorStatusesSet = new Set<number>();
 
   const cleanSlug = String(params.tenantSlug || "").trim();
   const cleanProductId = String(params.productId || "").trim();
@@ -531,11 +583,12 @@ export async function sendPromotionalPushToTenant(
 
   await Promise.all(
     subscriptions.map(async (sub) => {
-      if (
-        sub.endpoint &&
-        sub.endpoint.startsWith("https://preview-fallback.farmaflow.local/")
-      ) {
-        sentCount++;
+      if (!isValidRealPushEndpoint(sub.endpoint)) {
+        removedCount++;
+        console.warn(
+          `[WebPush] Removendo endpoint fictício/inválido antes do disparo: ${sub.endpoint}`
+        );
+        await removePushSubscriptionByEndpoint(supabaseAdmin, sub.endpoint);
         return;
       }
 
@@ -548,25 +601,69 @@ export async function sendPromotionalPushToTenant(
       };
 
       try {
-        await webPush.sendNotification(pushSubscription, payloadString, {
-          TTL: 86400,
-          urgency: "high",
-        });
+        const sendResponse = await webPush.sendNotification(
+          pushSubscription,
+          payloadString,
+          {
+            TTL: 86400,
+            urgency: "high",
+          }
+        );
         sentCount++;
+        console.log(
+          `[WebPush] Push entregue com sucesso (HTTP ${sendResponse?.statusCode || 201}) para ${sub.endpoint.slice(0, 60)}...`
+        );
       } catch (err: any) {
         const statusCode = Number(err?.statusCode || err?.status || 0);
-        if (statusCode === 404 || statusCode === 410) {
+        if (statusCode > 0) {
+          errorStatusesSet.add(statusCode);
+        }
+
+        const errDetail = String(err?.body || err?.message || err || "").trim();
+
+        // Remove automaticamente inscrições expiradas/inexistentes (404/410)
+        // ou rejeitadas por incompatibilidade/autenticação de chave VAPID (401/403)
+        if (
+          statusCode === 401 ||
+          statusCode === 403 ||
+          statusCode === 404 ||
+          statusCode === 410
+        ) {
           removedCount++;
+          console.warn(
+            `[WebPush] Removendo assinatura inválida/expirada (HTTP ${statusCode}) [endpoint=${sub.endpoint.slice(0, 60)}...]: ${errDetail}`
+          );
           await removePushSubscriptionByEndpoint(supabaseAdmin, sub.endpoint);
         } else {
           failedCount++;
           console.warn(
-            `[WebPush] Falha ao enviar para endpoint (${statusCode}):`,
-            err?.message || err
+            `[WebPush] Falha ao enviar para endpoint (HTTP ${statusCode || "N/A"}) [endpoint=${sub.endpoint.slice(0, 60)}...]: ${errDetail}`
           );
         }
       }
     })
+  );
+
+  const remainingSubscribers = Math.max(0, subscriptions.length - removedCount);
+  const parts: string[] = [
+    `Enviado para ${sentCount} ${sentCount === 1 ? "aparelho" : "aparelhos"}`,
+  ];
+  if (removedCount > 0) {
+    parts.push(
+      `${removedCount} ${
+        removedCount === 1
+          ? "inválido/expirado removido"
+          : "inválidos/expirados removidos"
+      }`
+    );
+  }
+  if (failedCount > 0) {
+    parts.push(`${failedCount} ${failedCount === 1 ? "falha" : "falhas"}`);
+  }
+  const summary = parts.join(" • ");
+
+  console.log(
+    `[WebPush] Resumo do disparo (tenant=${params.tenantId}): ${summary} | Restantes ativos=${remainingSubscribers}`
   );
 
   return {
@@ -574,6 +671,8 @@ export async function sendPromotionalPushToTenant(
     sentCount,
     failedCount,
     removedCount,
-    totalSubscribers: Math.max(0, subscriptions.length - removedCount),
+    totalSubscribers: remainingSubscribers,
+    errorStatuses: Array.from(errorStatusesSet),
+    summary,
   };
 }

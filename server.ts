@@ -88,6 +88,7 @@ import {
   getTenantPushSubscriptions,
   verifyPushSubscriptionExists,
   sendPromotionalPushToTenant,
+  isValidRealPushEndpoint,
 } from "./services/webPushService.js";
 
 
@@ -14989,6 +14990,12 @@ app.post(
             "Dados de inscrição Push incompletos (endpoint, p256dh e auth são obrigatórios).",
         });
       }
+      if (!isValidRealPushEndpoint(endpoint)) {
+        return res.status(400).json({
+          error:
+            "Endpoint Web Push inválido ou fictício (preview-fallback bloqueado).",
+        });
+      }
 
       const saved = await savePushSubscription(supabaseAdmin, {
         tenantId,
@@ -15113,6 +15120,8 @@ app.post(["/api/v1/push/send", "/api/push/send"], async (req, res) => {
       failedCount: result.failedCount,
       removedCount: result.removedCount,
       totalSubscribers: result.totalSubscribers,
+      errorStatuses: result.errorStatuses,
+      summary: result.summary,
       targetUrl: resolvedTargetUrl,
     });
   } catch (err: any) {

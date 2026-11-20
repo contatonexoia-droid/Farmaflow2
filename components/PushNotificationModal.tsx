@@ -108,6 +108,8 @@ export const PushNotificationModal: React.FC<PushNotificationModalProps> = ({
     failedCount: number;
     removedCount: number;
     totalSubscribers: number;
+    summary?: string;
+    errorStatuses?: number[];
     error?: string;
   } | null>(null);
 
@@ -240,10 +242,12 @@ export const PushNotificationModal: React.FC<PushNotificationModalProps> = ({
           sentCount: Number(data.sentCount || 0),
           failedCount: Number(data.failedCount || 0),
           removedCount: Number(data.removedCount || 0),
-          totalSubscribers: Number(data.totalSubscribers || 0)
+          totalSubscribers: Number(data.totalSubscribers || 0),
+          summary: typeof data.summary === 'string' ? data.summary : undefined,
+          errorStatuses: Array.isArray(data.errorStatuses) ? data.errorStatuses : undefined,
         });
-        if (typeof data.totalSubscribers === 'number' && typeof data.removedCount === 'number') {
-          setSubscriberCount(Math.max(0, data.totalSubscribers - data.removedCount));
+        if (typeof data.totalSubscribers === 'number') {
+          setSubscriberCount(Math.max(0, data.totalSubscribers));
         }
       }
     } catch (err: any) {
@@ -506,16 +510,38 @@ export const PushNotificationModal: React.FC<PushNotificationModalProps> = ({
                   {sendResult.success ? (
                     <>
                       <p className="font-black text-sm text-emerald-900">
-                        {sendResult.sentCount > 0
-                          ? `Notificação enviada com sucesso para ${sendResult.sentCount} ${
-                              sendResult.sentCount === 1 ? 'dispositivo móvel' : 'dispositivos móveis'
-                            }!`
-                          : 'Nenhum dispositivo ativo encontrado para receber esta notificação.'}
+                        {sendResult.summary
+                          ? sendResult.summary
+                          : sendResult.sentCount > 0
+                            ? `Enviado para ${sendResult.sentCount} ${
+                                sendResult.sentCount === 1 ? 'aparelho' : 'aparelhos'
+                              }${
+                                sendResult.removedCount > 0
+                                  ? ` • ${sendResult.removedCount} ${
+                                      sendResult.removedCount === 1
+                                        ? 'inválido/expirado removido'
+                                        : 'inválidos/expirados removidos'
+                                    }`
+                                  : ''
+                              }${
+                                sendResult.failedCount > 0
+                                  ? ` • ${sendResult.failedCount} ${
+                                      sendResult.failedCount === 1 ? 'falha' : 'falhas'
+                                    }`
+                                  : ''
+                              }`
+                            : 'Nenhum dispositivo ativo encontrado para receber esta notificação.'}
                       </p>
                       <p className="text-emerald-700 font-medium">
-                        Total de inscritos na loja: <strong>{sendResult.totalSubscribers}</strong>
+                        Dispositivos ativos restantes na loja: <strong>{sendResult.totalSubscribers}</strong>
                         {sendResult.removedCount > 0 && (
-                          <> • Inscrições antigas/desinstaladas limpas: <strong>{sendResult.removedCount}</strong></>
+                          <> • Inválidos/expirados removidos: <strong>{sendResult.removedCount}</strong></>
+                        )}
+                        {sendResult.failedCount > 0 && (
+                          <> • Falhas temporárias: <strong>{sendResult.failedCount}</strong></>
+                        )}
+                        {sendResult.errorStatuses && sendResult.errorStatuses.length > 0 && (
+                          <> (HTTP {sendResult.errorStatuses.join(', ')})</>
                         )}
                       </p>
                     </>
