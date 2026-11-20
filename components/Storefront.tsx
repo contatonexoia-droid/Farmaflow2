@@ -404,6 +404,7 @@ interface StorefrontProps {
     showGlobalToast?: boolean,
   ) => void;
   onProductClick: (product: Product) => void;
+  selectedProduct?: Product | null;
   onOpenCart: () => void;
   onBack?: () => void;
   onSearch?: (term: string, count: number) => void;
@@ -1520,6 +1521,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
   cartItems = [],
   onAddToCart,
   onProductClick,
+  selectedProduct = null,
   onOpenCart,
   onBack,
   onSearch,
@@ -4132,6 +4134,148 @@ export const Storefront: React.FC<StorefrontProps> = ({
       }
     };
   }, [openProductFromNotificationOrUrl]);
+
+  // Injeção dupla de JSON-LD (Product + Offer) no <head> no frontend para 100% de detecção pelo Googlebot / Rich Results Test
+  useEffect(() => {
+    if (typeof document === "undefined" || typeof window === "undefined") return;
+    const SCRIPT_ID = "farmaflow-product-jsonld";
+
+    const removeDynamicProductJsonLd = () => {
+      const existing = document.getElementById(SCRIPT_ID);
+      if (existing && existing.parentNode) {
+        existing.parentNode.removeChild(existing);
+      }
+    };
+
+    if (!selectedProduct || !selectedProduct.name) {
+      removeDynamicProductJsonLd();
+      return;
+    }
+
+    const parseValidPrice = (val: any): number => {
+      if (val === null || val === undefined || val === "") return 0;
+      const cleaned = typeof val === "string" ? val.replace(/[^\d.,-]/g, "").replace(",", ".") : val;
+      const n = Number(cleaned);
+      return Number.isFinite(n) && n > 0 ? n : 0;
+    };
+
+    const basePrice = parseValidPrice(selectedProduct.price);
+    const promoPrice = parseValidPrice(
+      selectedProduct.promotionalPrice ?? selectedProduct.promotional_price
+    );
+    const origPrice = parseValidPrice(selectedProduct.originalPrice);
+    const effectivePrice =
+      promoPrice > 0 && (basePrice <= 0 || promoPrice < basePrice)
+        ? promoPrice
+        : basePrice > 0
+          ? basePrice
+          : origPrice;
+    const formattedPrice = effectivePrice > 0 ? effectivePrice.toFixed(2) : "0.00";
+
+    const toAbsoluteHttpsImage = (raw?: string | null): string | null => {
+      const val = String(raw || "").trim();
+      if (
+        !val ||
+        val === "IGNORE" ||
+        val === "PENDENTE_CURADORIA" ||
+        val.startsWith("data:")
+      ) {
+        return null;
+      }
+      if (val.startsWith("https://")) return val;
+      if (val.startsWith("http://")) return val.replace("http://", "https://");
+      return null;
+    };
+
+    const origin = window.location.origin.startsWith("http://") && !window.location.hostname.startsWith("localhost")
+      ? window.location.origin.replace("http://", "https://")
+      : window.location.origin;
+    const fallbackLogoUrl =
+      toAbsoluteHttpsImage(tenant?.logoUrl || tenant?.logo_url || tenant?.logo) ||
+      `${origin}/api/v1/store/${encodeURIComponent(tenant?.id || "default")}/logo.png`;
+    const productImageUrl = toAbsoluteHttpsImage(selectedProduct.image) || fallbackLogoUrl;
+
+    const inStock = Number(selectedProduct.stock ?? 0) > 0;
+    const currentHref = window.location.href;
+    const storeName = String(tenant?.name || "FarmaFlow").trim();
+    const locParts = [tenant?.neighborhood, tenant?.city, tenant?.state].filter(Boolean);
+    const locationStr = locParts.join(" - ");
+    const descriptionText =
+      String(selectedProduct.description || "").trim() ||
+      `Compre ${selectedProduct.name}${selectedProduct.presentation ? ` (${selectedProduct.presentation})` : ""}${effectivePrice > 0 ? ` por R$ ${formattedPrice.replace(".", ",")}` : ""} na ${storeName}${locationStr ? ` em ${locationStr}` : ""}.`;
+
+    const streetParts = [tenant?.street, tenant?.address_number].filter(Boolean);
+    let streetAddress = streetParts.join(", ");
+    if (tenant?.neighborhood) {
+      streetAddress = streetAddress ? `${streetAddress} - ${tenant.neighborhood}` : tenant.neighborhood;
+    }
+    const postalAddress: Record<string, any> | undefined =
+      streetAddress || tenant?.city || tenant?.state || tenant?.cep
+        ? {
+            "@type": "PostalAddress",
+            addressCountry: "BR",
+            ...(streetAddress ? { streetAddress } : {}),
+            ...(tenant?.city ? { addressLocality: tenant.city } : {}),
+            ...(tenant?.state ? { addressRegion: tenant.state } : {}),
+            ...(tenant?.cep ? { postalCode: tenant.cep } : {}),
+          }
+        : undefined;
+
+    const sellerObj: Record<string, any> = {
+      "@type": "Pharmacy",
+      name: storeName,
+      url: origin,
+      logo: fallbackLogoUrl,
+      ...(tenant?.telefone_contato || tenant?.phone || tenant?.whatsapp
+        ? { telephone: String(tenant.telefone_contato || tenant.phone || tenant.whatsapp) }
+        : {}),
+      ...(postalAddress ? { address: postalAddress } : {}),
+    };
+
+    const cleanBarcode = String(selectedProduct.barcode || "").replace(/\D/g, "");
+    const productJsonLd: Record<string, any> = {
+      "@context": "https://schema.org",
+      "@type": "Product",
+      name: String(selectedProduct.name).trim(),
+      description: descriptionText.slice(0, 500),
+      image: [productImageUrl],
+      sku: String(selectedProduct.internalCode || selectedProduct.id),
+      ...(cleanBarcode.length === 13
+        ? { gtin13: cleanBarcode }
+        : cleanBarcode.length >= 8 && cleanBarcode.length <= 14
+          ? { gtin: cleanBarcode }
+          : {}),
+      ...(selectedProduct.manufacturer && selectedProduct.manufacturer.trim() !== "Outros"
+        ? { brand: { "@type": "Brand", name: selectedProduct.manufacturer.trim() } }
+        : {}),
+      offers: {
+        "@type": "Offer",
+        url: currentHref,
+        priceCurrency: "BRL",
+        price: formattedPrice,
+        availability: inStock ? "https://schema.org/InStock" : "https://schema.org/OutOfStock",
+        itemCondition: "https://schema.org/NewCondition",
+        seller: sellerObj,
+      },
+    };
+
+    // Evita duplicidade caso o servidor já tenha injetado um bloco SSR anterior na página
+    const ssrScripts = document.querySelectorAll('script[type="application/ld+json"][data-farmaflow-seo="true"]');
+    ssrScripts.forEach((node) => node.parentNode?.removeChild(node));
+
+    let scriptEl = document.getElementById(SCRIPT_ID) as HTMLScriptElement | null;
+    if (!scriptEl) {
+      scriptEl = document.createElement("script");
+      scriptEl.type = "application/ld+json";
+      scriptEl.id = SCRIPT_ID;
+      document.head.appendChild(scriptEl);
+    }
+    scriptEl.textContent = JSON.stringify(productJsonLd);
+
+    return () => {
+      removeDynamicProductJsonLd();
+    };
+  }, [selectedProduct, tenant]);
 
   return (
     <div className="bg-gray-50/50 min-h-screen font-sans relative flex flex-col justify-between">

@@ -789,7 +789,7 @@ app.get("/api/v1/resolve-tenant", async (req, res) => {
 
 const isSocialCrawler = (userAgent: string = ""): boolean => {
   if (!userAgent) return false;
-  return /whatsapp|facebookexternalhit|meta-externalagent|meta-externalfetcher|facebot|twitterbot|telegrambot|linkedinbot|slackbot|discordbot|skypeuripreview|googlebot|bingbot|baiduspider|yandex|crawlers|axios|node-fetch|got|undici|curl|evolution|baileys/i.test(userAgent);
+  return /whatsapp|facebookexternalhit|meta-externalagent|meta-externalfetcher|facebot|twitterbot|telegrambot|linkedinbot|slackbot|discordbot|skypeuripreview|googlebot|google-inspectiontool|googleother|storebot-google|adsbot-google|apis-google|mediapartners-google|chrome-lighthouse|bingbot|baiduspider|yandex|applebot|duckduckbot|petalbot|crawlers|axios|node-fetch|got|undici|curl|evolution|baileys/i.test(userAgent);
 };
 
 // Crawlers puramente sociais que não executam JS (WhatsApp, Facebook, Telegram, etc.)
@@ -798,7 +798,7 @@ const isSocialPreviewBot = (userAgent: string = ""): boolean => {
   return /whatsapp|facebookexternalhit|meta-externalagent|meta-externalfetcher|facebot|twitterbot|telegrambot|linkedinbot|slackbot|discordbot|skypeuripreview|evolution|baileys/i.test(userAgent);
 };
 
-const SEO_LOOKUP_TIMEOUT_MS = 1500;
+const SEO_LOOKUP_TIMEOUT_MS = 3500;
 const SEO_PRODUCT_CACHE_TTL_MS = 60 * 1000; // 1 minuto
 const SITEMAP_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hora
 
@@ -925,7 +925,7 @@ function extractSeoProductToken(rawSlugOrId: string): { raw: string; token: stri
 }
 
 function acceptsHtmlForSeo(req: express.Request): boolean {
-  if (req.method !== "GET") return false;
+  if (req.method !== "GET" && req.method !== "HEAD") return false;
   const p = String(req.path || "").toLowerCase();
   if (
     p.startsWith("/api/") ||
@@ -944,10 +944,21 @@ function acceptsHtmlForSeo(req: express.Request): boolean {
   ) {
     return false;
   }
-  const accept = String(req.headers.accept || "").toLowerCase();
+  const accept = String(req.headers.accept || "").toLowerCase().trim();
   const ua = String(req.headers["user-agent"] || "");
   if (accept.includes("text/html")) return true;
-  if (isSocialCrawler(ua) && (!accept || accept.includes("*/*"))) return true;
+  if (!accept || accept === "*/*" || accept.includes("*/*")) {
+    // Permite Google-InspectionTool (Teste de Pesquisa Aprimorada), bots e proxies que enviam Accept: */*
+    if (
+      !accept.includes("application/json") &&
+      !accept.includes("image/") &&
+      !accept.includes("text/css") &&
+      !accept.includes("javascript")
+    ) {
+      return true;
+    }
+  }
+  if (isSocialCrawler(ua)) return true;
   return false;
 }
 
@@ -1030,14 +1041,14 @@ async function fetchProductForSeo(tenantId: string, rawProductSlugOrId: string):
       } catch (_) {}
     }
 
-    // 2. Tentativa por internal_code (token final do slug amigável)
+    // 2. Tentativa por internal_code (exato ou case-insensitive, já que o slug usa minúsculas)
     if (token && /^[a-zA-Z0-9_-]{1,32}$/.test(token)) {
       try {
         const { data: byCodeList } = await supabaseAdmin
           .from("products")
           .select(selectCols)
           .eq("tenant_id", tenantId)
-          .eq("internal_code", token)
+          .ilike("internal_code", token)
           .limit(5);
         if (Array.isArray(byCodeList) && byCodeList.length > 0) {
           const exactSlug = byCodeList.find((r) => buildSeoProductSlug(r).toLowerCase() === raw.toLowerCase());
@@ -1177,14 +1188,38 @@ function buildPharmacyJsonLd(tenant: any, storeName: string, storeUrl: string, s
   return jsonLd;
 }
 
+function parseSafePositivePrice(val: any): number {
+  if (val === null || val === undefined || val === "") return 0;
+  const cleaned = typeof val === "string" ? val.replace(/[^\d.,-]/g, "").replace(",", ".") : val;
+  const num = Number(cleaned);
+  return Number.isFinite(num) && num > 0 ? num : 0;
+}
+
 function resolveEffectiveProductPrice(product: any): number {
-  const price = Number(product?.price) || 0;
-  const promo = Number(product?.promotional_price) || 0;
-  const orig = Number(product?.original_price) || 0;
+  const price = parseSafePositivePrice(product?.price);
+  const promo = parseSafePositivePrice(product?.promotional_price);
+  const orig = parseSafePositivePrice(product?.original_price);
   if (promo > 0 && (price <= 0 || promo < price)) return promo;
   if (price > 0) return price;
   if (orig > 0) return orig;
   return 0;
+}
+
+function ensureAbsoluteHttpsUrl(urlStr: string | undefined | null, fallbackUrl: string): string {
+  const raw = String(urlStr || "").trim();
+  if (
+    raw &&
+    raw !== "IGNORE" &&
+    raw !== "PENDENTE_CURADORIA" &&
+    !raw.startsWith("data:") &&
+    (raw.startsWith("https://") || raw.startsWith("http://"))
+  ) {
+    return raw.startsWith("http://") ? raw.replace("http://", "https://") : raw;
+  }
+  const fb = String(fallbackUrl || DEFAULT_FALLBACK_OG_LOGO).trim();
+  if (fb.startsWith("https://")) return fb;
+  if (fb.startsWith("http://")) return fb.replace("http://", "https://");
+  return DEFAULT_FALLBACK_OG_LOGO;
 }
 
 function buildTenantMetaRecordFromTenant(
@@ -1216,6 +1251,7 @@ function buildTenantMetaRecordFromTenant(
       storeLogoUrl = storeLogoUrl.replace("http://", "https://");
     }
   }
+  storeLogoUrl = ensureAbsoluteHttpsUrl(storeLogoUrl, DEFAULT_FALLBACK_OG_LOGO);
 
   const lowerHost = host.toLowerCase();
   const reservedSubdomains = ["www", "farmaflow", "nexoia", "app", "admin", "api", "portal"];
@@ -1256,19 +1292,16 @@ function buildTenantMetaRecordFromTenant(
   let availability: "InStock" | "OutOfStock" | undefined;
   let jsonLd: Record<string, any> = buildPharmacyJsonLd(tenant, storeName, storeUrl, storeLogoUrl);
 
-  // Enriquecimento SEO para Produto (Product + Offer)
+  // Enriquecimento SEO para Produto (Product + Offer validado para Google Rich Results)
   if (product && product.name) {
     const productName = String(product.name).trim();
     const effectivePrice = resolveEffectiveProductPrice(product);
+    const formattedPriceDecimal = effectivePrice > 0 ? effectivePrice.toFixed(2) : "0.00";
     const formattedBrPrice =
-      effectivePrice > 0 ? `R$ ${effectivePrice.toFixed(2).replace(".", ",")}` : "";
+      effectivePrice > 0 ? `R$ ${formattedPriceDecimal.replace(".", ",")}` : "";
     const inStock = Number(product.stock ?? 0) > 0;
     const productSlug = buildSeoProductSlug(product);
-    const prodImg = String(product.image || product.image_url || "").trim();
-
-    if ((prodImg.startsWith("http://") || prodImg.startsWith("https://")) && !prodImg.startsWith("data:")) {
-      logoUrl = prodImg.startsWith("http://") ? prodImg.replace("http://", "https://") : prodImg;
-    }
+    logoUrl = ensureAbsoluteHttpsUrl(product.image || product.image_url, storeLogoUrl);
 
     if (isSubdomainHost || isCustomDomainHost) {
       canonicalUrl = `${proto}://${host}/produto/${encodeURIComponent(productSlug)}`;
@@ -1282,7 +1315,7 @@ function buildTenantMetaRecordFromTenant(
     description = `Compre ${productName}${product.presentation ? ` (${product.presentation})` : ""}${formattedBrPrice ? ` por ${formattedBrPrice}` : ""} na ${storeName}${location ? ` em ${location}` : ""}. ${inStock ? "Produto em estoque com entrega rápida" : "Consulte disponibilidade"} via WhatsApp.`;
     ogType = "product";
     if (effectivePrice > 0) {
-      priceAmount = effectivePrice.toFixed(2);
+      priceAmount = formattedPriceDecimal;
     }
     availability = inStock ? "InStock" : "OutOfStock";
 
@@ -1293,7 +1326,7 @@ function buildTenantMetaRecordFromTenant(
       "@type": "Offer",
       url: canonicalUrl,
       priceCurrency: "BRL",
-      price: effectivePrice > 0 ? effectivePrice.toFixed(2) : "0.00",
+      price: formattedPriceDecimal,
       availability: inStock ? "https://schema.org/InStock" : "https://schema.org/OutOfStock",
       itemCondition: "https://schema.org/NewCondition",
       seller: sellerSchema,
@@ -1828,6 +1861,9 @@ app.get(
         const meta = await withSeoTimeout(getTenantMetaRecord(identifier, req), SEO_LOOKUP_TIMEOUT_MS);
 
         if (meta) {
+          const seoInjectedHeader = meta.ogType === "product" ? "product" : "store";
+          res.setHeader("X-SEO-Injected", seoInjectedHeader);
+
           if (isSocialOnly) {
             res.setHeader("Content-Type", "text/html; charset=utf-8");
             res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0, s-maxage=0");
@@ -1846,6 +1882,7 @@ app.get(
       }
 
       if (htmlFromRam) {
+        res.setHeader("X-SEO-Injected", "fallback");
         res.setHeader("Content-Type", "text/html; charset=utf-8");
         res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
         return res.status(200).send(htmlFromRam);
@@ -1853,6 +1890,7 @@ app.get(
       return next();
     } catch {
       if (htmlFromRam) {
+        res.setHeader("X-SEO-Injected", "fallback");
         res.setHeader("Content-Type", "text/html; charset=utf-8");
         res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
         return res.status(200).send(htmlFromRam);
@@ -1873,14 +1911,16 @@ app.get("/", async (req, res, next) => {
     const isSocialOnly = isSocialPreviewBot(ua);
     const storeParam = String(req.query.store || req.query.loja || req.query.tenant || req.query.p || "").trim();
     const { host } = resolveRequestOrigin(req);
+    const lowerHost = host.toLowerCase();
     const isSubdomain =
-      (host.endsWith(".farmaflow.online") || host.endsWith(".nexoia.online")) &&
-      !["www", "farmaflow", "nexoia", "app", "admin", "api", "portal"].includes(host.split(".")[0]);
+      (lowerHost.endsWith(".farmaflow.online") || lowerHost.endsWith(".nexoia.online")) &&
+      !["www", "farmaflow", "nexoia", "app", "admin", "api", "portal"].includes(lowerHost.split(".")[0]);
 
-    const identifier = storeParam || (isSubdomain ? host.split(".")[0] : "");
+    const identifier = storeParam || (isSubdomain ? lowerHost.split(".")[0] : "");
     if (identifier) {
       const meta = await withSeoTimeout(getTenantMetaRecord(identifier, req), SEO_LOOKUP_TIMEOUT_MS);
       if (meta) {
+        res.setHeader("X-SEO-Injected", meta.ogType === "product" ? "product" : "store");
         if (isSocialOnly) {
           res.setHeader("Content-Type", "text/html; charset=utf-8");
           res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0, s-maxage=0");
@@ -1897,6 +1937,7 @@ app.get("/", async (req, res, next) => {
       }
 
       if (htmlFromRam && !isSocialOnly) {
+        res.setHeader("X-SEO-Injected", "fallback");
         res.setHeader("Content-Type", "text/html; charset=utf-8");
         res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
         return res.status(200).send(htmlFromRam);
@@ -1905,6 +1946,7 @@ app.get("/", async (req, res, next) => {
     return next();
   } catch {
     if (htmlFromRam) {
+      res.setHeader("X-SEO-Injected", "fallback");
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
       return res.status(200).send(htmlFromRam);
@@ -16156,6 +16198,7 @@ async function startServer() {
               const subdomainId = lowerHost.split(".")[0];
               const meta = await withSeoTimeout(getTenantMetaRecord(subdomainId, req), SEO_LOOKUP_TIMEOUT_MS);
               if (meta) {
+                res.setHeader("X-SEO-Injected", meta.ogType === "product" ? "product" : "store");
                 res.setHeader("Content-Type", "text/html; charset=utf-8");
                 return res.status(200).send(injectStoreMetaIntoHtml(htmlFromRam, meta));
               }
@@ -16164,6 +16207,7 @@ async function startServer() {
         } catch {
           // Fallback silencioso para o HTML padrão
         }
+        res.setHeader("X-SEO-Injected", "fallback");
         res.setHeader("Content-Type", "text/html; charset=utf-8");
         return res.status(200).send(htmlFromRam);
       }

@@ -4189,6 +4189,7 @@ const App: React.FC = () => {
               cartItems={cart}
               onAddToCart={addToCart}
               onProductClick={handleProductClick}
+              selectedProduct={selectedProduct}
               onOpenCart={() => handleViewChange(ViewMode.CART)}
               onBack={
                 session.type !== "GUEST"
