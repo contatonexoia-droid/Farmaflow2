@@ -84,6 +84,7 @@ import {
   DEPARTMENT_MAPPING,
 } from "../lib/departments";
 import { StorefrontFooter } from "./StorefrontFooter";
+import { findProductBySlugOrId, extractProductLookupToken } from "../lib/store";
 
 const GENERIC_PLACEHOLDER = "https://i.imgur.com/fLz8F3X.png";
 
@@ -3977,14 +3978,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
         return;
       }
 
-      const lowerId = cleanId.toLowerCase();
-      const localMatch = (products || []).find(
-        (p) =>
-          String(p.id).toLowerCase() === lowerId ||
-          ((p as any).slug && String((p as any).slug).toLowerCase() === lowerId) ||
-          (p.barcode && String(p.barcode).toLowerCase() === lowerId) ||
-          (p.internalCode && String(p.internalCode).toLowerCase() === lowerId)
-      );
+      const localMatch = findProductBySlugOrId(products, cleanId);
 
       if (localMatch) {
         processedDeepLinkProductRef.current = cleanId;
@@ -3995,10 +3989,34 @@ export const Storefront: React.FC<StorefrontProps> = ({
         return;
       }
 
-      // Se a lista de produtos ainda está vazia no primeiro render, também tenta buscar na API filtrando pela loja
+      // Se a lista de produtos ainda está vazia no primeiro render, busca na API filtrando pela loja
+      // Suporta tanto ID direto (?produto=...) quanto slug amigável (/loja/:slug/produto/:productSlug)
       const tenantQuery = tenant?.id ? `?tenantId=${encodeURIComponent(tenant.id)}` : "";
-      fetch(`/api/v1/products/${encodeURIComponent(cleanId)}${tenantQuery}`)
-        .then((res) => (res.ok ? res.json() : null))
+      const { raw, token } = extractProductLookupToken(cleanId);
+      const primaryLookup = token && token !== raw ? token : raw;
+
+      const tryFetchProduct = async () => {
+        try {
+          const res1 = await fetch(`/api/v1/products/${encodeURIComponent(primaryLookup)}${tenantQuery}`);
+          if (res1.ok) {
+            const dbProd = await res1.json();
+            if (dbProd && dbProd.id) return dbProd;
+          }
+        } catch (_) {}
+
+        if (primaryLookup !== raw) {
+          try {
+            const res2 = await fetch(`/api/v1/products/${encodeURIComponent(raw)}${tenantQuery}`);
+            if (res2.ok) {
+              const dbProd = await res2.json();
+              if (dbProd && dbProd.id) return dbProd;
+            }
+          } catch (_) {}
+        }
+        return null;
+      };
+
+      tryFetchProduct()
         .then((dbProd) => {
           if (dbProd && dbProd.id) {
             processedDeepLinkProductRef.current = cleanId;

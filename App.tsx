@@ -68,7 +68,13 @@ import {
 } from "./services/storage";
 
 import { supabase } from "./services/supabase";
-import { getStoreUrl } from "./lib/store";
+import {
+  getStoreUrl,
+  getStoreSlug,
+  findProductBySlugOrId,
+  extractProductLookupToken,
+  getProductShareUrl,
+} from "./lib/store";
 // Added Calendar to lucide-react imports to fix missing component error
 
 // Captura imediata de parâmetros de Deep Link antes que qualquer roteador altere o histórico
@@ -131,7 +137,10 @@ import {
   Lock, MessageSquareShare, Zap,
   PanelLeftClose,
   PanelLeftOpen,
-  Menu
+  Menu,
+  Share2,
+  Check,
+  MapPin
 } from "lucide-react";
 
 
@@ -821,6 +830,7 @@ const App: React.FC = () => {
   const [cart, setCart] = useState<CartItem[]>([]);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [showAddedFeedback, setShowAddedFeedback] = useState(false);
+  const [productShareCopied, setProductShareCopied] = useState(false);
   const [globalToast, setGlobalToast] = useState<string | null>(null);
   const [audioBlocked, setAudioBlocked] = useState(false);
 
@@ -828,8 +838,9 @@ const App: React.FC = () => {
   const [zoomImage, setZoomImage] = useState<string | null>(null);
   const productModalScrollRef = useRef<HTMLDivElement>(null);
 
-  // Scroll to top of product modal whenever a new product is selected
+  // Scroll to top of product modal & sync document title whenever a new product is selected
   useEffect(() => {
+    setProductShareCopied(false);
     if (selectedProduct) {
       if (productModalScrollRef.current) {
         productModalScrollRef.current.scrollTo({ top: 0, behavior: "smooth" });
@@ -838,8 +849,96 @@ const App: React.FC = () => {
       if (scrollEl) {
         scrollEl.scrollTo({ top: 0, behavior: "smooth" });
       }
+      if (typeof document !== "undefined" && currentTenant) {
+        const effPrice =
+          selectedProduct.promotionalPrice &&
+          selectedProduct.promotionalPrice > 0 &&
+          selectedProduct.promotionalPrice < selectedProduct.price
+            ? selectedProduct.promotionalPrice
+            : selectedProduct.price;
+        const priceLabel = effPrice > 0 ? ` por R$ ${effPrice.toFixed(2).replace(".", ",")}` : "";
+        const cityPart = [currentTenant.city, currentTenant.state].filter(Boolean).join("/");
+        document.title = `${selectedProduct.name}${priceLabel} | ${currentTenant.name}${cityPart ? ` - ${cityPart}` : ""}`;
+      }
+    } else if (typeof document !== "undefined" && currentTenant) {
+      const loc = [currentTenant.neighborhood, currentTenant.city, currentTenant.state].filter(Boolean).join(" - ");
+      document.title = `${currentTenant.name}${loc ? ` (${loc})` : ""} - Farmácia Online & Delivery`;
     }
-  }, [selectedProduct?.id]);
+  }, [selectedProduct?.id, currentTenant?.id]);
+
+  const handleCloseProductModal = useCallback(() => {
+    setSelectedProduct(null);
+    try {
+      if (typeof window !== "undefined" && /\/produto\//i.test(window.location.pathname)) {
+        const host = window.location.hostname.toLowerCase();
+        const isSubdomain =
+          (host.endsWith(".farmaflow.online") || host.endsWith(".nexoia.online")) &&
+          !["www", "farmaflow", "nexoia", "app", "admin", "api", "portal"].includes(host.split(".")[0]);
+        const tenantSlug = getStoreSlug(currentTenant || undefined);
+        const nextPath = isSubdomain && !window.location.pathname.startsWith("/loja/")
+          ? "/"
+          : tenantSlug
+            ? `/loja/${tenantSlug}`
+            : "/";
+        window.history.replaceState(window.history.state, "", nextPath);
+      }
+    } catch (_) {}
+  }, [currentTenant]);
+
+  const handleShareProductOffer = useCallback(async (product: Product) => {
+    try {
+      const shareUrl = getProductShareUrl(currentTenant || undefined, product);
+      const effPrice =
+        product.promotionalPrice && product.promotionalPrice > 0 && product.promotionalPrice < product.price
+          ? product.promotionalPrice
+          : product.price;
+      const priceText = effPrice > 0 ? ` por R$ ${effPrice.toFixed(2).replace(".", ",")}` : "";
+      const storeLabel = currentTenant?.name || "FarmaFlow";
+      const shareTitle = `${product.name}${priceText} | ${storeLabel}`;
+      const shareText = `Confira esta oferta na ${storeLabel}: ${product.name}${priceText}`;
+
+      if (typeof navigator !== "undefined" && typeof navigator.share === "function") {
+        try {
+          await navigator.share({
+            title: shareTitle,
+            text: shareText,
+            url: shareUrl,
+          });
+          return;
+        } catch (shareErr: any) {
+          if (shareErr?.name === "AbortError") return;
+        }
+      }
+
+      let copied = false;
+      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+        try {
+          await navigator.clipboard.writeText(shareUrl);
+          copied = true;
+        } catch (_) {}
+      }
+      if (!copied && typeof document !== "undefined") {
+        try {
+          const ta = document.createElement("textarea");
+          ta.value = shareUrl;
+          ta.style.position = "fixed";
+          ta.style.opacity = "0";
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand("copy");
+          document.body.removeChild(ta);
+          copied = true;
+        } catch (_) {}
+      }
+
+      if (copied) {
+        setProductShareCopied(true);
+        setGlobalToast("Link da oferta copiado! Cole no WhatsApp para compartilhar.");
+        setTimeout(() => setProductShareCopied(false), 2500);
+        setTimeout(() => setGlobalToast(null), 2800);
+      }
+    } catch (_) {}
+  }, [currentTenant]);
 
   // --- DYNAMIC MANIFEST UPDATE ---
   useEffect(() => {
@@ -971,6 +1070,8 @@ const App: React.FC = () => {
   useEffect(() => {
     try {
       const params = new URLSearchParams(window.location.search);
+      const pathProdMatch = window.location.pathname.match(/\/produto\/([^/?#]+)/i);
+      const pathProdSlug = pathProdMatch && pathProdMatch[1] ? decodeURIComponent(pathProdMatch[1]) : null;
       const prodParam =
         params.get("produto") ||
         params.get("prod") ||
@@ -978,6 +1079,7 @@ const App: React.FC = () => {
         params.get("oferta") ||
         params.get("p_id") ||
         params.get("item") ||
+        pathProdSlug ||
         sessionStorage.getItem("ff_deeplink_produto");
 
       const searchParam =
@@ -989,20 +1091,7 @@ const App: React.FC = () => {
 
       if (prodParam && deepLinkProcessedRef.current !== `prod_${prodParam}`) {
         const cleanParam = prodParam.trim();
-        let targetProd: Product | undefined = undefined;
-
-        if (products && products.length > 0) {
-          targetProd = products.find(
-            (p) =>
-              String(p.id).toLowerCase() === cleanParam.toLowerCase() ||
-              ((p as any).slug &&
-                (p as any).slug.toLowerCase() === cleanParam.toLowerCase()) ||
-              (p.barcode && p.barcode.toLowerCase() === cleanParam.toLowerCase()) ||
-              (p.internalCode &&
-                p.internalCode.toLowerCase() === cleanParam.toLowerCase()) ||
-              (p.name && p.name.toLowerCase().includes(cleanParam.toLowerCase())),
-          );
-        }
+        const targetProd = findProductBySlugOrId(products, cleanParam);
 
         if (targetProd) {
           deepLinkProcessedRef.current = `prod_${prodParam}`;
@@ -1011,8 +1100,30 @@ const App: React.FC = () => {
         } else {
           // Se não encontrou na lista carregada no cliente, busca direto na API da loja
           const tenantQuery = currentTenant?.id ? `?tenantId=${encodeURIComponent(currentTenant.id)}` : "";
-          fetch(`/api/v1/products/${encodeURIComponent(cleanParam)}${tenantQuery}`)
-            .then((res) => (res.ok ? res.json() : null))
+          const { raw, token } = extractProductLookupToken(cleanParam);
+          const primaryLookup = token && token !== raw ? token : raw;
+
+          const tryFetch = async () => {
+            try {
+              const r1 = await fetch(`/api/v1/products/${encodeURIComponent(primaryLookup)}${tenantQuery}`);
+              if (r1.ok) {
+                const d1 = await r1.json();
+                if (d1 && d1.id) return d1;
+              }
+            } catch (_) {}
+            if (primaryLookup !== raw) {
+              try {
+                const r2 = await fetch(`/api/v1/products/${encodeURIComponent(raw)}${tenantQuery}`);
+                if (r2.ok) {
+                  const d2 = await r2.json();
+                  if (d2 && d2.id) return d2;
+                }
+              } catch (_) {}
+            }
+            return null;
+          };
+
+          tryFetch()
             .then((dbProd) => {
               if (dbProd && dbProd.id) {
                 deepLinkProcessedRef.current = `prod_${prodParam}`;
@@ -1040,7 +1151,7 @@ const App: React.FC = () => {
     } catch (e) {
       console.warn("Deep link resolution error:", e);
     }
-  }, [products, handleProductClick]);
+  }, [products, handleProductClick, currentTenant?.id]);
 
   // Escuta cliques em Notificações Web Push quando o PWA / aba já está aberta
   useEffect(() => {
@@ -2743,11 +2854,12 @@ const App: React.FC = () => {
                   .trim()
                   .replace(/\s+/g, "-")
               : tenant.id;
-            // Preservação de integridade: se não estiver no /loja/slug/ na barra de tarefas, força para elegância do PWA preservando query params
+            // Preservação de integridade: se não estiver no /loja/slug/ nem em /loja/slug/produto/..., força para elegância do PWA preservando query params
             const currentSearch = window.location.search || "";
             if (
               window.location.pathname !== `/loja/${targetSlug}/` &&
-              window.location.pathname !== `/loja/${targetSlug}`
+              window.location.pathname !== `/loja/${targetSlug}` &&
+              !window.location.pathname.startsWith(`/loja/${targetSlug}/produto/`)
             ) {
               window.history.replaceState(
                 { view: ViewMode.CATALOG, adminTab: "dashboard" },
@@ -4796,7 +4908,8 @@ const App: React.FC = () => {
             className={`bg-white w-full h-full md:h-auto md:max-h-[95vh] md:rounded-[2.5rem] max-w-5xl shadow-2xl flex flex-col relative overflow-hidden transition-all duration-500 animate-in slide-in-from-bottom-4`}
           >
             <button
-              onClick={() => setSelectedProduct(null)}
+              onClick={handleCloseProductModal}
+              aria-label="Fechar detalhes do produto"
               className="absolute top-4 right-4 z-20 bg-gray-100/80 backdrop-blur-md text-gray-600 p-2 rounded-full shadow-sm hover:bg-red-100 hover:text-red-600 transition-all border border-gray-200"
             >
               <X size={24} />
@@ -4885,30 +4998,85 @@ const App: React.FC = () => {
 
                 <div className={`w-full md:w-[60%] flex flex-col p-6 md:p-0`}>
                   <div className="mb-2">
-                    <div className="flex flex-wrap gap-2 mb-3">
-                      <span className="bg-gray-100 text-gray-500 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest">
-                        {selectedProduct.category}
-                      </span>
-                      {selectedProduct.manufacturer &&
-                        selectedProduct.manufacturer !== "Outros" && (
-                          <span className="bg-emerald-50 text-emerald-600 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest flex items-center gap-1">
-                            <Factory size={10} /> {selectedProduct.manufacturer}
-                          </span>
+                    <div className="flex flex-wrap items-center justify-between gap-2 mb-3 pr-10 md:pr-8">
+                      <div className="flex flex-wrap gap-2">
+                        <span className="bg-gray-100 text-gray-500 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest">
+                          {selectedProduct.category}
+                        </span>
+                        {selectedProduct.manufacturer &&
+                          selectedProduct.manufacturer !== "Outros" && (
+                            <span className="bg-emerald-50 text-emerald-600 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest flex items-center gap-1">
+                              <Factory size={10} /> {selectedProduct.manufacturer}
+                            </span>
+                          )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleShareProductOffer(selectedProduct)}
+                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-bold border transition-all cursor-pointer ${
+                          productShareCopied
+                            ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                            : "bg-gray-50 hover:bg-gray-100 text-gray-600 hover:text-gray-900 border-gray-200"
+                        }`}
+                        title="Compartilhar link amigável desta oferta"
+                      >
+                        {productShareCopied ? (
+                          <>
+                            <Check size={13} className="text-emerald-600" />
+                            <span>Link copiado</span>
+                          </>
+                        ) : (
+                          <>
+                            <Share2 size={13} />
+                            <span>Compartilhar Oferta</span>
+                          </>
                         )}
+                      </button>
                     </div>
-                    <h2 className="text-2xl md:text-3xl font-black mb-1 text-gray-900 leading-tight">
+                    <h1 className="text-2xl md:text-3xl font-black mb-1 text-gray-900 leading-tight">
                       {selectedProduct.name}
-                    </h2>
+                    </h1>
                     {selectedProduct.presentation && (
                       <p className="text-sm font-black text-emerald-600 uppercase tracking-wide mb-1">
                         {selectedProduct.presentation}
                       </p>
                     )}
-                    {selectedProduct.internalCode && (
-                      <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-6">
-                        Ref: {selectedProduct.internalCode}
-                      </p>
-                    )}
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 mt-2 mb-5 text-xs">
+                      <span
+                        className={`inline-flex items-center gap-1.5 font-bold ${
+                          selectedProduct.stock > 0 ? "text-emerald-700" : "text-amber-700"
+                        }`}
+                      >
+                        <span
+                          className={`w-2 h-2 rounded-full ${
+                            selectedProduct.stock > 0 ? "bg-emerald-500" : "bg-amber-500"
+                          }`}
+                        />
+                        {selectedProduct.stock > 0
+                          ? `Em estoque (${selectedProduct.stock} un.)`
+                          : "Indisponível no momento"}
+                      </span>
+                      {currentTenant && (
+                        <span className="inline-flex items-center gap-1 text-gray-500 font-medium">
+                          <MapPin size={12} className="text-gray-400 shrink-0" />
+                          <span>
+                            {currentTenant.name}
+                            {[currentTenant.neighborhood, currentTenant.city, currentTenant.state]
+                              .filter(Boolean)
+                              .length > 0
+                              ? ` • ${[currentTenant.neighborhood, currentTenant.city, currentTenant.state]
+                                  .filter(Boolean)
+                                  .join(", ")}`
+                              : ""}
+                          </span>
+                        </span>
+                      )}
+                      {selectedProduct.internalCode && (
+                        <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">
+                          Ref: {selectedProduct.internalCode}
+                        </span>
+                      )}
+                    </div>
                   </div>
 
                   {variableCombosForSelected.map((comboReq) => (
@@ -5169,26 +5337,41 @@ const App: React.FC = () => {
                     </div>
 
                     {selectedProduct.stock > 0 ? (
-                      <button
-                        onClick={() => {
-                          addToCart(selectedProduct, true);
-                        }}
-                        className="bg-brand text-brand-contrast h-14 px-8 rounded-2xl font-black text-sm flex items-center justify-center gap-3 transition-all hover:scale-[1.05] active:scale-95 shadow-xl shadow-brand/20 w-full md:w-auto"
-                        style={{ backgroundColor: currentTenant?.primaryColor }}
-                      >
-                        <ShoppingBag size={20} /> Adicionar
-                      </button>
+                      <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full md:w-auto">
+                        <button
+                          onClick={() => {
+                            addToCart(selectedProduct, true);
+                          }}
+                          className="bg-brand text-brand-contrast h-14 px-8 rounded-2xl font-black text-sm flex items-center justify-center gap-3 transition-all hover:scale-[1.03] active:scale-95 shadow-xl shadow-brand/20 w-full sm:w-auto cursor-pointer"
+                          style={{ backgroundColor: currentTenant?.primaryColor }}
+                        >
+                          <ShoppingBag size={20} /> Adicionar
+                        </button>
+                        {currentTenant?.whatsapp && (
+                          <a
+                            href={`https://wa.me/55${String(currentTenant.whatsapp).replace(/\D/g, "")}?text=${encodeURIComponent(
+                              `Olá! Vi o produto ${selectedProduct.name} na ${currentTenant.name} (${getProductShareUrl(currentTenant, selectedProduct)}) e gostaria de pedir.`
+                            )}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="h-14 px-4 rounded-2xl font-bold text-xs text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 flex items-center justify-center gap-2 transition-all w-full sm:w-auto"
+                            title="Pedir ou tirar dúvida pelo WhatsApp"
+                          >
+                            <MessageSquare size={16} /> WhatsApp
+                          </a>
+                        )}
+                      </div>
                     ) : (
-                      <button
-                        onClick={() => {
-                          window.open(
-                            `https://wa.me/55${currentTenant?.whatsapp}?text=Gostaria de saber quando chegará o produto: ${selectedProduct.name}`,
-                          );
-                        }}
+                      <a
+                        href={`https://wa.me/55${String(currentTenant?.whatsapp || "").replace(/\D/g, "")}?text=${encodeURIComponent(
+                          `Gostaria de saber quando chegará o produto: ${selectedProduct.name}`
+                        )}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
                         className="bg-gray-900 text-white h-14 px-6 rounded-2xl font-black text-[10px] uppercase flex items-center justify-center gap-2 transition-all hover:bg-gray-800 shadow-xl w-full md:w-auto"
                       >
                         <AlertCircle size={18} /> Avise-me quando chegar
-                      </button>
+                      </a>
                     )}
 
                     {showAddedFeedback && (

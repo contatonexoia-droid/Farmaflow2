@@ -784,13 +784,331 @@ app.get("/api/v1/resolve-tenant", async (req, res) => {
 });
 
 // ============================================================================
-// OPEN GRAPH / WHATSAPP RICH LINK PREVIEW MULTITENANT
+// OPEN GRAPH / SEO LOCAL PROGRAMÁTICO MULTITENANT (ZERO BREAKING CHANGES)
 // ============================================================================
 
-const isSocialCrawler = (userAgent: string = ''): boolean => {
+const isSocialCrawler = (userAgent: string = ""): boolean => {
   if (!userAgent) return false;
   return /whatsapp|facebookexternalhit|meta-externalagent|meta-externalfetcher|facebot|twitterbot|telegrambot|linkedinbot|slackbot|discordbot|skypeuripreview|googlebot|bingbot|baiduspider|yandex|crawlers|axios|node-fetch|got|undici|curl|evolution|baileys/i.test(userAgent);
 };
+
+// Crawlers puramente sociais que não executam JS (WhatsApp, Facebook, Telegram, etc.)
+const isSocialPreviewBot = (userAgent: string = ""): boolean => {
+  if (!userAgent) return false;
+  return /whatsapp|facebookexternalhit|meta-externalagent|meta-externalfetcher|facebot|twitterbot|telegrambot|linkedinbot|slackbot|discordbot|skypeuripreview|evolution|baileys/i.test(userAgent);
+};
+
+const SEO_LOOKUP_TIMEOUT_MS = 1500;
+const SEO_PRODUCT_CACHE_TTL_MS = 60 * 1000; // 1 minuto
+const SITEMAP_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hora
+
+const seoProductRamCache = new Map<string, { product: any | null; expiresAt: number }>();
+const sitemapIndexRamCache = new Map<string, { xml: string; expiresAt: number }>();
+const storeSitemapRamCache = new Map<string, { xml: string; expiresAt: number }>();
+
+async function withSeoTimeout<T>(promise: Promise<T>, ms = SEO_LOOKUP_TIMEOUT_MS): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise.catch(() => null),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), ms);
+      }),
+    ]);
+  } catch {
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function escapeHtmlAttr(str: string = ""): string {
+  return String(str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function escapeXml(str: string = ""): string {
+  return String(str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function safeJsonLdStringify(obj: Record<string, any>): string {
+  return JSON.stringify(obj)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/&/g, "\\u0026")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
+function slugifySeoTextServer(text: string = "", maxLength = 65): string {
+  const cleaned = String(text || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  if (!cleaned || cleaned.length <= maxLength) return cleaned;
+  const sliced = cleaned.slice(0, maxLength);
+  const lastDash = sliced.lastIndexOf("-");
+  return (lastDash > 15 ? sliced.slice(0, lastDash) : sliced).replace(/-+$/g, "");
+}
+
+function getSeoTenantSlug(tenant: any): string {
+  const raw = String(tenant?.slug || tenant?.subdomain || tenant?.id || tenant?.name || "").trim();
+  return slugifySeoTextServer(raw, 80) || String(tenant?.id || "");
+}
+
+function getSeoProductShortCode(product: any): string {
+  const rawInternal = String(product?.internal_code || product?.internalCode || "").trim();
+  if (rawInternal && /^[a-zA-Z0-9]{1,20}$/.test(rawInternal)) {
+    return rawInternal.toLowerCase();
+  }
+  const rawBarcode = String(product?.barcode || "").trim();
+  if (rawBarcode && /^[a-zA-Z0-9]{4,20}$/.test(rawBarcode)) {
+    return rawBarcode.toLowerCase();
+  }
+  const rawId = String(product?.id || "").trim();
+  if (!rawId) return "";
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawId)) {
+    return rawId.slice(0, 8).toLowerCase();
+  }
+  const cleanId = rawId.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+  return cleanId.length <= 16 ? cleanId : cleanId.slice(-10);
+}
+
+function buildSeoProductSlug(product: any): string {
+  const nameSlug = slugifySeoTextServer(product?.name || "", 65);
+  const shortCode = getSeoProductShortCode(product);
+  if (nameSlug && shortCode) {
+    if (nameSlug.endsWith(`-${shortCode}`) || nameSlug === shortCode) {
+      return nameSlug;
+    }
+    return `${nameSlug}-${shortCode}`;
+  }
+  if (nameSlug) return nameSlug;
+  if (shortCode) return shortCode;
+  return slugifySeoTextServer(String(product?.id || "produto"), 40) || "produto";
+}
+
+function extractSeoProductToken(rawSlugOrId: string): { raw: string; token: string; nameWords: string[] } {
+  let raw = String(rawSlugOrId || "").trim();
+  try {
+    raw = decodeURIComponent(raw).trim();
+  } catch {}
+  if (!raw) return { raw: "", token: "", nameWords: [] };
+
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw)) {
+    return { raw, token: raw, nameWords: [] };
+  }
+
+  const lastDash = raw.lastIndexOf("-");
+  if (lastDash > 0 && lastDash < raw.length - 1) {
+    const token = raw.slice(lastDash + 1).trim();
+    const prefix = raw.slice(0, lastDash).trim();
+    const nameWords = prefix
+      .split("-")
+      .map((w) => w.trim())
+      .filter((w) => w.length >= 3);
+    return { raw, token, nameWords };
+  }
+  return { raw, token: raw, nameWords: [] };
+}
+
+function acceptsHtmlForSeo(req: express.Request): boolean {
+  if (req.method !== "GET") return false;
+  const p = String(req.path || "").toLowerCase();
+  if (
+    p.startsWith("/api/") ||
+    p.startsWith("/admin") ||
+    p.startsWith("/painel") ||
+    p.startsWith("/login") ||
+    p.startsWith("/s/") ||
+    p.startsWith("/assets/") ||
+    p.startsWith("/installers/") ||
+    p === "/sw.js" ||
+    p === "/manifest.json" ||
+    p === "/robots.txt" ||
+    p === "/sitemap.xml" ||
+    p.endsWith("/sitemap.xml") ||
+    /\.(js|mjs|cjs|css|map|png|jpe?g|gif|webp|svg|ico|json|xml|txt|woff2?|ttf|eot|pdf|zip|exe|mp3|mp4|webm)$/i.test(p)
+  ) {
+    return false;
+  }
+  const accept = String(req.headers.accept || "").toLowerCase();
+  const ua = String(req.headers["user-agent"] || "");
+  if (accept.includes("text/html")) return true;
+  if (isSocialCrawler(ua) && (!accept || accept.includes("*/*"))) return true;
+  return false;
+}
+
+function resolveRequestOrigin(req: express.Request): { proto: string; host: string; baseUrl: string } {
+  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "farmaflow.online")
+    .split(",")[0]
+    .trim()
+    .split(":")[0];
+  const rawProto = String(req.headers["x-forwarded-proto"] || (req.secure ? "https" : "https"))
+    .split(",")[0]
+    .trim();
+  const proto = rawProto === "http" && (host === "localhost" || host === "127.0.0.1") ? "http" : "https";
+  return { proto, host, baseUrl: `${proto}://${host}` };
+}
+
+function extractProductIdentifierFromRequest(req: express.Request): string {
+  const paramSlug = Array.isArray(req.params?.productSlug)
+    ? req.params.productSlug[0]
+    : req.params?.productSlug
+      ? String(req.params.productSlug)
+      : "";
+  const paramId = Array.isArray(req.params?.id)
+    ? req.params.id[0]
+    : req.params?.id
+      ? String(req.params.id)
+      : "";
+  const queryProd = String(
+    req.query?.produto || req.query?.product || req.query?.prod || req.query?.oferta || ""
+  ).trim();
+
+  if (paramSlug) return paramSlug.trim();
+  if (paramId) return paramId.trim();
+  if (queryProd) return queryProd;
+
+  const pathMatch = String(req.path || "").match(/\/produto\/([^/?#]+)/i);
+  if (pathMatch && pathMatch[1]) {
+    try {
+      return decodeURIComponent(pathMatch[1]).trim();
+    } catch {
+      return pathMatch[1].trim();
+    }
+  }
+  return "";
+}
+
+async function fetchProductForSeo(tenantId: string, rawProductSlugOrId: string): Promise<any | null> {
+  if (!tenantId || !rawProductSlugOrId) return null;
+  const { raw, token, nameWords } = extractSeoProductToken(rawProductSlugOrId);
+  if (!raw) return null;
+
+  const cacheKey = `${tenantId}|${raw.toLowerCase()}`;
+  const now = Date.now();
+  const cached = seoProductRamCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    return cached.product;
+  }
+
+  const selectCols =
+    "id, tenant_id, internal_code, barcode, name, manufacturer, presentation, description, category, price, original_price, promotional_price, stock, image";
+
+  const remember = (prod: any | null) => {
+    if (seoProductRamCache.size > 1000) {
+      seoProductRamCache.clear();
+    }
+    seoProductRamCache.set(cacheKey, { product: prod, expiresAt: Date.now() + SEO_PRODUCT_CACHE_TTL_MS });
+    return prod;
+  };
+
+  try {
+    // 1. Tentativa exata por ID (ex.: ?produto=UUID ou /produto/ID)
+    if (raw === token || /^[0-9a-f-]{8,64}$/i.test(raw)) {
+      try {
+        const { data: byId } = await supabaseAdmin
+          .from("products")
+          .select(selectCols)
+          .eq("tenant_id", tenantId)
+          .eq("id", raw)
+          .maybeSingle();
+        if (byId) return remember(byId);
+      } catch (_) {}
+    }
+
+    // 2. Tentativa por internal_code (token final do slug amigável)
+    if (token && /^[a-zA-Z0-9_-]{1,32}$/.test(token)) {
+      try {
+        const { data: byCodeList } = await supabaseAdmin
+          .from("products")
+          .select(selectCols)
+          .eq("tenant_id", tenantId)
+          .eq("internal_code", token)
+          .limit(5);
+        if (Array.isArray(byCodeList) && byCodeList.length > 0) {
+          const exactSlug = byCodeList.find((r) => buildSeoProductSlug(r).toLowerCase() === raw.toLowerCase());
+          return remember(exactSlug || byCodeList[0]);
+        }
+      } catch (_) {}
+
+      // 3. Tentativa por barcode (EAN)
+      if (/^\d{4,20}$/.test(token)) {
+        try {
+          const { data: byBarcodeList } = await supabaseAdmin
+            .from("products")
+            .select(selectCols)
+            .eq("tenant_id", tenantId)
+            .eq("barcode", token)
+            .limit(5);
+          if (Array.isArray(byBarcodeList) && byBarcodeList.length > 0) {
+            const exactSlug = byBarcodeList.find((r) => buildSeoProductSlug(r).toLowerCase() === raw.toLowerCase());
+            return remember(exactSlug || byBarcodeList[0]);
+          }
+        } catch (_) {}
+      }
+
+      // 4. Tentativa por id igual ao token curto
+      if (token !== raw) {
+        try {
+          const { data: byShortId } = await supabaseAdmin
+            .from("products")
+            .select(selectCols)
+            .eq("tenant_id", tenantId)
+            .eq("id", token)
+            .maybeSingle();
+          if (byShortId) return remember(byShortId);
+        } catch (_) {}
+      }
+    }
+
+    // 5. Fallback para slugs com prefixo curto de UUID (ex.: dipirona-500mg-a1b2c3d4)
+    if (nameWords.length > 0) {
+      const searchWord = nameWords[0].replace(/[%_]/g, "");
+      if (searchWord.length >= 3) {
+        try {
+          const { data: candidates } = await supabaseAdmin
+            .from("products")
+            .select(selectCols)
+            .eq("tenant_id", tenantId)
+            .ilike("name", `%${searchWord}%`)
+            .limit(25);
+          if (Array.isArray(candidates) && candidates.length > 0) {
+            const lowerRaw = raw.toLowerCase();
+            const lowerToken = token.toLowerCase();
+            const matched =
+              candidates.find((r) => buildSeoProductSlug(r).toLowerCase() === lowerRaw) ||
+              candidates.find((r) => {
+                const rid = String(r.id || "").toLowerCase();
+                const ridClean = rid.replace(/[^a-z0-9]/g, "");
+                return (
+                  (lowerToken.length >= 6 && (rid.startsWith(lowerToken) || ridClean.endsWith(lowerToken))) ||
+                  String(r.internal_code || "").toLowerCase() === lowerToken ||
+                  String(r.barcode || "").toLowerCase() === lowerToken
+                );
+              });
+            if (matched) return remember(matched);
+          }
+        } catch (_) {}
+      }
+    }
+  } catch (_) {}
+
+  return remember(null);
+}
 
 interface TenantMetaRecord {
   id: string;
@@ -799,46 +1117,199 @@ interface TenantMetaRecord {
   title: string;
   description: string;
   logoUrl: string;
+  storeLogoUrl: string;
   canonicalUrl: string;
+  storeUrl: string;
   location: string;
   phone: string;
+  ogType: "website" | "product";
+  priceAmount?: string;
+  availability?: "InStock" | "OutOfStock";
+  jsonLd?: Record<string, any>;
   rawTenant?: any;
+  rawProduct?: any;
 }
 
-function buildTenantMetaRecordFromTenant(tenant: any, req: express.Request): TenantMetaRecord {
-  const host = (req.headers["x-forwarded-host"] || req.headers.host || "farmaflow.online").toString().split(":")[0];
-  const proto = (req.headers["x-forwarded-proto"] || (req.secure ? "https" : "https")).toString();
-  const baseUrl = `${proto}://${host}`;
-
-  const storeName = tenant.name || tenant.razao_social || "FarmaFlow Drogaria";
-  const locParts = [tenant.neighborhood, tenant.city, tenant.state].filter(Boolean);
-  const location = locParts.length > 0 ? locParts.join(" - ") : "";
-  const title = `${storeName}${location ? ` (${location})` : ""} - Farmácia Online & Delivery`;
-
-  const description =
-    tenant.description ||
-    tenant.banner_subtitle ||
-    tenant.bannersubtitle ||
-    tenant.banner_title ||
-    tenant.bannertitle ||
-    "Faça seu pedido online com tele-entrega rápida direta no WhatsApp. Medicamentos, perfumaria e ofertas exclusivas.";
-
-  const tenantSlug = tenant.slug || tenant.id;
-
-  const rawLogo = (tenant.logo_url || tenant.logo || tenant.smart_banners?._regulatoryData?.logo_url || "").trim();
-  let logoUrl = DEFAULT_FALLBACK_OG_LOGO;
-  if ((rawLogo.startsWith("http://") || rawLogo.startsWith("https://")) && !rawLogo.startsWith("data:")) {
-    logoUrl = rawLogo.startsWith("http://") ? rawLogo.replace("http://", "https://") : rawLogo;
-  } else if (tenant.id && (rawLogo.length > 0 || tenant.logo)) {
-    logoUrl = `${baseUrl}/api/v1/store/${encodeURIComponent(tenant.id)}/logo.png`;
-    if (logoUrl.startsWith("http://")) logoUrl = logoUrl.replace("http://", "https://");
+function buildPharmacyPostalAddress(tenant: any): Record<string, any> | undefined {
+  const streetParts = [
+    tenant?.street || tenant?.logradouro,
+    tenant?.address_number || tenant?.addressnumber || tenant?.numero,
+  ].filter(Boolean);
+  const neighborhood = String(tenant?.neighborhood || tenant?.bairro || "").trim();
+  let streetAddress = streetParts.join(", ");
+  if (neighborhood) {
+    streetAddress = streetAddress ? `${streetAddress} - ${neighborhood}` : neighborhood;
+  }
+  if (!streetAddress && (tenant?.full_address || tenant?.fulladdress)) {
+    streetAddress = String(tenant.full_address || tenant.fulladdress).trim();
   }
 
-  let canonicalUrl = `${baseUrl}/loja/${encodeURIComponent(tenantSlug)}`;
-  if (tenant.custom_domain && tenant.custom_domain.trim()) {
-    canonicalUrl = `https://${tenant.custom_domain.replace(/^https?:\/\//, "").trim()}`;
-  } else if (host.endsWith(".farmaflow.online") && host !== "farmaflow.online" && host !== "www.farmaflow.online") {
-    canonicalUrl = `${proto}://${host}`;
+  const city = String(tenant?.city || tenant?.cidade || "").trim();
+  const state = String(tenant?.state || tenant?.uf || "").trim();
+  const cep = String(tenant?.cep || "").trim();
+
+  if (!streetAddress && !city && !state && !cep) return undefined;
+
+  const address: Record<string, any> = {
+    "@type": "PostalAddress",
+    addressCountry: "BR",
+  };
+  if (streetAddress) address.streetAddress = streetAddress;
+  if (city) address.addressLocality = city;
+  if (state) address.addressRegion = state;
+  if (cep) address.postalCode = cep;
+  return address;
+}
+
+function buildPharmacyJsonLd(tenant: any, storeName: string, storeUrl: string, storeLogoUrl: string): Record<string, any> {
+  const phone = String(tenant?.telefone_contato || tenant?.phone || tenant?.whatsapp || "").trim();
+  const address = buildPharmacyPostalAddress(tenant);
+  const jsonLd: Record<string, any> = {
+    "@context": "https://schema.org",
+    "@type": "Pharmacy",
+    name: storeName,
+    url: storeUrl,
+    image: storeLogoUrl,
+    logo: storeLogoUrl,
+  };
+  if (phone) jsonLd.telephone = phone;
+  if (address) jsonLd.address = address;
+  return jsonLd;
+}
+
+function resolveEffectiveProductPrice(product: any): number {
+  const price = Number(product?.price) || 0;
+  const promo = Number(product?.promotional_price) || 0;
+  const orig = Number(product?.original_price) || 0;
+  if (promo > 0 && (price <= 0 || promo < price)) return promo;
+  if (price > 0) return price;
+  if (orig > 0) return orig;
+  return 0;
+}
+
+function buildTenantMetaRecordFromTenant(
+  tenant: any,
+  req: express.Request,
+  product?: any | null
+): TenantMetaRecord {
+  const { proto, host, baseUrl } = resolveRequestOrigin(req);
+
+  const storeName = String(tenant.name || tenant.razao_social || "FarmaFlow Drogaria").trim();
+  const neighborhood = String(tenant.neighborhood || tenant.bairro || "").trim();
+  const city = String(tenant.city || tenant.cidade || "").trim();
+  const state = String(tenant.state || tenant.uf || "").trim();
+  const locParts = [neighborhood, city, state].filter(Boolean);
+  const location = locParts.length > 0 ? locParts.join(" - ") : "";
+  const cityState = [city, state].filter(Boolean).join("/");
+
+  const tenantSlug = getSeoTenantSlug(tenant);
+
+  const rawLogo = String(
+    tenant.logo_url || tenant.logo || tenant.smart_banners?._regulatoryData?.logo_url || ""
+  ).trim();
+  let storeLogoUrl = DEFAULT_FALLBACK_OG_LOGO;
+  if ((rawLogo.startsWith("http://") || rawLogo.startsWith("https://")) && !rawLogo.startsWith("data:")) {
+    storeLogoUrl = rawLogo.startsWith("http://") ? rawLogo.replace("http://", "https://") : rawLogo;
+  } else if (tenant.id && (rawLogo.length > 0 || tenant.logo)) {
+    storeLogoUrl = `${baseUrl}/api/v1/store/${encodeURIComponent(tenant.id)}/logo.png`;
+    if (storeLogoUrl.startsWith("http://") && !host.startsWith("localhost")) {
+      storeLogoUrl = storeLogoUrl.replace("http://", "https://");
+    }
+  }
+
+  let storeUrl = `${baseUrl}/loja/${encodeURIComponent(tenantSlug)}`;
+  if (tenant.custom_domain && String(tenant.custom_domain).trim()) {
+    storeUrl = `https://${String(tenant.custom_domain).replace(/^https?:\/\//, "").replace(/\/+$/, "").trim()}`;
+  } else if (
+    (host.endsWith(".farmaflow.online") || host.endsWith(".nexoia.online")) &&
+    !["www", "farmaflow", "nexoia", "app", "admin", "api", "portal"].includes(host.split(".")[0])
+  ) {
+    storeUrl = `${proto}://${host}`;
+  }
+
+  // Metadados padrão da loja (Pharmacy)
+  let title = `${storeName}${location ? ` (${location})` : ""} - Farmácia Online & Delivery`;
+  let description =
+    String(
+      tenant.description ||
+        tenant.banner_subtitle ||
+        tenant.bannersubtitle ||
+        tenant.banner_title ||
+        tenant.bannertitle ||
+        ""
+    ).trim() ||
+    `Compre medicamentos, perfumaria e saúde na ${storeName}${location ? ` em ${location}` : ""}. Entrega rápida e pedido online direto no WhatsApp.`;
+  let logoUrl = storeLogoUrl;
+  let canonicalUrl = storeUrl;
+  let ogType: "website" | "product" = "website";
+  let priceAmount: string | undefined;
+  let availability: "InStock" | "OutOfStock" | undefined;
+  let jsonLd: Record<string, any> = buildPharmacyJsonLd(tenant, storeName, storeUrl, storeLogoUrl);
+
+  // Enriquecimento SEO para Produto (Product + Offer)
+  if (product && product.name) {
+    const productName = String(product.name).trim();
+    const effectivePrice = resolveEffectiveProductPrice(product);
+    const formattedBrPrice =
+      effectivePrice > 0 ? `R$ ${effectivePrice.toFixed(2).replace(".", ",")}` : "";
+    const inStock = Number(product.stock ?? 0) > 0;
+    const productSlug = buildSeoProductSlug(product);
+    const prodImg = String(product.image || product.image_url || "").trim();
+
+    if ((prodImg.startsWith("http://") || prodImg.startsWith("https://")) && !prodImg.startsWith("data:")) {
+      logoUrl = prodImg.startsWith("http://") ? prodImg.replace("http://", "https://") : prodImg;
+    }
+
+    const storeOriginForProduct =
+      tenant.custom_domain && String(tenant.custom_domain).trim()
+        ? `https://${String(tenant.custom_domain).replace(/^https?:\/\//, "").replace(/\/+$/, "").trim()}`
+        : baseUrl;
+    canonicalUrl = `${storeOriginForProduct}/loja/${encodeURIComponent(tenantSlug)}/produto/${encodeURIComponent(productSlug)}`;
+
+    title = `${productName}${formattedBrPrice ? ` por ${formattedBrPrice}` : ""} | ${storeName}${cityState ? ` - ${cityState}` : ""}`;
+    description = `Compre ${productName}${product.presentation ? ` (${product.presentation})` : ""}${formattedBrPrice ? ` por ${formattedBrPrice}` : ""} na ${storeName}${location ? ` em ${location}` : ""}. ${inStock ? "Produto em estoque com entrega rápida" : "Consulte disponibilidade"} via WhatsApp.`;
+    ogType = "product";
+    if (effectivePrice > 0) {
+      priceAmount = effectivePrice.toFixed(2);
+    }
+    availability = inStock ? "InStock" : "OutOfStock";
+
+    const sellerSchema = buildPharmacyJsonLd(tenant, storeName, storeUrl, storeLogoUrl);
+    delete sellerSchema["@context"];
+
+    const offerSchema: Record<string, any> = {
+      "@type": "Offer",
+      url: canonicalUrl,
+      priceCurrency: "BRL",
+      price: effectivePrice > 0 ? effectivePrice.toFixed(2) : "0.00",
+      availability: inStock ? "https://schema.org/InStock" : "https://schema.org/OutOfStock",
+      itemCondition: "https://schema.org/NewCondition",
+      seller: sellerSchema,
+    };
+
+    const productSchema: Record<string, any> = {
+      "@context": "https://schema.org",
+      "@type": "Product",
+      name: productName,
+      description: String(product.description || description).trim().slice(0, 500),
+      image: [logoUrl],
+      sku: String(product.internal_code || product.id || productSlug),
+      offers: offerSchema,
+    };
+    const cleanBarcode = String(product.barcode || "").replace(/\D/g, "");
+    if (cleanBarcode.length === 13) {
+      productSchema.gtin13 = cleanBarcode;
+    } else if (cleanBarcode.length >= 8 && cleanBarcode.length <= 14) {
+      productSchema.gtin = cleanBarcode;
+    }
+    if (product.manufacturer && String(product.manufacturer).trim() && String(product.manufacturer).trim() !== "Outros") {
+      productSchema.brand = {
+        "@type": "Brand",
+        name: String(product.manufacturer).trim(),
+      };
+    }
+
+    jsonLd = productSchema;
   }
 
   return {
@@ -848,188 +1319,216 @@ function buildTenantMetaRecordFromTenant(tenant: any, req: express.Request): Ten
     title,
     description,
     logoUrl,
+    storeLogoUrl,
     canonicalUrl,
+    storeUrl,
     location,
-    phone: tenant.whatsapp || "",
+    phone: String(tenant.telefone_contato || tenant.phone || tenant.whatsapp || ""),
+    ogType,
+    priceAmount,
+    availability,
+    jsonLd,
     rawTenant: tenant,
+    rawProduct: product || undefined,
   };
 }
 
 async function getTenantMetaRecord(identifier: string, req: express.Request): Promise<TenantMetaRecord | null> {
   if (!identifier) return null;
-  const tenant = await getTenantCachedOrFetch(identifier);
+  const tenant = await withSeoTimeout(getTenantCachedOrFetch(identifier), SEO_LOOKUP_TIMEOUT_MS);
   if (!tenant) return null;
 
-  // Resolução de URLs canônicas absolutas
-  const host = (req.headers["x-forwarded-host"] || req.headers.host || "farmaflow.online").toString().split(":")[0];
-  const proto = (req.headers["x-forwarded-proto"] || (req.secure ? "https" : "https")).toString();
-  const baseUrl = `${proto}://${host}`;
-
-  const storeName = tenant.name || tenant.razao_social || "FarmaFlow Drogaria";
-  const locParts = [tenant.neighborhood, tenant.city, tenant.state].filter(Boolean);
-  const location = locParts.length > 0 ? locParts.join(" - ") : "";
-  let title = `${storeName}${location ? ` (${location})` : ""} - Farmácia Online & Delivery`;
-
-  let description =
-    tenant.description ||
-    tenant.banner_subtitle ||
-    tenant.bannersubtitle ||
-    tenant.banner_title ||
-    tenant.bannertitle ||
-    "Faça seu pedido online com tele-entrega rápida direta no WhatsApp. Medicamentos, perfumaria e ofertas exclusivas.";
-
-  const tenantSlug = tenant.slug || tenant.id;
-
-  // Resolução do logotipo público da drogaria para Open Graph
-  const rawLogo = (tenant.logo_url || tenant.logo || tenant.smart_banners?._regulatoryData?.logo_url || "").trim();
-  let logoUrl = DEFAULT_FALLBACK_OG_LOGO;
-  if ((rawLogo.startsWith("http://") || rawLogo.startsWith("https://")) && !rawLogo.startsWith("data:")) {
-    logoUrl = rawLogo.startsWith("http://") ? rawLogo.replace("http://", "https://") : rawLogo;
-  } else if (tenant.id && (rawLogo.length > 0 || tenant.logo)) {
-    logoUrl = `${baseUrl}/api/v1/store/${encodeURIComponent(tenant.id)}/logo.png`;
-    if (logoUrl.startsWith("http://")) logoUrl = logoUrl.replace("http://", "https://");
+  const targetProdIdentifier = extractProductIdentifierFromRequest(req);
+  let productData: any | null = null;
+  if (targetProdIdentifier) {
+    productData = await withSeoTimeout(
+      fetchProductForSeo(String(tenant.id), targetProdIdentifier),
+      SEO_LOOKUP_TIMEOUT_MS
+    );
   }
 
-  let canonicalUrl = `${baseUrl}/loja/${encodeURIComponent(tenantSlug)}`;
-  if (tenant.custom_domain && tenant.custom_domain.trim()) {
-    canonicalUrl = `https://${tenant.custom_domain.replace(/^https?:\/\//, "").trim()}`;
-  } else if (host.endsWith(".farmaflow.online") && host !== "farmaflow.online" && host !== "www.farmaflow.online") {
-    canonicalUrl = `${proto}://${host}`;
-  }
-
-  // Enriquecimento com dados de produto específico para Link Preview no WhatsApp
-  const targetProdId = (req.query?.produto || req.query?.prod || req.query?.product || req.params?.id || "").toString().trim();
-  if (targetProdId) {
-    try {
-      const { data: prodData } = await supabase
-        .from("products")
-        .select("id, name, slug, price, presentation, image, image_url")
-        .or(`id.eq.${targetProdId},slug.eq.${targetProdId}`)
-        .limit(1)
-        .maybeSingle();
-
-      if (prodData) {
-        const prodPrice = Number(prodData.price) > 0 ? ` - R$ ${Number(prodData.price).toFixed(2).replace('.', ',')}` : "";
-        title = `${prodData.name}${prodPrice} | ${storeName}`;
-        description = `${prodData.presentation ? `${prodData.presentation}. ` : ""}Peça online na ${storeName} com entrega rápida e pagamento facilitado no WhatsApp.`;
-        const prodImg = (prodData.image || prodData.image_url || "").trim();
-        if ((prodImg.startsWith("http://") || prodImg.startsWith("https://")) && !prodImg.startsWith("data:")) {
-          logoUrl = prodImg.startsWith("http://") ? prodImg.replace("http://", "https://") : prodImg;
-        }
-      }
-    } catch (_) {}
-  }
-
-  return {
-    id: tenant.id,
-    name: storeName,
-    slug: tenantSlug,
-    title,
-    description,
-    logoUrl,
-    canonicalUrl,
-    location,
-    phone: tenant.whatsapp || "",
-    rawTenant: tenant,
-  };
+  return buildTenantMetaRecordFromTenant(tenant, req, productData);
 }
 
 function generateStoreOpenGraphHtml(meta: TenantMetaRecord): string {
-  const esc = (str: string = "") =>
-    str
-      .replace(/&/g, "&amp;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#39;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
-
-  const titleName = esc(meta.rawTenant?.trade_name || meta.name || "Drogaria Explendido");
+  const titleText = escapeHtmlAttr(meta.title || meta.name || "FarmaFlow");
+  const siteName = escapeHtmlAttr(meta.name || "FarmaFlow");
   const rawLogo = meta.logoUrl || DEFAULT_FALLBACK_OG_LOGO;
-  const logoUrl = esc(rawLogo);
+  const logoUrl = escapeHtmlAttr(rawLogo);
   const imageType = detectOgImageType(rawLogo);
-  const descName = esc(meta.rawTenant?.trade_name || "nossa drogaria");
-  const descricao = esc(`Faça seu pedido online com rapidez e comodidade na ${descName}.`);
-  const currentUrl = esc(meta.canonicalUrl || "https://drogaria-esplendido.farmaflow.online");
+  const descricao = escapeHtmlAttr(
+    meta.description || `Faça seu pedido online com rapidez e comodidade na ${meta.name || "nossa drogaria"}.`
+  );
+  const currentUrl = escapeHtmlAttr(meta.canonicalUrl || meta.storeUrl || "https://farmaflow.online");
+  const ogType = meta.ogType === "product" ? "product" : "website";
+  const priceMeta =
+    meta.ogType === "product" && meta.priceAmount
+      ? `\n  <meta property="product:price:amount" content="${escapeHtmlAttr(meta.priceAmount)}" />\n  <meta property="product:price:currency" content="BRL" />`
+      : "";
+  const jsonLdScript = meta.jsonLd
+    ? `\n  <script type="application/ld+json" data-farmaflow-seo="true">${safeJsonLdStringify(meta.jsonLd)}</script>`
+    : "";
 
   return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
-  <title>${titleName}</title>
+  <title>${titleText}</title>
   <meta name="description" content="${descricao}" />
-  <meta property="og:type" content="website" />
-  <meta property="og:site_name" content="${titleName}" />
-  <meta property="og:title" content="${titleName}" />
+  <link rel="canonical" href="${currentUrl}" />
+  <meta property="og:type" content="${ogType}" />
+  <meta property="og:site_name" content="${siteName}" />
+  <meta property="og:title" content="${titleText}" />
   <meta property="og:description" content="${descricao}" />
   <meta property="og:image" content="${logoUrl}" />
   <meta property="og:image:secure_url" content="${logoUrl}" />
   <meta property="og:image:type" content="${imageType}" />
   <meta property="og:image:width" content="600" />
   <meta property="og:image:height" content="600" />
-  <meta property="og:image:alt" content="${titleName}" />
-  <meta property="og:url" content="${currentUrl}" />
+  <meta property="og:image:alt" content="${titleText}" />
+  <meta property="og:url" content="${currentUrl}" />${priceMeta}
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="${titleName}" />
+  <meta name="twitter:title" content="${titleText}" />
   <meta name="twitter:description" content="${descricao}" />
   <meta name="twitter:image" content="${logoUrl}" />
-  <link rel="icon" href="${logoUrl}" />
-  <link rel="apple-touch-icon" href="${logoUrl}" />
+  <link rel="icon" href="${escapeHtmlAttr(meta.storeLogoUrl || rawLogo)}" />
+  <link rel="apple-touch-icon" href="${escapeHtmlAttr(meta.storeLogoUrl || rawLogo)}" />${jsonLdScript}
 </head>
 <body></body>
 </html>`;
 }
 
 function injectStoreMetaIntoHtml(html: string, meta: TenantMetaRecord): string {
-  let updated = html;
-  const imageType = detectOgImageType(meta.logoUrl);
+  try {
+    let updated = html;
+    const escTitle = escapeHtmlAttr(meta.title);
+    const escDesc = escapeHtmlAttr(meta.description);
+    const escName = escapeHtmlAttr(meta.name);
+    const escUrl = escapeHtmlAttr(meta.canonicalUrl);
+    const escImg = escapeHtmlAttr(meta.logoUrl);
+    const escStoreLogo = escapeHtmlAttr(meta.storeLogoUrl || meta.logoUrl);
+    const imageType = detectOgImageType(meta.logoUrl);
+    const ogType = meta.ogType === "product" ? "product" : "website";
 
-  updated = updated.replace(/<title>.*?<\/title>/i, `<title>${meta.title}</title>`);
+    updated = updated.replace(/<title>.*?<\/title>/i, () => `<title>${escTitle}</title>`);
 
-  if (updated.includes('property="og:title"')) {
-    updated = updated.replace(/<meta\s+property="og:title"\s+content="[^"]*"\s*\/?>/i, `<meta property="og:title" content="${meta.title}" />`);
-  }
-  if (updated.includes('property="og:description"')) {
-    updated = updated.replace(/<meta\s+property="og:description"\s+content="[^"]*"\s*\/?>/i, `<meta property="og:description" content="${meta.description}" />`);
-  }
-  if (updated.includes('property="og:url"')) {
-    updated = updated.replace(/<meta\s+property="og:url"\s+content="[^"]*"\s*\/?>/i, `<meta property="og:url" content="${meta.canonicalUrl}" />`);
-  }
-  if (updated.includes('property="og:site_name"')) {
-    updated = updated.replace(/<meta\s+property="og:site_name"\s+content="[^"]*"\s*\/?>/i, `<meta property="og:site_name" content="${meta.name}" />`);
-  }
-  if (updated.includes('property="og:image"')) {
-    updated = updated.replace(/<meta\s+property="og:image"\s+content="[^"]*"\s*\/?>/i, `<meta property="og:image" content="${meta.logoUrl}" />`);
-  }
-  if (updated.includes('property="og:image:secure_url"')) {
-    updated = updated.replace(/<meta\s+property="og:image:secure_url"\s+content="[^"]*"\s*\/?>/i, `<meta property="og:image:secure_url" content="${meta.logoUrl}" />`);
-  }
-  if (updated.includes('property="og:image:type"')) {
-    updated = updated.replace(/<meta\s+property="og:image:type"\s+content="[^"]*"\s*\/?>/i, `<meta property="og:image:type" content="${imageType}" />`);
-  }
-  if (updated.includes('property="og:image:alt"')) {
-    updated = updated.replace(/<meta\s+property="og:image:alt"\s+content="[^"]*"\s*\/?>/i, `<meta property="og:image:alt" content="${meta.name}" />`);
-  }
-  if (updated.includes('name="twitter:card"')) {
-    updated = updated.replace(/<meta\s+name="twitter:card"\s+content="[^"]*"\s*\/?>/i, `<meta name="twitter:card" content="summary_large_image" />`);
-  }
-  if (updated.includes('name="twitter:title"')) {
-    updated = updated.replace(/<meta\s+name="twitter:title"\s+content="[^"]*"\s*\/?>/i, `<meta name="twitter:title" content="${meta.title}" />`);
-  }
-  if (updated.includes('name="twitter:description"')) {
-    updated = updated.replace(/<meta\s+name="twitter:description"\s+content="[^"]*"\s*\/?>/i, `<meta name="twitter:description" content="${meta.description}" />`);
-  }
-  if (updated.includes('name="twitter:image"')) {
-    updated = updated.replace(/<meta\s+name="twitter:image"\s+content="[^"]*"\s*\/?>/i, `<meta name="twitter:image" content="${meta.logoUrl}" />`);
-  }
-  if (updated.includes('name="description"')) {
-    updated = updated.replace(/<meta\s+name="description"\s+content="[^"]*"\s*\/?>/i, `<meta name="description" content="${meta.description}" />`);
-  }
-  if (meta.logoUrl && !meta.logoUrl.includes("preview-share.png")) {
-    updated = updated.replace(/<link\s+rel="icon"[^>]*>/i, `<link rel="icon" type="${imageType}" href="${meta.logoUrl}" />`);
-    updated = updated.replace(/<link\s+rel="apple-touch-icon"[^>]*>/i, `<link rel="apple-touch-icon" href="${meta.logoUrl}" />`);
-  }
+    if (updated.includes('property="og:type"')) {
+      updated = updated.replace(
+        /<meta\s+property="og:type"\s+content="[^"]*"\s*\/?>/i,
+        () => `<meta property="og:type" content="${ogType}" />`
+      );
+    }
+    if (updated.includes('property="og:title"')) {
+      updated = updated.replace(
+        /<meta\s+property="og:title"\s+content="[^"]*"\s*\/?>/i,
+        () => `<meta property="og:title" content="${escTitle}" />`
+      );
+    }
+    if (updated.includes('property="og:description"')) {
+      updated = updated.replace(
+        /<meta\s+property="og:description"\s+content="[^"]*"\s*\/?>/i,
+        () => `<meta property="og:description" content="${escDesc}" />`
+      );
+    }
+    if (updated.includes('property="og:url"')) {
+      updated = updated.replace(
+        /<meta\s+property="og:url"\s+content="[^"]*"\s*\/?>/i,
+        () => `<meta property="og:url" content="${escUrl}" />`
+      );
+    }
+    if (updated.includes('property="og:site_name"')) {
+      updated = updated.replace(
+        /<meta\s+property="og:site_name"\s+content="[^"]*"\s*\/?>/i,
+        () => `<meta property="og:site_name" content="${escName}" />`
+      );
+    }
+    if (updated.includes('property="og:image"')) {
+      updated = updated.replace(
+        /<meta\s+property="og:image"\s+content="[^"]*"\s*\/?>/i,
+        () => `<meta property="og:image" content="${escImg}" />`
+      );
+    }
+    if (updated.includes('property="og:image:secure_url"')) {
+      updated = updated.replace(
+        /<meta\s+property="og:image:secure_url"\s+content="[^"]*"\s*\/?>/i,
+        () => `<meta property="og:image:secure_url" content="${escImg}" />`
+      );
+    }
+    if (updated.includes('property="og:image:type"')) {
+      updated = updated.replace(
+        /<meta\s+property="og:image:type"\s+content="[^"]*"\s*\/?>/i,
+        () => `<meta property="og:image:type" content="${imageType}" />`
+      );
+    }
+    if (updated.includes('property="og:image:alt"')) {
+      updated = updated.replace(
+        /<meta\s+property="og:image:alt"\s+content="[^"]*"\s*\/?>/i,
+        () => `<meta property="og:image:alt" content="${escTitle}" />`
+      );
+    }
+    if (updated.includes('name="twitter:card"')) {
+      updated = updated.replace(
+        /<meta\s+name="twitter:card"\s+content="[^"]*"\s*\/?>/i,
+        () => `<meta name="twitter:card" content="summary_large_image" />`
+      );
+    }
+    if (updated.includes('name="twitter:title"')) {
+      updated = updated.replace(
+        /<meta\s+name="twitter:title"\s+content="[^"]*"\s*\/?>/i,
+        () => `<meta name="twitter:title" content="${escTitle}" />`
+      );
+    }
+    if (updated.includes('name="twitter:description"')) {
+      updated = updated.replace(
+        /<meta\s+name="twitter:description"\s+content="[^"]*"\s*\/?>/i,
+        () => `<meta name="twitter:description" content="${escDesc}" />`
+      );
+    }
+    if (updated.includes('name="twitter:image"')) {
+      updated = updated.replace(
+        /<meta\s+name="twitter:image"\s+content="[^"]*"\s*\/?>/i,
+        () => `<meta name="twitter:image" content="${escImg}" />`
+      );
+    }
+    if (updated.includes('name="description"')) {
+      updated = updated.replace(
+        /<meta\s+name="description"\s+content="[^"]*"\s*\/?>/i,
+        () => `<meta name="description" content="${escDesc}" />`
+      );
+    }
+    if (meta.storeLogoUrl && !meta.storeLogoUrl.includes("preview-share.png")) {
+      const storeLogoType = detectOgImageType(meta.storeLogoUrl);
+      updated = updated.replace(
+        /<link\s+rel="icon"[^>]*>/i,
+        () => `<link rel="icon" type="${storeLogoType}" href="${escStoreLogo}" />`
+      );
+      updated = updated.replace(
+        /<link\s+rel="apple-touch-icon"[^>]*>/i,
+        () => `<link rel="apple-touch-icon" href="${escStoreLogo}" />`
+      );
+    }
 
-  return updated;
+    // Remove canonical ou JSON-LD anterior injetado caso exista
+    updated = updated.replace(/<link\s+rel="canonical"[^>]*>\s*/gi, "");
+    updated = updated.replace(/<script\s+type="application\/ld\+json"\s+data-farmaflow-seo="true">[\s\S]*?<\/script>\s*/gi, "");
+
+    const extraHeadTags: string[] = [`<link rel="canonical" href="${escUrl}" />`];
+    if (meta.ogType === "product" && meta.priceAmount) {
+      extraHeadTags.push(`<meta property="product:price:amount" content="${escapeHtmlAttr(meta.priceAmount)}" />`);
+      extraHeadTags.push(`<meta property="product:price:currency" content="BRL" />`);
+    }
+    if (meta.jsonLd) {
+      extraHeadTags.push(
+        `<script type="application/ld+json" data-farmaflow-seo="true">${safeJsonLdStringify(meta.jsonLd)}</script>`
+      );
+    }
+
+    updated = updated.replace(/<\/head>/i, () => `    ${extraHeadTags.join("\n    ")}\n  </head>`);
+    return updated;
+  } catch {
+    // Fallback silencioso: nunca quebra o HTML original
+    return html;
+  }
 }
 
 // Endpoint de Servir Logo da Loja em Formato Binário Real (JPEG/PNG) para WhatsApp e Crawlers
@@ -1088,94 +1587,285 @@ app.get(["/api/v1/store/:tenantId/logo.png", "/api/store-logo/:tenantId.png"], a
 // Endpoint /api/og e /api/og-handler de Metadados / Rich Preview Card para Integrações e Crawlers
 app.all(["/api/og-handler", "/api/og"], ogHandler);
 
-// Interceptor de Rota de Loja Pública (/loja/:slug e /produto/:id)
-app.get(["/loja/:slug", "/loja/:slug/*all", "/produto/:id", "/produto/:id/*all", "/loja/:slug/produto/:id"], async (req, res, next) => {
+// ============================================================================
+// ROBOTS.TXT E SITEMAPS XML DINÂMICOS (CACHE 1 HORA + FALLBACK SEGURO)
+// ============================================================================
+
+app.get("/robots.txt", (req, res) => {
   try {
-    const slug = Array.isArray(req.params.slug) ? req.params.slug[0] : String(req.params.slug || "");
-    const prodId = Array.isArray(req.params.id) ? req.params.id[0] : String(req.params.id || "");
-    const identifier = slug || prodId;
-    const isCrawler = isSocialCrawler((req.headers["user-agent"] as string) || "");
+    const { baseUrl } = resolveRequestOrigin(req);
+    const body = [
+      "User-agent: *",
+      "Allow: /loja/",
+      "Disallow: /admin",
+      "Disallow: /painel",
+      "Disallow: /api/",
+      "",
+      `Sitemap: ${baseUrl}/sitemap.xml`,
+      "",
+    ].join("\n");
 
-    if (isCrawler) {
-      const meta = await getTenantMetaRecord(identifier, req);
-      if (!meta) return next();
-      res.setHeader("Content-Type", "text/html; charset=utf-8");
-      res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0, s-maxage=0");
-      res.setHeader("CDN-Cache-Control", "no-store");
-      res.setHeader("Vercel-CDN-Cache-Control", "no-store");
-      return res.send(generateStoreOpenGraphHtml(meta));
-    }
-
-    const htmlFromRam = getIndexHtmlFromRam();
-    if (!htmlFromRam) return next();
-
-    let tenantObj = getTenantFromRamCacheSync(identifier);
-    if (!tenantObj && identifier) {
-      tenantObj = await getTenantCachedOrFetch(identifier).catch(() => null);
-    }
-
-    if (tenantObj) {
-      const meta = buildTenantMetaRecordFromTenant(tenantObj, req);
-      const injected = injectStoreMetaIntoHtml(htmlFromRam, meta);
-      res.setHeader("Content-Type", "text/html; charset=utf-8");
-      res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-      return res.send(injected);
-    }
-
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-    return res.send(htmlFromRam);
-  } catch (err) {
-    return next();
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.setHeader("Cache-Control", "public, max-age=3600");
+    return res.status(200).send(body);
+  } catch {
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    return res.status(200).send("User-agent: *\nAllow: /loja/\nDisallow: /admin\nDisallow: /painel\nDisallow: /api/\n");
   }
 });
 
-// Interceptor de Rota Raiz (/) para Crawlers de Redes Sociais com parâmetros de drogaria ou subdomínio
-app.get("/", async (req, res, next) => {
-  try {
-    const isCrawler = isSocialCrawler((req.headers["user-agent"] as string) || "");
-    const storeParam = (req.query.store || req.query.loja || req.query.tenant || req.query.p || "").toString().trim();
-    const host = (req.headers["x-forwarded-host"] || req.headers.host || "").toString().split(":")[0];
-    const isSubdomain = (host.endsWith(".farmaflow.online") || host.endsWith(".nexoia.online")) && !["www", "farmaflow", "nexoia", "app", "admin", "api", "portal"].includes(host.split(".")[0]);
+app.get("/sitemap.xml", async (req, res) => {
+  const { host, baseUrl } = resolveRequestOrigin(req);
+  const cacheKey = baseUrl.toLowerCase();
+  const now = Date.now();
 
-    if (isCrawler || storeParam || isSubdomain) {
-      let identifier = storeParam;
-      if (!identifier && isSubdomain) {
-        identifier = host.split(".")[0];
+  res.setHeader("Content-Type", "application/xml; charset=utf-8");
+  res.setHeader("Cache-Control", "public, max-age=3600, stale-while-revalidate=7200");
+
+  try {
+    const cached = sitemapIndexRamCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      return res.status(200).send(cached.xml);
+    }
+
+    const today = new Date().toISOString().split("T")[0];
+    const isSubdomain =
+      (host.endsWith(".farmaflow.online") || host.endsWith(".nexoia.online")) &&
+      !["www", "farmaflow", "nexoia", "app", "admin", "api", "portal"].includes(host.split(".")[0]);
+
+    let activeTenants: any[] = [];
+    if (isSubdomain) {
+      const subTenant = await withSeoTimeout(getTenantCachedOrFetch(host.split(".")[0]), 2500);
+      if (subTenant) activeTenants = [subTenant];
+    } else {
+      let allTenants =
+        allTenantsRamCache && allTenantsRamCache.expiresAt > now ? allTenantsRamCache.list : null;
+      if (!allTenants) {
+        const fetched = await withSeoTimeout(
+          Promise.resolve(
+            supabaseAdmin
+              .from("tenants")
+              .select("id, slug, name, is_blocked, license_expiration")
+              .limit(1000)
+          ),
+          3000
+        );
+        if (fetched && Array.isArray((fetched as any).data)) {
+          allTenants = (fetched as any).data;
+        }
       }
+      if (Array.isArray(allTenants)) {
+        const startOfToday = new Date().setHours(0, 0, 0, 0);
+        activeTenants = allTenants.filter((t: any) => {
+          if (!t || t.is_blocked === true || t.isblocked === true) return false;
+          if (t.license_expiration && new Date(t.license_expiration).getTime() < startOfToday) {
+            return false;
+          }
+          return Boolean(getSeoTenantSlug(t));
+        });
+      }
+    }
+
+    const seenSlugs = new Set<string>();
+    const sitemapEntries: string[] = [];
+    for (const t of activeTenants) {
+      const slug = getSeoTenantSlug(t);
+      if (!slug || seenSlugs.has(slug)) continue;
+      seenSlugs.add(slug);
+      const loc = `${baseUrl}/loja/${encodeURIComponent(slug)}/sitemap.xml`;
+      sitemapEntries.push(
+        `  <sitemap>\n    <loc>${escapeXml(loc)}</loc>\n    <lastmod>${today}</lastmod>\n  </sitemap>`
+      );
+    }
+
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${sitemapEntries.join("\n")}\n</sitemapindex>\n`;
+    sitemapIndexRamCache.set(cacheKey, { xml, expiresAt: now + SITEMAP_CACHE_TTL_MS });
+    return res.status(200).send(xml);
+  } catch {
+    const emptyXml = `<?xml version="1.0" encoding="UTF-8"?>\n<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></sitemapindex>\n`;
+    return res.status(200).send(emptyXml);
+  }
+});
+
+app.get("/loja/:tenantSlug/sitemap.xml", async (req, res) => {
+  const tenantSlugParam = Array.isArray(req.params.tenantSlug)
+    ? req.params.tenantSlug[0]
+    : String(req.params.tenantSlug || "").trim();
+  const { baseUrl } = resolveRequestOrigin(req);
+  const cacheKey = `${baseUrl.toLowerCase()}|${tenantSlugParam.toLowerCase()}`;
+  const now = Date.now();
+
+  res.setHeader("Content-Type", "application/xml; charset=utf-8");
+  res.setHeader("Cache-Control", "public, max-age=3600, stale-while-revalidate=7200");
+
+  try {
+    const cached = storeSitemapRamCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      return res.status(200).send(cached.xml);
+    }
+
+    const tenant = await withSeoTimeout(getTenantCachedOrFetch(tenantSlugParam), 2500);
+    if (!tenant || tenant.is_blocked === true || tenant.isblocked === true) {
+      const emptyXml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>\n`;
+      return res.status(404).send(emptyXml);
+    }
+
+    const cleanTenantSlug = getSeoTenantSlug(tenant);
+    const today = new Date().toISOString().split("T")[0];
+    const storeLoc = `${baseUrl}/loja/${encodeURIComponent(cleanTenantSlug)}`;
+
+    const urls: string[] = [
+      `  <url>\n    <loc>${escapeXml(storeLoc)}</loc>\n    <lastmod>${today}</lastmod>\n    <changefreq>daily</changefreq>\n    <priority>1.0</priority>\n  </url>`,
+    ];
+
+    const prodRes = await withSeoTimeout(
+      Promise.resolve(
+        supabaseAdmin
+          .from("products")
+          .select("id, name, internal_code, barcode, price, stock")
+          .eq("tenant_id", tenant.id)
+          .gt("stock", 0)
+          .gt("price", 0)
+          .limit(5000)
+      ),
+      3500
+    );
+
+    const rows = prodRes && Array.isArray((prodRes as any).data) ? (prodRes as any).data : [];
+    const seenProductSlugs = new Set<string>();
+
+    for (const prod of rows) {
+      if (!prod?.name || Number(prod.stock ?? 0) <= 0) continue;
+      const pSlug = buildSeoProductSlug(prod);
+      if (!pSlug || seenProductSlugs.has(pSlug)) continue;
+      seenProductSlugs.add(pSlug);
+      const prodLoc = `${baseUrl}/loja/${encodeURIComponent(cleanTenantSlug)}/produto/${encodeURIComponent(pSlug)}`;
+      urls.push(
+        `  <url>\n    <loc>${escapeXml(prodLoc)}</loc>\n    <lastmod>${today}</lastmod>\n    <changefreq>daily</changefreq>\n    <priority>0.8</priority>\n  </url>`
+      );
+    }
+
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.join("\n")}\n</urlset>\n`;
+    if (storeSitemapRamCache.size > 500) {
+      storeSitemapRamCache.clear();
+    }
+    storeSitemapRamCache.set(cacheKey, { xml, expiresAt: now + SITEMAP_CACHE_TTL_MS });
+    return res.status(200).send(xml);
+  } catch {
+    const fallbackXml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>\n`;
+    return res.status(200).send(fallbackXml);
+  }
+});
+
+// Interceptor de Rota de Loja Pública (/loja/:slug, /loja/:slug/produto/:productSlug e /produto/:productSlug)
+app.get(
+  [
+    "/loja/:slug/produto/:productSlug",
+    "/loja/:slug",
+    "/loja/:slug/*all",
+    "/produto/:productSlug",
+    "/produto/:productSlug/*all",
+  ],
+  async (req, res, next) => {
+    if (!acceptsHtmlForSeo(req)) return next();
+
+    const htmlFromRam = getIndexHtmlFromRam();
+
+    try {
+      const slug = Array.isArray(req.params.slug) ? req.params.slug[0] : String(req.params.slug || "");
+      const { host } = resolveRequestOrigin(req);
+      const isSubdomain =
+        (host.endsWith(".farmaflow.online") || host.endsWith(".nexoia.online")) &&
+        !["www", "farmaflow", "nexoia", "app", "admin", "api", "portal"].includes(host.split(".")[0]);
+      const identifier = slug || (isSubdomain ? host.split(".")[0] : "");
+      const ua = String(req.headers["user-agent"] || "");
+      const isSocialOnly = isSocialPreviewBot(ua);
 
       if (identifier) {
-        if (isCrawler) {
-          const meta = await getTenantMetaRecord(identifier, req);
-          if (meta) {
+        const meta = await withSeoTimeout(getTenantMetaRecord(identifier, req), SEO_LOOKUP_TIMEOUT_MS);
+
+        if (meta) {
+          if (isSocialOnly) {
             res.setHeader("Content-Type", "text/html; charset=utf-8");
             res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0, s-maxage=0");
             res.setHeader("CDN-Cache-Control", "no-store");
             res.setHeader("Vercel-CDN-Cache-Control", "no-store");
-            return res.send(generateStoreOpenGraphHtml(meta));
+            return res.status(200).send(generateStoreOpenGraphHtml(meta));
           }
-        } else {
-          const htmlFromRam = getIndexHtmlFromRam();
+
           if (htmlFromRam) {
-            let tenantObj = getTenantFromRamCacheSync(identifier);
-            if (!tenantObj) {
-              tenantObj = await getTenantCachedOrFetch(identifier).catch(() => null);
-            }
-            if (tenantObj) {
-              const meta = buildTenantMetaRecordFromTenant(tenantObj, req);
-              res.setHeader("Content-Type", "text/html; charset=utf-8");
-              res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-              return res.send(injectStoreMetaIntoHtml(htmlFromRam, meta));
-            }
+            const injected = injectStoreMetaIntoHtml(htmlFromRam, meta);
             res.setHeader("Content-Type", "text/html; charset=utf-8");
             res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-            return res.send(htmlFromRam);
+            return res.status(200).send(injected);
           }
         }
       }
+
+      if (htmlFromRam) {
+        res.setHeader("Content-Type", "text/html; charset=utf-8");
+        res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+        return res.status(200).send(htmlFromRam);
+      }
+      return next();
+    } catch {
+      if (htmlFromRam) {
+        res.setHeader("Content-Type", "text/html; charset=utf-8");
+        res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+        return res.status(200).send(htmlFromRam);
+      }
+      return next();
+    }
+  }
+);
+
+// Interceptor de Rota Raiz (/) para Lojas em Subdomínio, Parâmetros (?store/?loja/?produto) e Crawlers
+app.get("/", async (req, res, next) => {
+  if (!acceptsHtmlForSeo(req)) return next();
+
+  const htmlFromRam = getIndexHtmlFromRam();
+
+  try {
+    const ua = String(req.headers["user-agent"] || "");
+    const isSocialOnly = isSocialPreviewBot(ua);
+    const storeParam = String(req.query.store || req.query.loja || req.query.tenant || req.query.p || "").trim();
+    const { host } = resolveRequestOrigin(req);
+    const isSubdomain =
+      (host.endsWith(".farmaflow.online") || host.endsWith(".nexoia.online")) &&
+      !["www", "farmaflow", "nexoia", "app", "admin", "api", "portal"].includes(host.split(".")[0]);
+
+    const identifier = storeParam || (isSubdomain ? host.split(".")[0] : "");
+    if (identifier) {
+      const meta = await withSeoTimeout(getTenantMetaRecord(identifier, req), SEO_LOOKUP_TIMEOUT_MS);
+      if (meta) {
+        if (isSocialOnly) {
+          res.setHeader("Content-Type", "text/html; charset=utf-8");
+          res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0, s-maxage=0");
+          res.setHeader("CDN-Cache-Control", "no-store");
+          res.setHeader("Vercel-CDN-Cache-Control", "no-store");
+          return res.status(200).send(generateStoreOpenGraphHtml(meta));
+        }
+
+        if (htmlFromRam) {
+          res.setHeader("Content-Type", "text/html; charset=utf-8");
+          res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+          return res.status(200).send(injectStoreMetaIntoHtml(htmlFromRam, meta));
+        }
+      }
+
+      if (htmlFromRam && !isSocialOnly) {
+        res.setHeader("Content-Type", "text/html; charset=utf-8");
+        res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+        return res.status(200).send(htmlFromRam);
+      }
     }
     return next();
-  } catch (err) {
+  } catch {
+    if (htmlFromRam) {
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+      return res.status(200).send(htmlFromRam);
+    }
     return next();
   }
 });
@@ -15412,22 +16102,27 @@ async function startServer() {
       res.setHeader('Expires', '0');
       const htmlFromRam = getIndexHtmlFromRam();
       if (htmlFromRam) {
-        const host = (req.headers["x-forwarded-host"] || req.headers.host || "").toString().split(":")[0].toLowerCase();
-        const isSubdomain = (host.endsWith(".farmaflow.online") || host.endsWith(".nexoia.online")) && !["www", "farmaflow", "nexoia", "app", "admin", "api", "portal"].includes(host.split(".")[0]);
-        if (isSubdomain) {
-          const subdomainId = host.split(".")[0];
-          let tenantObj = getTenantFromRamCacheSync(subdomainId);
-          if (!tenantObj) {
-            tenantObj = await getTenantCachedOrFetch(subdomainId).catch(() => null);
+        try {
+          if (acceptsHtmlForSeo(req)) {
+            const { host } = resolveRequestOrigin(req);
+            const lowerHost = host.toLowerCase();
+            const isSubdomain =
+              (lowerHost.endsWith(".farmaflow.online") || lowerHost.endsWith(".nexoia.online")) &&
+              !["www", "farmaflow", "nexoia", "app", "admin", "api", "portal"].includes(lowerHost.split(".")[0]);
+            if (isSubdomain) {
+              const subdomainId = lowerHost.split(".")[0];
+              const meta = await withSeoTimeout(getTenantMetaRecord(subdomainId, req), SEO_LOOKUP_TIMEOUT_MS);
+              if (meta) {
+                res.setHeader("Content-Type", "text/html; charset=utf-8");
+                return res.status(200).send(injectStoreMetaIntoHtml(htmlFromRam, meta));
+              }
+            }
           }
-          if (tenantObj) {
-            const meta = buildTenantMetaRecordFromTenant(tenantObj, req);
-            res.setHeader("Content-Type", "text/html; charset=utf-8");
-            return res.send(injectStoreMetaIntoHtml(htmlFromRam, meta));
-          }
+        } catch {
+          // Fallback silencioso para o HTML padrão
         }
         res.setHeader("Content-Type", "text/html; charset=utf-8");
-        return res.send(htmlFromRam);
+        return res.status(200).send(htmlFromRam);
       }
       res.sendFile(path.join(distPath, "index.html"));
     });
