@@ -84,7 +84,7 @@ import {
 import {
   ensurePushSubscriptionsTable,
   getOrInitVapidKeys,
-  resolveTenantIdByEndpoint,
+  resolveTenantIdsByEndpoint,
   removePushSubscriptionByEndpoint,
   savePushSubscription,
   getTenantPushSubscriptions,
@@ -16118,14 +16118,16 @@ app.post(
         body.userAgent || body.user_agent || req.headers["user-agent"] || ""
       ).trim();
 
-      if (!tenantId && oldEndpoint) {
-        const resolved = await resolveTenantIdByEndpoint(supabaseAdmin, oldEndpoint);
-        if (resolved) {
-          tenantId = resolved;
-        }
+      let targetTenantIds: string[] = [];
+      if (tenantId) {
+        targetTenantIds = [tenantId];
+      } else if (oldEndpoint) {
+        // Quando o Service Worker renova a inscrição sem tenantId explícito,
+        // preserva TODAS as drogarias em que o oldEndpoint estava inscrito.
+        targetTenantIds = await resolveTenantIdsByEndpoint(supabaseAdmin, oldEndpoint);
       }
 
-      if (!tenantId) {
+      if (targetTenantIds.length === 0) {
         return res
           .status(400)
           .json({ error: "tenant_id é obrigatório para inscrição Push." });
@@ -16143,23 +16145,32 @@ app.post(
         });
       }
 
-      const saved = await savePushSubscription(supabaseAdmin, {
-        tenantId,
-        endpoint,
-        p256dh,
-        auth,
-        userAgent,
-      });
+      let primarySaved: any = null;
+      for (const tid of targetTenantIds) {
+        const saved = await savePushSubscription(supabaseAdmin, {
+          tenantId: tid,
+          endpoint,
+          p256dh,
+          auth,
+          userAgent,
+        });
+        if (!primarySaved) primarySaved = saved;
 
-      if (oldEndpoint && oldEndpoint !== endpoint) {
-        await removePushSubscriptionByEndpoint(supabaseAdmin, oldEndpoint).catch(() => {});
+        // Ao substituir um oldEndpoint durante auto-renovação, filtra sempre por tenant_id + oldEndpoint
+        // garantindo que a loja B nunca apague nem sobrescreva a inscrição da loja A.
+        if (oldEndpoint && oldEndpoint !== endpoint) {
+          await removePushSubscriptionByEndpoint(supabaseAdmin, oldEndpoint, {
+            tenantId: tid,
+          }).catch(() => {});
+        }
       }
 
-      const allSubs = await getTenantPushSubscriptions(supabaseAdmin, tenantId);
+      const primaryTenantId = targetTenantIds[0];
+      const allSubs = await getTenantPushSubscriptions(supabaseAdmin, primaryTenantId);
 
       return res.status(200).json({
         success: true,
-        subscription: saved,
+        subscription: primarySaved,
         subscriberCount: allSubs.length,
       });
     } catch (err: any) {

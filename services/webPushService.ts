@@ -53,11 +53,12 @@ export async function ensurePushSubscriptionsTable(): Promise<void> {
       CREATE TABLE IF NOT EXISTS public.push_subscriptions (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         tenant_id TEXT NOT NULL,
-        endpoint TEXT NOT NULL UNIQUE,
+        endpoint TEXT NOT NULL,
         p256dh TEXT NOT NULL,
         auth TEXT NOT NULL,
         user_agent TEXT,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now())
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()),
+        CONSTRAINT push_subscriptions_tenant_id_endpoint_key UNIQUE (tenant_id, endpoint)
       );
       CREATE INDEX IF NOT EXISTS idx_push_subscriptions_tenant_id
         ON public.push_subscriptions(tenant_id);
@@ -142,30 +143,54 @@ export async function getOrInitVapidKeys(
 }
 
 /**
- * Localiza o tenant_id associado a um endpoint antigo (usado na auto-renovação pushsubscriptionchange do Service Worker)
+ * Localiza todos os tenant_id associados a um endpoint antigo
+ * (usado na auto-renovação pushsubscriptionchange do Service Worker para preservar múltiplas lojas)
  */
-export async function resolveTenantIdByEndpoint(
+export async function resolveTenantIdsByEndpoint(
   supabaseAdmin: SupabaseClient,
   endpoint: string
-): Promise<string | null> {
+): Promise<string[]> {
   const cleanEndpoint = String(endpoint || "").trim();
-  if (!cleanEndpoint) return null;
+  if (!cleanEndpoint) return [];
+
+  const tenantIds = new Set<string>();
 
   try {
     const { data, error } = await supabaseAdmin
       .from("push_subscriptions")
       .select("tenant_id")
-      .eq("endpoint", cleanEndpoint)
-      .maybeSingle();
+      .eq("endpoint", cleanEndpoint);
 
-    if (!error && data?.tenant_id) {
-      return String(data.tenant_id).trim();
+    if (!error && Array.isArray(data)) {
+      for (const row of data) {
+        const tid = String(row?.tenant_id || "").trim();
+        if (tid) tenantIds.add(tid);
+      }
     }
   } catch (_) {}
 
-  const localRows = loadLocalSubscriptions();
-  const matched = localRows.find((r) => r.endpoint === cleanEndpoint && r.tenant_id);
-  return matched ? String(matched.tenant_id).trim() : null;
+  if (tenantIds.size === 0) {
+    const localRows = loadLocalSubscriptions();
+    for (const r of localRows) {
+      if (r.endpoint === cleanEndpoint && r.tenant_id) {
+        const tid = String(r.tenant_id).trim();
+        if (tid) tenantIds.add(tid);
+      }
+    }
+  }
+
+  return Array.from(tenantIds);
+}
+
+/**
+ * Localiza o primeiro tenant_id associado a um endpoint antigo (compatibilidade)
+ */
+export async function resolveTenantIdByEndpoint(
+  supabaseAdmin: SupabaseClient,
+  endpoint: string
+): Promise<string | null> {
+  const ids = await resolveTenantIdsByEndpoint(supabaseAdmin, endpoint);
+  return ids.length > 0 ? ids[0] : null;
 }
 
 function loadLocalSubscriptions(): PushSubscriptionRow[] {
@@ -241,7 +266,7 @@ export async function savePushSubscription(
     created_at: nowIso,
   };
 
-  // 1. Salva na tabela push_subscriptions do Supabase
+  // 1. Salva na tabela push_subscriptions do Supabase isolado por (tenant_id, endpoint)
   try {
     const { data, error } = await supabaseAdmin
       .from("push_subscriptions")
@@ -254,7 +279,7 @@ export async function savePushSubscription(
           user_agent: cleanUa || null,
           created_at: nowIso,
         },
-        { onConflict: "endpoint" }
+        { onConflict: "tenant_id,endpoint" }
       )
       .select("*")
       .maybeSingle();
@@ -262,35 +287,52 @@ export async function savePushSubscription(
     if (!error && data) {
       row.id = data.id || row.id;
     } else if (error) {
-      // Caso a constraint unique em endpoint ainda não exista, verifica manualmente
-      const { data: existing } = await supabaseAdmin
+      // Fallback seguro isolado por (tenant_id, endpoint) — nunca sobrescreve outra drogaria
+      const { data: existingList } = await supabaseAdmin
         .from("push_subscriptions")
         .select("id")
+        .eq("tenant_id", cleanTenantId)
         .eq("endpoint", cleanEndpoint)
-        .maybeSingle();
+        .limit(1);
+
+      const existing = Array.isArray(existingList) ? existingList[0] : null;
 
       if (existing?.id) {
         await supabaseAdmin
           .from("push_subscriptions")
           .update({
-            tenant_id: cleanTenantId,
             p256dh: cleanP256dh,
             auth: cleanAuth,
             user_agent: cleanUa || null,
           })
-          .eq("id", existing.id);
+          .eq("id", existing.id)
+          .eq("tenant_id", cleanTenantId);
         row.id = existing.id;
       } else {
-        await supabaseAdmin.from("push_subscriptions").insert(row);
+        const { data: inserted, error: insertError } = await supabaseAdmin
+          .from("push_subscriptions")
+          .insert(row)
+          .select("id")
+          .maybeSingle();
+        if (!insertError && inserted?.id) {
+          row.id = inserted.id;
+        } else if (insertError) {
+          console.warn(
+            "[WebPush] Aviso ao inserir inscrição multi-loja (verifique se a constraint UNIQUE(tenant_id, endpoint) foi aplicada no Supabase):",
+            insertError.message || insertError
+          );
+        }
       }
     }
   } catch (err: any) {
     console.warn("[WebPush] Fallback ativado ao salvar em push_subscriptions:", err?.message || err);
   }
 
-  // 2. Mantém espelho local para resiliência total
+  // 2. Mantém espelho local isolado por (tenant_id, endpoint) para resiliência total
   const localRows = loadLocalSubscriptions();
-  const idx = localRows.findIndex((r) => r.endpoint === cleanEndpoint);
+  const idx = localRows.findIndex(
+    (r) => r.tenant_id === cleanTenantId && r.endpoint === cleanEndpoint
+  );
   if (idx >= 0) {
     localRows[idx] = { ...localRows[idx], ...row };
   } else {
@@ -314,7 +356,7 @@ export async function getTenantPushSubscriptions(
   const byEndpoint = new Map<string, PushSubscriptionRow>();
   let supabaseQuerySucceeded = false;
 
-  const invalidEndpointsToPurge: string[] = [];
+  const invalidSubsToPurge: Array<{ id?: string; endpoint: string }> = [];
 
   try {
     const { data, error } = await supabaseAdmin
@@ -328,7 +370,7 @@ export async function getTenantPushSubscriptions(
         const ep = String(item?.endpoint || "").trim();
         if (!ep) continue;
         if (!isValidRealPushEndpoint(ep)) {
-          invalidEndpointsToPurge.push(ep);
+          invalidSubsToPurge.push({ id: item?.id ? String(item.id) : undefined, endpoint: ep });
           continue;
         }
         if (item?.p256dh && item?.auth) {
@@ -348,13 +390,16 @@ export async function getTenantPushSubscriptions(
     console.warn("[WebPush] Aviso ao consultar push_subscriptions no Supabase:", err?.message || err);
   }
 
-  if (invalidEndpointsToPurge.length > 0) {
+  if (invalidSubsToPurge.length > 0) {
     console.warn(
-      `[WebPush] Removendo ${invalidEndpointsToPurge.length} endpoint(s) fictício(s)/inválido(s) do tenant ${cleanTenantId}.`
+      `[WebPush] Removendo ${invalidSubsToPurge.length} endpoint(s) fictício(s)/inválido(s) do tenant ${cleanTenantId}.`
     );
     await Promise.all(
-      invalidEndpointsToPurge.map((ep) =>
-        removePushSubscriptionByEndpoint(supabaseAdmin, ep)
+      invalidSubsToPurge.map((item) =>
+        removePushSubscriptionByEndpoint(supabaseAdmin, item.endpoint, {
+          id: item.id,
+          tenantId: cleanTenantId,
+        })
       )
     );
   }
@@ -413,10 +458,10 @@ export async function verifyPushSubscriptionExists(
       query = query.eq("tenant_id", cleanTenantId);
     }
 
-    const { data, error } = await query.maybeSingle();
+    const { data, error } = await query.limit(1);
 
     if (!error) {
-      const exists = Boolean(data && data.endpoint);
+      const exists = Array.isArray(data) && data.length > 0 && Boolean(data[0]?.endpoint);
       if (!exists) {
         // Garante remoção também do espelho local caso tenha sido excluído no Supabase
         const localRows = loadLocalSubscriptions();
@@ -447,24 +492,54 @@ export async function verifyPushSubscriptionExists(
 }
 
 /**
- * Remove um endpoint inválido/expirado (HTTP 404 ou 410)
+ * Remove uma inscrição específica isolada pelo `id` da linha ou pela combinação `(tenant_id, endpoint)`
+ * (usado na limpeza de HTTP 404/410 e na troca de oldEndpoint sem afetar outras drogarias).
  */
 export async function removePushSubscriptionByEndpoint(
   supabaseAdmin: SupabaseClient,
-  endpoint: string
+  endpoint: string,
+  options?: { id?: string; tenantId?: string }
 ): Promise<void> {
   const cleanEndpoint = String(endpoint || "").trim();
-  if (!cleanEndpoint) return;
+  const cleanId = String(options?.id || "").trim();
+  const cleanTenantId = String(options?.tenantId || "").trim();
+
+  if (!cleanId && !cleanEndpoint) return;
 
   try {
-    await supabaseAdmin
-      .from("push_subscriptions")
-      .delete()
-      .eq("endpoint", cleanEndpoint);
+    if (cleanId) {
+      let query = supabaseAdmin.from("push_subscriptions").delete().eq("id", cleanId);
+      if (cleanTenantId) {
+        query = query.eq("tenant_id", cleanTenantId);
+      }
+      await query;
+    } else if (cleanTenantId) {
+      await supabaseAdmin
+        .from("push_subscriptions")
+        .delete()
+        .eq("tenant_id", cleanTenantId)
+        .eq("endpoint", cleanEndpoint);
+    } else {
+      await supabaseAdmin
+        .from("push_subscriptions")
+        .delete()
+        .eq("endpoint", cleanEndpoint);
+    }
   } catch (_) {}
 
   const localRows = loadLocalSubscriptions();
-  const filtered = localRows.filter((r) => r.endpoint !== cleanEndpoint);
+  const filtered = localRows.filter((r) => {
+    if (cleanId && r.id === cleanId && (!cleanTenantId || r.tenant_id === cleanTenantId)) {
+      return false;
+    }
+    if (cleanTenantId && cleanEndpoint) {
+      return !(r.tenant_id === cleanTenantId && r.endpoint === cleanEndpoint);
+    }
+    if (!cleanId && !cleanTenantId && cleanEndpoint) {
+      return r.endpoint !== cleanEndpoint;
+    }
+    return true;
+  });
   if (filtered.length !== localRows.length) {
     saveLocalSubscriptions(filtered);
   }
@@ -575,7 +650,10 @@ export async function sendPromotionalPushToTenant(
         console.warn(
           `[WebPush] Removendo endpoint fictício/inválido antes do disparo: ${sub.endpoint}`
         );
-        await removePushSubscriptionByEndpoint(supabaseAdmin, sub.endpoint);
+        await removePushSubscriptionByEndpoint(supabaseAdmin, sub.endpoint, {
+          id: sub.id,
+          tenantId: sub.tenant_id || params.tenantId,
+        });
         return;
       }
 
@@ -608,14 +686,18 @@ export async function sendPromotionalPushToTenant(
 
         const errDetail = String(err?.body || err?.message || err || "").trim();
 
-        // Limpeza automática: remove do banco APENAS erros definitivos do navegador (404 e 410).
+        // Limpeza automática: remove do banco APENAS erros definitivos do navegador (404 e 410),
+        // filtrando pelo id/tenant_id da linha para não afetar inscrições em outras drogarias.
         // NÃO deleta inscrições quando o erro for 403 (ou 401), preservando os clientes para renovação silenciosa.
         if (statusCode === 404 || statusCode === 410) {
           removedCount++;
           console.log(
-            `[WebPush] Assinatura expirada/inexistente removida automaticamente (HTTP ${statusCode}) [endpoint=${sub.endpoint.slice(0, 60)}...]`
+            `[WebPush] Assinatura expirada/inexistente removida automaticamente (HTTP ${statusCode}) [id=${sub.id} tenant=${sub.tenant_id || params.tenantId} endpoint=${sub.endpoint.slice(0, 60)}...]`
           );
-          await removePushSubscriptionByEndpoint(supabaseAdmin, sub.endpoint);
+          await removePushSubscriptionByEndpoint(supabaseAdmin, sub.endpoint, {
+            id: sub.id,
+            tenantId: sub.tenant_id || params.tenantId,
+          });
         } else {
           failedCount++;
           console.warn(
