@@ -154,6 +154,7 @@ export interface Order {
   enviadoParaEntrega?: boolean;
   entregaFinalizada?: boolean;
   vendaEliminada?: boolean;
+  origin?: string;
 }
 
 export interface AppReview {

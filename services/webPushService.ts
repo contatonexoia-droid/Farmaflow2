@@ -570,6 +570,11 @@ export async function sendPromotionalPushToTenant(
     resolvedUrl = `${resolvedUrl}${sep}produto=${encodeURIComponent(cleanProductId)}`;
   }
 
+  if (!/[?&]origem=/i.test(resolvedUrl)) {
+    const originSep = resolvedUrl.includes("?") ? "&" : "?";
+    resolvedUrl = `${resolvedUrl}${originSep}origem=push`;
+  }
+
   const payloadString = JSON.stringify({
     title: params.title,
     body: params.body,

@@ -543,8 +543,33 @@ app.put("/api/v1/tenants/:id/orders", async (req, res) => {
     const { error } = await supabaseAdmin
       .from("orders")
       .upsert(dbOrders);
-    
-    if (error) throw error;
+
+    if (error) {
+      const code = String((error as any)?.code || "");
+      const msg = `${(error as any)?.message || ""} ${(error as any)?.details || ""} ${(error as any)?.hint || ""}`.toLowerCase();
+      const isMissingOriginCol =
+        code === "42703" ||
+        code === "PGRST204" ||
+        (msg.includes("origin") &&
+          (msg.includes("column") || msg.includes("schema cache") || msg.includes("does not exist")));
+
+      if (isMissingOriginCol) {
+        const stripOrigin = (row: any) => {
+          if (!row || typeof row !== "object") return row;
+          const { origin: _removed, ...rest } = row;
+          return rest;
+        };
+        const sanitizedPayload = Array.isArray(dbOrders)
+          ? dbOrders.map(stripOrigin)
+          : stripOrigin(dbOrders);
+        const { error: retryError } = await supabaseAdmin
+          .from("orders")
+          .upsert(sanitizedPayload);
+        if (retryError) throw retryError;
+        return res.json({ success: true });
+      }
+      throw error;
+    }
     res.json({ success: true });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
@@ -2012,12 +2037,13 @@ async function handleGoogleShoppingFeedRequest(
         supabaseAdmin
           .from("products")
           .select(
-            "id, internal_code, barcode, name, manufacturer, description, price, original_price, promotional_price, stock, image"
+            "id, internal_code, barcode, name, manufacturer, description, price, original_price, promotional_price, stock, image, requires_prescription"
           )
           .eq("tenant_id", tenant.id)
           .gt("stock", 0)
           .gt("price", 0)
           .not("image", "is", null)
+          .or("requires_prescription.is.null,requires_prescription.eq.false")
           .limit(5000)
       ),
       remainingTimeoutMs
@@ -2033,6 +2059,7 @@ async function handleGoogleShoppingFeedRequest(
 
     for (const prod of rows) {
       if (!prod) continue;
+      if (prod.requires_prescription === true) continue;
       if (Number(prod.stock ?? 0) <= 0) continue;
 
       const title = sanitizeXmlText(prod.name, 150);

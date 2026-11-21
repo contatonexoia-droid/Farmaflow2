@@ -85,6 +85,7 @@ import {
 } from "../lib/departments";
 import { StorefrontFooter } from "./StorefrontFooter";
 import { findProductBySlugOrId, extractProductLookupToken } from "../lib/store";
+import { captureAndPersistOrderOrigin } from "../lib/orderOrigin";
 
 const GENERIC_PLACEHOLDER = "https://i.imgur.com/fLz8F3X.png";
 
@@ -1535,6 +1536,17 @@ export const Storefront: React.FC<StorefrontProps> = ({
   const [visibleCount, setVisibleCount] = useState(INITIAL_PAGE_SIZE);
   const searchCache = useRef<Record<string, Product[]>>({});
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const originCapturedRef = useRef(false);
+
+  // Captura imediata da origem do pedido antes de qualquer limpeza de query params
+  if (!originCapturedRef.current) {
+    originCapturedRef.current = true;
+    captureAndPersistOrderOrigin();
+  }
+
+  useEffect(() => {
+    captureAndPersistOrderOrigin();
+  }, [tenant?.id]);
 
   // Filtro obrigatório e estrito em todas as listagens da Vitrine Pública (preço > 0 e estoque > 0)
   const validStoreProducts = useMemo(() => {
@@ -4089,6 +4101,11 @@ export const Storefront: React.FC<StorefrontProps> = ({
         if (data.url) {
           try {
             const parsedUrl = new URL(data.url, window.location.origin);
+            captureAndPersistOrderOrigin(
+              parsedUrl.searchParams.has("origem") || parsedUrl.searchParams.has("utm_source")
+                ? parsedUrl.search
+                : "?origem=push",
+            );
             if (!targetProductId) {
               targetProductId =
                 parsedUrl.searchParams.get("produto") ||
@@ -4100,7 +4117,11 @@ export const Storefront: React.FC<StorefrontProps> = ({
             if (window.location.pathname + window.location.search !== nextRelativeUrl) {
               window.history.replaceState(window.history.state, "", nextRelativeUrl);
             }
-          } catch (_) {}
+          } catch (_) {
+            captureAndPersistOrderOrigin("?origem=push");
+          }
+        } else {
+          captureAndPersistOrderOrigin("?origem=push");
         }
         if (targetProductId) {
           openProductFromNotificationOrUrl(targetProductId, true);
@@ -4117,6 +4138,10 @@ export const Storefront: React.FC<StorefrontProps> = ({
       try {
         (window as any).launchQueue.setConsumer((launchParams: any) => {
           if (launchParams?.targetURL) {
+            try {
+              const launchedUrl = new URL(launchParams.targetURL, window.location.origin);
+              captureAndPersistOrderOrigin(launchedUrl.search);
+            } catch (_) {}
             const launchedProdId = extractProductIdFromUrl(launchParams.targetURL);
             if (launchedProdId) {
               openProductFromNotificationOrUrl(launchedProdId, true);

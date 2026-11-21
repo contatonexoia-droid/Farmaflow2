@@ -77,11 +77,17 @@ import {
   extractProductLookupToken,
   getProductShareUrl,
 } from "./lib/store";
+import {
+  captureAndPersistOrderOrigin,
+  getStoredOrderOrigin,
+  appendOriginParam,
+} from "./lib/orderOrigin";
 // Added Calendar to lucide-react imports to fix missing component error
 
-// Captura imediata de parâmetros de Deep Link antes que qualquer roteador altere o histórico
+// Captura imediata de parâmetros de Deep Link e Origem antes que qualquer roteador altere o histórico
 if (typeof window !== "undefined") {
   try {
+    captureAndPersistOrderOrigin();
     const p = new URLSearchParams(window.location.search);
     let prod = p.get("produto") || p.get("prod") || p.get("product") || p.get("oferta") || p.get("p_id") || p.get("item");
     const pathMatch = window.location.pathname.match(/\/produto\/([^\/?#]+)/i);
@@ -895,7 +901,10 @@ const App: React.FC = () => {
 
   const handleShareProductOffer = useCallback(async (product: Product) => {
     try {
-      const shareUrl = getProductShareUrl(currentTenant || undefined, product);
+      const shareUrl = appendOriginParam(
+        getProductShareUrl(currentTenant || undefined, product),
+        "compartilhamento",
+      );
       const effPrice =
         product.promotionalPrice && product.promotionalPrice > 0 && product.promotionalPrice < product.price
           ? product.promotionalPrice
@@ -1195,15 +1204,26 @@ const App: React.FC = () => {
           event.data.type === "PUSH_NOTIFICATION_CLICK")
       ) {
         let targetProductId = event.data.productId;
-        if (!targetProductId && event.data.url) {
+        if (event.data.url) {
           try {
             const parsedUrl = new URL(event.data.url, window.location.origin);
-            targetProductId =
-              parsedUrl.searchParams.get("product") ||
-              parsedUrl.searchParams.get("oferta") ||
-              parsedUrl.searchParams.get("produto") ||
-              parsedUrl.searchParams.get("prod");
-          } catch (_) {}
+            captureAndPersistOrderOrigin(
+              parsedUrl.searchParams.has("origem") || parsedUrl.searchParams.has("utm_source")
+                ? parsedUrl.search
+                : "?origem=push",
+            );
+            if (!targetProductId) {
+              targetProductId =
+                parsedUrl.searchParams.get("product") ||
+                parsedUrl.searchParams.get("oferta") ||
+                parsedUrl.searchParams.get("produto") ||
+                parsedUrl.searchParams.get("prod");
+            }
+          } catch (_) {
+            captureAndPersistOrderOrigin("?origem=push");
+          }
+        } else {
+          captureAndPersistOrderOrigin("?origem=push");
         }
         if (targetProductId) {
           const cleanId = String(targetProductId).trim();
@@ -3613,6 +3633,7 @@ const App: React.FC = () => {
         couponDiscount: finalCouponDiscount,
         deliveryMode,
         receiptFile: uploadedPrescriptionUrl || undefined,
+        origin: getStoredOrderOrigin(),
       };
 
       await saveOrderByTenant(currentTenant.id, newOrder);

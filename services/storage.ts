@@ -11,6 +11,7 @@ import {
 } from "../types";
 import { parseOperatingHoursFromText, resolveTenantOperatingHours } from "../utils/operatingHours";
 import { classifyProductTaxonomy } from "../lib/departments";
+import { normalizeOrderOrigin } from "../lib/orderOrigin";
 
 /**
  * SQL DEFINITIVO PARA CORREÇÃO DO BANCO (Execute no SQL Editor do Supabase):
@@ -1033,6 +1034,10 @@ export const mapDbOrderToApp = (o: any): Order => {
           ? Number(o.valorNotaFiscal)
           : undefined,
     divergenciaNotaFiscal: Boolean(o.divergencia_nota_fiscal || o.divergenciaNotaFiscal),
+    origin:
+      normalizeOrderOrigin(
+        o.origin || o.order_origin || cust?.orderOrigin || cust?.origin
+      ) || "direto",
   };
 };
 
@@ -1556,16 +1561,31 @@ export const getOrdersByTenant = async (tenantId: string): Promise<Order[]> => {
   }
 };
 
+const isMissingOriginColumnError = (err: any): boolean => {
+  if (!err) return false;
+  const code = String(err.code || "");
+  const msg = `${err.message || ""} ${err.details || ""} ${err.hint || ""}`.toLowerCase();
+  if (code === "42703" || code === "PGRST204") {
+    return msg.includes("origin");
+  }
+  return (
+    msg.includes("origin") &&
+    (msg.includes("column") || msg.includes("schema cache") || msg.includes("does not exist"))
+  );
+};
+
 export const saveOrderByTenant = async (tenantId: string, order: Order) => {
   if (!isSupabaseConfigured()) throw new Error("CONFIG_MISSING");
   try {
-    const payload = {
+    const safeOrigin = normalizeOrderOrigin(order.origin) || "direto";
+    const basePayload = {
       id: order.id,
       tenant_id: tenantId,
       items: order.items,
       customer: {
         ...order.customer,
         couponDiscount: order.couponDiscount, // Store here as fallback for missing column
+        orderOrigin: safeOrigin, // Fallback seguro caso a coluna origin ainda não exista no banco
       },
       total: order.total,
       date: order.date || new Date().toISOString(),
@@ -1576,9 +1596,22 @@ export const saveOrderByTenant = async (tenantId: string, order: Order) => {
       delivery_mode: order.deliveryMode || "delivery",
     };
 
+    const payloadWithOrigin = {
+      ...basePayload,
+      origin: safeOrigin,
+    };
+
     await retryRequest(async () => {
-      const { error } = await supabase.from("orders").insert(payload);
-      if (error) throw error;
+      const { error } = await supabase.from("orders").insert(payloadWithOrigin);
+      if (error) {
+        if (isMissingOriginColumnError(error)) {
+          console.warn("[Orders] Coluna 'origin' ainda não existe no Supabase. Repetindo insert sem esse campo.");
+          const { error: fallbackError } = await supabase.from("orders").insert(basePayload);
+          if (fallbackError) throw fallbackError;
+        } else {
+          throw error;
+        }
+      }
       
       // Call new deduct-stock endpoint
       try {
@@ -1600,26 +1633,38 @@ export const saveOrderByTenant = async (tenantId: string, order: Order) => {
 
 export const saveOrdersByTenant = async (tenantId: string, orders: Order[]) => {
   if (!isSupabaseConfigured()) return;
-  const dbOrders = orders.map((o) => ({
-    id: o.id,
-    tenant_id: tenantId,
-    status: o.status,
-    customer: {
-      ...o.customer,
-      couponDiscount: o.couponDiscount,
-    },
-    total: o.total,
-    items: o.items,
-    date: o.date || new Date().toISOString(),
-    observation: o.observation,
-    receipt_file: o.receiptFile,
-    applied_coupon: o.appliedCoupon,
+  const dbOrdersBase = orders.map((o) => {
+    const safeOrigin =
+      normalizeOrderOrigin(o.origin || (o.customer as any)?.orderOrigin) || "direto";
+    return {
+      id: o.id,
+      tenant_id: tenantId,
+      status: o.status,
+      customer: {
+        ...o.customer,
+        couponDiscount: o.couponDiscount,
+        orderOrigin: safeOrigin,
+      },
+      total: o.total,
+      items: o.items,
+      date: o.date || new Date().toISOString(),
+      observation: o.observation,
+      receipt_file: o.receiptFile,
+      applied_coupon: o.appliedCoupon,
+    };
+  });
+  const dbOrdersWithOrigin = dbOrdersBase.map((row, idx) => ({
+    ...row,
+    origin:
+      normalizeOrderOrigin(orders[idx]?.origin || (orders[idx]?.customer as any)?.orderOrigin) ||
+      "direto",
   }));
+
   try {
     const res = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/orders`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(dbOrders),
+      body: JSON.stringify(dbOrdersWithOrigin),
     });
     if (res.ok) return;
   } catch (apiError) {
@@ -1627,8 +1672,15 @@ export const saveOrdersByTenant = async (tenantId: string, orders: Order[]) => {
   }
   try {
     await retryRequest(async () => {
-      const { error } = await supabase.from("orders").upsert(dbOrders);
-      if (error) throw error;
+      const { error } = await supabase.from("orders").upsert(dbOrdersWithOrigin);
+      if (error) {
+        if (isMissingOriginColumnError(error)) {
+          const { error: fallbackError } = await supabase.from("orders").upsert(dbOrdersBase);
+          if (fallbackError) throw fallbackError;
+        } else {
+          throw error;
+        }
+      }
     });
   } catch (e) {
     handleNetworkError(e, "Salvar Pedidos");

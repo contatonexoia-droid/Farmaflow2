@@ -24,6 +24,7 @@ import {
 import { toast } from 'sonner';
 import { PharmacyConfig, Product, PromotionRule } from '../types';
 import { buildProductSlug, getStoreUrl } from '../lib/store';
+import { appendOriginParam } from '../lib/orderOrigin';
 
 interface AdminStoryGeneratorProps {
   products: Product[];
@@ -685,14 +686,14 @@ export const AdminStoryGenerator: React.FC<AdminStoryGeneratorProps> = ({
     setSelectedIds((prev) => prev.filter((id) => id !== productId));
   };
 
-  // URL oficial de divulgação (subdomínio da loja + /produto/:productSlug quando 1 item)
+  // URL oficial de divulgação (subdomínio da loja + /produto/:productSlug quando 1 item) com tag ?origem=story
   const offerShareUrl = useMemo(() => {
     const baseStoreUrl = getStoreUrl(tenant).replace(/\/+$/, '');
-    if (selectedProducts.length === 1) {
-      const slug = buildProductSlug(selectedProducts[0]);
-      return `${baseStoreUrl}/produto/${encodeURIComponent(slug)}`;
-    }
-    return baseStoreUrl;
+    const rawUrl =
+      selectedProducts.length === 1
+        ? `${baseStoreUrl}/produto/${encodeURIComponent(buildProductSlug(selectedProducts[0]))}`
+        : baseStoreUrl;
+    return appendOriginParam(rawUrl, 'story');
   }, [tenant, selectedProducts]);
 
   // Legenda curta automática (máximo 120 caracteres, SEM link dentro)

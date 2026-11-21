@@ -6,6 +6,7 @@ import { getEmptySearches, isSupabaseConfigured, getTenants, getOrdersByTenant }
 import { getStoreUrl } from '../lib/store';
 import { supabase } from '../services/supabase';
 import { StoreShareCard } from './StoreShareCard';
+import { SalesOriginRoiCard } from './SalesOriginRoiCard';
 
 const isConfirmedOrder = (status: string): boolean => {
   const s = (status || "").toLowerCase();
@@ -214,32 +215,29 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
-  const filteredOrders = useMemo(() => {
-    let baseOrders = allOrders;
-    
-    // Deduplicate to prevent key collisions
+  const networkScopedOrders = useMemo(() => {
     const uniqueMap = new Map<string, Order>();
-    (baseOrders || []).forEach((o) => {
+    (allOrders || []).forEach((o) => {
       if (o && o.id) {
         uniqueMap.set(o.id, o);
       }
     });
     const uniqueBaseOrders = Array.from(uniqueMap.values());
-
     if (selectedBranchId === 'ALL_NETWORK') {
-        baseOrders = uniqueBaseOrders;
-    } else {
-        baseOrders = uniqueBaseOrders.filter(o => o.tenantId === selectedBranchId);
+      return uniqueBaseOrders;
     }
+    return uniqueBaseOrders.filter((o) => o.tenantId === selectedBranchId);
+  }, [allOrders, selectedBranchId]);
 
-    return baseOrders.filter(o => {
+  const filteredOrders = useMemo(() => {
+    return networkScopedOrders.filter(o => {
       if (!o.date) return false;
       const orderDate = getLocalDateString(o.date);
       if (startDate && orderDate < startDate) return false;
       if (endDate && orderDate > endDate) return false;
       return true;
     });
-  }, [allOrders, startDate, endDate, selectedBranchId]);
+  }, [networkScopedOrders, startDate, endDate]);
 
   const stats = useMemo(() => {
     const confirmedOrders = filteredOrders.filter(o => isConfirmedOrder(o.status));
@@ -549,6 +547,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <p className={`text-[11px] font-bold mt-1 ${theme.textSecondary}`}>No período selecionado</p>
         </div>
       </div>
+
+      <SalesOriginRoiCard orders={networkScopedOrders} isDarkMode={isDarkMode} />
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         

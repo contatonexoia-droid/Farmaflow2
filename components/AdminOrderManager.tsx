@@ -37,6 +37,7 @@ import {
 } from "lucide-react";
 import { OrderConferenceModal } from "./OrderConferenceModal";
 import { SmartNumberInput } from "./SmartNumberInput";
+import { getOrderOriginMeta } from "../lib/orderOrigin";
 
 interface AdminOrderManagerProps {
   orders: Order[];
@@ -1163,6 +1164,19 @@ export const AdminOrderManager: React.FC<AdminOrderManagerProps> = ({
                         {safeDate(order.date)}
                       </span>
                       {getStatusBadge(getEffectiveOrderStatus(order), order)}
+                      {(() => {
+                        const originMeta = getOrderOriginMeta(
+                          order.origin || (order.customer as any)?.orderOrigin,
+                        );
+                        return (
+                          <span
+                            title={`Origem do pedido: ${originMeta.label}`}
+                            className={`text-[10px] font-black uppercase tracking-wider px-2 py-1 rounded-md border whitespace-nowrap ${originMeta.badgeClass}`}
+                          >
+                            {originMeta.label}
+                          </span>
+                        );
+                      })()}
                       {isPendingLongTime && (
                         <span className="text-[10px] font-black text-red-600 bg-red-100 px-2 py-1 rounded-md flex items-center gap-1 whitespace-nowrap">
                           <AlertTriangle size={12} /> Pendente há muito tempo
