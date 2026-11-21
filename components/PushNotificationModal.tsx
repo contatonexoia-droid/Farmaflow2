@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Product, PharmacyConfig } from '../types';
-import { getStoreSlug } from '../lib/store';
+import { getStoreSlug, getStoreUrl, buildProductSlug } from '../lib/store';
 import {
   Bell,
   X,
@@ -45,17 +45,149 @@ const parseJsonResponse = async (response: Response) => {
   return response.json();
 };
 
+const LOWERCASE_CONNECTORS = new Set([
+  'de',
+  'da',
+  'do',
+  'das',
+  'dos',
+  'e',
+  'em',
+  'com',
+  'para',
+  'por',
+  'sem',
+  'ao',
+  'aos',
+  'na',
+  'no',
+  'nas',
+  'nos',
+  'c/',
+  's/',
+]);
+
+const UPPERCASE_ACRONYMS = new Set([
+  'FPS',
+  'SPF',
+  'UVA',
+  'UVB',
+  'UV',
+  'RN',
+  'PP',
+  'GG',
+  'XG',
+  'XXG',
+  'XXXG',
+  'LED',
+  'USB',
+  'OTC',
+  'BB',
+  'CC',
+  'DD',
+  'D3',
+  'K2',
+  'B1',
+  'B2',
+  'B3',
+  'B5',
+  'B6',
+  'B12',
+  'Q10',
+  'HD',
+  '3D',
+  '4K',
+  'II',
+  'III',
+  'IV',
+]);
+
+const formatWordSegment = (segment: string, isFirstToken: boolean): string => {
+  if (!segment) return segment;
+
+  const lower = segment.toLowerCase();
+  const upper = segment.toUpperCase();
+
+  // Unidades coladas a números (ex: 500MG -> 500mg, 200ML -> 200ml, 2000UI -> 2000UI, 1L -> 1L)
+  const unitMatch = segment.match(/^(\d+(?:[.,]\d+)?)(mg|ml|mcg|kg|g|l|ui|un|cp|cpr|comp|caps|cm|mm|m)$/i);
+  if (unitMatch) {
+    const [, num, rawUnit] = unitMatch;
+    const unitLower = rawUnit.toLowerCase();
+    if (unitLower === 'ui') return `${num}UI`;
+    if (unitLower === 'l') return `${num}L`;
+    return `${num}${unitLower}`;
+  }
+
+  // Siglas conhecidas (FPS, UVA, UVB, XXG, B12, D3, etc.)
+  if (UPPERCASE_ACRONYMS.has(upper)) {
+    return upper;
+  }
+
+  if (lower === 'ph') {
+    return 'pH';
+  }
+
+  // Abreviações c/ e s/
+  if (lower === 'c/' || lower === 's/') {
+    return lower;
+  }
+
+  // Se o segmento já estiver em capitalização mista (ex: "La", "iPhone", "McDonald"), preserva
+  const hasLower = segment !== upper;
+  const hasUpper = segment !== lower;
+  if (hasLower && hasUpper) {
+    return segment;
+  }
+
+  // Conectivos portugueses em minúscula quando não forem a primeira palavra
+  if (!isFirstToken && LOWERCASE_CONNECTORS.has(lower)) {
+    return lower;
+  }
+
+  // Capitaliza a primeira letra alfabética (lidando com pontuação inicial como "(" ou "\"")
+  const matchFirstLetter = lower.match(/^([^a-zA-ZÀ-ÿ]*)([a-zA-ZÀ-ÿ])(.*)$/);
+  if (!matchFirstLetter) return segment;
+
+  const [, prefix, firstChar, rest] = matchFirstLetter;
+  return `${prefix}${firstChar.toUpperCase()}${rest}`;
+};
+
+export const formatProductNameNatural = (rawName?: string | null): string => {
+  const cleaned = String(rawName || '').trim().replace(/\s+/g, ' ');
+  if (!cleaned) return '';
+
+  return cleaned
+    .split(' ')
+    .map((token, tokenIndex) => {
+      const lowerToken = token.toLowerCase();
+      if (lowerToken === 'c/' || lowerToken === 's/') {
+        return lowerToken;
+      }
+
+      // Preserva delimitadores internos como hífen ou barra (ex: LA ROCHE-POSAY, PRO-V, A-Z)
+      const parts = token.split(/([-–/])/);
+      return parts
+        .map((part, partIndex) => {
+          if (part === '-' || part === '–' || part === '/') return part;
+          return formatWordSegment(part, tokenIndex === 0 && partIndex === 0);
+        })
+        .join('');
+    })
+    .join(' ');
+};
+
 export const buildDefaultPushText = (product: Product | null, storeName: string) => {
   const cleanStoreName = (storeName || 'Nossa Farmácia').trim();
-  const defaultTitle = `🔥 Oferta Especial na ${cleanStoreName}!`;
+  const defaultTitle = `Novidade na ${cleanStoreName}`;
 
   if (!product) {
     return {
       title: defaultTitle,
-      body: `Confira nossas ofertas especiais no aplicativo da ${cleanStoreName}! Peça agora pelo celular.`
+      body: `Confira as novidades e produtos disponíveis na ${cleanStoreName} com entrega rápida.`
     };
   }
 
+  const formattedProductName = formatProductNameNatural(product.name) || 'Produto';
   const rawPrice = Number(product.price || 0);
   const rawPromo = Number((product as any).promotionalPrice || (product as any).promotional_price || 0);
   const rawOriginal = Number(product.originalPrice || (product as any).original_price || 0);
@@ -75,8 +207,8 @@ export const buildDefaultPushText = (product: Product | null, storeName: string)
   }
 
   const defaultBody = hasPromo
-    ? `${product.name} de R$ ${formatPriceBR(fromPrice)} por apenas R$ ${formatPriceBR(toPrice)}! Aproveite antes que acabe.`
-    : `${product.name} por apenas R$ ${formatPriceBR(toPrice)}! Peça agora pelo app.`;
+    ? `${formattedProductName}: de R$ ${formatPriceBR(fromPrice)} por R$ ${formatPriceBR(toPrice)} com entrega rápida.`
+    : `${formattedProductName} disponível por R$ ${formatPriceBR(toPrice)} com entrega rápida.`;
 
   return {
     title: defaultTitle,
@@ -194,12 +326,38 @@ export const PushNotificationModal: React.FC<PushNotificationModalProps> = ({
   }, [selectedProduct, getProductDisplayImage]);
 
   const targetUrl = useMemo(() => {
+    const hasConfiguredSubdomain = Boolean(
+      tenant?.custom_domain?.trim() ||
+      (tenant as any)?.subdomain?.trim() ||
+      tenant?.slug?.trim()
+    );
+
+    if (hasConfiguredSubdomain) {
+      const storeBaseUrl = getStoreUrl(tenant).replace(/\/+$/, '');
+      if (selectedProduct) {
+        const productSlug = buildProductSlug(selectedProduct);
+        if (productSlug) {
+          return `${storeBaseUrl}/produto/${encodeURIComponent(productSlug)}?origem=push`;
+        }
+        if (selectedProduct.id) {
+          return `${storeBaseUrl}/?produto=${encodeURIComponent(selectedProduct.id)}&origem=push`;
+        }
+      }
+      return `${storeBaseUrl}/?origem=push`;
+    }
+
     const baseStorePath = cleanSlug ? `/loja/${cleanSlug}` : '/loja';
-    if (selectedProduct?.id) {
-      return `${baseStorePath}?produto=${encodeURIComponent(selectedProduct.id)}&origem=push`;
+    if (selectedProduct) {
+      const productSlug = buildProductSlug(selectedProduct);
+      if (cleanSlug && productSlug) {
+        return `/loja/${cleanSlug}/produto/${encodeURIComponent(productSlug)}?origem=push`;
+      }
+      if (selectedProduct.id) {
+        return `${baseStorePath}?produto=${encodeURIComponent(selectedProduct.id)}&origem=push`;
+      }
     }
     return `${baseStorePath}?origem=push`;
-  }, [cleanSlug, selectedProduct]);
+  }, [tenant, cleanSlug, selectedProduct]);
 
   const handleSendPush = async () => {
     if (!tenant?.id) return;
@@ -460,7 +618,7 @@ export const PushNotificationModal: React.FC<PushNotificationModalProps> = ({
                   value={title}
                   maxLength={80}
                   onChange={(e) => setTitle(e.target.value)}
-                  placeholder={`🔥 Oferta Especial na ${storeName}!`}
+                  placeholder={`Novidade na ${storeName}`}
                   className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl text-sm font-bold text-gray-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-orange-500 transition-all"
                 />
               </div>
@@ -597,7 +755,7 @@ export const PushNotificationModal: React.FC<PushNotificationModalProps> = ({
                   <div className="flex items-start gap-3">
                     <div className="flex-1 min-w-0">
                       <p className="text-xs md:text-sm font-black text-gray-900 leading-snug break-words">
-                        {title || `🔥 Oferta Especial na ${storeName}!`}
+                        {title || `Novidade na ${storeName}`}
                       </p>
                       <p className="text-xs text-gray-700 font-medium leading-relaxed mt-1 break-words">
                         {body || 'Selecione um produto para gerar o texto da promoção...'}
