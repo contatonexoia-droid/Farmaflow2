@@ -86,6 +86,10 @@ import {
 import { StorefrontFooter } from "./StorefrontFooter";
 import { findProductBySlugOrId, extractProductLookupToken } from "../lib/store";
 import { captureAndPersistOrderOrigin } from "../lib/orderOrigin";
+import {
+  parseRepeatOrderParam,
+  matchCatalogProduct,
+} from "../lib/repurchaseRadar";
 
 const GENERIC_PLACEHOLDER = "https://i.imgur.com/fLz8F3X.png";
 
@@ -409,6 +413,15 @@ interface StorefrontProps {
   onOpenCart: () => void;
   onBack?: () => void;
   onSearch?: (term: string, count: number) => void;
+  onApplyRepeatOrder?: (
+    itemsToAdd: { product: Product; quantity: number }[],
+    unavailableItems: string[],
+  ) => void;
+  repeatOrderBanner?: {
+    addedCount: number;
+    unavailableItems: string[];
+  } | null;
+  onDismissRepeatBanner?: () => void;
 }
 
 const normalizeStr = (str: string) =>
@@ -1526,6 +1539,9 @@ export const Storefront: React.FC<StorefrontProps> = ({
   onOpenCart,
   onBack,
   onSearch,
+  onApplyRepeatOrder,
+  repeatOrderBanner = null,
+  onDismissRepeatBanner,
 }) => {
   const INITIAL_PAGE_SIZE = 24;
   const BATCH_PAGE_SIZE = 24;
@@ -1537,6 +1553,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
   const searchCache = useRef<Record<string, Product[]>>({});
   const sentinelRef = useRef<HTMLDivElement>(null);
   const originCapturedRef = useRef(false);
+  const repeatOrderProcessedRef = useRef<string | null>(null);
 
   // Captura imediata da origem do pedido antes de qualquer limpeza de query params
   if (!originCapturedRef.current) {
@@ -1547,6 +1564,77 @@ export const Storefront: React.FC<StorefrontProps> = ({
   useEffect(() => {
     captureAndPersistOrderOrigin();
   }, [tenant?.id]);
+
+  // Link Mágico "Repetir Pedido em 1 Toque" (?repetir=id1:qtd1,id2:qtd2&origem=recompra)
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!tenant?.id || !products || products.length === 0) return;
+
+    let rawRepeat = "";
+    try {
+      const params = new URLSearchParams(window.location.search);
+      rawRepeat = (params.get("repetir") || "").trim();
+      if (!rawRepeat) {
+        rawRepeat = (sessionStorage.getItem("ff_repeat_order") || "").trim();
+      }
+    } catch {
+      return;
+    }
+
+    if (!rawRepeat) return;
+    const processKey = `${tenant?.id || ""}:${rawRepeat}`;
+    if (repeatOrderProcessedRef.current === processKey) return;
+    repeatOrderProcessedRef.current = processKey;
+
+    // 1. Garante captura da origem 'recompra' ANTES de limpar a URL
+    try {
+      const currentParams = new URLSearchParams(window.location.search);
+      const hasExplicitOrigin =
+        currentParams.has("origem") || currentParams.has("utm_source");
+      captureAndPersistOrderOrigin(
+        hasExplicitOrigin ? window.location.search : "?origem=recompra",
+      );
+      sessionStorage.removeItem("ff_repeat_order");
+
+      if (currentParams.has("repetir") || currentParams.has("origem")) {
+        currentParams.delete("repetir");
+        currentParams.delete("origem");
+        const cleanSearch = currentParams.toString();
+        const nextUrl = `${window.location.pathname}${cleanSearch ? `?${cleanSearch}` : ""}${window.location.hash || ""}`;
+        window.history.replaceState(window.history.state, "", nextUrl);
+      }
+    } catch {
+      captureAndPersistOrderOrigin("?origem=recompra");
+    }
+
+    // 2. Resolve os itens no catálogo atual com estoque > 0 e preços atualizados do ERP
+    const parsedEntries = parseRepeatOrderParam(rawRepeat);
+    if (parsedEntries.length === 0) return;
+
+    const availableToAdd: { product: Product; quantity: number }[] = [];
+    const unavailableNames: string[] = [];
+
+    for (const entry of parsedEntries) {
+      const matched = matchCatalogProduct(entry.id, products);
+      if (matched && isValidStoreProduct(matched)) {
+        availableToAdd.push({
+          product: matched,
+          quantity: Math.max(1, Math.min(entry.quantity, matched.stock)),
+        });
+      } else {
+        unavailableNames.push(
+          matched?.name ? matched.name : `Item #${entry.id}`,
+        );
+      }
+    }
+
+    if (onApplyRepeatOrder) {
+      onApplyRepeatOrder(availableToAdd, unavailableNames);
+    } else if (availableToAdd.length > 0) {
+      availableToAdd.forEach(({ product }) => onAddToCart(product, false, false));
+      onOpenCart();
+    }
+  }, [products, tenant?.id, onApplyRepeatOrder, onAddToCart, onOpenCart]);
 
   // Filtro obrigatório e estrito em todas as listagens da Vitrine Pública (preço > 0 e estoque > 0)
   const validStoreProducts = useMemo(() => {
@@ -4705,6 +4793,53 @@ export const Storefront: React.FC<StorefrontProps> = ({
           />
         ) : null}
       </header>
+
+      {repeatOrderBanner && (
+        <div className="w-full max-w-[1600px] mx-auto px-4 md:px-8 mt-4">
+          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-start gap-3 min-w-0">
+              <CheckCircle2 size={20} className="text-emerald-600 shrink-0 mt-0.5" />
+              <div className="min-w-0">
+                <p className="text-sm font-black text-emerald-950">
+                  {repeatOrderBanner.addedCount > 0
+                    ? "Seu pedido anterior já está pronto no carrinho com os preços atualizados!"
+                    : "Os itens do seu pedido anterior estão indisponíveis no estoque hoje."}
+                </p>
+                {repeatOrderBanner.unavailableItems.length > 0 && (
+                  <p className="text-xs text-amber-800 mt-1">
+                    Sem estoque hoje:{" "}
+                    <span className="font-bold">
+                      {repeatOrderBanner.unavailableItems.join(", ")}
+                    </span>
+                    .
+                  </p>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {repeatOrderBanner.addedCount > 0 && (
+                <button
+                  type="button"
+                  onClick={onOpenCart}
+                  className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold whitespace-nowrap transition-colors"
+                >
+                  Finalizar Entrega
+                </button>
+              )}
+              {onDismissRepeatBanner && (
+                <button
+                  type="button"
+                  onClick={onDismissRepeatBanner}
+                  className="p-2 rounded-lg text-emerald-700 hover:bg-emerald-100 transition-colors"
+                  aria-label="Fechar aviso"
+                >
+                  <X size={16} />
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       <section className="w-full max-w-[1600px] lg:max-w-none mx-auto lg:mx-0 px-4 md:px-8 lg:px-0 mt-6 md:mt-8 [content-visibility:auto] [contain-intrinsic-size:300px]">
         <div

@@ -243,6 +243,11 @@ interface CartProps {
     uploadedPrescriptionUrl?: string | null,
   ) => Promise<void> | void;
   onBackToStore: () => void;
+  repeatOrderBanner?: {
+    addedCount: number;
+    unavailableItems: string[];
+  } | null;
+  onDismissRepeatBanner?: () => void;
 }
 
 export const Cart: React.FC<CartProps> = ({
@@ -255,6 +260,8 @@ export const Cart: React.FC<CartProps> = ({
   onRemove,
   onComplete,
   onBackToStore,
+  repeatOrderBanner = null,
+  onDismissRepeatBanner,
 }) => {
   const [gateways, setGateways] = useState<any[]>([]);
 
@@ -1262,6 +1269,45 @@ export const Cart: React.FC<CartProps> = ({
             Meus Itens
           </h2>
         </div>
+
+        {repeatOrderBanner && (
+          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 space-y-2">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-start gap-2.5">
+                <CheckCircle size={18} className="text-emerald-600 shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-sm font-black text-emerald-950">
+                    Seu pedido anterior já está pronto no carrinho com os preços atualizados!
+                  </p>
+                  <p className="text-xs text-emerald-800 mt-0.5">
+                    Confira os itens abaixo e informe seu endereço para entrega rápida.
+                  </p>
+                </div>
+              </div>
+              {onDismissRepeatBanner && (
+                <button
+                  type="button"
+                  onClick={onDismissRepeatBanner}
+                  className="text-xs font-bold text-emerald-700 hover:text-emerald-900 px-2 py-1 rounded-lg hover:bg-emerald-100 shrink-0"
+                >
+                  OK
+                </button>
+              )}
+            </div>
+            {repeatOrderBanner.unavailableItems.length > 0 && (
+              <div className="flex items-start gap-2 rounded-xl bg-amber-50 border border-amber-200/80 px-3 py-2 text-xs text-amber-900">
+                <AlertTriangle size={14} className="text-amber-600 shrink-0 mt-0.5" />
+                <span>
+                  Indisponível no estoque hoje (não adicionado):{" "}
+                  <strong className="font-bold">
+                    {repeatOrderBanner.unavailableItems.join(", ")}
+                  </strong>
+                  . Os demais itens foram incluídos normalmente.
+                </span>
+              </div>
+            )}
+          </div>
+        )}
 
         {activeGlobalCoupon && activeGlobalCoupon?.minPurchaseValue
           ? (() => {

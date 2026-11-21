@@ -7,6 +7,7 @@ export type OrderOrigin =
   | 'instagram'
   | 'facebook'
   | 'whatsapp'
+  | 'recompra'
   | 'direto';
 
 export const ORDER_ORIGIN_STORAGE_KEY = 'farmaflow_order_origin';
@@ -73,6 +74,15 @@ export const normalizeOrderOrigin = (raw?: string | null): OrderOrigin | null =>
   }
   if (cleaned === 'whatsapp' || cleaned === 'wa' || cleaned === 'wpp' || cleaned === 'zap') {
     return 'whatsapp';
+  }
+  if (
+    cleaned === 'recompra' ||
+    cleaned === 'radar_recompra' ||
+    cleaned === 'repurchase' ||
+    cleaned === 'repetir' ||
+    cleaned === 'repetir_pedido'
+  ) {
+    return 'recompra';
   }
   if (cleaned === 'direto' || cleaned === 'direct') {
     return 'direto';
@@ -228,6 +238,12 @@ export const getOrderOriginMeta = (rawOrigin?: string | null): OrderOriginBadgeM
         origin: 'facebook',
         label: 'Facebook',
         badgeClass: 'bg-indigo-50 text-indigo-700 border-indigo-200',
+      };
+    case 'recompra':
+      return {
+        origin: 'recompra',
+        label: 'Recompra',
+        badgeClass: 'bg-teal-50 text-teal-700 border-teal-200',
       };
     case 'direto':
     default:

@@ -22,6 +22,7 @@ const AUTOMATIC_ORIGINS: Set<OrderOrigin> = new Set([
   'google_shopping',
   'story',
   'push',
+  'recompra',
 ]);
 
 interface ChannelRow {
@@ -93,12 +94,13 @@ export const SalesOriginRoiCard: React.FC<SalesOriginRoiCardProps> = ({
     });
 
     const buckets: Record<
-      'google_shopping' | 'stories_ig' | 'push' | 'share_wa' | 'direct_other',
+      'google_shopping' | 'stories_ig' | 'push' | 'recompra' | 'share_wa' | 'direct_other',
       { revenue: number; count: number }
     > = {
       google_shopping: { revenue: 0, count: 0 },
       stories_ig: { revenue: 0, count: 0 },
       push: { revenue: 0, count: 0 },
+      recompra: { revenue: 0, count: 0 },
       share_wa: { revenue: 0, count: 0 },
       direct_other: { revenue: 0, count: 0 },
     };
@@ -133,6 +135,9 @@ export const SalesOriginRoiCard: React.FC<SalesOriginRoiCardProps> = ({
       } else if (origin === 'push') {
         buckets.push.revenue += value;
         buckets.push.count += 1;
+      } else if (origin === 'recompra') {
+        buckets.recompra.revenue += value;
+        buckets.recompra.count += 1;
       } else if (origin === 'compartilhamento' || origin === 'whatsapp') {
         buckets.share_wa.revenue += value;
         buckets.share_wa.count += 1;
@@ -175,6 +180,15 @@ export const SalesOriginRoiCard: React.FC<SalesOriginRoiCardProps> = ({
         revenue: buckets.push.revenue,
         count: buckets.push.count,
         sharePct: calcPct(buckets.push.revenue, buckets.push.count),
+      },
+      {
+        id: 'recompra',
+        label: 'Radar de Recompra',
+        sublabel: 'Lembretes de reposição e pedido 1-toque',
+        barColor: 'bg-teal-600',
+        revenue: buckets.recompra.revenue,
+        count: buckets.recompra.count,
+        sharePct: calcPct(buckets.recompra.revenue, buckets.recompra.count),
       },
       {
         id: 'share_wa',
@@ -336,7 +350,7 @@ export const SalesOriginRoiCard: React.FC<SalesOriginRoiCardProps> = ({
               }`}
             >
               {roiSummary.autoOrders}{' '}
-              {roiSummary.autoOrders === 1 ? 'pedido' : 'pedidos'} · Google, Shopping, Stories e Push
+              {roiSummary.autoOrders === 1 ? 'pedido' : 'pedidos'} · Google, Shopping, Stories, Push e Recompra
             </span>
           </div>
         </div>
@@ -358,7 +372,7 @@ export const SalesOriginRoiCard: React.FC<SalesOriginRoiCardProps> = ({
                 isDarkMode ? 'text-gray-400' : 'text-gray-500'
               }`}
             >
-              Assim que novos pedidos entrarem, a origem (Google, Shopping, Stories, Push ou Direto) aparecerá aqui automaticamente.
+              Assim que novos pedidos entrarem, a origem (Google, Shopping, Stories, Push, Recompra ou Direto) aparecerá aqui automaticamente.
             </p>
           </div>
         ) : (

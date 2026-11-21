@@ -95,11 +95,15 @@ if (typeof window !== "undefined") {
       prod = decodeURIComponent(pathMatch[1]);
     }
     const search = p.get("busca") || p.get("q") || p.get("search") || p.get("termo");
+    const repeatOrder = p.get("repetir");
     if (prod) {
       sessionStorage.setItem("ff_deeplink_produto", prod.trim());
     }
     if (search) {
       sessionStorage.setItem("ff_deeplink_busca", search.trim());
+    }
+    if (repeatOrder) {
+      sessionStorage.setItem("ff_repeat_order", repeatOrder.trim());
     }
   } catch {}
 }
@@ -149,7 +153,8 @@ import {
   Share2,
   Check,
   MapPin,
-  Smartphone
+  Smartphone,
+  RotateCcw
 } from "lucide-react";
 
 
@@ -221,6 +226,11 @@ const AdminPriceTags = lazy(() =>
 const AdminStoryGenerator = lazy(() =>
   import("./components/AdminStoryGenerator").then((m) => ({
     default: m.AdminStoryGenerator,
+  })),
+);
+const AdminRepurchaseRadar = lazy(() =>
+  import("./components/AdminRepurchaseRadar").then((m) => ({
+    default: m.AdminRepurchaseRadar,
   })),
 );
 const SuperAdminManager = lazy(() =>
@@ -638,6 +648,7 @@ const App: React.FC = () => {
     | "coupons"
     | "price-tags"
     | "stories"
+    | "repurchase"
     | "settings"
     | "manual"
     | "history"
@@ -649,6 +660,11 @@ const App: React.FC = () => {
   >(() => {
     return (localStorage.getItem("ff_admin_tab") as any) || "dashboard";
   });
+
+  const [repeatOrderBanner, setRepeatOrderBanner] = useState<{
+    addedCount: number;
+    unavailableItems: string[];
+  } | null>(null);
 
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
@@ -4076,6 +4092,16 @@ const App: React.FC = () => {
                       </button>
                       <button
                         onClick={() => {
+                          setAdminTab("repurchase");
+                          setIsSidebarOpen(false);
+                        }}
+                        className={`w-full flex items-center gap-3 px-6 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "repurchase" ? "bg-brand text-brand-contrast" : "text-gray-500 hover:bg-gray-50"}`}
+                      >
+                        <RotateCcw size={20} />
+                        Radar de Recompra
+                      </button>
+                      <button
+                        onClick={() => {
                           setAdminTab("history");
                           setIsSidebarOpen(false);
                         }}
@@ -4240,6 +4266,35 @@ const App: React.FC = () => {
                   : undefined
               }
               onSearch={handleSearch}
+              onApplyRepeatOrder={(itemsToAdd, unavailableItems) => {
+                if (itemsToAdd.length > 0) {
+                  setCart((prev) => {
+                    const next = [...prev];
+                    for (const { product, quantity } of itemsToAdd) {
+                      const safeQty = Math.max(1, Math.min(quantity, product.stock));
+                      const idx = next.findIndex((i) => i.id === product.id);
+                      if (idx >= 0) {
+                        next[idx] = {
+                          ...product,
+                          quantity: Math.min(product.stock, Math.max(next[idx].quantity, safeQty)),
+                        };
+                      } else {
+                        next.push({ ...product, quantity: safeQty });
+                      }
+                    }
+                    return next;
+                  });
+                }
+                setRepeatOrderBanner({
+                  addedCount: itemsToAdd.length,
+                  unavailableItems,
+                });
+                if (itemsToAdd.length > 0) {
+                  handleViewChange(ViewMode.CART);
+                }
+              }}
+              repeatOrderBanner={repeatOrderBanner}
+              onDismissRepeatBanner={() => setRepeatOrderBanner(null)}
             />
           )}
           {view === ViewMode.ADMIN_PHARMACY && currentTenant && (
@@ -4516,6 +4571,29 @@ const App: React.FC = () => {
                         {isSidebarCollapsed && (
                           <div className="fixed left-24 z-50 pointer-events-none hidden group-hover:flex items-center px-3 py-1.5 bg-gray-900 text-white text-xs font-bold rounded-xl shadow-lg whitespace-nowrap animate-in fade-in zoom-in-95 duration-150">
                             Gerador de Stories
+                          </div>
+                        )}
+                      </button>
+
+                      <button
+                        onClick={() => setAdminTab("repurchase")}
+                        title={isSidebarCollapsed ? "Radar de Recompra" : undefined}
+                        className={`group relative w-full flex items-center rounded-2xl font-bold text-[14px] transition-all ${
+                          isSidebarCollapsed 
+                            ? "justify-center p-3.5" 
+                            : "gap-3 px-4 py-3.5"
+                        } ${adminTab === "repurchase" ? "bg-brand text-brand-contrast shadow-sm" : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"}`}
+                        style={
+                          adminTab === "repurchase"
+                            ? { backgroundColor: currentTenant.primaryColor }
+                            : {}
+                        }
+                      >
+                        <RotateCcw size={19} className="shrink-0" />
+                        {!isSidebarCollapsed && <span className="truncate">Radar de Recompra</span>}
+                        {isSidebarCollapsed && (
+                          <div className="fixed left-24 z-50 pointer-events-none hidden group-hover:flex items-center px-3 py-1.5 bg-gray-900 text-white text-xs font-bold rounded-xl shadow-lg whitespace-nowrap animate-in fade-in zoom-in-95 duration-150">
+                            Radar de Recompra
                           </div>
                         )}
                       </button>
@@ -4907,6 +4985,22 @@ const App: React.FC = () => {
                     />
                   </React.Suspense>
                 )}
+                {adminTab === "repurchase" && (
+                  <React.Suspense
+                    fallback={
+                      <div className="p-8 text-center text-gray-400">
+                        Carregando Radar de Recompra...
+                      </div>
+                    }
+                  >
+                    <AdminRepurchaseRadar
+                      orders={orders}
+                      products={products}
+                      tenant={currentTenant!}
+                      promotions={promotions}
+                    />
+                  </React.Suspense>
+                )}
                 {adminTab === "history" && (
                   <AdminImportHistory tenant={currentTenant} />
                 )}
@@ -4983,8 +5077,13 @@ const App: React.FC = () => {
               matrizProducts={matrizProducts}
               updateQuantity={updateCartQuantity}
               onRemove={(id) => setCart(cart.filter((i) => i.id !== id))}
-              onComplete={finalizeOrder}
+              onComplete={async (...args) => {
+                setRepeatOrderBanner(null);
+                return finalizeOrder(...args);
+              }}
               onBackToStore={() => handleViewChange(ViewMode.CATALOG)}
+              repeatOrderBanner={repeatOrderBanner}
+              onDismissRepeatBanner={() => setRepeatOrderBanner(null)}
             />
           )}
         </Suspense>
