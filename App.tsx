@@ -142,7 +142,8 @@ import {
   Menu,
   Share2,
   Check,
-  MapPin
+  MapPin,
+  Smartphone
 } from "lucide-react";
 
 
@@ -209,6 +210,11 @@ const AdminPromotionManager = lazy(
 const AdminPriceTags = lazy(() =>
   import("./components/AdminPriceTags").then((m) => ({
     default: m.AdminPriceTags,
+  })),
+);
+const AdminStoryGenerator = lazy(() =>
+  import("./components/AdminStoryGenerator").then((m) => ({
+    default: m.AdminStoryGenerator,
   })),
 );
 const SuperAdminManager = lazy(() =>
@@ -625,6 +631,7 @@ const App: React.FC = () => {
     | "promotions"
     | "coupons"
     | "price-tags"
+    | "stories"
     | "settings"
     | "manual"
     | "history"
@@ -4038,6 +4045,16 @@ const App: React.FC = () => {
                       </button>
                       <button
                         onClick={() => {
+                          setAdminTab("stories");
+                          setIsSidebarOpen(false);
+                        }}
+                        className={`w-full flex items-center gap-3 px-6 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "stories" ? "bg-brand text-brand-contrast" : "text-gray-500 hover:bg-gray-50"}`}
+                      >
+                        <Smartphone size={20} />
+                        Gerador de Stories
+                      </button>
+                      <button
+                        onClick={() => {
                           setAdminTab("history");
                           setIsSidebarOpen(false);
                         }}
@@ -4460,6 +4477,29 @@ const App: React.FC = () => {
                       </button>
 
                       <button
+                        onClick={() => setAdminTab("stories")}
+                        title={isSidebarCollapsed ? "Gerador de Stories" : undefined}
+                        className={`group relative w-full flex items-center rounded-2xl font-bold text-[14px] transition-all ${
+                          isSidebarCollapsed 
+                            ? "justify-center p-3.5" 
+                            : "gap-3 px-4 py-3.5"
+                        } ${adminTab === "stories" ? "bg-brand text-brand-contrast shadow-sm" : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"}`}
+                        style={
+                          adminTab === "stories"
+                            ? { backgroundColor: currentTenant.primaryColor }
+                            : {}
+                        }
+                      >
+                        <Smartphone size={19} className="shrink-0" />
+                        {!isSidebarCollapsed && <span className="truncate">Gerador de Stories</span>}
+                        {isSidebarCollapsed && (
+                          <div className="fixed left-24 z-50 pointer-events-none hidden group-hover:flex items-center px-3 py-1.5 bg-gray-900 text-white text-xs font-bold rounded-xl shadow-lg whitespace-nowrap animate-in fade-in zoom-in-95 duration-150">
+                            Gerador de Stories
+                          </div>
+                        )}
+                      </button>
+
+                      <button
                         onClick={() => setAdminTab("history")}
                         title={isSidebarCollapsed ? "Histórico 24h" : undefined}
                         className={`group relative w-full flex items-center rounded-2xl font-bold text-[14px] transition-all ${
@@ -4825,6 +4865,21 @@ const App: React.FC = () => {
                     }
                   >
                     <AdminPriceTags
+                      products={products}
+                      tenant={currentTenant!}
+                      promotions={promotions}
+                    />
+                  </React.Suspense>
+                )}
+                {adminTab === "stories" && (
+                  <React.Suspense
+                    fallback={
+                      <div className="p-8 text-center text-gray-400">
+                        Carregando Gerador de Stories...
+                      </div>
+                    }
+                  >
+                    <AdminStoryGenerator
                       products={products}
                       tenant={currentTenant!}
                       promotions={promotions}
