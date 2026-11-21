@@ -1,5 +1,46 @@
-const CACHE_NAME = "farmaflow-v7";
+const CACHE_NAME = "farmaflow-v8";
+const PUSH_META_CACHE = "farmaflow-push-meta-v1";
+const PUSH_META_KEY = "/__farmaflow_push_meta__";
 const STATIC_ASSETS = ["/icon-192.svg", "/icon-512.svg"];
+
+async function savePushMeta(partialMeta) {
+  try {
+    const cache = await caches.open(PUSH_META_CACHE);
+    const existing = await loadPushMeta();
+    const merged = {
+      tenantId: partialMeta.tenantId || existing.tenantId || null,
+      vapidPublicKey: partialMeta.vapidPublicKey || existing.vapidPublicKey || null,
+    };
+    await cache.put(
+      PUSH_META_KEY,
+      new Response(JSON.stringify(merged), {
+        headers: { "Content-Type": "application/json" },
+      })
+    );
+  } catch (_) {}
+}
+
+async function loadPushMeta() {
+  try {
+    const cache = await caches.open(PUSH_META_CACHE);
+    const res = await cache.match(PUSH_META_KEY);
+    if (!res) return {};
+    return (await res.json()) || {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function swUrlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}
 
 self.addEventListener("install", (event) => {
   self.skipWaiting();
@@ -18,13 +59,25 @@ self.addEventListener("activate", (event) => {
         const cacheNames = await caches.keys();
         await Promise.all(
           cacheNames
-            .filter((name) => name !== CACHE_NAME)
+            .filter((name) => name !== CACHE_NAME && name !== PUSH_META_CACHE)
             .map((cacheName) => caches.delete(cacheName))
         );
       } catch (_) {}
       await self.clients.claim();
     })()
   );
+});
+
+self.addEventListener("message", (event) => {
+  const data = event?.data;
+  if (data && data.type === "SET_PUSH_CONTEXT") {
+    event.waitUntil(
+      savePushMeta({
+        tenantId: data.tenantId || null,
+        vapidPublicKey: data.vapidPublicKey || null,
+      })
+    );
+  }
 });
 
 self.addEventListener("fetch", (event) => {
@@ -132,10 +185,78 @@ self.addEventListener("push", function (event) {
   };
 
   event.waitUntil(
-    self.registration.showNotification(
-      data.title || "🔥 Oferta Especial!",
-      options
-    )
+    Promise.all([
+      tenantId ? savePushMeta({ tenantId }) : Promise.resolve(),
+      self.registration.showNotification(
+        data.title || "🔥 Oferta Especial!",
+        options
+      ),
+    ])
+  );
+});
+
+self.addEventListener("pushsubscriptionchange", function (event) {
+  event.waitUntil(
+    (async () => {
+      try {
+        const meta = await loadPushMeta();
+        let tenantId = meta.tenantId || null;
+        let applicationServerKey =
+          event.oldSubscription?.options?.applicationServerKey || null;
+
+        // Busca a chave VAPID pública atual do servidor para garantir alinhamento
+        try {
+          const query = tenantId
+            ? `?tenantId=${encodeURIComponent(tenantId)}`
+            : "";
+          const keyRes = await fetch(`/api/v1/push/vapid-public-key${query}`, {
+            headers: { Accept: "application/json" },
+          });
+          if (keyRes.ok) {
+            const keyData = await keyRes.json();
+            if (keyData?.publicKey) {
+              applicationServerKey = swUrlBase64ToUint8Array(keyData.publicKey);
+              await savePushMeta({
+                tenantId,
+                vapidPublicKey: keyData.publicKey,
+              });
+            }
+          }
+        } catch (_) {}
+
+        if (!applicationServerKey && meta.vapidPublicKey) {
+          applicationServerKey = swUrlBase64ToUint8Array(meta.vapidPublicKey);
+        }
+
+        let renewedSub = event.newSubscription || null;
+        if (!renewedSub && applicationServerKey) {
+          renewedSub = await self.registration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey,
+          });
+        }
+        if (!renewedSub) return;
+
+        const subJson = renewedSub.toJSON();
+        const oldEndpoint = event.oldSubscription?.endpoint || null;
+
+        await fetch("/api/v1/push/subscribe", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify({
+            tenantId: tenantId || undefined,
+            oldEndpoint,
+            subscription: subJson,
+            userAgent: "FarmaFlow-SW-AutoRenew",
+          }),
+        });
+      } catch (_) {
+        // Silencioso: a vitrine também revalida na próxima abertura
+      }
+    })()
   );
 });
 

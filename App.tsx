@@ -40,6 +40,8 @@ import { TenantSelector } from "./components/TenantSelector";
 import { Storefront } from "./components/Storefront";
 
 import { PWAInstallPrompt } from "./components/PWAInstallPrompt";
+import { PushOptInPrompt } from "./components/PushOptInPrompt";
+import { silentSyncPushSubscription } from "./lib/webPushClient";
 
 import { OrderAlert } from "./components/OrderAlert";
 
@@ -665,6 +667,9 @@ const App: React.FC = () => {
     addedCount: number;
     unavailableItems: string[];
   } | null>(null);
+  const [pushOptInContext, setPushOptInContext] = useState<
+    "cart" | "order_complete" | null
+  >(null);
 
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
@@ -3493,85 +3498,28 @@ const App: React.FC = () => {
       setTimeout(() => setGlobalToast(null), 2000);
     }
 
-    // Disparo silencioso e não-bloqueante de permissão Push exclusivamente ao adicionar ao carrinho
+    // Auto-renovação silenciosa (quando granted) ou convite discreto não-bloqueante (quando default)
     if (
       typeof window !== "undefined" &&
       currentTenant?.id &&
       "Notification" in window &&
-      Notification.permission === "default"
+      "serviceWorker" in navigator &&
+      "PushManager" in window
     ) {
-      const tenantIdForPush = currentTenant.id;
-      void (async () => {
+      if (Notification.permission === "granted") {
+        void silentSyncPushSubscription(currentTenant.id);
+      } else if (Notification.permission === "default") {
         try {
-          const permission = await Notification.requestPermission();
-          if (permission !== "granted") return;
-          if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
-
-          const regPromise = navigator.serviceWorker
-            .register("/sw.js", { scope: "/" })
-            .then((reg) => {
-              void reg.update().catch(() => {});
-              return navigator.serviceWorker.ready;
-            });
-
-          const registration = await Promise.race([
-            regPromise,
-            new Promise<ServiceWorkerRegistration | null>((resolve) =>
-              setTimeout(() => resolve(null), 4000)
-            ),
-          ]);
-          if (!registration || !registration.pushManager) return;
-
-          const keyRes = await fetch(
-            `/api/v1/push/vapid-public-key?tenantId=${encodeURIComponent(tenantIdForPush)}`,
-            { headers: { Accept: "application/json" } }
+          const dismissed = sessionStorage.getItem(
+            `ff_push_optin_dismissed_cart_${currentTenant.id}`,
           );
-          if (!keyRes.ok) return;
-          const keyData = await keyRes.json();
-          if (!keyData?.publicKey) return;
-
-          const padding = "=".repeat((4 - (keyData.publicKey.length % 4)) % 4);
-          const base64 = (keyData.publicKey + padding)
-            .replace(/-/g, "+")
-            .replace(/_/g, "/");
-          const rawData = window.atob(base64);
-          const appServerKey = new Uint8Array(rawData.length);
-          for (let i = 0; i < rawData.length; ++i) {
-            appServerKey[i] = rawData.charCodeAt(i);
+          if (!dismissed) {
+            setPushOptInContext("cart");
           }
-
-          let sub = await registration.pushManager.getSubscription();
-          if (!sub) {
-            sub = await registration.pushManager.subscribe({
-              userVisibleOnly: true,
-              applicationServerKey: appServerKey,
-            });
-          }
-          if (!sub) return;
-
-          const subJson = sub.toJSON();
-          await fetch("/api/v1/push/subscribe", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Accept: "application/json",
-            },
-            body: JSON.stringify({
-              tenantId: tenantIdForPush,
-              subscription: subJson,
-              userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "FarmaFlow-PWA",
-            }),
-          });
-
-          if (subJson?.endpoint) {
-            (window as any).currentPushEndpoint = subJson.endpoint;
-            localStorage.setItem(`ff_push_endpoint_${tenantIdForPush}`, subJson.endpoint);
-            localStorage.setItem("ff_push_endpoint", subJson.endpoint);
-          }
-          localStorage.setItem(`push_subscribed_${tenantIdForPush}`, "true");
-          localStorage.setItem(`ff_push_subscribed_${tenantIdForPush}`, "true");
-        } catch (_) {}
-      })();
+        } catch {
+          setPushOptInContext("cart");
+        }
+      }
     }
   };
 
@@ -3730,6 +3678,30 @@ const App: React.FC = () => {
       setCart([]);
       setView(ViewMode.CATALOG);
       window.history.pushState({ view: ViewMode.CATALOG, adminTab }, "");
+
+      // Convite discreto pós-pedido (quando default) ou auto-renovação silenciosa (quando granted)
+      if (
+        typeof window !== "undefined" &&
+        currentTenant?.id &&
+        "Notification" in window &&
+        "serviceWorker" in navigator &&
+        "PushManager" in window
+      ) {
+        if (Notification.permission === "granted") {
+          void silentSyncPushSubscription(currentTenant.id);
+        } else if (Notification.permission === "default") {
+          try {
+            const dismissedPostOrder = sessionStorage.getItem(
+              `ff_push_optin_dismissed_order_${currentTenant.id}`,
+            );
+            if (!dismissedPostOrder) {
+              setPushOptInContext("order_complete");
+            }
+          } catch {
+            setPushOptInContext("order_complete");
+          }
+        }
+      }
     } catch (error: any) {
       console.error("Erro ao finalizar pedido:", error);
       alert(`Erro ao finalizar pedido.`);
@@ -4254,7 +4226,17 @@ const App: React.FC = () => {
               onAddToCart={addToCart}
               onProductClick={handleProductClick}
               selectedProduct={selectedProduct}
-              onOpenCart={() => handleViewChange(ViewMode.CART)}
+              onOpenCart={() => {
+                if (
+                  currentTenant?.id &&
+                  typeof window !== "undefined" &&
+                  "Notification" in window &&
+                  Notification.permission === "granted"
+                ) {
+                  void silentSyncPushSubscription(currentTenant.id);
+                }
+                handleViewChange(ViewMode.CART);
+              }}
               onBack={
                 session.type !== "GUEST"
                   ? () =>
@@ -5088,6 +5070,28 @@ const App: React.FC = () => {
           )}
         </Suspense>
         {view === ViewMode.CATALOG && <PWAInstallPrompt />}
+        {(view === ViewMode.CATALOG || view === ViewMode.CART) &&
+          currentTenant &&
+          pushOptInContext && (
+            <PushOptInPrompt
+              tenantId={currentTenant.id}
+              tenantName={currentTenant.name}
+              primaryColor={currentTenant.primaryColor}
+              context={pushOptInContext}
+              onClose={(dismissedByUser) => {
+                if (dismissedByUser && currentTenant?.id) {
+                  try {
+                    const key =
+                      pushOptInContext === "order_complete"
+                        ? `ff_push_optin_dismissed_order_${currentTenant.id}`
+                        : `ff_push_optin_dismissed_cart_${currentTenant.id}`;
+                    sessionStorage.setItem(key, "true");
+                  } catch {}
+                }
+                setPushOptInContext(null);
+              }}
+            />
+          )}
       </main>
 
       {zoomImage && (

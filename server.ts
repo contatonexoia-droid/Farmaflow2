@@ -84,6 +84,8 @@ import {
 import {
   ensurePushSubscriptionsTable,
   getOrInitVapidKeys,
+  resolveTenantIdByEndpoint,
+  removePushSubscriptionByEndpoint,
   savePushSubscription,
   getTenantPushSubscriptions,
   verifyPushSubscriptionExists,
@@ -16004,8 +16006,16 @@ app.get(
         const subs = await getTenantPushSubscriptions(supabaseAdmin, tenantId);
         subscriberCount = subs.length;
       }
+      if (!keys) {
+        return res.status(200).json({
+          publicKey: null,
+          configured: false,
+          subscriberCount,
+        });
+      }
       return res.status(200).json({
         publicKey: keys.publicKey,
+        configured: true,
         subscriberCount,
       });
     } catch (err: any) {
@@ -16094,7 +16104,8 @@ app.post(
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     try {
       const body = req.body || {};
-      const tenantId = String(body.tenantId || body.tenant_id || "").trim();
+      let tenantId = String(body.tenantId || body.tenant_id || "").trim();
+      const oldEndpoint = String(body.oldEndpoint || body.old_endpoint || "").trim();
       const subscription = body.subscription || body;
       const endpoint = String(subscription?.endpoint || body.endpoint || "").trim();
       const p256dh = String(
@@ -16106,6 +16117,13 @@ app.post(
       const userAgent = String(
         body.userAgent || body.user_agent || req.headers["user-agent"] || ""
       ).trim();
+
+      if (!tenantId && oldEndpoint) {
+        const resolved = await resolveTenantIdByEndpoint(supabaseAdmin, oldEndpoint);
+        if (resolved) {
+          tenantId = resolved;
+        }
+      }
 
       if (!tenantId) {
         return res
@@ -16132,6 +16150,10 @@ app.post(
         auth,
         userAgent,
       });
+
+      if (oldEndpoint && oldEndpoint !== endpoint) {
+        await removePushSubscriptionByEndpoint(supabaseAdmin, oldEndpoint).catch(() => {});
+      }
 
       const allSubs = await getTenantPushSubscriptions(supabaseAdmin, tenantId);
 
@@ -16241,6 +16263,20 @@ app.post(["/api/v1/push/send", "/api/push/send"], async (req, res) => {
       targetUrl: resolvedTargetUrl,
       iconUrl: resolvedIconUrl || "/icon-192.svg",
     });
+
+    if (!result.success) {
+      return res.status(503).json({
+        success: false,
+        error: result.summary,
+        sentCount: result.sentCount,
+        failedCount: result.failedCount,
+        removedCount: result.removedCount,
+        totalSubscribers: result.totalSubscribers,
+        errorStatuses: result.errorStatuses,
+        summary: result.summary,
+        targetUrl: resolvedTargetUrl,
+      });
+    }
 
     return res.status(200).json({
       success: true,

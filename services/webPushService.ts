@@ -23,13 +23,11 @@ export interface VapidKeysConfig {
   subject: string;
 }
 
-const LOCAL_VAPID_FILE = path.join(process.cwd(), "vapid_keys.json");
 const LOCAL_SUBS_FILE = path.join(process.cwd(), "push_subscriptions_data.json");
-const STORAGE_BUCKET = "backups_empresas";
-const STORAGE_VAPID_PATH = "_system/vapid_keys.json";
 
 let cachedVapidKeys: VapidKeysConfig | null = null;
 let isVapidConfigured = false;
+let hasWarnedMissingVapid = false;
 let isTableChecked = false;
 
 /**
@@ -75,142 +73,99 @@ export async function ensurePushSubscriptionsTable(): Promise<void> {
 }
 
 /**
- * Obtém ou gera e persiste o par de chaves VAPID para não perder inscrições a cada reinicialização
+ * Lê as chaves VAPID fixas exclusivamente das variáveis de ambiente.
+ * NUNCA gera chaves aleatórias em memória ou em arquivo local do container,
+ * evitando erro HTTP 403 nos inscritos existentes após deploys na Easypanel.
  */
 export async function getOrInitVapidKeys(
-  supabaseAdmin: SupabaseClient
-): Promise<VapidKeysConfig> {
-  if (cachedVapidKeys && isVapidConfigured) {
-    return cachedVapidKeys;
-  }
+  _supabaseAdmin?: SupabaseClient
+): Promise<VapidKeysConfig | null> {
+  const envPublicKey = String(
+    process.env.VAPID_PUBLIC_KEY ||
+      process.env.WEB_PUSH_PUBLIC_KEY ||
+      process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ||
+      process.env.VITE_VAPID_PUBLIC_KEY ||
+      ""
+  ).trim();
 
-  const subject =
-    process.env.VAPID_SUBJECT || "mailto:contato@farmaflow.online";
+  const envPrivateKey = String(
+    process.env.VAPID_PRIVATE_KEY || process.env.WEB_PUSH_PRIVATE_KEY || ""
+  ).trim();
 
-  // 1. Variáveis de ambiente (.env)
-  if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
-    cachedVapidKeys = {
-      publicKey: process.env.VAPID_PUBLIC_KEY.trim(),
-      privateKey: process.env.VAPID_PRIVATE_KEY.trim(),
-      subject,
-    };
-    webPush.setVapidDetails(
-      cachedVapidKeys.subject,
-      cachedVapidKeys.publicKey,
-      cachedVapidKeys.privateKey
-    );
-    isVapidConfigured = true;
-    return cachedVapidKeys;
-  }
+  const envSubject = String(
+    process.env.VAPID_SUBJECT ||
+      process.env.WEB_PUSH_SUBJECT ||
+      "mailto:contato@farmaflow.site"
+  ).trim();
 
-  // 2. Configuração global no Supabase Storage (fonte compartilhada entre instâncias)
-  try {
-    const { data, error } = await supabaseAdmin.storage
-      .from(STORAGE_BUCKET)
-      .download(STORAGE_VAPID_PATH);
-
-    if (!error && data) {
-      const text = await data.text();
-      const parsed = JSON.parse(text);
-      if (parsed?.publicKey && parsed?.privateKey) {
-        cachedVapidKeys = {
-          publicKey: String(parsed.publicKey).trim(),
-          privateKey: String(parsed.privateKey).trim(),
-          subject: parsed.subject || subject,
-        };
-        try {
-          fs.writeFileSync(
-            LOCAL_VAPID_FILE,
-            JSON.stringify(cachedVapidKeys, null, 2),
-            "utf-8"
-          );
-        } catch (_) {}
-        webPush.setVapidDetails(
-          cachedVapidKeys.subject,
-          cachedVapidKeys.publicKey,
-          cachedVapidKeys.privateKey
-        );
-        isVapidConfigured = true;
-        return cachedVapidKeys;
-      }
-    }
-  } catch (_) {}
-
-  // 3. Arquivo local persistido (vapid_keys.json)
-  try {
-    if (fs.existsSync(LOCAL_VAPID_FILE)) {
-      const raw = fs.readFileSync(LOCAL_VAPID_FILE, "utf-8");
-      const parsed = JSON.parse(raw);
-      if (parsed?.publicKey && parsed?.privateKey) {
-        cachedVapidKeys = {
-          publicKey: String(parsed.publicKey).trim(),
-          privateKey: String(parsed.privateKey).trim(),
-          subject: parsed.subject || subject,
-        };
-        try {
-          await supabaseAdmin.storage
-            .from(STORAGE_BUCKET)
-            .upload(
-              STORAGE_VAPID_PATH,
-              JSON.stringify(cachedVapidKeys, null, 2),
-              {
-                contentType: "application/json",
-                upsert: true,
-              }
-            );
-        } catch (_) {}
-        webPush.setVapidDetails(
-          cachedVapidKeys.subject,
-          cachedVapidKeys.publicKey,
-          cachedVapidKeys.privateKey
-        );
-        isVapidConfigured = true;
-        return cachedVapidKeys;
-      }
-    }
-  } catch (err) {
-    console.warn("[WebPush] Aviso ao ler vapid_keys.json local:", err);
-  }
-
-  // 4. Gera novo par de chaves VAPID válido e persiste globalmente
-  const generated = webPush.generateVAPIDKeys();
-  cachedVapidKeys = {
-    publicKey: generated.publicKey,
-    privateKey: generated.privateKey,
-    subject,
-  };
-
-  try {
-    fs.writeFileSync(
-      LOCAL_VAPID_FILE,
-      JSON.stringify(cachedVapidKeys, null, 2),
-      "utf-8"
-    );
-  } catch (err) {
-    console.warn("[WebPush] Não foi possível salvar vapid_keys.json local:", err);
-  }
-
-  try {
-    await supabaseAdmin.storage
-      .from(STORAGE_BUCKET)
-      .upload(
-        STORAGE_VAPID_PATH,
-        JSON.stringify(cachedVapidKeys, null, 2),
-        {
-          contentType: "application/json",
-          upsert: true,
-        }
+  if (!envPublicKey || !envPrivateKey) {
+    if (!hasWarnedMissingVapid) {
+      hasWarnedMissingVapid = true;
+      console.warn(
+        "[WebPush] AVISO: Variáveis VAPID_PUBLIC_KEY e/ou VAPID_PRIVATE_KEY não configuradas no ambiente. " +
+          "Nenhuma chave aleatória será gerada para não invalidar clientes inscritos. " +
+          "Configure VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY e VAPID_SUBJECT (padrão mailto:contato@farmaflow.site) na Easypanel."
       );
+    }
+    return null;
+  }
+
+  if (
+    cachedVapidKeys &&
+    isVapidConfigured &&
+    cachedVapidKeys.publicKey === envPublicKey &&
+    cachedVapidKeys.privateKey === envPrivateKey &&
+    cachedVapidKeys.subject === envSubject
+  ) {
+    return cachedVapidKeys;
+  }
+
+  try {
+    webPush.setVapidDetails(envSubject, envPublicKey, envPrivateKey);
+    cachedVapidKeys = {
+      publicKey: envPublicKey,
+      privateKey: envPrivateKey,
+      subject: envSubject,
+    };
+    isVapidConfigured = true;
+    hasWarnedMissingVapid = false;
+    return cachedVapidKeys;
+  } catch (err: any) {
+    console.warn(
+      "[WebPush] AVISO: Falha ao configurar chaves VAPID das variáveis de ambiente:",
+      err?.message || err
+    );
+    cachedVapidKeys = null;
+    isVapidConfigured = false;
+    return null;
+  }
+}
+
+/**
+ * Localiza o tenant_id associado a um endpoint antigo (usado na auto-renovação pushsubscriptionchange do Service Worker)
+ */
+export async function resolveTenantIdByEndpoint(
+  supabaseAdmin: SupabaseClient,
+  endpoint: string
+): Promise<string | null> {
+  const cleanEndpoint = String(endpoint || "").trim();
+  if (!cleanEndpoint) return null;
+
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("push_subscriptions")
+      .select("tenant_id")
+      .eq("endpoint", cleanEndpoint)
+      .maybeSingle();
+
+    if (!error && data?.tenant_id) {
+      return String(data.tenant_id).trim();
+    }
   } catch (_) {}
 
-  webPush.setVapidDetails(
-    cachedVapidKeys.subject,
-    cachedVapidKeys.publicKey,
-    cachedVapidKeys.privateKey
-  );
-  isVapidConfigured = true;
-  console.log("[WebPush] Par de chaves VAPID gerado e persistido com sucesso.");
-  return cachedVapidKeys;
+  const localRows = loadLocalSubscriptions();
+  const matched = localRows.find((r) => r.endpoint === cleanEndpoint && r.tenant_id);
+  return matched ? String(matched.tenant_id).trim() : null;
 }
 
 function loadLocalSubscriptions(): PushSubscriptionRow[] {
@@ -539,12 +494,25 @@ export async function sendPromotionalPushToTenant(
   errorStatuses: number[];
   summary: string;
 }> {
-  await getOrInitVapidKeys(supabaseAdmin);
+  const keys = await getOrInitVapidKeys(supabaseAdmin);
 
   const subscriptions = await getTenantPushSubscriptions(
     supabaseAdmin,
     params.tenantId
   );
+
+  if (!keys) {
+    return {
+      success: false,
+      sentCount: 0,
+      failedCount: subscriptions.length,
+      removedCount: 0,
+      totalSubscribers: subscriptions.length,
+      errorStatuses: [],
+      summary:
+        "Chaves VAPID não configuradas nas variáveis de ambiente (VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY).",
+    };
+  }
 
   let sentCount = 0;
   let failedCount = 0;
@@ -640,23 +608,18 @@ export async function sendPromotionalPushToTenant(
 
         const errDetail = String(err?.body || err?.message || err || "").trim();
 
-        // Remove automaticamente inscrições expiradas/inexistentes (404/410)
-        // ou rejeitadas por incompatibilidade/autenticação de chave VAPID (401/403)
-        if (
-          statusCode === 401 ||
-          statusCode === 403 ||
-          statusCode === 404 ||
-          statusCode === 410
-        ) {
+        // Limpeza automática: remove do banco APENAS erros definitivos do navegador (404 e 410).
+        // NÃO deleta inscrições quando o erro for 403 (ou 401), preservando os clientes para renovação silenciosa.
+        if (statusCode === 404 || statusCode === 410) {
           removedCount++;
           console.log(
-            `[WebPush] Assinatura inválida/expirada removida automaticamente (HTTP ${statusCode}) [endpoint=${sub.endpoint.slice(0, 60)}...]`
+            `[WebPush] Assinatura expirada/inexistente removida automaticamente (HTTP ${statusCode}) [endpoint=${sub.endpoint.slice(0, 60)}...]`
           );
           await removePushSubscriptionByEndpoint(supabaseAdmin, sub.endpoint);
         } else {
           failedCount++;
           console.warn(
-            `[WebPush] Falha no envio para endpoint (HTTP ${statusCode || "N/A"}) [endpoint=${sub.endpoint.slice(0, 60)}...]: ${errDetail}`
+            `[WebPush] Falha no envio para endpoint (HTTP ${statusCode || "N/A"} - assinatura preservada) [endpoint=${sub.endpoint.slice(0, 60)}...]: ${errDetail}`
           );
         }
       }

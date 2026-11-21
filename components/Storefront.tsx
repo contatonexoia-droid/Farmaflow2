@@ -90,6 +90,10 @@ import {
   parseRepeatOrderParam,
   matchCatalogProduct,
 } from "../lib/repurchaseRadar";
+import {
+  silentSyncPushSubscription,
+  notifyServiceWorkerPushContext,
+} from "../lib/webPushClient";
 
 const GENERIC_PLACEHOLDER = "https://i.imgur.com/fLz8F3X.png";
 
@@ -3467,72 +3471,23 @@ export const Storefront: React.FC<StorefrontProps> = ({
     if (
       typeof window === "undefined" ||
       !tenant?.id ||
-      !("Notification" in window) ||
-      Notification.permission !== "default"
+      !("Notification" in window)
     ) {
       return;
     }
 
-    // Disparo 100% silencioso e não-bloqueante (void) exclusivamente ao adicionar ao carrinho
-    void (async () => {
-      try {
-        const permission = await Notification.requestPermission();
-        if (permission !== "granted") return;
-
-        if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
-
-        const regPromise = navigator.serviceWorker
-          .register("/sw.js", { scope: "/" })
-          .then((reg) => {
-            void reg.update().catch(() => {});
-            return navigator.serviceWorker.ready;
-          });
-
-        const registration = await Promise.race([
-          regPromise,
-          new Promise<ServiceWorkerRegistration | null>((resolve) =>
-            setTimeout(() => resolve(null), 4000)
-          ),
-        ]);
-
-        if (!registration || !registration.pushManager) return;
-
-        const keyRes = await fetch(
-          `/api/v1/push/vapid-public-key?tenantId=${encodeURIComponent(tenant.id)}`,
-          { headers: { Accept: "application/json" } }
-        );
-        if (!keyRes.ok) return;
-        const keyData = await keyRes.json();
-        if (!keyData?.publicKey) return;
-
-        const expectedKeyBytes = urlBase64ToUint8Array(keyData.publicKey);
-        let sub = await registration.pushManager.getSubscription();
-        if (
-          sub &&
-          (!isRealPushEndpoint(sub.endpoint) ||
-            !areApplicationServerKeysEqual(sub, expectedKeyBytes))
-        ) {
-          await sub.unsubscribe().catch(() => {});
-          sub = null;
+    // Se o cliente já autorizou notificações, verifica e renova silenciosamente em segundo plano
+    // caso a assinatura esteja ausente ou diferente da VAPID_PUBLIC_KEY atual (zero popup).
+    // Se permission === 'default', o convite discreto não-bloqueante é exibido pelo App.tsx.
+    if (Notification.permission === "granted") {
+      void silentSyncPushSubscription(tenant.id).then((res) => {
+        if (res.synced) {
+          setIsPushSubscribed(true);
+          setShowPushBanner(false);
         }
-        if (!sub) {
-          sub = await subscribeWithVapidKey(registration, expectedKeyBytes);
-        }
-        if (!sub) return;
-
-        await upsertRealPushSubscription(tenant.id, sub);
-      } catch (_) {
-        // Silencioso: nunca trava nem interfere na adição ao carrinho
-      }
-    })();
-  }, [
-    tenant?.id,
-    urlBase64ToUint8Array,
-    isRealPushEndpoint,
-    areApplicationServerKeysEqual,
-    subscribeWithVapidKey,
-    upsertRealPushSubscription,
-  ]);
+      });
+    }
+  }, [tenant?.id]);
 
   const handleAddToCartWrapper = useCallback((product: Product) => {
     onAddToCart(product, false, false);
@@ -3817,65 +3772,20 @@ export const Storefront: React.FC<StorefrontProps> = ({
         }
       } catch (_) {}
 
-      // Re-inscrição automática silenciosa sempre que Notification.permission === 'granted'
-      if (
-        Notification.permission === "granted" &&
-        registration &&
-        registration.pushManager
-      ) {
+      // Auto-renovação silenciosa sempre que Notification.permission === 'granted'
+      if (Notification.permission === "granted") {
         try {
-          const keyRes = await Promise.race([
-            fetch(
-              `/api/v1/push/vapid-public-key?tenantId=${encodeURIComponent(tenant.id)}`,
-              { headers: { Accept: "application/json" } }
-            ),
-            new Promise<Response>((_, reject) =>
-              setTimeout(() => reject(new Error("VAPID_TIMEOUT")), 4000)
-            ),
-          ]);
-          const keyCt = (keyRes.headers.get("content-type") || "").toLowerCase();
-          if (keyRes.ok && keyCt.includes("application/json")) {
-            const keyData = await keyRes.json();
-            if (keyData?.publicKey) {
-              const expectedKeyBytes = urlBase64ToUint8Array(keyData.publicKey);
-              const needsResubscribe =
-                !currentSub ||
-                !isRealPushEndpoint(currentSub.endpoint) ||
-                !areApplicationServerKeysEqual(currentSub, expectedKeyBytes);
-
-              if (needsResubscribe) {
-                if (currentSub) {
-                  await currentSub.unsubscribe().catch(() => {});
-                  await new Promise((resolve) => setTimeout(resolve, 100));
-                }
-                const freshSub = await subscribeWithVapidKey(
-                  registration,
-                  expectedKeyBytes
-                );
-
-                if (freshSub && isRealPushEndpoint(freshSub.endpoint)) {
-                  const synced = await upsertRealPushSubscription(tenant.id, freshSub);
-                  if (!isCancelled && synced) {
-                    setIsPushSubscribed(true);
-                    setShowPushBanner(false);
-                  }
-                  return;
-                }
-              } else if (currentSub && isRealPushEndpoint(currentSub.endpoint)) {
-                const existsInDb = await checkEndpointExistsInDatabase(currentSub.endpoint);
-                if (!existsInDb) {
-                  const synced = await upsertRealPushSubscription(tenant.id, currentSub);
-                  if (!isCancelled && synced) {
-                    setIsPushSubscribed(true);
-                    setShowPushBanner(false);
-                  }
-                  return;
-                }
-              }
-            }
+          const syncRes = await silentSyncPushSubscription(tenant.id, {
+            force: true,
+          });
+          if (!isCancelled && syncRes.synced) {
+            setIsPushSubscribed(true);
+            setShowPushBanner(false);
           }
+          return;
         } catch (silentErr) {
-          console.warn("[WebPush] Aviso na re-inscrição silenciosa:", silentErr);
+          console.warn("[WebPush] Aviso na auto-renovação silenciosa:", silentErr);
+          return;
         }
       }
 
@@ -4047,6 +3957,11 @@ export const Storefront: React.FC<StorefrontProps> = ({
         toast.error("Falha ao registrar inscrição Push no servidor.");
         return;
       }
+
+      try {
+        localStorage.setItem(`ff_push_vapid_key_${tenant.id}`, keyData.publicKey);
+      } catch (_) {}
+      notifyServiceWorkerPushContext(registration, tenant.id, keyData.publicKey);
 
       setIsPushSubscribed(true);
       setShowPushBanner(false);
