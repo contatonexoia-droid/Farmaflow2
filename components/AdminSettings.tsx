@@ -12,6 +12,7 @@ import { AiAgentSettings } from './AiAgentSettings';
 import { TenantSelector } from './TenantSelector';
 import { WelcomeSettings } from './WelcomeSettings';
 import { StoreShareCard } from './StoreShareCard';
+import { GoogleShoppingFeedCard } from './GoogleShoppingFeedCard';
 import { StoreCounterMaterials } from './StoreCounterMaterials';
 import {
   parseOperatingHoursFromText,
@@ -1171,6 +1172,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
         {activeTab === 'geral' && (
           <div className="space-y-8 animate-in fade-in">
             <StoreShareCard tenant={formData} />
+            <GoogleShoppingFeedCard tenant={formData} />
             <StoreCounterMaterials tenant={formData} />
 
             <form onSubmit={handleSubmit} className="space-y-10">

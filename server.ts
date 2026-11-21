@@ -801,10 +801,13 @@ const isSocialPreviewBot = (userAgent: string = ""): boolean => {
 const SEO_LOOKUP_TIMEOUT_MS = 3500;
 const SEO_PRODUCT_CACHE_TTL_MS = 60 * 1000; // 1 minuto
 const SITEMAP_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hora
+const GOOGLE_SHOPPING_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hora
+const GOOGLE_SHOPPING_TIMEOUT_MS = 4000;
 
 const seoProductRamCache = new Map<string, { product: any | null; expiresAt: number }>();
 const sitemapIndexRamCache = new Map<string, { xml: string; expiresAt: number }>();
 const storeSitemapRamCache = new Map<string, { xml: string; expiresAt: number }>();
+const googleShoppingRamCache = new Map<string, { xml: string; expiresAt: number }>();
 
 async function withSeoTimeout<T>(promise: Promise<T>, ms = SEO_LOOKUP_TIMEOUT_MS): Promise<T | null> {
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -940,6 +943,8 @@ function acceptsHtmlForSeo(req: express.Request): boolean {
     p === "/robots.txt" ||
     p === "/sitemap.xml" ||
     p.endsWith("/sitemap.xml") ||
+    p === "/google-shopping.xml" ||
+    p.endsWith("/google-shopping.xml") ||
     /\.(js|mjs|cjs|css|map|png|jpe?g|gif|webp|svg|ico|json|xml|txt|woff2?|ttf|eot|pdf|zip|exe|mp3|mp4|webm)$/i.test(p)
   ) {
     return false;
@@ -1643,6 +1648,7 @@ app.get("/robots.txt", (req, res) => {
       "User-agent: *",
       "Allow: /loja/",
       "Allow: /produto/",
+      "Allow: /google-shopping.xml",
       "Disallow: /admin",
       "Disallow: /painel",
       "Disallow: /api/",
@@ -1656,7 +1662,7 @@ app.get("/robots.txt", (req, res) => {
     return res.status(200).send(body);
   } catch {
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
-    return res.status(200).send("User-agent: *\nAllow: /loja/\nAllow: /produto/\nDisallow: /admin\nDisallow: /painel\nDisallow: /api/\n");
+    return res.status(200).send("User-agent: *\nAllow: /loja/\nAllow: /produto/\nAllow: /google-shopping.xml\nDisallow: /admin\nDisallow: /painel\nDisallow: /api/\n");
   }
 });
 
@@ -1816,6 +1822,317 @@ app.get("/loja/:tenantSlug/sitemap.xml", async (req, res) => {
     const fallbackXml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>\n`;
     return res.status(200).send(fallbackXml);
   }
+});
+
+// ============================================================================
+// FEED XML GOOGLE MERCHANT CENTER (RSS 2.0) / META & INSTAGRAM CATALOG
+// ============================================================================
+
+function sanitizeXmlText(raw: string = "", maxLength?: number): string {
+  let cleaned = String(raw || "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (maxLength && cleaned.length > maxLength) {
+    cleaned = cleaned.slice(0, maxLength).trimEnd();
+  }
+  return cleaned;
+}
+
+function isValidGtinCode(rawBarcode?: string | null): string | null {
+  const digits = String(rawBarcode || "").replace(/\D/g, "");
+  if (!/^(\d{8}|\d{12}|\d{13}|\d{14})$/.test(digits)) return null;
+  if (/^0+$/.test(digits)) return null;
+
+  // Validação padrão GS1 (dígito verificador Mod-10 exigido pelo Google Merchant Center)
+  const body = digits.slice(0, -1);
+  const checkDigit = Number(digits[digits.length - 1]);
+  let sum = 0;
+  for (let i = 0; i < body.length; i++) {
+    const num = Number(body[body.length - 1 - i]);
+    sum += i % 2 === 0 ? num * 3 : num;
+  }
+  const expected = (10 - (sum % 10)) % 10;
+  return checkDigit === expected ? digits : null;
+}
+
+function resolveValidMerchantImageUrl(rawImage?: string | null): string | null {
+  const raw = String(rawImage || "").trim();
+  if (!raw) return null;
+  const lower = raw.toLowerCase();
+  if (
+    lower === "ignore" ||
+    lower === "pendente_curadoria" ||
+    lower.startsWith("data:") ||
+    lower.includes("flz8f3x.png") ||
+    lower.includes("preview-share.png") ||
+    lower.includes("placeholder") ||
+    lower.includes("no-image") ||
+    lower.includes("sem-foto")
+  ) {
+    return null;
+  }
+  if (!raw.startsWith("https://")) {
+    return null;
+  }
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "https:" || !parsed.hostname) return null;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+function resolveMerchantPrices(product: any): { normalPrice: number; salePrice: number | null } {
+  const price = parseSafePositivePrice(product?.price);
+  const promo = parseSafePositivePrice(product?.promotional_price);
+  const orig = parseSafePositivePrice(product?.original_price);
+
+  // Caso 1: promotional_price explicitamente menor que price
+  if (promo > 0 && price > 0 && promo < price) {
+    const normal = orig > price ? orig : price;
+    return { normalPrice: normal, salePrice: promo };
+  }
+
+  // Caso 2: original_price maior que price (sem promotional_price separado)
+  if (orig > 0 && price > 0 && price < orig) {
+    return { normalPrice: orig, salePrice: price };
+  }
+
+  // Caso 3: preço regular sem promoção
+  if (price > 0) {
+    return { normalPrice: price, salePrice: null };
+  }
+  if (orig > 0) {
+    return { normalPrice: orig, salePrice: null };
+  }
+  return { normalPrice: 0, salePrice: null };
+}
+
+function isMerchantStoreHost(host: string): boolean {
+  const lowerHost = String(host || "").toLowerCase();
+  return (
+    ((lowerHost.endsWith(".farmaflow.online") || lowerHost.endsWith(".nexoia.online")) &&
+      !["www", "farmaflow", "nexoia", "app", "admin", "api", "portal"].includes(lowerHost.split(".")[0])) ||
+    (lowerHost !== "farmaflow.online" &&
+      lowerHost !== "www.farmaflow.online" &&
+      lowerHost !== "nexoia.online" &&
+      lowerHost !== "farmaflow.nexoia.online" &&
+      lowerHost !== "localhost" &&
+      lowerHost !== "127.0.0.1" &&
+      !lowerHost.includes("run.app"))
+  );
+}
+
+function buildEmptyMerchantFeedXml(title = "FarmaFlow Feed", link = "https://farmaflow.online"): string {
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<rss xmlns:g="http://base.google.com/ns/1.0" version="2.0">',
+    "  <channel>",
+    `    <title>${escapeXml(sanitizeXmlText(title, 150))}</title>`,
+    `    <link>${escapeXml(link)}</link>`,
+    `    <description>${escapeXml(sanitizeXmlText(`Catálogo de produtos ${title}`, 250))}</description>`,
+    "  </channel>",
+    "</rss>",
+    "",
+  ].join("\n");
+}
+
+async function handleGoogleShoppingFeedRequest(
+  req: express.Request,
+  res: express.Response,
+  explicitTenantSlug?: string
+) {
+  const { host, baseUrl } = resolveRequestOrigin(req);
+  const lowerHost = host.toLowerCase();
+  const isStoreHost = isMerchantStoreHost(lowerHost);
+
+  let tenantIdentifier = String(explicitTenantSlug || "").trim();
+  if (!tenantIdentifier) {
+    if (lowerHost.endsWith(".farmaflow.online") || lowerHost.endsWith(".nexoia.online")) {
+      const sub = lowerHost.split(".")[0];
+      if (sub && !["www", "farmaflow", "nexoia", "app", "admin", "api", "portal"].includes(sub)) {
+        tenantIdentifier = sub;
+      }
+    } else if (isStoreHost) {
+      tenantIdentifier = lowerHost.replace(/^www\./, "");
+    }
+  }
+
+  res.setHeader("Content-Type", "application/xml; charset=utf-8");
+  res.setHeader("Cache-Control", "public, max-age=3600");
+
+  if (!tenantIdentifier) {
+    return res.status(404).send(buildEmptyMerchantFeedXml("FarmaFlow", baseUrl));
+  }
+
+  const cacheKey = `${baseUrl.toLowerCase()}|${tenantIdentifier.toLowerCase()}`;
+  const now = Date.now();
+
+  try {
+    const cached = googleShoppingRamCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      return res.status(200).send(cached.xml);
+    }
+
+    const startTime = Date.now();
+    const tenant = await withSeoTimeout(
+      getTenantCachedOrFetch(tenantIdentifier),
+      Math.min(2000, GOOGLE_SHOPPING_TIMEOUT_MS)
+    );
+
+    const startOfToday = new Date().setHours(0, 0, 0, 0);
+    const isTenantExpired =
+      tenant?.license_expiration &&
+      new Date(tenant.license_expiration).getTime() < startOfToday;
+
+    if (!tenant || tenant.is_blocked === true || tenant.isblocked === true || isTenantExpired) {
+      return res.status(404).send(buildEmptyMerchantFeedXml("Loja não encontrada", baseUrl));
+    }
+
+    const cleanTenantSlug = getSeoTenantSlug(tenant);
+    const storeName = sanitizeXmlText(tenant.name || tenant.razao_social || "FarmaFlow Drogaria", 120);
+    const city = sanitizeXmlText(tenant.city || tenant.cidade || "", 60);
+    const state = sanitizeXmlText(tenant.state || tenant.uf || "", 10);
+    const cityState = [city, state].filter(Boolean).join("/");
+
+    const channelLink = isStoreHost
+      ? `${baseUrl}/`
+      : `${baseUrl}/loja/${encodeURIComponent(cleanTenantSlug)}`;
+
+    const remainingTimeoutMs = Math.max(
+      1200,
+      GOOGLE_SHOPPING_TIMEOUT_MS - (Date.now() - startTime)
+    );
+
+    const prodRes = await withSeoTimeout(
+      Promise.resolve(
+        supabaseAdmin
+          .from("products")
+          .select(
+            "id, internal_code, barcode, name, manufacturer, description, price, original_price, promotional_price, stock, image"
+          )
+          .eq("tenant_id", tenant.id)
+          .gt("stock", 0)
+          .gt("price", 0)
+          .not("image", "is", null)
+          .limit(5000)
+      ),
+      remainingTimeoutMs
+    );
+
+    if (!prodRes) {
+      return res.status(200).send(buildEmptyMerchantFeedXml(storeName, channelLink));
+    }
+
+    const rows = Array.isArray((prodRes as any).data) ? (prodRes as any).data : [];
+    const seenIds = new Set<string>();
+    const itemsXml: string[] = [];
+
+    for (const prod of rows) {
+      if (!prod) continue;
+      if (Number(prod.stock ?? 0) <= 0) continue;
+
+      const title = sanitizeXmlText(prod.name, 150);
+      if (!title) continue;
+
+      const imageLink = resolveValidMerchantImageUrl(prod.image);
+      if (!imageLink) continue;
+
+      const { normalPrice, salePrice } = resolveMerchantPrices(prod);
+      if (normalPrice <= 0) continue;
+
+      const itemId = sanitizeXmlText(String(prod.internal_code || prod.id || ""), 50);
+      if (!itemId || seenIds.has(itemId)) continue;
+      seenIds.add(itemId);
+
+      const pSlug = buildSeoProductSlug(prod);
+      if (!pSlug) continue;
+
+      const productUrl = isStoreHost
+        ? `${baseUrl}/produto/${encodeURIComponent(pSlug)}?origem=google_shopping`
+        : `${baseUrl}/loja/${encodeURIComponent(cleanTenantSlug)}/produto/${encodeURIComponent(pSlug)}?origem=google_shopping`;
+
+      const rawDesc = sanitizeXmlText(prod.description || "", 5000);
+      const fallbackDesc = cityState
+        ? `${title} disponível para entrega rápida na ${storeName} - ${cityState}`
+        : `${title} disponível para entrega rápida na ${storeName}`;
+      const description = rawDesc.length >= 10 ? rawDesc : sanitizeXmlText(fallbackDesc, 5000);
+
+      const brand = sanitizeXmlText(prod.manufacturer || "", 70) || sanitizeXmlText(storeName, 70);
+      const validGtin = isValidGtinCode(prod.barcode);
+
+      const lines = [
+        "    <item>",
+        `      <g:id>${escapeXml(itemId)}</g:id>`,
+        `      <g:title>${escapeXml(title)}</g:title>`,
+        `      <g:description>${escapeXml(description)}</g:description>`,
+        `      <g:link>${escapeXml(productUrl)}</g:link>`,
+        `      <g:image_link>${escapeXml(imageLink)}</g:image_link>`,
+        "      <g:availability>in_stock</g:availability>",
+        "      <g:condition>new</g:condition>",
+        `      <g:price>${normalPrice.toFixed(2)} BRL</g:price>`,
+      ];
+
+      if (salePrice !== null && salePrice > 0 && salePrice < normalPrice) {
+        lines.push(`      <g:sale_price>${salePrice.toFixed(2)} BRL</g:sale_price>`);
+      }
+
+      lines.push(`      <g:brand>${escapeXml(brand)}</g:brand>`);
+
+      if (validGtin) {
+        lines.push(`      <g:gtin>${escapeXml(validGtin)}</g:gtin>`);
+        lines.push("      <g:identifier_exists>yes</g:identifier_exists>");
+      } else {
+        lines.push("      <g:identifier_exists>no</g:identifier_exists>");
+      }
+
+      lines.push("    </item>");
+      itemsXml.push(lines.join("\n"));
+    }
+
+    const channelDesc = cityState
+      ? `Catálogo oficial de produtos da ${storeName} (${cityState}) com entrega rápida.`
+      : `Catálogo oficial de produtos da ${storeName} com entrega rápida.`;
+
+    const xml = [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<rss xmlns:g="http://base.google.com/ns/1.0" version="2.0">',
+      "  <channel>",
+      `    <title>${escapeXml(storeName)}</title>`,
+      `    <link>${escapeXml(channelLink)}</link>`,
+      `    <description>${escapeXml(sanitizeXmlText(channelDesc, 300))}</description>`,
+      ...itemsXml,
+      "  </channel>",
+      "</rss>",
+      "",
+    ].join("\n");
+
+    if (googleShoppingRamCache.size > 300) {
+      googleShoppingRamCache.clear();
+    }
+    googleShoppingRamCache.set(cacheKey, {
+      xml,
+      expiresAt: now + GOOGLE_SHOPPING_CACHE_TTL_MS,
+    });
+
+    return res.status(200).send(xml);
+  } catch {
+    return res.status(200).send(buildEmptyMerchantFeedXml("FarmaFlow", baseUrl));
+  }
+}
+
+app.get("/google-shopping.xml", async (req, res) => {
+  return handleGoogleShoppingFeedRequest(req, res);
+});
+
+app.get("/loja/:tenantSlug/google-shopping.xml", async (req, res) => {
+  const tenantSlugParam = Array.isArray(req.params.tenantSlug)
+    ? req.params.tenantSlug[0]
+    : String(req.params.tenantSlug || "").trim();
+  return handleGoogleShoppingFeedRequest(req, res, tenantSlugParam);
 });
 
 // Interceptor de Rota de Loja Pública (/loja/:slug, /loja/:slug/produto/:productSlug e /produto/:productSlug em subdomínios)
