@@ -19,6 +19,7 @@ import {
   ExternalLink,
   MessageCircle,
   Tag,
+  Link2,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { PharmacyConfig, Product, PromotionRule } from '../types';
@@ -555,7 +556,7 @@ export const AdminStoryGenerator: React.FC<AdminStoryGeneratorProps> = ({
     Boolean(tenant?.whatsapp)
   );
   const [showLinkGuide, setShowLinkGuide] = useState<boolean>(true);
-  const [includeCaptionOnCopy, setIncludeCaptionOnCopy] = useState<boolean>(true);
+  const [captionText, setCaptionText] = useState<string>('');
 
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [catalogFilter, setCatalogFilter] = useState<'all' | 'promo' | 'with_photo'>('all');
@@ -694,34 +695,70 @@ export const AdminStoryGenerator: React.FC<AdminStoryGeneratorProps> = ({
     return baseStoreUrl;
   }, [tenant, selectedProducts]);
 
-  // Legenda pronta opcional para Status do WhatsApp
-  const readyCaption = useMemo(() => {
-    const storeName = tenant?.name || 'Nossa Farmácia';
-    const cleanHeadline = headline.trim() || 'OFERTA DO DIA';
+  // Legenda curta automática (máximo 120 caracteres, SEM link dentro)
+  const MAX_CAPTION_LENGTH = 120;
+
+  const autoShortCaption = useMemo(() => {
+    const truncateClean = (text: string, maxChars: number): string => {
+      const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+      if (maxChars <= 0) return '';
+      if (normalized.length <= maxChars) return normalized;
+      if (maxChars <= 3) return normalized.slice(0, maxChars);
+      return `${normalized.slice(0, maxChars - 3).trimEnd()}...`;
+    };
+
+    const rawStoreName = (tenant?.name || 'nossa farmácia').replace(/\s+/g, ' ').trim();
 
     if (selectedProducts.length === 1) {
       const prod = selectedProducts[0];
       const pricing = resolveProductPricing(prod, promotions);
-      const priceLine = pricing.hasDiscount
-        ? `De R$ ${formatBRL(pricing.originalPrice)} por apenas *R$ ${formatBRL(pricing.finalPrice)}* (-${pricing.discountPercent}% OFF)`
-        : `Por apenas *R$ ${formatBRL(pricing.finalPrice)}*`;
+      const priceStr = formatBRL(pricing.finalPrice);
 
-      return `${cleanHeadline} na ${storeName}\n\n${prod.name}\n${priceLine}\n\nPeça online com entrega rápida:\n${offerShareUrl}`;
+      let storeSafe = truncateClean(rawStoreName, 26);
+      const prefix = '🔥 ';
+      let suffix = ` por apenas R$ ${priceStr}! Peça agora com entrega rápida na ${storeSafe}. 📲`;
+
+      let availableForProduct = MAX_CAPTION_LENGTH - prefix.length - suffix.length;
+      if (availableForProduct < 16) {
+        storeSafe = truncateClean(rawStoreName, 18);
+        suffix = ` por apenas R$ ${priceStr}! Peça com entrega rápida na ${storeSafe}. 📲`;
+        availableForProduct = MAX_CAPTION_LENGTH - prefix.length - suffix.length;
+      }
+
+      const shortProduct = truncateClean(prod.name, Math.max(8, availableForProduct));
+      return `${prefix}${shortProduct}${suffix}`.slice(0, MAX_CAPTION_LENGTH);
     }
 
     if (selectedProducts.length > 1) {
-      const listLines = selectedProducts
-        .map((prod) => {
-          const pricing = resolveProductPricing(prod, promotions);
-          return `• ${prod.name} — *R$ ${formatBRL(pricing.finalPrice)}*`;
+      const storeSafe = truncateClean(rawStoreName, 24);
+      const prefix = '🔥 Ofertas na ';
+      const middle = ': ';
+      const suffix = '! Peça agora com entrega rápida. 📲';
+      const fixedLen = prefix.length + storeSafe.length + middle.length + suffix.length;
+      const availableForList = MAX_CAPTION_LENGTH - fixedLen;
+      const joinedNames = selectedProducts
+        .map((p) => {
+          const pricing = resolveProductPricing(p, promotions);
+          const firstWords = String(p.name || '').trim().split(/\s+/).slice(0, 2).join(' ');
+          return `${firstWords} R$ ${formatBRL(pricing.finalPrice)}`;
         })
-        .join('\n');
+        .join(' · ');
 
-      return `${cleanHeadline} na ${storeName}\n\n${listLines}\n\nConfira e peça online com entrega rápida:\n${offerShareUrl}`;
+      const shortList = truncateClean(joinedNames, Math.max(12, availableForList));
+      return `${prefix}${storeSafe}${middle}${shortList}${suffix}`.slice(0, MAX_CAPTION_LENGTH);
     }
 
-    return `${cleanHeadline} na ${storeName}\n\nConfira nossas ofertas online:\n${offerShareUrl}`;
-  }, [tenant?.name, headline, selectedProducts, promotions, offerShareUrl]);
+    const storeSafe = truncateClean(rawStoreName, 36);
+    return `🔥 Ofertas do dia na ${storeSafe}! Peça agora com entrega rápida. 📲`.slice(
+      0,
+      MAX_CAPTION_LENGTH
+    );
+  }, [tenant?.name, selectedProducts, promotions]);
+
+  // Mantém a legenda sincronizada ao trocar produto(s) selecionado(s)
+  useEffect(() => {
+    setCaptionText(autoShortCaption);
+  }, [autoShortCaption]);
 
   // Motor principal de renderização HTML5 Canvas (1080 x 1920 px)
   const renderStoryCanvas = useCallback(async () => {
@@ -1388,22 +1425,34 @@ export const AdminStoryGenerator: React.FC<AdminStoryGeneratorProps> = ({
     }
   };
 
-  const handleCopyOfferLink = async (withCaption = includeCaptionOnCopy) => {
-    const payload = withCaption ? readyCaption : offerShareUrl;
+  const handleCopyLink = async () => {
     try {
-      await navigator.clipboard.writeText(payload);
-      setCopiedState(withCaption ? 'caption' : 'link');
-      toast.success(
-        withCaption
-          ? 'Link + legenda copiados para a área de transferência!'
-          : 'Link da oferta copiado!',
-        {
-          description: offerShareUrl,
-        }
-      );
+      await navigator.clipboard.writeText(offerShareUrl);
+      setCopiedState('link');
+      toast.success('Link copiado!', {
+        description: 'URL limpa pronta para colar na figurinha de Link do Instagram Stories.',
+      });
       window.setTimeout(() => setCopiedState('idle'), 2400);
     } catch {
-      toast.error('Não foi possível copiar automaticamente. Copie o link exibido abaixo.');
+      toast.error('Não foi possível copiar o link automaticamente.');
+    }
+  };
+
+  const handleCopyCaption = async () => {
+    const cleanCaption = captionText.trim().slice(0, MAX_CAPTION_LENGTH);
+    if (!cleanCaption) {
+      toast.error('A legenda está vazia.');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(cleanCaption);
+      setCopiedState('caption');
+      toast.success('Legenda copiada!', {
+        description: 'Texto curto (sem link) pronto para colar no Story ou Status do WhatsApp.',
+      });
+      window.setTimeout(() => setCopiedState('idle'), 2400);
+    } catch {
+      toast.error('Não foi possível copiar a legenda automaticamente.');
     }
   };
 
@@ -1421,6 +1470,7 @@ export const AdminStoryGenerator: React.FC<AdminStoryGeneratorProps> = ({
       }
 
       const file = new File([blob], buildFileName(), { type: 'image/png' });
+      const shortCaption = captionText.trim().slice(0, MAX_CAPTION_LENGTH);
       const nav = navigator as Navigator & {
         canShare?: (data?: ShareData) => boolean;
       };
@@ -1429,16 +1479,16 @@ export const AdminStoryGenerator: React.FC<AdminStoryGeneratorProps> = ({
         await navigator.share({
           files: [file],
           title: headline.trim() || tenant?.name || 'Oferta',
-          text: readyCaption,
+          text: shortCaption,
           url: offerShareUrl,
         });
       } else {
         await navigator.share({
           title: headline.trim() || tenant?.name || 'Oferta',
-          text: readyCaption,
+          text: shortCaption,
           url: offerShareUrl,
         });
-        toast.info('Seu navegador compartilhou o link e a legenda.', {
+        toast.info('Seu navegador compartilhou a legenda e o link.', {
           description: 'Use "Baixar Story" para salvar a imagem na galeria.',
         });
       }
@@ -1456,6 +1506,7 @@ export const AdminStoryGenerator: React.FC<AdminStoryGeneratorProps> = ({
     setFooterText('Peça agora pelo WhatsApp ou clique no link');
     setShowDeliverySeal(true);
     setShowWhatsappInFooter(Boolean(tenant?.whatsapp));
+    setCaptionText(autoShortCaption);
   };
 
   return (
@@ -1870,17 +1921,15 @@ export const AdminStoryGenerator: React.FC<AdminStoryGeneratorProps> = ({
             </div>
           </section>
 
-          {/* 4. Link Pronto & Legenda para Status do WhatsApp */}
-          <section className="bg-white border border-gray-200 rounded-2xl p-5 sm:p-6 space-y-4">
+          {/* 4. Link Limpo & Legenda Curta (máx. 120 caracteres) */}
+          <section className="bg-white border border-gray-200 rounded-2xl p-5 sm:p-6 space-y-5">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div>
                 <h2 className="text-base font-bold text-gray-900">
-                  4. Link da Oferta e Legenda Pronta
+                  4. Link da Oferta e Legenda Curta
                 </h2>
                 <p className="text-xs text-gray-500 mt-0.5">
-                  {selectedProducts.length === 1
-                    ? 'Link amigável direto para o produto selecionado.'
-                    : 'Link oficial da vitrine da farmácia para o combo de ofertas.'}
+                  Copie o link limpo para a figurinha de Link do Instagram e a legenda curta separadamente.
                 </p>
               </div>
               <a
@@ -1894,36 +1943,102 @@ export const AdminStoryGenerator: React.FC<AdminStoryGeneratorProps> = ({
               </a>
             </div>
 
-            <div className="flex items-center gap-2 px-3.5 py-2.5 bg-gray-50 border border-gray-200 rounded-xl">
-              <Tag size={14} className="text-gray-400 shrink-0" />
-              <span className="text-xs font-mono text-gray-700 truncate select-all flex-1">
-                {offerShareUrl}
-              </span>
-              <button
-                type="button"
-                onClick={() => handleCopyOfferLink(false)}
-                className="px-2.5 py-1 text-xs font-bold text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-100 whitespace-nowrap shrink-0"
-              >
-                {copiedState === 'link' ? 'Copiado' : 'Só link'}
-              </button>
+            {/* URL Limpa */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-gray-700">
+                  {selectedProducts.length === 1
+                    ? 'Link Direto do Produto (Figurinha de Link)'
+                    : 'Link da Vitrine da Farmácia (Figurinha de Link)'}
+                </span>
+              </div>
+              <div className="flex items-center gap-2 px-3.5 py-2.5 bg-gray-50 border border-gray-200 rounded-xl">
+                <Tag size={14} className="text-gray-400 shrink-0" />
+                <span className="text-xs font-mono text-gray-700 truncate select-all flex-1">
+                  {offerShareUrl}
+                </span>
+                <button
+                  type="button"
+                  onClick={handleCopyLink}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-100 whitespace-nowrap shrink-0 transition-colors"
+                >
+                  {copiedState === 'link' ? (
+                    <>
+                      <Check size={13} className="text-emerald-600" />
+                      <span className="text-emerald-700">Copiado</span>
+                    </>
+                  ) : (
+                    <>
+                      <Link2 size={13} />
+                      <span>Copiar Link</span>
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
 
-            <div className="space-y-2">
-              <label className="inline-flex items-center gap-2.5 text-xs font-semibold text-gray-700 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={includeCaptionOnCopy}
-                  onChange={(e) => setIncludeCaptionOnCopy(e.target.checked)}
-                  className="w-4 h-4 rounded border-gray-300 accent-gray-900"
-                />
-                Incluir legenda pronta para Status do WhatsApp ao clicar em &ldquo;Copiar Link da Oferta&rdquo;
-              </label>
+            {/* Legenda Curta Editável (máx. 120 caracteres, sem link) */}
+            <div className="space-y-2 border-t border-gray-100 pt-4">
+              <div className="flex items-center justify-between gap-2">
+                <label
+                  htmlFor="story-caption-input"
+                  className="text-xs font-bold text-gray-700"
+                >
+                  Legenda Curta da Oferta (sem link)
+                </label>
+                <div className="flex items-center gap-3">
+                  {captionText !== autoShortCaption && (
+                    <button
+                      type="button"
+                      onClick={() => setCaptionText(autoShortCaption)}
+                      className="text-[11px] font-bold text-gray-500 hover:text-gray-900 transition-colors"
+                    >
+                      Restaurar automática
+                    </button>
+                  )}
+                  <span
+                    className={`text-xs font-bold tabular-nums ${
+                      captionText.length >= MAX_CAPTION_LENGTH
+                        ? 'text-red-600'
+                        : captionText.length >= 105
+                        ? 'text-amber-600'
+                        : 'text-gray-500'
+                    }`}
+                  >
+                    {captionText.length}/{MAX_CAPTION_LENGTH} caracteres
+                  </span>
+                </div>
+              </div>
 
-              {includeCaptionOnCopy && (
-                <pre className="p-3.5 text-xs text-gray-700 bg-gray-50 border border-gray-200 rounded-xl whitespace-pre-wrap font-sans leading-relaxed">
-                  {readyCaption}
-                </pre>
-              )}
+              <textarea
+                id="story-caption-input"
+                rows={2}
+                maxLength={MAX_CAPTION_LENGTH}
+                value={captionText}
+                onChange={(e) => setCaptionText(e.target.value.slice(0, MAX_CAPTION_LENGTH))}
+                placeholder="Digite a legenda curta da oferta (máx. 120 caracteres)..."
+                className="w-full px-3.5 py-2.5 text-sm text-gray-900 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-gray-900 focus:outline-none resize-none leading-relaxed"
+              />
+
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={handleCopyCaption}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-100 whitespace-nowrap transition-colors"
+                >
+                  {copiedState === 'caption' ? (
+                    <>
+                      <Check size={13} className="text-emerald-600" />
+                      <span className="text-emerald-700">Legenda Copiada</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy size={13} />
+                      <span>Copiar Legenda</span>
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
           </section>
         </div>
@@ -1994,25 +2109,43 @@ export const AdminStoryGenerator: React.FC<AdminStoryGeneratorProps> = ({
                 Baixar Story (PNG Alta Qualidade)
               </button>
 
-              <button
-                type="button"
-                onClick={() => handleCopyOfferLink(includeCaptionOnCopy)}
-                className="w-full flex items-center justify-center gap-2 py-3 px-5 rounded-xl bg-white hover:bg-gray-50 text-gray-900 border border-gray-300 text-sm font-bold transition-all active:scale-[0.99] whitespace-nowrap"
-              >
-                {copiedState !== 'idle' ? (
-                  <>
-                    <Check size={17} className="text-emerald-600" />
-                    <span className="text-emerald-700">
-                      {copiedState === 'caption' ? 'Link + Legenda Copiados!' : 'Link Copiado!'}
-                    </span>
-                  </>
-                ) : (
-                  <>
-                    <Copy size={17} className="text-gray-500" />
-                    Copiar Link da Oferta
-                  </>
-                )}
-              </button>
+              <div className="grid grid-cols-2 gap-2.5">
+                <button
+                  type="button"
+                  onClick={handleCopyLink}
+                  className="flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-white hover:bg-gray-50 text-gray-900 border border-gray-300 text-sm font-bold transition-all active:scale-[0.99] whitespace-nowrap"
+                >
+                  {copiedState === 'link' ? (
+                    <>
+                      <Check size={16} className="text-emerald-600 shrink-0" />
+                      <span className="text-emerald-700">Copiado!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Link2 size={16} className="text-gray-500 shrink-0" />
+                      <span>Copiar Link</span>
+                    </>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleCopyCaption}
+                  className="flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-white hover:bg-gray-50 text-gray-900 border border-gray-300 text-sm font-bold transition-all active:scale-[0.99] whitespace-nowrap"
+                >
+                  {copiedState === 'caption' ? (
+                    <>
+                      <Check size={16} className="text-emerald-600 shrink-0" />
+                      <span className="text-emerald-700">Copiada!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy size={16} className="text-gray-500 shrink-0" />
+                      <span>Copiar Legenda</span>
+                    </>
+                  )}
+                </button>
+              </div>
 
               {canNativeShare && (
                 <button
