@@ -12593,7 +12593,7 @@ const EVOLUTION_WEBHOOK_EVENTS = [
 
 function normalizeEvolutionUrl(url?: string): string {
   if (!url) return DEFAULT_EVOLUTION_URL;
-  let cleaned = String(url).trim();
+  let cleaned = String(url).replace(/[\r\n\t]+/g, '').trim();
   if (!cleaned) return DEFAULT_EVOLUTION_URL;
 
   if (!/^https?:\/\//i.test(cleaned)) {
@@ -12710,23 +12710,175 @@ interface EvolutionWebhookRegistrationResult {
   attempts: Array<{ format: string; status: number; detail?: any }>;
 }
 
+type EvolutionKeySource = 'body' | 'db_loja' | 'env' | 'none';
+
+interface ResolvedEvolutionConfig {
+  tenantId: string;
+  evolutionUrl: string;
+  evolutionKey: string;
+  instanceName: string;
+  evoHeaders: Record<string, string>;
+  keySource: EvolutionKeySource;
+  isCustomServer: boolean;
+  envEvolutionUrl: string;
+  envEvolutionKey: string;
+  shouldSyncDbWithEnv?: boolean;
+}
+
+function isMaskedEvolutionKey(raw?: unknown): boolean {
+  const s = String(raw ?? '').trim();
+  if (!s) return false;
+  return s.includes('•') || s.includes('***') || s.includes('•••');
+}
+
+function sanitizeEvolutionApiKey(raw?: unknown): string {
+  if (raw === null || raw === undefined) return '';
+  let cleaned = String(raw).replace(/[\r\n\t]+/g, '').trim();
+  if (!cleaned || isMaskedEvolutionKey(cleaned)) return '';
+  // Remove qualquer prefixo "Bearer " colado por engano
+  cleaned = cleaned.replace(/^bearer\s+/i, '').trim();
+  // Remove aspas acidentais envolvendo a chave
+  if (
+    (cleaned.startsWith('"') && cleaned.endsWith('"')) ||
+    (cleaned.startsWith("'") && cleaned.endsWith("'"))
+  ) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  if (!cleaned || isMaskedEvolutionKey(cleaned)) return '';
+  return cleaned;
+}
+
+function maskEvolutionKeyPreview(key: string): string {
+  const clean = String(key || '');
+  if (!clean) return '(vazia)';
+  if (clean.length <= 8) {
+    return `${clean.slice(0, 2)}...${clean.slice(-2)}`;
+  }
+  return `${clean.slice(0, 4)}...${clean.slice(-4)}`;
+}
+
+function logEvolution401Diagnostic(url: string, key: string, keySource: EvolutionKeySource) {
+  console.error(
+    `[Evolution API 401] Unauthorized | origem=${keySource} | length=${key.length} | preview=${maskEvolutionKeyPreview(key)} | url=${url}`
+  );
+}
+
+function buildEvolutionHeaders(evolutionKey: string): Record<string, string> {
+  const cleanKey = sanitizeEvolutionApiKey(evolutionKey);
+  // Cabeçalho exato exigido pela Evolution API v2 (NUNCA duplicar apikey/apiKey nem enviar Authorization: Bearer)
+  return {
+    apikey: cleanKey,
+    'Content-Type': 'application/json',
+  };
+}
+
+async function persistHealedEvolutionKey(config: ResolvedEvolutionConfig, workingKey: string) {
+  const cleanKey = sanitizeEvolutionApiKey(workingKey);
+  if (!cleanKey || !config.instanceName) return;
+  try {
+    const { data: existing } = await supabaseAdmin
+      .from('whatsapp_instances')
+      .select('id')
+      .eq('instance_name', config.instanceName)
+      .maybeSingle();
+
+    if (existing?.id) {
+      await supabaseAdmin
+        .from('whatsapp_instances')
+        .update({
+          evolution_url: config.evolutionUrl,
+          evolution_key: cleanKey,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', existing.id);
+      console.log(
+        `[Evolution API] Configuração da instância "${config.instanceName}" sincronizada automaticamente com EVOLUTION_API_KEY ativa (${maskEvolutionKeyPreview(cleanKey)}).`
+      );
+    }
+  } catch (err: any) {
+    console.warn('[Evolution API] Aviso ao atualizar chave sincronizada no banco:', err?.message || err);
+  }
+}
+
+async function evolutionRequestWithFallback(
+  config: ResolvedEvolutionConfig,
+  endpointPathOrUrl: string,
+  options: RequestInit = {},
+  timeoutMs: number = 7000,
+  allowEnvFallback: boolean = true
+): Promise<{ ok: boolean; status: number; data: any; rawText?: string; error?: string }> {
+  const fullUrl = /^https?:\/\//i.test(endpointPathOrUrl)
+    ? endpointPathOrUrl
+    : `${config.evolutionUrl}${endpointPathOrUrl.startsWith('/') ? '' : '/'}${endpointPathOrUrl}`;
+
+  const res = await safeEvolutionRequest(
+    fullUrl,
+    {
+      ...options,
+      headers: buildEvolutionHeaders(config.evolutionKey),
+    },
+    timeoutMs
+  );
+
+  if (res.status === 401) {
+    logEvolution401Diagnostic(fullUrl, config.evolutionKey, config.keySource);
+
+    if (
+      allowEnvFallback &&
+      config.envEvolutionKey &&
+      config.evolutionKey !== config.envEvolutionKey
+    ) {
+      console.warn(
+        `[Evolution API] Tentando fallback automático com EVOLUTION_API_KEY (env · ${maskEvolutionKeyPreview(config.envEvolutionKey)}) para ${fullUrl}...`
+      );
+      const retryRes = await safeEvolutionRequest(
+        fullUrl,
+        {
+          ...options,
+          headers: buildEvolutionHeaders(config.envEvolutionKey),
+        },
+        timeoutMs
+      );
+
+      if (retryRes.status === 401) {
+        logEvolution401Diagnostic(fullUrl, config.envEvolutionKey, 'env');
+      } else {
+        config.evolutionKey = config.envEvolutionKey;
+        config.keySource = 'env';
+        config.evoHeaders = buildEvolutionHeaders(config.envEvolutionKey);
+        config.shouldSyncDbWithEnv = false;
+        await persistHealedEvolutionKey(config, config.envEvolutionKey);
+      }
+      return retryRes;
+    }
+
+    return res;
+  }
+
+  if (
+    config.shouldSyncDbWithEnv &&
+    config.keySource === 'env' &&
+    config.envEvolutionKey &&
+    config.evolutionKey === config.envEvolutionKey
+  ) {
+    config.shouldSyncDbWithEnv = false;
+    persistHealedEvolutionKey(config, config.envEvolutionKey).catch(() => {});
+  }
+
+  return res;
+}
+
 async function registerEvolutionWebhook(params: {
   evolutionUrl: string;
   evolutionKey: string;
   instanceName: string;
   webhookUrl: string;
+  evoConfig?: ResolvedEvolutionConfig;
 }): Promise<EvolutionWebhookRegistrationResult> {
-  const cleanUrl = normalizeEvolutionUrl(params.evolutionUrl);
-  const cleanKey = String(params.evolutionKey || '').trim();
-  const cleanInstance = String(params.instanceName || '').trim();
+  const cleanUrl = normalizeEvolutionUrl(params.evoConfig?.evolutionUrl || params.evolutionUrl);
+  const cleanKey = sanitizeEvolutionApiKey(params.evoConfig?.evolutionKey || params.evolutionKey);
+  const cleanInstance = String(params.evoConfig?.instanceName || params.instanceName || '').trim();
   const targetWebhookUrl = String(params.webhookUrl || DEFAULT_CHAT_WEBHOOK_URL).trim();
-
-  const headers = {
-    'Content-Type': 'application/json',
-    apikey: cleanKey,
-    apiKey: cleanKey,
-    Authorization: `Bearer ${cleanKey}`,
-  };
 
   const endpoint = `${cleanUrl}/webhook/set/${encodeURIComponent(cleanInstance)}`;
 
@@ -12775,15 +12927,30 @@ async function registerEvolutionWebhook(params: {
   let lastErrorMsg = '';
 
   for (const attempt of payloads) {
-    const res = await safeEvolutionRequest(
-      endpoint,
-      {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(attempt.body),
-      },
-      8000
-    );
+    const res = params.evoConfig
+      ? await evolutionRequestWithFallback(
+          params.evoConfig,
+          endpoint,
+          {
+            method: 'POST',
+            body: JSON.stringify(attempt.body),
+          },
+          8000,
+          params.evoConfig.keySource !== 'body' || !params.evoConfig.isCustomServer
+        )
+      : await safeEvolutionRequest(
+          endpoint,
+          {
+            method: 'POST',
+            headers: buildEvolutionHeaders(cleanKey),
+            body: JSON.stringify(attempt.body),
+          },
+          8000
+        );
+
+    if (!params.evoConfig && res.status === 401) {
+      logEvolution401Diagnostic(endpoint, cleanKey, 'none');
+    }
 
     const detail = res.data ?? (res.rawText || res.error || null);
     attempts.push({ format: attempt.format, status: res.status, detail });
@@ -12849,7 +13016,7 @@ async function registerEvolutionWebhook(params: {
 }
 
 function isPlaceholderEvolutionUrl(url?: string | null): boolean {
-  const raw = String(url || '').trim().toLowerCase();
+  const raw = String(url || '').replace(/[\r\n\t]+/g, '').trim().toLowerCase();
   if (!raw) return true;
   return (
     raw.includes('seudominio.com') ||
@@ -12894,19 +13061,8 @@ function isEvolutionAlreadyExistsError(status: number, data: any, rawText?: stri
   );
 }
 
-function buildEvolutionHeaders(evolutionKey: string): Record<string, string> {
-  return {
-    'Content-Type': 'application/json',
-    apikey: evolutionKey,
-    apiKey: evolutionKey,
-    Authorization: `Bearer ${evolutionKey}`,
-  };
-}
-
 async function createEvolutionInstanceClean(params: {
-  evolutionUrl: string;
-  evoHeaders: Record<string, string>;
-  instanceName: string;
+  evoConfig: ResolvedEvolutionConfig;
 }): Promise<{
   ok: boolean;
   alreadyExists: boolean;
@@ -12915,7 +13071,8 @@ async function createEvolutionInstanceClean(params: {
   error?: string;
   rawResponse?: any;
 }> {
-  const { evolutionUrl, evoHeaders, instanceName } = params;
+  const { evoConfig } = params;
+  const { evolutionUrl, instanceName } = evoConfig;
 
   // Payload mínimo e padrão da Evolution API v2 (NUNCA misturar bloco webhook no /instance/create)
   const cleanCreatePayload = {
@@ -12925,17 +13082,18 @@ async function createEvolutionInstanceClean(params: {
   };
 
   console.log(
-    `[Evolution API] Criando instância limpa "${instanceName}" em ${evolutionUrl}/instance/create`
+    `[Evolution API] Criando instância limpa "${instanceName}" em ${evolutionUrl}/instance/create (chave=${evoConfig.keySource})`
   );
 
-  const createRes = await safeEvolutionRequest(
-    `${evolutionUrl}/instance/create`,
+  const createRes = await evolutionRequestWithFallback(
+    evoConfig,
+    '/instance/create',
     {
       method: 'POST',
-      headers: evoHeaders,
       body: JSON.stringify(cleanCreatePayload),
     },
-    10000
+    10000,
+    evoConfig.keySource !== 'body' || !evoConfig.isCustomServer
   );
 
   if (createRes.ok) {
@@ -12979,15 +13137,59 @@ async function createEvolutionInstanceClean(params: {
   };
 }
 
-async function resolveEvolutionConfig(tenantId: string, inboxId?: string, override?: any) {
+function extractOverrideUrl(override?: any): string {
+  if (!override || typeof override !== 'object') return '';
+  const candidate =
+    override.evolutionUrl ??
+    override.url ??
+    override.evolution_url ??
+    override.evolutionApiUrl ??
+    override.evolution_api_url ??
+    '';
+  return String(candidate || '').replace(/[\r\n\t]+/g, '').trim();
+}
+
+function extractOverrideApiKey(override?: any): string {
+  if (!override || typeof override !== 'object') return '';
+  const candidates = [
+    override.apiKey,
+    override.evolutionApiKey,
+    override.evolution_api_key,
+    override.evolutionKey,
+    override.evolution_key,
+    override.apikey,
+  ];
+  for (const raw of candidates) {
+    const clean = sanitizeEvolutionApiKey(raw);
+    if (clean) return clean;
+  }
+  return '';
+}
+
+async function resolveEvolutionConfig(
+  tenantId: string,
+  bodyOverrideOrInboxId?: string | Record<string, any>,
+  maybeOverride?: Record<string, any>
+): Promise<ResolvedEvolutionConfig> {
+  const override: Record<string, any> =
+    typeof bodyOverrideOrInboxId === 'object' && bodyOverrideOrInboxId !== null
+      ? bodyOverrideOrInboxId
+      : maybeOverride || {};
+  const inboxId: string | undefined =
+    typeof bodyOverrideOrInboxId === 'string'
+      ? bodyOverrideOrInboxId
+      : typeof override?.inboxId === 'string'
+        ? override.inboxId
+        : undefined;
+
   const envEvolutionUrl =
     process.env.EVOLUTION_API_URL && !isPlaceholderEvolutionUrl(process.env.EVOLUTION_API_URL)
       ? normalizeEvolutionUrl(process.env.EVOLUTION_API_URL)
       : '';
-  const envEvolutionKey = String(process.env.EVOLUTION_API_KEY || '').trim();
+  const envEvolutionKey = sanitizeEvolutionApiKey(process.env.EVOLUTION_API_KEY);
 
-  const rawOverrideUrl = typeof override?.evolutionUrl === 'string' ? override.evolutionUrl.trim() : '';
-  const rawOverrideKey = typeof override?.evolutionKey === 'string' ? override.evolutionKey.trim() : '';
+  const rawOverrideUrl = extractOverrideUrl(override);
+  const rawOverrideKey = extractOverrideApiKey(override);
 
   // Se o cliente enviou apenas a URL padrão hardcoded enquanto o servidor tem EVOLUTION_API_URL na Easypanel,
   // prioriza a variável de ambiente quando a loja não tem configuração customizada salva.
@@ -12997,8 +13199,16 @@ async function resolveEvolutionConfig(tenantId: string, inboxId?: string, overri
     !(envEvolutionUrl && normalizeEvolutionUrl(rawOverrideUrl) === DEFAULT_EVOLUTION_URL && envEvolutionUrl !== DEFAULT_EVOLUTION_URL)
       ? rawOverrideUrl
       : '';
+
   let evolutionKey = rawOverrideKey;
-  let instanceName = typeof override?.instanceName === 'string' ? override.instanceName.trim() : '';
+  let keySource: EvolutionKeySource = evolutionKey ? 'body' : 'none';
+  let dbKeyFound = '';
+  let instanceName =
+    typeof override?.instanceName === 'string'
+      ? override.instanceName.trim()
+      : typeof override?.instance_name === 'string'
+        ? override.instance_name.trim()
+        : '';
 
   const rawTenant = (tenantId || "principal").replace(/^store_/, '').replace(/^tenant_/, '');
   const cleanStore = rawTenant.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
@@ -13006,7 +13216,6 @@ async function resolveEvolutionConfig(tenantId: string, inboxId?: string, overri
   // 1. Identificar ou resolver o nome exclusivo da instância
   if (!instanceName) {
     if (inboxId && inboxId !== "default" && !inboxId.includes("default")) {
-      // Verifica se a caixa já possui uma instância vinculada
       try {
         const { data: inboxRow } = await supabaseAdmin
           .from('inboxes')
@@ -13061,8 +13270,8 @@ async function resolveEvolutionConfig(tenantId: string, inboxId?: string, overri
         .maybeSingle();
 
       if (byName) {
-        const dbUrl = String(byName.evolution_url || '').trim();
-        const dbKey = String(byName.evolution_key || '').trim();
+        const dbUrl = String(byName.evolution_url || '').replace(/[\r\n\t]+/g, '').trim();
+        const dbKey = sanitizeEvolutionApiKey(byName.evolution_key);
         if (
           !evolutionUrl &&
           dbUrl &&
@@ -13073,6 +13282,8 @@ async function resolveEvolutionConfig(tenantId: string, inboxId?: string, overri
         }
         if (!evolutionKey && dbKey) {
           evolutionKey = dbKey;
+          dbKeyFound = dbKey;
+          keySource = 'db_loja';
         }
       }
     }
@@ -13086,9 +13297,9 @@ async function resolveEvolutionConfig(tenantId: string, inboxId?: string, overri
         .order('updated_at', { ascending: false });
 
       if (instList && instList.length > 0) {
-        const withKey = instList.find((i: any) => i.evolution_key && String(i.evolution_key).trim() !== '');
+        const withKey = instList.find((i: any) => sanitizeEvolutionApiKey(i.evolution_key) !== '');
         const withUrl = instList.find((i: any) => {
-          const u = String(i.evolution_url || '').trim();
+          const u = String(i.evolution_url || '').replace(/[\r\n\t]+/g, '').trim();
           if (!u || isPlaceholderEvolutionUrl(u)) return false;
           if (envEvolutionUrl && normalizeEvolutionUrl(u) === DEFAULT_EVOLUTION_URL && envEvolutionUrl !== DEFAULT_EVOLUTION_URL) {
             return false;
@@ -13096,8 +13307,17 @@ async function resolveEvolutionConfig(tenantId: string, inboxId?: string, overri
           return true;
         });
 
-        if (withKey && !evolutionKey) evolutionKey = String(withKey.evolution_key).trim();
-        if (withUrl && !evolutionUrl) evolutionUrl = String(withUrl.evolution_url).trim();
+        if (withKey && !evolutionKey) {
+          const cleanDbKey = sanitizeEvolutionApiKey(withKey.evolution_key);
+          if (cleanDbKey) {
+            evolutionKey = cleanDbKey;
+            dbKeyFound = cleanDbKey;
+            keySource = 'db_loja';
+          }
+        }
+        if (withUrl && !evolutionUrl) {
+          evolutionUrl = String(withUrl.evolution_url).replace(/[\r\n\t]+/g, '').trim();
+        }
       }
     }
 
@@ -13112,8 +13332,8 @@ async function resolveEvolutionConfig(tenantId: string, inboxId?: string, overri
 
         if (tenantRows && tenantRows.length > 0) {
           const t = tenantRows[0];
-          const tUrl = String(t.evolution_url || t.evolution_api_url || '').trim();
-          const tKey = String(t.evolution_key || t.evolution_api_key || t.evolution_token || '').trim();
+          const tUrl = String(t.evolution_url || t.evolution_api_url || '').replace(/[\r\n\t]+/g, '').trim();
+          const tKey = sanitizeEvolutionApiKey(t.evolution_key || t.evolution_api_key || t.evolution_token);
           if (
             !evolutionUrl &&
             tUrl &&
@@ -13124,6 +13344,8 @@ async function resolveEvolutionConfig(tenantId: string, inboxId?: string, overri
           }
           if (!evolutionKey && tKey) {
             evolutionKey = tKey;
+            dbKeyFound = tKey;
+            keySource = 'db_loja';
           }
         }
       } catch (tErr) {}
@@ -13132,64 +13354,91 @@ async function resolveEvolutionConfig(tenantId: string, inboxId?: string, overri
     console.warn("[resolveEvolutionConfig] Erro ao buscar dados no Supabase:", e);
   }
 
-  // 3. Prioriza variáveis de ambiente da Easypanel (EVOLUTION_API_URL / EVOLUTION_API_KEY) quando não há config customizada válida
-  if (!evolutionUrl) {
+  // 3. Prioriza variáveis de ambiente da Easypanel (EVOLUTION_API_URL / EVOLUTION_API_KEY)
+  if (!evolutionUrl || isPlaceholderEvolutionUrl(evolutionUrl)) {
     evolutionUrl = envEvolutionUrl || DEFAULT_EVOLUTION_URL;
   }
-  if (!evolutionKey) {
-    evolutionKey = envEvolutionKey;
-  }
-
-  if (isPlaceholderEvolutionUrl(evolutionUrl)) {
-    evolutionUrl = envEvolutionUrl || DEFAULT_EVOLUTION_URL;
-  }
-
   evolutionUrl = normalizeEvolutionUrl(evolutionUrl);
-  evolutionKey = String(evolutionKey || '').trim();
+
+  const isSameAsEnvUrl = Boolean(envEvolutionUrl && evolutionUrl === envEvolutionUrl);
+  const isCustomServer = Boolean(
+    envEvolutionUrl ? evolutionUrl !== envEvolutionUrl : evolutionUrl !== DEFAULT_EVOLUTION_URL
+  );
+
+  let shouldSyncDbWithEnv = false;
+
+  if (!evolutionKey && envEvolutionKey) {
+    evolutionKey = envEvolutionKey;
+    keySource = 'env';
+  } else if (
+    keySource === 'db_loja' &&
+    isSameAsEnvUrl &&
+    envEvolutionKey &&
+    dbKeyFound &&
+    dbKeyFound !== envEvolutionKey
+  ) {
+    // A loja usa a mesma URL base da Easypanel, mas tinha uma chave antiga no banco: usa a chave ativa da env e sincroniza o banco
+    console.warn(
+      `[resolveEvolutionConfig] Chave salva no banco para "${instanceName}" (${maskEvolutionKeyPreview(dbKeyFound)}) difere de EVOLUTION_API_KEY (${maskEvolutionKeyPreview(envEvolutionKey)}) para a mesma URL base (${evolutionUrl}). Usando chave ativa da env.`
+    );
+    evolutionKey = envEvolutionKey;
+    keySource = 'env';
+    shouldSyncDbWithEnv = true;
+  }
+
+  evolutionKey = sanitizeEvolutionApiKey(evolutionKey);
+  if (!evolutionKey) {
+    keySource = 'none';
+  }
 
   return {
+    tenantId,
     evolutionUrl,
     evolutionKey,
     instanceName,
     evoHeaders: buildEvolutionHeaders(evolutionKey),
+    keySource,
+    isCustomServer,
+    envEvolutionUrl,
+    envEvolutionKey,
+    shouldSyncDbWithEnv,
   };
 }
 
 app.post("/api/v1/chat/instance/test-evolution", requireChatEnabled, async (req, res) => {
   try {
     const tenantId = (req as any).tenantId || req.body.tenantId || (req.headers["x-tenant-id"] as string);
-    const { evolutionUrl: inputUrl, evolutionKey: inputKey, instanceName: inputInstance } = req.body;
+    const evoConfig = await resolveEvolutionConfig(tenantId, req.body);
 
-    const { evolutionUrl, evolutionKey, instanceName } = await resolveEvolutionConfig(tenantId, req.body.inboxId, {
-      evolutionUrl: inputUrl,
-      evolutionKey: inputKey,
-      instanceName: inputInstance
-    });
-
-    if (!evolutionUrl) {
+    if (!evoConfig.evolutionUrl) {
       return res.status(200).json({ ok: false, error: "URL da Evolution API não informada." });
     }
 
-    if (!evolutionKey) {
+    if (!evoConfig.evolutionKey) {
       return res.status(200).json({ ok: false, error: "Chave Global (AUTHENTICATION_API_KEY) da Evolution API não informada." });
     }
 
-    const evoHeaders = {
-      "Content-Type": "application/json",
-      "apikey": evolutionKey,
-      "apiKey": evolutionKey,
-      "Authorization": `Bearer ${evolutionKey}`
-    };
+    // Se o usuário enviou explicitamente uma chave nova no body para testar, respeita essa chave no teste;
+    // caso a chave tenha vindo do banco da loja, habilita fallback automático para EVOLUTION_API_KEY em caso de 401.
+    const allowEnvFallback = evoConfig.keySource !== 'body';
 
-    let testRes = await safeEvolutionRequest(`${evolutionUrl}/instance/fetchInstances`, {
-      headers: evoHeaders
-    }, 7000);
+    let testRes = await evolutionRequestWithFallback(
+      evoConfig,
+      '/instance/fetchInstances',
+      {},
+      7000,
+      allowEnvFallback
+    );
 
-    // Fallback: se /fetchInstances não existir nesta versão da Evolution, testa /instance/connectionState/${instanceName}
-    if (!testRes.ok && testRes.status === 404 && instanceName) {
-      const fallbackRes = await safeEvolutionRequest(`${evolutionUrl}/instance/connectionState/${instanceName}`, {
-        headers: evoHeaders
-      }, 5000);
+    // Fallback: se /fetchInstances não existir nesta versão da Evolution, testa /instance/connectionState/{instanceName}
+    if (!testRes.ok && testRes.status === 404 && evoConfig.instanceName) {
+      const fallbackRes = await evolutionRequestWithFallback(
+        evoConfig,
+        `/instance/connectionState/${encodeURIComponent(evoConfig.instanceName)}`,
+        {},
+        5000,
+        allowEnvFallback
+      );
       if (fallbackRes.ok || fallbackRes.status === 404) {
         testRes = fallbackRes;
       }
@@ -13197,14 +13446,18 @@ app.post("/api/v1/chat/instance/test-evolution", requireChatEnabled, async (req,
 
     if (!testRes.ok) {
       if (testRes.status === 401 || testRes.status === 403) {
+        const detail = formatEvolutionErrorDetail(testRes);
         return res.status(200).json({ 
           ok: false, 
-          error: "Chave de API (AUTHENTICATION_API_KEY) inválida ou não autorizada na Evolution API." 
+          status: testRes.status,
+          keySource: evoConfig.keySource,
+          error: `Chave de API (AUTHENTICATION_API_KEY) não autorizada na Evolution API (HTTP ${testRes.status}): ${detail}`
         });
       }
       return res.status(200).json({
         ok: false,
-        error: testRes.error || testRes.data?.error || testRes.data?.message || `Servidor da Evolution API inacessível em ${evolutionUrl}. Verifique a URL e a rede.`
+        status: testRes.status,
+        error: testRes.error || testRes.data?.error || testRes.data?.message || `Servidor da Evolution API inacessível em ${evoConfig.evolutionUrl}. Verifique a URL e a rede.`
       });
     }
 
@@ -13217,9 +13470,9 @@ app.post("/api/v1/chat/instance/test-evolution", requireChatEnabled, async (req,
     let instanceState = "disconnected";
     let instanceOwner = null;
 
-    if (instanceName) {
+    if (evoConfig.instanceName) {
       const matching = instances.find((i: any) => 
-        (i.name === instanceName || i.instance?.instanceName === instanceName || i.instanceName === instanceName || i.id === instanceName)
+        (i.name === evoConfig.instanceName || i.instance?.instanceName === evoConfig.instanceName || i.instanceName === evoConfig.instanceName || i.id === evoConfig.instanceName)
       );
       if (matching) {
         instanceExists = true;
@@ -13230,13 +13483,15 @@ app.post("/api/v1/chat/instance/test-evolution", requireChatEnabled, async (req,
 
     return res.json({
       ok: true,
-      evolutionUrl,
-      instanceName,
+      evolutionUrl: evoConfig.evolutionUrl,
+      instanceName: evoConfig.instanceName,
+      keySource: evoConfig.keySource,
+      keyPreview: maskEvolutionKeyPreview(evoConfig.evolutionKey),
       totalInstances: instances.length,
       instanceExists,
       instanceState,
       instanceOwner,
-      message: "Conexão com a Evolution API estabelecida com sucesso!"
+      message: `Conexão com a Evolution API estabelecida com sucesso! (${instances.length} instância(s) no servidor)`
     });
   } catch (error: any) {
     return res.status(200).json({ ok: false, error: error.message || "Erro ao testar conexão com Evolution API" });
@@ -13247,14 +13502,14 @@ app.post("/api/v1/chat/instance/save-config", requireChatEnabled, async (req, re
   try {
     const tenantId = (req as any).tenantId || req.body.tenantId || (req.headers["x-tenant-id"] as string);
     const inboxId = req.body.inboxId;
-    const { evolutionUrl, evolutionKey, instanceName } = req.body;
 
     if (!tenantId) return res.status(400).json({ error: "Tenant ID is required." });
 
-    const targetInstanceName = instanceName || (inboxId && inboxId !== 'default' ? `inbox_${String(inboxId).replace(/[^a-zA-Z0-9]/g,"").toLowerCase()}` : `store_${String(tenantId).replace(/[^a-zA-Z0-9]/g,"").toLowerCase()}`);
-
-    const normalizedUrl = normalizeEvolutionUrl(evolutionUrl || DEFAULT_EVOLUTION_URL);
-    const cleanKey = (evolutionKey || '').trim();
+    const resolved = await resolveEvolutionConfig(tenantId, req.body);
+    const explicitKey = extractOverrideApiKey(req.body);
+    const targetInstanceName = resolved.instanceName;
+    const normalizedUrl = resolved.evolutionUrl;
+    const cleanKeyToSave = explicitKey || (resolved.keySource === 'env' ? resolved.evolutionKey : '');
 
     // 1. Procura registro existente por instance_name
     let existing: any = null;
@@ -13290,8 +13545,8 @@ app.post("/api/v1/chat/instance/save-config", requireChatEnabled, async (req, re
       updated_at: new Date().toISOString()
     };
 
-    if (cleanKey) {
-      updatePayload.evolution_key = cleanKey;
+    if (cleanKeyToSave) {
+      updatePayload.evolution_key = cleanKeyToSave;
     }
 
     let savedId = existing?.id;
@@ -13307,7 +13562,7 @@ app.post("/api/v1/chat/instance/save-config", requireChatEnabled, async (req, re
           .from('whatsapp_instances')
           .insert({
             ...updatePayload,
-            evolution_key: cleanKey || null,
+            evolution_key: cleanKeyToSave || resolved.evolutionKey || null,
             status: 'DISCONNECTED'
           })
           .select('id')
@@ -13332,10 +13587,15 @@ app.post("/api/v1/chat/instance/save-config", requireChatEnabled, async (req, re
       } catch (e) {}
     }
 
+    const activeKey = cleanKeyToSave || resolved.evolutionKey;
+
     return res.json({ 
       success: true, 
       evolutionUrl: normalizedUrl,
-      evolutionKey: cleanKey,
+      hasKey: !!activeKey,
+      keySource: explicitKey ? 'db_loja' : resolved.keySource,
+      keyPreview: activeKey ? maskEvolutionKeyPreview(activeKey) : null,
+      isCustomServer: resolved.isCustomServer,
       instanceName: targetInstanceName,
       message: "Configurações da Evolution salvas com sucesso!" 
     });
@@ -13410,13 +13670,10 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
     const forceRecreate = Boolean(req.body.recreate || req.body.force);
     if (!tenantId) return res.status(400).json({ success: false, error: "Tenant ID is required." });
 
-    const { evolutionUrl, evolutionKey, instanceName, evoHeaders } = await resolveEvolutionConfig(
-      tenantId,
-      inboxId,
-      req.body
-    );
+    const evoConfig = await resolveEvolutionConfig(tenantId, req.body);
+    const { evolutionUrl, instanceName } = evoConfig;
 
-    if (!evolutionUrl || !evolutionKey) {
+    if (!evolutionUrl || !evoConfig.evolutionKey) {
       return res.status(400).json({
         success: false,
         error: "Por favor, informe a Chave Global da Evolution API (AUTHENTICATION_API_KEY) para criar a instância automaticamente.",
@@ -13426,6 +13683,7 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
     }
 
     const webhookUrl = resolveChatWebhookUrl(req);
+    const allowEnvFallback = evoConfig.keySource !== 'body' || !evoConfig.isCustomServer;
 
     let base64: string | null = null;
     let isConnected = false;
@@ -13439,20 +13697,25 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
       // Se solicitado recriação forçada, remove a instância anterior (404 é ignorado)
       if (forceRecreate) {
         console.log(`[Evolution API] Forçando recriação da instância "${instanceName}"...`);
-        await safeEvolutionRequest(`${evolutionUrl}/instance/delete/${encodeURIComponent(instanceName)}`, {
-          method: "DELETE",
-          headers: evoHeaders
-        }, 6000).catch(() => {});
+        await evolutionRequestWithFallback(
+          evoConfig,
+          `/instance/delete/${encodeURIComponent(instanceName)}`,
+          { method: "DELETE" },
+          6000,
+          allowEnvFallback
+        ).catch(() => {});
         await new Promise((r) => setTimeout(r, 800));
       }
 
       // 1. Verificar se a instância já existe e está conectada
       let instanceNotFound = forceRecreate;
       if (!forceRecreate) {
-        const stateRes = await safeEvolutionRequest(
-          `${evolutionUrl}/instance/connectionState/${encodeURIComponent(instanceName)}`,
-          { headers: evoHeaders },
-          5000
+        const stateRes = await evolutionRequestWithFallback(
+          evoConfig,
+          `/instance/connectionState/${encodeURIComponent(instanceName)}`,
+          {},
+          5000,
+          allowEnvFallback
         );
 
         if (stateRes.status === 401 || stateRes.status === 403) {
@@ -13485,10 +13748,12 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
 
       // 2. Se já existe mas não está conectada, tenta GET /instance/connect/{instanceName}
       if (!isConnected && !instanceNotFound) {
-        const connectRes = await safeEvolutionRequest(
-          `${evolutionUrl}/instance/connect/${encodeURIComponent(instanceName)}`,
-          { headers: evoHeaders },
-          6000
+        const connectRes = await evolutionRequestWithFallback(
+          evoConfig,
+          `/instance/connect/${encodeURIComponent(instanceName)}`,
+          {},
+          6000,
+          allowEnvFallback
         );
 
         if (connectRes.status === 404) {
@@ -13523,11 +13788,7 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
 
       // 3. Etapa 1 da criação limpa: POST /instance/create SEM bloco webhook
       if (!isConnected && !base64 && (instanceNotFound || !instanceConfirmed)) {
-        const createResult = await createEvolutionInstanceClean({
-          evolutionUrl,
-          evoHeaders,
-          instanceName,
-        });
+        const createResult = await createEvolutionInstanceClean({ evoConfig });
 
         if (!createResult.ok) {
           const httpCode =
@@ -13562,10 +13823,12 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
       if (!isConnected && !base64 && instanceConfirmed) {
         for (let attempt = 1; attempt <= 2; attempt++) {
           await new Promise((r) => setTimeout(r, 1500));
-          const pollRes = await safeEvolutionRequest(
-            `${evolutionUrl}/instance/connect/${encodeURIComponent(instanceName)}`,
-            { headers: evoHeaders },
-            6000
+          const pollRes = await evolutionRequestWithFallback(
+            evoConfig,
+            `/instance/connect/${encodeURIComponent(instanceName)}`,
+            {},
+            6000,
+            allowEnvFallback
           );
 
           if (pollRes.ok && pollRes.data) {
@@ -13607,10 +13870,11 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
 
       // 5. Etapa 2: Registra o Webhook SOMENTE DEPOIS de confirmar que a instância existe na Evolution
       webhookResult = await registerEvolutionWebhook({
-        evolutionUrl,
-        evolutionKey,
+        evolutionUrl: evoConfig.evolutionUrl,
+        evolutionKey: evoConfig.evolutionKey,
         instanceName,
         webhookUrl,
+        evoConfig,
       });
 
     } catch (evolutionError: any) {
@@ -13626,8 +13890,8 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
       const updateData: any = {
         store_id: tenantId,
         instance_name: instanceName,
-        evolution_url: evolutionUrl,
-        evolution_key: evolutionKey,
+        evolution_url: evoConfig.evolutionUrl,
+        evolution_key: evoConfig.evolutionKey,
         updated_at: new Date().toISOString()
       };
 
@@ -13677,7 +13941,10 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
         phoneNumber,
         phone_number: phoneNumber,
         instanceName,
-        evolutionUrl,
+        evolutionUrl: evoConfig.evolutionUrl,
+        keySource: evoConfig.keySource,
+        keyPreview: maskEvolutionKeyPreview(evoConfig.evolutionKey),
+        isCustomServer: evoConfig.isCustomServer,
         isEvolutionLive: true,
         webhook: webhookResult
       });
@@ -13689,7 +13956,10 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
       qrcodeBase64: base64,
       isEvolutionLive: true,
       instanceName,
-      evolutionUrl,
+      evolutionUrl: evoConfig.evolutionUrl,
+      keySource: evoConfig.keySource,
+      keyPreview: maskEvolutionKeyPreview(evoConfig.evolutionKey),
+      isCustomServer: evoConfig.isCustomServer,
       webhook: webhookResult
     });
 
@@ -13705,21 +13975,33 @@ app.get("/api/v1/chat/instance/status", requireChatEnabled, async (req, res) => 
         const inboxId = req.query.inboxId as string;
         if (!tenantId) return res.status(400).json({ error: "Tenant ID is required." });
         
-        const { evolutionUrl, evolutionKey, instanceName, evoHeaders } = await resolveEvolutionConfig(tenantId, inboxId);
+        const evoConfig = await resolveEvolutionConfig(String(tenantId), { inboxId });
+        const { evolutionUrl, instanceName } = evoConfig;
+
+        const buildStatusMeta = () => ({
+          instanceName,
+          evolutionUrl: evoConfig.evolutionUrl,
+          hasKey: !!evoConfig.evolutionKey,
+          keySource: evoConfig.keySource,
+          keyPreview: evoConfig.evolutionKey ? maskEvolutionKeyPreview(evoConfig.evolutionKey) : null,
+          isCustomServer: evoConfig.isCustomServer,
+        });
 
         // Se Evolution estiver configurada, consulta estado real com timeout
-        if (evolutionUrl && evolutionKey) {
+        if (evolutionUrl && evoConfig.evolutionKey) {
           try {
-            const stateRes = await safeEvolutionRequest(`${evolutionUrl}/instance/connectionState/${encodeURIComponent(instanceName)}`, {
-              headers: evoHeaders
-            }, 3500);
+            const stateRes = await evolutionRequestWithFallback(
+              evoConfig,
+              `/instance/connectionState/${encodeURIComponent(instanceName)}`,
+              {},
+              3500,
+              true
+            );
 
             if (stateRes.status === 404) {
               return res.json({
                 status: 'DISCONNECTED',
-                instanceName,
-                evolutionUrl,
-                hasKey: !!evolutionKey,
+                ...buildStatusMeta(),
               });
             }
             if (stateRes.ok && stateRes.data) {
@@ -13742,8 +14024,8 @@ app.get("/api/v1/chat/instance/status", requireChatEnabled, async (req, res) => 
                          instance_name: instanceName,
                          status: 'CONNECTED',
                          ...(phoneNumber ? { phone_number: phoneNumber } : {}),
-                         evolution_url: evolutionUrl,
-                         evolution_key: evolutionKey,
+                         evolution_url: evoConfig.evolutionUrl,
+                         evolution_key: evoConfig.evolutionKey,
                          updated_at: new Date().toISOString()
                       }).select('id').maybeSingle();
                       if (inserted?.id) instId = inserted.id;
@@ -13759,15 +14041,16 @@ app.get("/api/v1/chat/instance/status", requireChatEnabled, async (req, res) => 
                     status: 'CONNECTED', 
                     phoneNumber, 
                     phone_number: phoneNumber, 
-                    instanceName, 
-                    evolutionUrl,
-                    hasKey: !!evolutionKey,
-                    evolutionKey: evolutionKey || undefined
+                    ...buildStatusMeta(),
                   });
               } else {
-                  const connectRes = await safeEvolutionRequest(`${evolutionUrl}/instance/connect/${encodeURIComponent(instanceName)}`, {
-                    headers: evoHeaders
-                  }, 3500);
+                  const connectRes = await evolutionRequestWithFallback(
+                    evoConfig,
+                    `/instance/connect/${encodeURIComponent(instanceName)}`,
+                    {},
+                    3500,
+                    true
+                  );
 
                   let base64: string | null = null;
                   if (connectRes.ok && connectRes.data) {
@@ -13787,10 +14070,7 @@ app.get("/api/v1/chat/instance/status", requireChatEnabled, async (req, res) => 
                   return res.json({ 
                     status: base64 ? 'QRCODE' : 'DISCONNECTED', 
                     qrcodeBase64: base64 || null, 
-                    instanceName, 
-                    evolutionUrl,
-                    hasKey: !!evolutionKey,
-                    evolutionKey: evolutionKey || undefined
+                    ...buildStatusMeta(),
                   });
               }
             }
@@ -13812,20 +14092,15 @@ app.get("/api/v1/chat/instance/status", requireChatEnabled, async (req, res) => 
               phoneNumber: existing.phone_number || null,
               phone_number: existing.phone_number || null,
               qrcodeBase64: existing.qrcode_base64 || null,
-              instanceName,
-              evolutionUrl,
-              hasKey: !!evolutionKey || !!existing.evolution_key,
-              evolutionKey: evolutionKey || existing.evolution_key || undefined
+              ...buildStatusMeta(),
+              hasKey: !!evoConfig.evolutionKey || !!sanitizeEvolutionApiKey(existing.evolution_key),
             });
           }
         } catch (dbErr) {}
 
         return res.json({ 
           status: 'DISCONNECTED', 
-          instanceName, 
-          evolutionUrl,
-          hasKey: !!evolutionKey,
-          evolutionKey: evolutionKey || undefined
+          ...buildStatusMeta(),
         });
     } catch(error: any) {
         return res.json({ status: 'DISCONNECTED' });
@@ -13839,23 +14114,21 @@ app.post(["/api/v1/chat/instance/recreate", "/api/v1/chat/instance/restart"], re
     const isRestartOnly = req.path.endsWith('/restart');
     if (!tenantId) return res.status(400).json({ success: false, error: "Tenant ID is required." });
 
-    const { evolutionUrl, evolutionKey, instanceName, evoHeaders } = await resolveEvolutionConfig(
-      tenantId,
-      inboxId,
-      req.body
-    );
+    const evoConfig = await resolveEvolutionConfig(tenantId, req.body);
+    const { evolutionUrl, instanceName } = evoConfig;
 
-    if (!evolutionUrl || !evolutionKey) {
+    if (!evolutionUrl || !evoConfig.evolutionKey) {
       return res.status(400).json({
         success: false,
         error: "Configurações da Evolution API incompletas (URL ou API Key ausentes).",
-        needsKey: !evolutionKey,
+        needsKey: !evoConfig.evolutionKey,
         evolutionUrl,
         instanceName,
       });
     }
 
     const webhookUrl = resolveChatWebhookUrl(req);
+    const allowEnvFallback = evoConfig.keySource !== 'body' || !evoConfig.isCustomServer;
     let base64: string | null = null;
     let isConnected = false;
     let instanceConfirmed = false;
@@ -13865,19 +14138,17 @@ app.post(["/api/v1/chat/instance/recreate", "/api/v1/chat/instance/restart"], re
 
     if (isRestartOnly) {
       console.log(`[Evolution API] Reiniciando instância "${instanceName}" em ${evolutionUrl}...`);
-      const restartRes = await safeEvolutionRequest(
-        `${evolutionUrl}/instance/restart/${encodeURIComponent(instanceName)}`,
-        { method: "PUT", headers: evoHeaders },
-        8000
+      const restartRes = await evolutionRequestWithFallback(
+        evoConfig,
+        `/instance/restart/${encodeURIComponent(instanceName)}`,
+        { method: "PUT" },
+        8000,
+        allowEnvFallback
       );
 
       if (restartRes.status === 404) {
         console.log(`[Evolution API] /instance/restart retornou 404 para "${instanceName}". Executando criação limpa automática...`);
-        const createResult = await createEvolutionInstanceClean({
-          evolutionUrl,
-          evoHeaders,
-          instanceName,
-        });
+        const createResult = await createEvolutionInstanceClean({ evoConfig });
         if (!createResult.ok) {
           const httpCode = createResult.status === 401 || createResult.status === 403 ? 401 : createResult.status === 502 ? 502 : 400;
           return res.status(httpCode).json({
@@ -13920,10 +14191,12 @@ app.post(["/api/v1/chat/instance/recreate", "/api/v1/chat/instance/restart"], re
     } else {
       // 1. Deleta instância anterior na Evolution (404 é ignorado caso ainda não exista)
       console.log(`[Evolution API] Recriando instância do zero: "${instanceName}" em ${evolutionUrl}`);
-      const delRes = await safeEvolutionRequest(
-        `${evolutionUrl}/instance/delete/${encodeURIComponent(instanceName)}`,
-        { method: "DELETE", headers: evoHeaders },
-        6000
+      const delRes = await evolutionRequestWithFallback(
+        evoConfig,
+        `/instance/delete/${encodeURIComponent(instanceName)}`,
+        { method: "DELETE" },
+        6000,
+        allowEnvFallback
       );
 
       if (delRes.status === 401 || delRes.status === 403) {
@@ -13944,11 +14217,7 @@ app.post(["/api/v1/chat/instance/recreate", "/api/v1/chat/instance/restart"], re
       }
 
       // 2. Cria nova instância com payload limpo (NUNCA misturar webhook no /instance/create)
-      const createResult = await createEvolutionInstanceClean({
-        evolutionUrl,
-        evoHeaders,
-        instanceName,
-      });
+      const createResult = await createEvolutionInstanceClean({ evoConfig });
 
       if (!createResult.ok) {
         const httpCode =
@@ -13983,20 +14252,18 @@ app.post(["/api/v1/chat/instance/recreate", "/api/v1/chat/instance/restart"], re
     if (!isConnected && !base64 && instanceConfirmed) {
       for (let attempt = 1; attempt <= 2; attempt++) {
         await new Promise((r) => setTimeout(r, 1500));
-        const cRes = await safeEvolutionRequest(
-          `${evolutionUrl}/instance/connect/${encodeURIComponent(instanceName)}`,
-          { headers: evoHeaders },
-          6000
+        const cRes = await evolutionRequestWithFallback(
+          evoConfig,
+          `/instance/connect/${encodeURIComponent(instanceName)}`,
+          {},
+          6000,
+          allowEnvFallback
         );
 
         if (cRes.status === 404) {
           // Se por qualquer motivo ainda deu 404, tenta auto-criação limpa uma vez
           console.warn(`[Evolution API] /instance/connect retornou 404 após criação para "${instanceName}". Tentando auto-criação...`);
-          const retryCreate = await createEvolutionInstanceClean({
-            evolutionUrl,
-            evoHeaders,
-            instanceName,
-          });
+          const retryCreate = await createEvolutionInstanceClean({ evoConfig });
           if (!retryCreate.ok) {
             return res.status(retryCreate.status === 401 || retryCreate.status === 403 ? 401 : 400).json({
               success: false,
@@ -14055,10 +14322,11 @@ app.post(["/api/v1/chat/instance/recreate", "/api/v1/chat/instance/restart"], re
 
     // 4. Etapa 2: Registra o Webhook SOMENTE DEPOIS de confirmar a existência da instância
     const webhookResult = await registerEvolutionWebhook({
-      evolutionUrl,
-      evolutionKey,
+      evolutionUrl: evoConfig.evolutionUrl,
+      evolutionKey: evoConfig.evolutionKey,
       instanceName,
       webhookUrl,
+      evoConfig,
     });
 
     // 5. Atualiza no banco
@@ -14066,8 +14334,8 @@ app.post(["/api/v1/chat/instance/recreate", "/api/v1/chat/instance/restart"], re
       const { data: upserted } = await supabaseAdmin.from('whatsapp_instances').upsert({
         store_id: tenantId,
         instance_name: instanceName,
-        evolution_url: evolutionUrl,
-        evolution_key: evolutionKey,
+        evolution_url: evoConfig.evolutionUrl,
+        evolution_key: evoConfig.evolutionKey,
         status: isConnected ? 'CONNECTED' : 'QRCODE',
         qrcode_base64: isConnected ? null : (base64 || null),
         phone_number: isConnected ? phoneNumber : null,
@@ -14088,7 +14356,10 @@ app.post(["/api/v1/chat/instance/recreate", "/api/v1/chat/instance/restart"], re
         phoneNumber,
         phone_number: phoneNumber,
         instanceName,
-        evolutionUrl,
+        evolutionUrl: evoConfig.evolutionUrl,
+        keySource: evoConfig.keySource,
+        keyPreview: maskEvolutionKeyPreview(evoConfig.evolutionKey),
+        isCustomServer: evoConfig.isCustomServer,
         webhook: webhookResult
       });
     }
@@ -14098,7 +14369,10 @@ app.post(["/api/v1/chat/instance/recreate", "/api/v1/chat/instance/restart"], re
       status: 'QRCODE',
       qrcodeBase64: base64,
       instanceName,
-      evolutionUrl,
+      evolutionUrl: evoConfig.evolutionUrl,
+      keySource: evoConfig.keySource,
+      keyPreview: maskEvolutionKeyPreview(evoConfig.evolutionKey),
+      isCustomServer: evoConfig.isCustomServer,
       webhook: webhookResult
     });
   } catch (err: any) {
@@ -14110,46 +14384,42 @@ app.post(["/api/v1/chat/instance/recreate", "/api/v1/chat/instance/restart"], re
 app.post("/api/v1/chat/instance/configure-webhook", requireChatEnabled, async (req, res) => {
   try {
     const tenantId = (req as any).tenantId || req.body.tenantId || (req.headers["x-tenant-id"] as string);
-    const inboxId = req.body.inboxId;
     if (!tenantId) {
       return res.status(400).json({ ok: false, error: "Tenant ID é obrigatório." });
     }
 
-    const { evolutionUrl, evolutionKey, instanceName } = await resolveEvolutionConfig(
-      tenantId,
-      inboxId,
-      req.body
-    );
+    const evoConfig = await resolveEvolutionConfig(tenantId, req.body);
 
-    if (!evolutionUrl || !evolutionKey) {
+    if (!evoConfig.evolutionUrl || !evoConfig.evolutionKey) {
       return res.status(400).json({
         ok: false,
         error: "Configure a URL e a Chave Global (AUTHENTICATION_API_KEY) da Evolution API antes de reconfigurar o webhook.",
-        evolutionUrl,
-        instanceName,
+        evolutionUrl: evoConfig.evolutionUrl,
+        instanceName: evoConfig.instanceName,
       });
     }
 
     const webhookUrl = resolveChatWebhookUrl(req);
     const webhookResult = await registerEvolutionWebhook({
-      evolutionUrl,
-      evolutionKey,
-      instanceName,
+      evolutionUrl: evoConfig.evolutionUrl,
+      evolutionKey: evoConfig.evolutionKey,
+      instanceName: evoConfig.instanceName,
       webhookUrl,
+      evoConfig,
     });
 
     return res.status(200).json({
       ok: webhookResult.ok,
       success: webhookResult.ok,
-      instanceName,
-      evolutionUrl,
+      instanceName: evoConfig.instanceName,
+      evolutionUrl: evoConfig.evolutionUrl,
       webhook: webhookResult,
       message: webhookResult.ok
-        ? `Webhook registrado com sucesso em "${instanceName}" (${webhookResult.formatUsed} · HTTP ${webhookResult.status}).`
+        ? `Webhook registrado com sucesso em "${evoConfig.instanceName}" (${webhookResult.formatUsed} · HTTP ${webhookResult.status}).`
         : undefined,
       error: webhookResult.ok
         ? undefined
-        : `Falha ao registrar webhook em "${instanceName}": ${webhookResult.error}`,
+        : `Falha ao registrar webhook em "${evoConfig.instanceName}": ${webhookResult.error}`,
     });
   } catch (err: any) {
     console.error("[Evolution Webhook Reconfigure Error]:", err);
@@ -14167,7 +14437,7 @@ app.post("/api/v1/chat/instance/confirm", requireChatEnabled, async (req, res) =
     const phoneNumber = req.body.phoneNumber || "(11) 98765-4321";
     if (!tenantId) return res.status(400).json({ error: "Tenant ID is required." });
 
-    const { instanceName, evolutionUrl, evolutionKey } = await resolveEvolutionConfig(tenantId, inboxId, req.body);
+    const { instanceName, evolutionUrl, evolutionKey } = await resolveEvolutionConfig(tenantId, req.body);
 
     const { data: existing } = await supabaseAdmin.from('whatsapp_instances').select('id').eq('instance_name', instanceName).maybeSingle();
     let instId = existing?.id;
@@ -14206,16 +14476,18 @@ app.post("/api/v1/chat/instance/confirm", requireChatEnabled, async (req, res) =
 app.post("/api/v1/chat/instance/disconnect", requireChatEnabled, async (req, res) => {
   try {
     const tenantId = (req as any).tenantId || req.body.tenantId || (req.headers["x-tenant-id"] as string);
-    const inboxId = req.body.inboxId;
     if (!tenantId) return res.status(400).json({ error: "Tenant ID is required." });
 
-    const { evolutionUrl, evolutionKey, instanceName, evoHeaders } = await resolveEvolutionConfig(tenantId, inboxId, req.body);
+    const evoConfig = await resolveEvolutionConfig(tenantId, req.body);
 
-    if (evolutionUrl && evolutionKey) {
-      safeEvolutionRequest(`${evolutionUrl}/instance/logout/${encodeURIComponent(instanceName)}`, {
-        method: "DELETE",
-        headers: evoHeaders
-      }, 3000).catch(() => {});
+    if (evoConfig.evolutionUrl && evoConfig.evolutionKey) {
+      evolutionRequestWithFallback(
+        evoConfig,
+        `/instance/logout/${encodeURIComponent(evoConfig.instanceName)}`,
+        { method: "DELETE" },
+        3000,
+        true
+      ).catch(() => {});
     }
 
     // Update status in supabase for this specific instance
@@ -14225,10 +14497,10 @@ app.post("/api/v1/chat/instance/disconnect", requireChatEnabled, async (req, res
         phone_number: null,
         qrcode_base64: null,
         updated_at: new Date().toISOString()
-      }).eq('instance_name', instanceName);
+      }).eq('instance_name', evoConfig.instanceName);
     } catch (e) {}
 
-    return res.json({ success: true, status: 'DISCONNECTED', instanceName });
+    return res.json({ success: true, status: 'DISCONNECTED', instanceName: evoConfig.instanceName });
   } catch (error: any) {
     return res.status(500).json({ error: error.message });
   }

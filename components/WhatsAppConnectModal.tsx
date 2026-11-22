@@ -16,7 +16,7 @@ interface WhatsAppConnectModalProps {
 const DEFAULT_EVOLUTION_API_URL = 'https://evolution.nexoia.online';
 
 function sanitizeEvolutionUrl(rawUrl?: string | null): string {
-  const trimmed = String(rawUrl || '').trim();
+  const trimmed = String(rawUrl || '').replace(/[\r\n\t]+/g, '').trim();
   if (!trimmed) return DEFAULT_EVOLUTION_API_URL;
   const withProto = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
   try {
@@ -31,6 +31,25 @@ function sanitizeEvolutionUrl(rawUrl?: string | null): string {
       .replace(/\/manager(?:\/.*)?$/i, '')
       .replace(/\/+$/, '');
   }
+}
+
+function sanitizeEvolutionApiKey(rawKey?: string | null): string {
+  let cleaned = String(rawKey || '').replace(/[\r\n\t]+/g, '').trim();
+  if (!cleaned) return '';
+  if (cleaned.includes('•') || cleaned.includes('***') || cleaned.includes('•••')) {
+    return '';
+  }
+  cleaned = cleaned.replace(/^bearer\s+/i, '').trim();
+  if (
+    (cleaned.startsWith('"') && cleaned.endsWith('"')) ||
+    (cleaned.startsWith("'") && cleaned.endsWith("'"))
+  ) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  if (!cleaned || cleaned.includes('•') || cleaned.includes('***') || cleaned.includes('•••')) {
+    return '';
+  }
+  return cleaned;
 }
 
 async function safeFetchJson(url: string, options?: RequestInit): Promise<{ ok: boolean; status: number; data: any; error?: string }> {
@@ -84,22 +103,14 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [showKey, setShowKey] = useState(false);
 
-  // Configurações da Evolution API
+  // Configurações da Evolution API (carregadas do servidor na abertura sem sobrescrever com chaves antigas em cache)
   const DEFAULT_EVOLUTION_URL = DEFAULT_EVOLUTION_API_URL;
-  const [evolutionUrl, setEvolutionUrl] = useState(() => {
-    if (typeof window !== 'undefined') {
-      const stored = localStorage.getItem(`farmaflow_evo_url_${tenantId}`);
-      return stored ? sanitizeEvolutionUrl(stored) : '';
-    }
-    return '';
-  });
-  const [evolutionKey, setEvolutionKey] = useState(() => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem(`farmaflow_evo_key_${tenantId}`) || '';
-    }
-    return '';
-  });
+  const [evolutionUrl, setEvolutionUrl] = useState('');
+  const [evolutionKey, setEvolutionKey] = useState('');
   const [hasSavedKey, setHasSavedKey] = useState(false);
+  const [activeKeySource, setActiveKeySource] = useState<'env' | 'db_loja' | 'none' | null>(null);
+  const [activeKeyPreview, setActiveKeyPreview] = useState<string | null>(null);
+  const [isCustomServer, setIsCustomServer] = useState(false);
   const [instanceName, setInstanceName] = useState('');
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string; instancesCount?: number } | null>(null);
@@ -144,6 +155,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
       setSuccessMessage(null);
       setTestResult(null);
       setWebhookStatus(null);
+      setEvolutionKey('');
       setInstanceName(defaultInstanceName);
       fetchInstanceStatus(true);
     } else {
@@ -194,21 +206,30 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
           setStatus('DISCONNECTED');
         }
         
-        // Só atualiza os campos de input se for na carga inicial ou se o usuário não estiver na aba de ajustes
+        // Só atualiza os campos de input na carga inicial ou fora da aba de ajustes
         if (isInit || activeTab !== 'settings') {
           if (data.evolutionUrl) {
             const cleanEvoUrl = sanitizeEvolutionUrl(data.evolutionUrl);
             setEvolutionUrl(cleanEvoUrl);
-            localStorage.setItem(`farmaflow_evo_url_${tenantId}`, cleanEvoUrl);
           }
-          if (data.evolutionKey) {
-            setEvolutionKey(data.evolutionKey);
-            setHasSavedKey(true);
-            localStorage.setItem(`farmaflow_evo_key_${tenantId}`, data.evolutionKey);
-          } else if (data.hasKey) {
-            setHasSavedKey(true);
+          if (typeof data.hasKey === 'boolean') {
+            setHasSavedKey(data.hasKey);
           }
-          if (data.instanceName && !instanceName) {
+          if (data.keySource) {
+            setActiveKeySource(data.keySource);
+          }
+          if (data.keyPreview !== undefined) {
+            setActiveKeyPreview(data.keyPreview || null);
+          }
+          if (typeof data.isCustomServer === 'boolean') {
+            setIsCustomServer(data.isCustomServer);
+          }
+          // Remove chaves antigas em cache local para nunca sobrescrever a config ativa da Easypanel
+          if (typeof window !== 'undefined' && (!data.isCustomServer || data.keySource === 'env')) {
+            localStorage.removeItem(`farmaflow_evo_key_${tenantId}`);
+            localStorage.removeItem(`farmaflow_evo_url_${tenantId}`);
+          }
+          if (data.instanceName && (isInit || !instanceName)) {
             setInstanceName(data.instanceName);
           }
         }
@@ -218,15 +239,37 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     }
   };
 
+  // Monta payload padronizado (mesmos nomes de campos JSON lidos pelo backend, nunca enviando chave mascarada)
+  const buildEvolutionPayload = () => {
+    const cleanedUrl = evolutionUrl.trim() ? sanitizeEvolutionUrl(evolutionUrl) : undefined;
+    if (cleanedUrl && cleanedUrl !== evolutionUrl) {
+      setEvolutionUrl(cleanedUrl);
+    }
+    const cleanedKey = sanitizeEvolutionApiKey(evolutionKey);
+    const cleanedInstance = (instanceName || defaultInstanceName).trim();
+
+    const payload: Record<string, any> = {
+      tenantId,
+      inboxId,
+      instanceName: cleanedInstance,
+    };
+    if (cleanedUrl) {
+      payload.url = cleanedUrl;
+      payload.evolutionUrl = cleanedUrl;
+    }
+    if (cleanedKey) {
+      payload.apiKey = cleanedKey;
+      payload.evolutionKey = cleanedKey;
+    }
+    return { payload, cleanedUrl, cleanedKey, cleanedInstance };
+  };
+
   const handleTestEvolutionConnection = async () => {
     setIsTesting(true);
     setTestResult(null);
     setErrorMessage(null);
     try {
-      const cleanedUrl = evolutionUrl.trim() ? sanitizeEvolutionUrl(evolutionUrl) : undefined;
-      if (cleanedUrl && cleanedUrl !== evolutionUrl) {
-        setEvolutionUrl(cleanedUrl);
-      }
+      const { payload } = buildEvolutionPayload();
 
       const { ok, data, error } = await safeFetchJson('/api/v1/chat/instance/test-evolution', {
         method: 'POST',
@@ -235,16 +278,20 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
           'x-tenant-id': tenantId,
           'Authorization': `Bearer ${localStorage.getItem('farmaflow_admin_token') || ''}`
         },
-        body: JSON.stringify({
-          tenantId,
-          inboxId,
-          ...(cleanedUrl ? { evolutionUrl: cleanedUrl } : {}),
-          evolutionKey: evolutionKey.trim(),
-          instanceName: (instanceName || defaultInstanceName).trim()
-        })
+        body: JSON.stringify(payload)
       });
 
       if (ok && data?.ok) {
+        if (data.evolutionUrl) {
+          setEvolutionUrl(sanitizeEvolutionUrl(data.evolutionUrl));
+        }
+        if (data.keySource) {
+          setActiveKeySource(data.keySource);
+        }
+        if (data.keyPreview) {
+          setActiveKeyPreview(data.keyPreview);
+          setHasSavedKey(true);
+        }
         setTestResult({
           ok: true,
           message: data.message || `Evolution API conectada! (${data.totalInstances || 0} instância(s) no servidor)`
@@ -270,9 +317,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     setErrorMessage(null);
     setSuccessMessage(null);
     try {
-      const trimmedUrl = sanitizeEvolutionUrl(evolutionUrl);
-      const trimmedKey = evolutionKey.trim();
-      const trimmedInstance = (instanceName || defaultInstanceName).trim();
+      const { payload, cleanedUrl, cleanedKey } = buildEvolutionPayload();
 
       const { ok, data, error } = await safeFetchJson('/api/v1/chat/instance/save-config', {
         method: 'POST',
@@ -281,22 +326,33 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
           'x-tenant-id': tenantId,
           'Authorization': `Bearer ${localStorage.getItem('farmaflow_admin_token') || ''}`
         },
-        body: JSON.stringify({
-          tenantId,
-          inboxId,
-          evolutionUrl: trimmedUrl,
-          evolutionKey: trimmedKey,
-          instanceName: trimmedInstance
-        })
+        body: JSON.stringify(payload)
       });
 
       if (ok && data?.success) {
-        const savedUrl = sanitizeEvolutionUrl(data.evolutionUrl || trimmedUrl);
-        setEvolutionUrl(savedUrl);
-        localStorage.setItem(`farmaflow_evo_url_${tenantId}`, savedUrl);
-        if (trimmedKey) {
-          localStorage.setItem(`farmaflow_evo_key_${tenantId}`, trimmedKey);
+        const savedUrl = sanitizeEvolutionUrl(data.evolutionUrl || cleanedUrl || '');
+        if (savedUrl) {
+          setEvolutionUrl(savedUrl);
+        }
+        if (typeof data.hasKey === 'boolean') {
+          setHasSavedKey(data.hasKey);
+        } else if (cleanedKey) {
           setHasSavedKey(true);
+        }
+        if (data.keySource) {
+          setActiveKeySource(data.keySource);
+        }
+        if (data.keyPreview !== undefined) {
+          setActiveKeyPreview(data.keyPreview || null);
+        }
+        if (typeof data.isCustomServer === 'boolean') {
+          setIsCustomServer(data.isCustomServer);
+        }
+        // Limpa o campo de input e qualquer cache antigo no localStorage após salvar com segurança no servidor
+        setEvolutionKey('');
+        if (typeof window !== 'undefined') {
+          localStorage.removeItem(`farmaflow_evo_key_${tenantId}`);
+          localStorage.removeItem(`farmaflow_evo_url_${tenantId}`);
         }
         setSuccessMessage("Configurações da Evolution API salvas com sucesso!");
         setTimeout(() => setSuccessMessage(null), 4000);
@@ -333,10 +389,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     setWebhookStatus(null);
     setErrorMessage(null);
     try {
-      const cleanedUrl = evolutionUrl.trim() ? sanitizeEvolutionUrl(evolutionUrl) : undefined;
-      if (cleanedUrl && cleanedUrl !== evolutionUrl) {
-        setEvolutionUrl(cleanedUrl);
-      }
+      const { payload } = buildEvolutionPayload();
 
       const { ok, data, error } = await safeFetchJson('/api/v1/chat/instance/configure-webhook', {
         method: 'POST',
@@ -345,13 +398,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
           'x-tenant-id': tenantId,
           'Authorization': `Bearer ${localStorage.getItem('farmaflow_admin_token') || ''}`
         },
-        body: JSON.stringify({
-          tenantId,
-          inboxId,
-          ...(cleanedUrl ? { evolutionUrl: cleanedUrl } : {}),
-          evolutionKey: evolutionKey.trim(),
-          instanceName: (instanceName || defaultInstanceName).trim()
-        })
+        body: JSON.stringify(payload)
       });
 
       if (ok && data?.ok) {
@@ -388,7 +435,8 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
       return;
     }
 
-    if (!evolutionKey.trim() && !hasSavedKey) {
+    const cleanedKeyInput = sanitizeEvolutionApiKey(evolutionKey);
+    if (!cleanedKeyInput && !hasSavedKey) {
       setErrorMessage("Informe a Chave Global da Evolution API (AUTHENTICATION_API_KEY) para criar a instância automaticamente.");
       setActiveTab('settings');
       return;
@@ -399,11 +447,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     setSuccessMessage(null);
     setWebhookStatus(null);
     try {
-      const cleanedUrl = evolutionUrl.trim() ? sanitizeEvolutionUrl(evolutionUrl) : undefined;
-      if (cleanedUrl && cleanedUrl !== evolutionUrl) {
-        setEvolutionUrl(cleanedUrl);
-        localStorage.setItem(`farmaflow_evo_url_${tenantId}`, cleanedUrl);
-      }
+      const { payload } = buildEvolutionPayload();
 
       const { ok, data, error } = await safeFetchJson('/api/v1/chat/instance/create', {
         method: 'POST',
@@ -412,20 +456,17 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
           'x-tenant-id': tenantId,
           'Authorization': `Bearer ${localStorage.getItem('farmaflow_admin_token') || ''}`
         },
-        body: JSON.stringify({ 
-          tenantId, 
-          inboxId,
-          ...(cleanedUrl ? { evolutionUrl: cleanedUrl } : {}),
-          evolutionKey: evolutionKey.trim(),
-          instanceName: (instanceName || defaultInstanceName).trim()
-        })
+        body: JSON.stringify(payload)
       });
 
       if (ok && data && data.success !== false) {
         if (data.evolutionUrl) {
-          const serverCleanUrl = sanitizeEvolutionUrl(data.evolutionUrl);
-          setEvolutionUrl(serverCleanUrl);
-          localStorage.setItem(`farmaflow_evo_url_${tenantId}`, serverCleanUrl);
+          setEvolutionUrl(sanitizeEvolutionUrl(data.evolutionUrl));
+        }
+        if (data.keySource) setActiveKeySource(data.keySource);
+        if (data.keyPreview) {
+          setActiveKeyPreview(data.keyPreview);
+          setHasSavedKey(true);
         }
 
         if (data.status === 'CONNECTED') {
@@ -472,11 +513,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     setWebhookStatus(null);
     setQrCodeBase64(null);
     try {
-      const cleanedUrl = evolutionUrl.trim() ? sanitizeEvolutionUrl(evolutionUrl) : undefined;
-      if (cleanedUrl && cleanedUrl !== evolutionUrl) {
-        setEvolutionUrl(cleanedUrl);
-        localStorage.setItem(`farmaflow_evo_url_${tenantId}`, cleanedUrl);
-      }
+      const { payload } = buildEvolutionPayload();
 
       const { ok, data, error } = await safeFetchJson('/api/v1/chat/instance/recreate', {
         method: 'POST',
@@ -485,20 +522,17 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
           'x-tenant-id': tenantId,
           'Authorization': `Bearer ${localStorage.getItem('farmaflow_admin_token') || ''}`
         },
-        body: JSON.stringify({
-          tenantId,
-          inboxId,
-          ...(cleanedUrl ? { evolutionUrl: cleanedUrl } : {}),
-          evolutionKey: evolutionKey.trim(),
-          instanceName: (instanceName || defaultInstanceName).trim()
-        })
+        body: JSON.stringify(payload)
       });
 
       if (ok && data && data.success !== false) {
         if (data.evolutionUrl) {
-          const serverCleanUrl = sanitizeEvolutionUrl(data.evolutionUrl);
-          setEvolutionUrl(serverCleanUrl);
-          localStorage.setItem(`farmaflow_evo_url_${tenantId}`, serverCleanUrl);
+          setEvolutionUrl(sanitizeEvolutionUrl(data.evolutionUrl));
+        }
+        if (data.keySource) setActiveKeySource(data.keySource);
+        if (data.keyPreview) {
+          setActiveKeyPreview(data.keyPreview);
+          setHasSavedKey(true);
         }
 
         if (data.status === 'CONNECTED') {
@@ -541,7 +575,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     setIsDisconnecting(true);
     setErrorMessage(null);
     try {
-      const cleanedUrl = evolutionUrl.trim() ? sanitizeEvolutionUrl(evolutionUrl) : undefined;
+      const { payload } = buildEvolutionPayload();
       const { ok } = await safeFetchJson('/api/v1/chat/instance/disconnect', {
         method: 'POST',
         headers: {
@@ -549,13 +583,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
           'x-tenant-id': tenantId,
           'Authorization': `Bearer ${localStorage.getItem('farmaflow_admin_token') || ''}`
         },
-        body: JSON.stringify({ 
-          tenantId, 
-          inboxId,
-          ...(cleanedUrl ? { evolutionUrl: cleanedUrl } : {}),
-          evolutionKey: evolutionKey.trim(),
-          instanceName: (instanceName || defaultInstanceName).trim()
-        })
+        body: JSON.stringify(payload)
       });
 
       if (ok) {
@@ -930,15 +958,27 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
 
               {/* Global API Key */}
               <div className="space-y-1">
-                <label className="text-xs font-bold text-gray-700 flex items-center gap-1.5">
-                  <Key className="w-3.5 h-3.5 text-gray-500" /> Chave Global de API (AUTHENTICATION_API_KEY):
-                </label>
+                <div className="flex items-center justify-between gap-2">
+                  <label className="text-xs font-bold text-gray-700 flex items-center gap-1.5">
+                    <Key className="w-3.5 h-3.5 text-gray-500" /> Chave Global de API (AUTHENTICATION_API_KEY):
+                  </label>
+                  {hasSavedKey && (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 whitespace-nowrap">
+                      {activeKeySource === 'env' ? 'Ativa (Easypanel)' : 'Salva na loja'}
+                      {activeKeyPreview ? ` · ${activeKeyPreview}` : ''}
+                    </span>
+                  )}
+                </div>
                 <div className="relative">
                   <input 
                     type={showKey ? "text" : "password"}
                     value={evolutionKey}
                     onChange={(e) => setEvolutionKey(e.target.value)}
-                    placeholder="Chave AUTHENTICATION_API_KEY do Easypanel"
+                    placeholder={
+                      hasSavedKey
+                        ? `Deixe vazio para usar a chave ativa${activeKeyPreview ? ` (${activeKeyPreview})` : ''} ou cole uma nova`
+                        : "Chave AUTHENTICATION_API_KEY do Easypanel"
+                    }
                     className="w-full p-2.5 pr-9 text-xs bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-hidden font-mono"
                   />
                   <button
@@ -949,6 +989,11 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
                     {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
                 </div>
+                {!isCustomServer && hasSavedKey && (
+                  <p className="text-[11px] text-emerald-700">
+                    Usando automaticamente as variáveis ativas da Easypanel. Só preencha acima se quiser usar outro servidor próprio.
+                  </p>
+                )}
               </div>
 
               {/* Instance Name */}
