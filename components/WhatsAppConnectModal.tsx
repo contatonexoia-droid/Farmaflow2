@@ -89,9 +89,9 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
   const [evolutionUrl, setEvolutionUrl] = useState(() => {
     if (typeof window !== 'undefined') {
       const stored = localStorage.getItem(`farmaflow_evo_url_${tenantId}`);
-      return stored ? sanitizeEvolutionUrl(stored) : DEFAULT_EVOLUTION_URL;
+      return stored ? sanitizeEvolutionUrl(stored) : '';
     }
-    return DEFAULT_EVOLUTION_URL;
+    return '';
   });
   const [evolutionKey, setEvolutionKey] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -223,8 +223,8 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     setTestResult(null);
     setErrorMessage(null);
     try {
-      const cleanedUrl = sanitizeEvolutionUrl(evolutionUrl);
-      if (cleanedUrl !== evolutionUrl) {
+      const cleanedUrl = evolutionUrl.trim() ? sanitizeEvolutionUrl(evolutionUrl) : undefined;
+      if (cleanedUrl && cleanedUrl !== evolutionUrl) {
         setEvolutionUrl(cleanedUrl);
       }
 
@@ -238,7 +238,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
         body: JSON.stringify({
           tenantId,
           inboxId,
-          evolutionUrl: cleanedUrl,
+          ...(cleanedUrl ? { evolutionUrl: cleanedUrl } : {}),
           evolutionKey: evolutionKey.trim(),
           instanceName: (instanceName || defaultInstanceName).trim()
         })
@@ -333,8 +333,8 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     setWebhookStatus(null);
     setErrorMessage(null);
     try {
-      const cleanedUrl = sanitizeEvolutionUrl(evolutionUrl);
-      if (cleanedUrl !== evolutionUrl) {
+      const cleanedUrl = evolutionUrl.trim() ? sanitizeEvolutionUrl(evolutionUrl) : undefined;
+      if (cleanedUrl && cleanedUrl !== evolutionUrl) {
         setEvolutionUrl(cleanedUrl);
       }
 
@@ -348,7 +348,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
         body: JSON.stringify({
           tenantId,
           inboxId,
-          evolutionUrl: cleanedUrl,
+          ...(cleanedUrl ? { evolutionUrl: cleanedUrl } : {}),
           evolutionKey: evolutionKey.trim(),
           instanceName: (instanceName || defaultInstanceName).trim()
         })
@@ -399,8 +399,8 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     setSuccessMessage(null);
     setWebhookStatus(null);
     try {
-      const cleanedUrl = sanitizeEvolutionUrl(evolutionUrl);
-      if (cleanedUrl !== evolutionUrl) {
+      const cleanedUrl = evolutionUrl.trim() ? sanitizeEvolutionUrl(evolutionUrl) : undefined;
+      if (cleanedUrl && cleanedUrl !== evolutionUrl) {
         setEvolutionUrl(cleanedUrl);
         localStorage.setItem(`farmaflow_evo_url_${tenantId}`, cleanedUrl);
       }
@@ -415,13 +415,13 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
         body: JSON.stringify({ 
           tenantId, 
           inboxId,
-          evolutionUrl: cleanedUrl,
+          ...(cleanedUrl ? { evolutionUrl: cleanedUrl } : {}),
           evolutionKey: evolutionKey.trim(),
           instanceName: (instanceName || defaultInstanceName).trim()
         })
       });
 
-      if (ok && data) {
+      if (ok && data && data.success !== false) {
         if (data.evolutionUrl) {
           const serverCleanUrl = sanitizeEvolutionUrl(data.evolutionUrl);
           setEvolutionUrl(serverCleanUrl);
@@ -433,6 +433,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
           setPhoneNumber(data.phoneNumber || data.phone_number || null);
           setIsPolling(false);
           setSuccessMessage("WhatsApp conectado com sucesso!");
+          applyWebhookDiagnostic(data.webhook);
         } else if (data.qrcodeBase64) {
           let b64 = data.qrcodeBase64;
           if (!b64.startsWith('data:image')) {
@@ -442,19 +443,21 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
           setStatus('QRCODE');
           setIsPolling(true);
           setSuccessMessage("QR Code gerado com sucesso! Aponte o WhatsApp do celular para conectar.");
-        } else {
-          setErrorMessage(data.error || "Aguardando resposta da Evolution API. Clique em 'Recriar Instância' caso não apareça.");
-        }
-
-        applyWebhookDiagnostic(data.webhook);
-      } else {
-        setErrorMessage(error || data?.error || "Não foi possível criar a instância na Evolution API. Verifique a URL e a API Key na aba Configurações.");
-        if (data?.webhook) {
           applyWebhookDiagnostic(data.webhook);
+        } else {
+          setStatus('DISCONNECTED');
+          setIsPolling(false);
+          setErrorMessage(data.error || "A Evolution API não retornou o QR Code. Verifique as configurações e tente novamente.");
         }
+      } else {
+        setStatus('DISCONNECTED');
+        setIsPolling(false);
+        setErrorMessage(error || data?.error || "Não foi possível criar a instância na Evolution API. Verifique a URL e a API Key na aba Configurações.");
       }
     } catch (e: any) {
       console.error("[WhatsAppConnectModal] Erro ao gerar QR Code:", e);
+      setStatus('DISCONNECTED');
+      setIsPolling(false);
       setErrorMessage(e.message || "Erro de conexão ao comunicar com a Evolution API.");
     } finally {
       setIsLoading(false);
@@ -469,8 +472,8 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     setWebhookStatus(null);
     setQrCodeBase64(null);
     try {
-      const cleanedUrl = sanitizeEvolutionUrl(evolutionUrl);
-      if (cleanedUrl !== evolutionUrl) {
+      const cleanedUrl = evolutionUrl.trim() ? sanitizeEvolutionUrl(evolutionUrl) : undefined;
+      if (cleanedUrl && cleanedUrl !== evolutionUrl) {
         setEvolutionUrl(cleanedUrl);
         localStorage.setItem(`farmaflow_evo_url_${tenantId}`, cleanedUrl);
       }
@@ -485,29 +488,49 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
         body: JSON.stringify({
           tenantId,
           inboxId,
-          evolutionUrl: cleanedUrl,
+          ...(cleanedUrl ? { evolutionUrl: cleanedUrl } : {}),
           evolutionKey: evolutionKey.trim(),
           instanceName: (instanceName || defaultInstanceName).trim()
         })
       });
 
-      if (ok && data) {
-        if (data.qrcodeBase64) {
+      if (ok && data && data.success !== false) {
+        if (data.evolutionUrl) {
+          const serverCleanUrl = sanitizeEvolutionUrl(data.evolutionUrl);
+          setEvolutionUrl(serverCleanUrl);
+          localStorage.setItem(`farmaflow_evo_url_${tenantId}`, serverCleanUrl);
+        }
+
+        if (data.status === 'CONNECTED') {
+          setStatus('CONNECTED');
+          setPhoneNumber(data.phoneNumber || data.phone_number || null);
+          setIsPolling(false);
+          setSuccessMessage("WhatsApp conectado com sucesso!");
+          applyWebhookDiagnostic(data.webhook);
+        } else if (data.qrcodeBase64) {
           let b64 = data.qrcodeBase64;
           if (!b64.startsWith('data:image')) {
             b64 = `data:image/png;base64,${b64}`;
           }
           setQrCodeBase64(b64);
+          setStatus('QRCODE');
+          setIsPolling(true);
+          setSuccessMessage("Instância reiniciada com sucesso na Evolution API! QR Code gerado.");
+          applyWebhookDiagnostic(data.webhook);
+        } else {
+          setStatus('DISCONNECTED');
+          setIsPolling(false);
+          setErrorMessage(data.error || "A Evolution API não retornou o QR Code para esta instância. Verifique a URL e a API Key.");
         }
-        setStatus('QRCODE');
-        setIsPolling(true);
-        setSuccessMessage("Instância reiniciada com sucesso na Evolution API! QR Code gerado.");
-        applyWebhookDiagnostic(data.webhook);
       } else {
+        setStatus('DISCONNECTED');
+        setIsPolling(false);
         setErrorMessage(error || data?.error || "Erro ao recriar instância na Evolution API.");
       }
     } catch (e: any) {
-      setErrorMessage("Falha ao recriar instância na Evolution API.");
+      setStatus('DISCONNECTED');
+      setIsPolling(false);
+      setErrorMessage(e?.message || "Falha ao recriar instância na Evolution API.");
     } finally {
       setIsLoading(false);
     }
@@ -518,7 +541,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     setIsDisconnecting(true);
     setErrorMessage(null);
     try {
-      const cleanedUrl = sanitizeEvolutionUrl(evolutionUrl);
+      const cleanedUrl = evolutionUrl.trim() ? sanitizeEvolutionUrl(evolutionUrl) : undefined;
       const { ok } = await safeFetchJson('/api/v1/chat/instance/disconnect', {
         method: 'POST',
         headers: {
@@ -529,7 +552,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
         body: JSON.stringify({ 
           tenantId, 
           inboxId,
-          evolutionUrl: cleanedUrl,
+          ...(cleanedUrl ? { evolutionUrl: cleanedUrl } : {}),
           evolutionKey: evolutionKey.trim(),
           instanceName: (instanceName || defaultInstanceName).trim()
         })
