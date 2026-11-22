@@ -2778,7 +2778,11 @@ app.post("/api/v1/team/users", checkTenantAccess, async (req, res) => {
 
 app.patch("/api/v1/team/users/:id", checkTenantAccess, async (req, res) => {
   try {
-    const userId = req.params.id;
+    const userId = String(req.params.id || "").trim();
+    const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidPattern.test(userId)) {
+      return res.status(400).json({ error: "ID de usuário inválido (UUID esperado)." });
+    }
     const { full_name, role, is_active } = req.body;
 
     let cleanRole: string | undefined = undefined;
@@ -2820,7 +2824,11 @@ app.patch("/api/v1/team/users/:id", checkTenantAccess, async (req, res) => {
 
 app.delete("/api/v1/team/users/:id", checkTenantAccess, async (req, res) => {
   try {
-    const userId = req.params.id;
+    const userId = String(req.params.id || "").trim();
+    const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidPattern.test(userId)) {
+      return res.status(400).json({ error: "ID de usuário inválido (UUID esperado)." });
+    }
     const tenantId = (req.headers["x-tenant-id"] || req.query.tenantId) as string;
 
     // 1. Busca dados do usuário para identificar vínculos
@@ -2961,13 +2969,19 @@ async function resolveOperatorAllowedInboxIds(
   headerUserId?: string,
   headerUserRole?: string
 ): Promise<{ isOperator: boolean; allowedInboxIds: string[] }> {
+  const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const candidateUserIds = new Set<string>();
   const candidateEmails = new Set<string>();
+  let hasSyntheticAdminSession = false;
 
   const addCandidate = (val?: string | null) => {
     if (!val || typeof val !== "string") return;
     const clean = val.trim();
     if (!clean || clean === "undefined" || clean === "null") return;
+    if (/^admin_/i.test(clean)) {
+      hasSyntheticAdminSession = true;
+      return;
+    }
     if (clean.includes("@")) {
       candidateEmails.add(clean.toLowerCase());
     } else {
@@ -2979,6 +2993,12 @@ async function resolveOperatorAllowedInboxIds(
   addCandidate(headerUserId);
 
   let detectedRole = (userRole || headerUserRole || "").toLowerCase().trim();
+  const isExplicitAdminRole = ["admin", "super_admin", "superadmin", "owner", "proprietario", "gerente", "manager", "matriz", "admin_matriz", "network_admin"].includes(detectedRole);
+
+  // Para sessões sintéticas de administrador (admin_*), resolve acesso diretamente sem consultar tenant_users.id
+  if (hasSyntheticAdminSession && (isExplicitAdminRole || !["operador", "operator", "atendente", "balconista"].includes(detectedRole))) {
+    return { isOperator: false, allowedInboxIds: [] };
+  }
 
   // 1. Tentar resolver a partir do token Bearer se fornecido
   const cleanAuthToken = authHeader ? String(authHeader).replace(/^Bearer\s+/i, '').trim() : '';
@@ -2995,9 +3015,10 @@ async function resolveOperatorAllowedInboxIds(
     } catch (_) {}
   }
 
-  // 2. Buscar correspondência em tenant_users para mapear todos os IDs possíveis (id, supabase_user_id, email, role)
+  // 2. Buscar correspondência em tenant_users (NUNCA filtrar tenant_users.id com strings não-UUID)
   try {
     const rawIds = Array.from(candidateUserIds);
+    const validUuids = rawIds.filter((id) => UUID_REGEX.test(id));
     const rawEmails = Array.from(candidateEmails);
 
     const tuQueries: Promise<any>[] = [];
@@ -3015,29 +3036,15 @@ async function resolveOperatorAllowedInboxIds(
       }
     }
 
-    if (rawIds.length > 0) {
-      const validUuids = rawIds.filter(id => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id));
-      if (validUuids.length > 0) {
-        tuQueries.push(
-          Promise.resolve(
-            supabaseAdmin
-              .from("tenant_users")
-              .select("id, supabase_user_id, role, tenant_id, email")
-              .or(`id.in.(${validUuids.join(',')}),supabase_user_id.in.(${validUuids.join(',')})`)
-          )
-        );
-      }
-      const otherIds = rawIds.filter(id => !validUuids.includes(id));
-      for (const oid of otherIds) {
-        tuQueries.push(
-          Promise.resolve(
-            supabaseAdmin
-              .from("tenant_users")
-              .select("id, supabase_user_id, role, tenant_id, email")
-              .eq("id", oid)
-          )
-        );
-      }
+    if (validUuids.length > 0) {
+      tuQueries.push(
+        Promise.resolve(
+          supabaseAdmin
+            .from("tenant_users")
+            .select("id, supabase_user_id, role, tenant_id, email")
+            .or(`id.in.(${validUuids.join(',')}),supabase_user_id.in.(${validUuids.join(',')})`)
+        )
+      );
     }
 
     if (storeId && storeId !== "default" && rawEmails.length > 0) {
@@ -15982,14 +15989,14 @@ app.post("/api/v1/chat/send", requireChatEnabled, async (req, res) => {
         .eq("id", conversation_id)
         .maybeSingle();
 
-      if (conv?.inbox_id) {
+      if (conv?.inbox_id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(conv.inbox_id))) {
         const { data: inbox } = await supabaseAdmin
           .from("inboxes")
           .select("whatsapp_instance_id")
           .eq("id", conv.inbox_id)
           .maybeSingle();
 
-        if (inbox?.whatsapp_instance_id) {
+        if (inbox?.whatsapp_instance_id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(inbox.whatsapp_instance_id))) {
           const { data: inst } = await supabaseAdmin
             .from("whatsapp_instances")
             .select("instance_name")

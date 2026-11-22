@@ -125,20 +125,20 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
       }
     } catch (e) {
       console.warn("[InboxManagement] Could not fetch inboxes from database, loading fallback:", e);
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       const saved = localStorage.getItem(`inboxes_${tenantId}`);
       if (saved) {
-        try { setInboxes(JSON.parse(saved)); } catch (_) {}
+        try {
+          const parsed = JSON.parse(saved);
+          const validInboxes = Array.isArray(parsed)
+            ? parsed.filter((ib: any) => ib && typeof ib.id === 'string' && uuidRegex.test(ib.id))
+            : [];
+          setInboxes(validInboxes);
+        } catch (_) {
+          setInboxes([]);
+        }
       } else {
-        const defaultInbox = [{
-          id: `inbox_default_${tenantId}`,
-          store_id: tenantId,
-          name: 'Geral / Atendimento',
-          description: 'Caixa de entrada principal para recebimento de mensagens',
-          whatsapp_instance_id: null,
-          created_at: new Date().toISOString()
-        }];
-        setInboxes(defaultInbox);
-        localStorage.setItem(`inboxes_${tenantId}`, JSON.stringify(defaultInbox));
+        setInboxes([]);
       }
     } finally {
       setLoading(false);

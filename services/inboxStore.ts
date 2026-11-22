@@ -1,6 +1,12 @@
 import { createClient } from "@supabase/supabase-js";
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isValidUuid(value?: unknown): value is string {
+  return typeof value === "string" && UUID_REGEX.test(value.trim());
+}
 
 const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || "https://nalshjhoiecxooejpiaw.supabase.co";
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_Y2lAqlvDUhdjSNtv80GkJA_SiOgynYy";
@@ -74,9 +80,10 @@ class InboxStore {
       console.warn("[InboxStore] Supabase query error, falling back to memory:", err);
     }
 
-    const fileInboxes = this.inboxes.filter(i => i.store_id === storeId);
+    // Ignora IDs sintéticos antigos (ex: inbox_default_*) do cache local
+    const fileInboxes = this.inboxes.filter(i => i.store_id === storeId && isValidUuid(i.id));
     
-    // Combine dbInboxes with any file inboxes that aren't yet in dbInboxes
+    // Combine dbInboxes with any valid-UUID file inboxes that aren't yet in dbInboxes
     const dbIds = new Set(dbInboxes.map(i => i.id));
     const merged = [...dbInboxes];
     for (const fi of fileInboxes) {
@@ -86,30 +93,26 @@ class InboxStore {
     }
 
     if (merged.length === 0) {
-      // Create default inbox
-      const defaultInbox: InboxItem = {
-        id: `inbox_default_${storeId}`,
-        store_id: storeId,
-        name: "Geral / Atendimento",
-        description: "Caixa de entrada principal da loja",
-        whatsapp_instance_id: null,
-        channel_type: "whatsapp",
-        created_at: new Date().toISOString()
-      };
-      this.inboxes.push(defaultInbox);
-      this.saveToFile();
-      return [defaultInbox];
+      // Cria automaticamente a caixa de entrada principal na tabela inboxes com UUID válido
+      const createdDefault = await this.createInbox(
+        storeId,
+        "Geral / Atendimento",
+        "Caixa de entrada principal da loja",
+        null,
+        "whatsapp"
+      );
+      return [createdDefault];
     }
 
     return merged;
   }
 
   public async createInbox(storeId: string, name: string, description?: string, whatsappInstanceId?: string | null, channelType?: string | null): Promise<InboxItem> {
-    const isUuid = whatsappInstanceId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(whatsappInstanceId);
-    const validInstId = isUuid ? whatsappInstanceId : null;
+    const validInstId = isValidUuid(whatsappInstanceId) ? whatsappInstanceId : null;
+    const generatedUuid = crypto.randomUUID();
 
     const newInbox: InboxItem = {
-      id: `inbox_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      id: generatedUuid,
       store_id: storeId,
       name,
       description: description || "",
@@ -119,8 +122,8 @@ class InboxStore {
     };
 
     try {
-      // First try inserting clean payload
       const payload: any = {
+        id: generatedUuid,
         store_id: storeId,
         name,
         description: description || null,
@@ -138,6 +141,7 @@ class InboxStore {
           ...data,
           channel_type: channelType || data.channel_type || "whatsapp"
         };
+        this.inboxes = this.inboxes.filter(i => i.id !== item.id && isValidUuid(i.id));
         this.inboxes.push(item);
         this.saveToFile();
         return item;
@@ -149,14 +153,14 @@ class InboxStore {
       console.warn("[InboxStore] Supabase insert failed, using fallback:", err);
     }
 
+    this.inboxes = this.inboxes.filter(i => i.id !== newInbox.id && isValidUuid(i.id));
     this.inboxes.push(newInbox);
     this.saveToFile();
     return newInbox;
   }
 
   public async updateInbox(id: string, name: string, description?: string, whatsappInstanceId?: string | null, channelType?: string | null): Promise<InboxItem> {
-    const isUuid = whatsappInstanceId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(whatsappInstanceId);
-    const validInstId = isUuid ? whatsappInstanceId : null;
+    const validInstId = isValidUuid(whatsappInstanceId) ? whatsappInstanceId : null;
 
     const payload: any = {
       name,
@@ -164,29 +168,31 @@ class InboxStore {
       whatsapp_instance_id: validInstId
     };
 
-    try {
-      const { data, error } = await supabaseAdmin
-        .from("inboxes")
-        .update(payload)
-        .eq("id", id)
-        .select()
-        .single();
+    if (isValidUuid(id)) {
+      try {
+        const { data, error } = await supabaseAdmin
+          .from("inboxes")
+          .update(payload)
+          .eq("id", id)
+          .select()
+          .single();
 
-      if (!error && data) {
-        const updatedItem = { ...data, channel_type: channelType || "whatsapp" };
-        this.inboxes = this.inboxes.map(i => i.id === id ? updatedItem : i);
-        this.saveToFile();
-        return updatedItem;
+        if (!error && data) {
+          const updatedItem = { ...data, channel_type: channelType || "whatsapp" };
+          this.inboxes = this.inboxes.map(i => i.id === id ? updatedItem : i);
+          this.saveToFile();
+          return updatedItem;
+        }
+      } catch (err) {
+        console.warn("[InboxStore] Supabase update failed, using fallback:", err);
       }
-    } catch (err) {
-      console.warn("[InboxStore] Supabase update failed, using fallback:", err);
     }
 
     const localPayload = { ...payload, channel_type: channelType || "whatsapp" };
     const index = this.inboxes.findIndex(i => i.id === id);
     if (index >= 0) {
       this.inboxes[index] = { ...this.inboxes[index], ...localPayload };
-    } else {
+    } else if (isValidUuid(id)) {
       const created = { id, store_id: "default", created_at: new Date().toISOString(), ...localPayload };
       this.inboxes.push(created);
     }
@@ -195,10 +201,12 @@ class InboxStore {
   }
 
   public async deleteInbox(id: string): Promise<boolean> {
-    try {
-      await supabaseAdmin.from("inboxes").delete().eq("id", id);
-    } catch (err) {
-      console.warn("[InboxStore] Supabase delete failed:", err);
+    if (isValidUuid(id)) {
+      try {
+        await supabaseAdmin.from("inboxes").delete().eq("id", id);
+      } catch (err) {
+        console.warn("[InboxStore] Supabase delete failed:", err);
+      }
     }
 
     this.inboxes = this.inboxes.filter(i => i.id !== id);
@@ -208,28 +216,30 @@ class InboxStore {
   }
 
   public async getMembers(inboxId: string): Promise<string[]> {
-    try {
-      // 1. Try department_access first
-      const { data: deptData, error: deptErr } = await supabaseAdmin
-        .from("department_access")
-        .select("user_id")
-        .eq("department_id", inboxId);
+    if (isValidUuid(inboxId)) {
+      try {
+        // 1. Try department_access first
+        const { data: deptData, error: deptErr } = await supabaseAdmin
+          .from("department_access")
+          .select("user_id")
+          .eq("department_id", inboxId);
 
-      if (!deptErr && deptData && deptData.length > 0) {
-        return deptData.map(m => m.user_id).filter(Boolean);
+        if (!deptErr && deptData && deptData.length > 0) {
+          return deptData.map(m => m.user_id).filter(Boolean);
+        }
+
+        // 2. Try inbox_members
+        const { data, error } = await supabaseAdmin
+          .from("inbox_members")
+          .select("user_id")
+          .eq("inbox_id", inboxId);
+
+        if (!error && data) {
+          return data.map(m => m.user_id).filter(Boolean);
+        }
+      } catch (err) {
+        console.warn("[InboxStore] Supabase members query failed:", err);
       }
-
-      // 2. Try inbox_members
-      const { data, error } = await supabaseAdmin
-        .from("inbox_members")
-        .select("user_id")
-        .eq("inbox_id", inboxId);
-
-      if (!error && data) {
-        return data.map(m => m.user_id).filter(Boolean);
-      }
-    } catch (err) {
-      console.warn("[InboxStore] Supabase members query failed:", err);
     }
 
     return this.members.filter(m => m.inbox_id === inboxId).map(m => m.user_id);
@@ -239,7 +249,7 @@ class InboxStore {
     const cleanUserIds = Array.from(new Set(userIds.filter(Boolean)));
     
     let activeTenantId = tenantId;
-    if (!activeTenantId) {
+    if (!activeTenantId && isValidUuid(inboxId)) {
       try {
         const { data: inboxInfo } = await supabaseAdmin
           .from("inboxes")
@@ -254,33 +264,35 @@ class InboxStore {
       }
     }
 
-    // 1. Update department_access table
-    try {
-      await supabaseAdmin.from("department_access").delete().eq("department_id", inboxId);
-      if (cleanUserIds.length > 0) {
-        await supabaseAdmin.from("department_access").insert(
-          cleanUserIds.map(uid => ({ 
-            department_id: inboxId, 
-            user_id: uid, 
-            tenant_id: activeTenantId || null,
-            created_at: new Date().toISOString() 
-          }))
-        );
+    if (isValidUuid(inboxId)) {
+      // 1. Update department_access table
+      try {
+        await supabaseAdmin.from("department_access").delete().eq("department_id", inboxId);
+        if (cleanUserIds.length > 0) {
+          await supabaseAdmin.from("department_access").insert(
+            cleanUserIds.map(uid => ({ 
+              department_id: inboxId, 
+              user_id: uid, 
+              tenant_id: activeTenantId || null,
+              created_at: new Date().toISOString() 
+            }))
+          );
+        }
+      } catch (err) {
+        console.warn("[InboxStore] department_access sync failed:", err);
       }
-    } catch (err) {
-      console.warn("[InboxStore] department_access sync failed:", err);
-    }
 
-    // 2. Update inbox_members table
-    try {
-      await supabaseAdmin.from("inbox_members").delete().eq("inbox_id", inboxId);
-      if (cleanUserIds.length > 0) {
-        await supabaseAdmin.from("inbox_members").insert(
-          cleanUserIds.map(uid => ({ inbox_id: inboxId, user_id: uid }))
-        );
+      // 2. Update inbox_members table
+      try {
+        await supabaseAdmin.from("inbox_members").delete().eq("inbox_id", inboxId);
+        if (cleanUserIds.length > 0) {
+          await supabaseAdmin.from("inbox_members").insert(
+            cleanUserIds.map(uid => ({ inbox_id: inboxId, user_id: uid }))
+          );
+        }
+      } catch (err) {
+        console.warn("[InboxStore] inbox_members sync failed:", err);
       }
-    } catch (err) {
-      console.warn("[InboxStore] inbox_members sync failed:", err);
     }
 
     // 3. Update in-memory and local file

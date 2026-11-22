@@ -7,6 +7,12 @@ import { evolutionApiService } from "./evolutionApiService.js";
 import { isWeblojaOrderMessage, isBotSentOrEcho, registerBotSentMessage, botSentMessageIds } from "./botHandoffManager.js";
 import { realtimeHub } from "./realtimeHub.js";
 
+export const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isValidUuid(value?: unknown): value is string {
+  return typeof value === "string" && UUID_REGEX.test(value.trim());
+}
+
 function stringToUuid(str: string): string {
   const hash = crypto.createHash('md5').update(str).digest('hex');
   return `${hash.substring(0, 8)}-${hash.substring(8, 12)}-4${hash.substring(13, 16)}-${(parseInt(hash.substring(16, 18), 16) & 0x3f | 0x80).toString(16)}${hash.substring(18, 20)}-${hash.substring(20, 32)}`;
@@ -121,9 +127,31 @@ export const VALID_CHAT_MESSAGE_COLUMNS = new Set([
 export function sanitizeChatMessagePayload(data: Record<string, any>): Record<string, any> {
   const sanitized: Record<string, any> = {};
   for (const [key, value] of Object.entries(data)) {
-    if (VALID_CHAT_MESSAGE_COLUMNS.has(key) && value !== undefined) {
-      sanitized[key] = value;
+    if (!VALID_CHAT_MESSAGE_COLUMNS.has(key) || value === undefined) continue;
+
+    // Nunca enviar reaction vazio/null no payload padrão (evita falhas em diferenças de schema)
+    if (key === "reaction") {
+      if (typeof value === "string" && value.trim() !== "") {
+        sanitized[key] = value.trim();
+      }
+      continue;
     }
+
+    // Só envia reactions se houver reações reais definidas
+    if (key === "reactions") {
+      if (Array.isArray(value) && value.length > 0) {
+        sanitized[key] = value;
+      }
+      continue;
+    }
+
+    // Valida colunas UUID em chat_messages
+    if (key === "sender_id") {
+      sanitized[key] = isValidUuid(value) ? value.trim() : null;
+      continue;
+    }
+
+    sanitized[key] = value;
   }
   return sanitized;
 }
@@ -161,6 +189,14 @@ export function sanitizeChatConversationPayload(data: Record<string, any>): Reco
   // Se assigned_to foi passado mas assigned_user_id não, mapeia para a coluna correta do banco
   if (data.assigned_to !== undefined && sanitized.assigned_user_id === undefined) {
     sanitized.assigned_user_id = data.assigned_to;
+  }
+
+  // Garante que colunas UUID nunca recebam strings sintéticas (ex: inbox_default_*, admin_*)
+  if (sanitized.inbox_id !== undefined && sanitized.inbox_id !== null) {
+    sanitized.inbox_id = isValidUuid(sanitized.inbox_id) ? sanitized.inbox_id.trim() : null;
+  }
+  if (sanitized.assigned_user_id !== undefined && sanitized.assigned_user_id !== null) {
+    sanitized.assigned_user_id = isValidUuid(sanitized.assigned_user_id) ? sanitized.assigned_user_id.trim() : null;
   }
 
   return sanitized;
@@ -375,12 +411,18 @@ class ChatStore {
         .order("last_message_at", { ascending: false });
 
       if (inboxId && inboxId !== "all") {
-        query = query.eq("inbox_id", inboxId);
+        if (isValidUuid(inboxId)) {
+          query = query.eq("inbox_id", inboxId.trim());
+        } else {
+          // Ignora filtro sintético não-UUID (ex: inbox_default_*) para evitar Postgres 22P02
+          console.warn(`[ChatStore] Ignorando filtro inbox_id não-UUID em getConversations: "${inboxId}"`);
+        }
       }
 
       if (allowedInboxIds !== undefined) {
-        if (allowedInboxIds.length > 0) {
-          query = query.in("inbox_id", allowedInboxIds);
+        const validAllowedInboxIds = allowedInboxIds.filter((id) => isValidUuid(id));
+        if (validAllowedInboxIds.length > 0) {
+          query = query.in("inbox_id", validAllowedInboxIds);
         } else {
           return [];
         }
@@ -1100,27 +1142,36 @@ class ChatStore {
           .maybeSingle();
           
         if (inst) {
-          const { data: inbox } = await supabaseAdmin
-            .from("inboxes")
-            .select("id")
-            .or(`whatsapp_instance_id.eq.${inst.id},whatsapp_instance_id.eq.${inst.instance_name}`)
-            .maybeSingle();
-            
-          if (inbox?.id) {
-            resolvedInboxId = inbox.id;
-            console.log(`[ChatStore] Mensagem recebida na instância ${instanceName} vinculada à caixa ${resolvedInboxId}`);
+          const orFilters: string[] = [];
+          if (isValidUuid(inst.id)) orFilters.push(`whatsapp_instance_id.eq.${inst.id}`);
+          if (inst.instance_name && isValidUuid(inst.instance_name)) {
+            orFilters.push(`whatsapp_instance_id.eq.${inst.instance_name}`);
+          }
+          if (orFilters.length > 0) {
+            const { data: inbox } = await supabaseAdmin
+              .from("inboxes")
+              .select("id")
+              .or(orFilters.join(","))
+              .maybeSingle();
+
+            if (isValidUuid(inbox?.id)) {
+              resolvedInboxId = inbox.id;
+              console.log(`[ChatStore] Mensagem recebida na instância ${instanceName} vinculada à caixa ${resolvedInboxId}`);
+            }
           }
         }
 
-        if (!resolvedInboxId) {
-          // Fallback em memória/arquivo para inboxes
+        if (!isValidUuid(resolvedInboxId)) {
+          // Fallback em memória/arquivo apenas para inboxes com UUID válido
           const inboxes = await inboxStore.getInboxes(storeId);
-          const matched = inboxes.find(i => 
-            i.whatsapp_instance_id === instanceName || 
-            (inst?.id && i.whatsapp_instance_id === inst.id) ||
-            i.id.toLowerCase().includes(instanceName.replace(/^inbox_/, '').toLowerCase())
+          const matched = inboxes.find(i =>
+            isValidUuid(i.id) && (
+              i.whatsapp_instance_id === instanceName ||
+              (inst?.id && i.whatsapp_instance_id === inst.id) ||
+              i.id.toLowerCase().includes(instanceName.replace(/^inbox_/, '').toLowerCase())
+            )
           );
-          if (matched) {
+          if (matched && isValidUuid(matched.id)) {
             resolvedInboxId = matched.id;
           }
         }
@@ -1129,44 +1180,60 @@ class ChatStore {
       }
     }
 
-    if (!resolvedInboxId && convInfo?.inbox_id) {
+    if (!isValidUuid(resolvedInboxId) && isValidUuid(convInfo?.inbox_id)) {
       resolvedInboxId = convInfo.inbox_id;
     }
 
-    if (!resolvedInboxId) {
-       try {
-         const { data: firstInbox, error: fetchInboxError } = await supabaseAdmin
-           .from("inboxes")
-           .select("id")
-           .eq("store_id", storeId)
-           .order("created_at", { ascending: true })
-           .limit(1)
-           .maybeSingle();
-           
-         if (fetchInboxError && fetchInboxError.code !== 'PGRST116') {
-           console.error('[ERRO CRITICO NO BACKGROUND]: Erro na obtenção do inbox_id da loja', fetchInboxError.message, fetchInboxError);
-         }
-           
-         if (firstInbox?.id) {
-           resolvedInboxId = firstInbox.id;
-         } else {
-           // Cria caixa de entrada padrão se nenhuma existir
-           const defaultInboxId = stringToUuid(`inbox_default_${storeId}`);
-           const { error: insertInboxError } = await supabaseAdmin.from("inboxes").upsert([{
-             id: defaultInboxId,
-             store_id: storeId,
-             name: "Caixa de Entrada Principal"
-           }], { onConflict: "id" });
-           
-           if (insertInboxError) {
-             console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao criar caixa de entrada padrão (inbox_id)', insertInboxError.message, insertInboxError);
-           } else {
-             resolvedInboxId = defaultInboxId;
-           }
-         }
-       } catch (error: any) {
-         console.error('[ERRO CRITICO NO BACKGROUND]: Exceção na obtenção do inbox_id', error.message, error.stack);
-       }
+    if (!isValidUuid(resolvedInboxId)) {
+      resolvedInboxId = null;
+      try {
+        const candidateStoreIds = Array.from(new Set([storeId, cleanStoreId].filter(Boolean)));
+        const { data: firstInbox, error: fetchInboxError } = await supabaseAdmin
+          .from("inboxes")
+          .select("id")
+          .in("store_id", candidateStoreIds)
+          .order("created_at", { ascending: true })
+          .limit(1)
+          .maybeSingle();
+
+        if (fetchInboxError && fetchInboxError.code !== 'PGRST116') {
+          console.error('[ERRO CRITICO NO BACKGROUND]: Erro na obtenção do inbox_id da loja', fetchInboxError.message, fetchInboxError);
+        }
+
+        if (isValidUuid(firstInbox?.id)) {
+          resolvedInboxId = firstInbox.id;
+        } else {
+          // Cria automaticamente a caixa de entrada principal com UUID válido (crypto.randomUUID)
+          const generatedInboxUuid = crypto.randomUUID();
+          const { data: createdInbox, error: insertInboxError } = await supabaseAdmin
+            .from("inboxes")
+            .insert([{
+              id: generatedInboxUuid,
+              store_id: cleanStoreId || storeId,
+              name: "Caixa de Entrada Principal",
+              description: "Caixa de entrada principal da loja"
+            }])
+            .select("id")
+            .maybeSingle();
+
+          if (insertInboxError) {
+            console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao criar caixa de entrada padrão (inbox_id)', insertInboxError.message, insertInboxError);
+            resolvedInboxId = null;
+          } else if (isValidUuid(createdInbox?.id)) {
+            resolvedInboxId = createdInbox.id;
+          } else {
+            resolvedInboxId = isValidUuid(generatedInboxUuid) ? generatedInboxUuid : null;
+          }
+        }
+      } catch (error: any) {
+        console.error('[ERRO CRITICO NO BACKGROUND]: Exceção na obtenção do inbox_id', error.message, error.stack);
+        resolvedInboxId = null;
+      }
+    }
+
+    // Garantia final: inbox_id sempre será um UUID válido ou null
+    if (!isValidUuid(resolvedInboxId)) {
+      resolvedInboxId = null;
     }
 
     const currentUnreadCount = convInfo?.unread_count || 0;
@@ -1486,8 +1553,6 @@ class ChatStore {
           media_url: extractedMediaUrl || null,
           media_type: extractedMediaType || "text",
           remote_id: rawMsgKey,
-          reaction: null,
-          reactions: [],
           is_private: false,
           created_at: now
         });
@@ -1495,17 +1560,12 @@ class ChatStore {
         const { error } = await supabaseAdmin.from("chat_messages").insert([msgInsertData]);
         
         if (error) {
-          console.warn('[ChatStore] Aviso na inserção com sanitizeChatMessagePayload (tentando fallback direto):', error.message);
-          await supabaseAdmin.from("chat_messages").insert([{
-            id: msgId,
-            conversation_id: convId,
-            sender_type: senderType,
-            content: text,
-            media_url: extractedMediaUrl || null,
-            media_type: extractedMediaType || "text",
-            is_private: false,
-            created_at: now
-          }]);
+          console.warn('[ChatStore] Aviso na inserção com sanitizeChatMessagePayload (tentando fallback mínimo sem campos opcionais):', error.message);
+          const fallbackPayload = { ...msgInsertData };
+          delete fallbackPayload.reaction;
+          delete fallbackPayload.reactions;
+          delete fallbackPayload.remote_id;
+          await supabaseAdmin.from("chat_messages").insert([fallbackPayload]);
         }
       } catch (error: any) {
         console.error('[ERRO CRITICO NO BACKGROUND]: Exceção na inserção da mensagem (chat_messages)', error.message, error.stack);
@@ -2428,7 +2488,7 @@ class ChatStore {
     let logMessageText = "";
 
     if (options.inboxId) {
-      updates.inbox_id = options.inboxId;
+      updates.inbox_id = isValidUuid(options.inboxId) ? options.inboxId.trim() : null;
       if (!options.userId) {
         updates.assigned_user_id = null;
         updates.assigned_to = null;
@@ -2442,7 +2502,7 @@ class ChatStore {
     }
 
     if (options.userId) {
-      updates.assigned_user_id = options.userId;
+      updates.assigned_user_id = isValidUuid(options.userId) ? options.userId.trim() : null;
       updates.assigned_to = options.userId;
       updates.is_human_controlled = true;
       updates.is_bot_active = false;
@@ -2454,18 +2514,23 @@ class ChatStore {
     }
 
     let targetName = "";
-    if (options.inboxId) {
+    if (options.inboxId && isValidUuid(options.inboxId)) {
       try {
-        const { data: ib } = await supabaseAdmin.from("inboxes").select("name").eq("id", options.inboxId).maybeSingle();
+        const { data: ib } = await supabaseAdmin.from("inboxes").select("name").eq("id", options.inboxId.trim()).maybeSingle();
         if (ib?.name) targetName = `departamento "${ib.name}"`;
       } catch (_) {}
     }
     if (options.userId) {
-      try {
-        const { data: tu } = await supabaseAdmin.from("tenant_users").select("name, email").eq("id", options.userId).maybeSingle();
-        const userName = tu?.name || tu?.email || options.userId;
-        targetName = targetName ? `${targetName} e atendente ${userName}` : `atendente ${userName}`;
-      } catch (_) {}
+      if (isValidUuid(options.userId)) {
+        try {
+          const { data: tu } = await supabaseAdmin.from("tenant_users").select("name, email").eq("id", options.userId.trim()).maybeSingle();
+          const userName = tu?.name || tu?.email || options.userId;
+          targetName = targetName ? `${targetName} e atendente ${userName}` : `atendente ${userName}`;
+        } catch (_) {}
+      } else {
+        const fallbackLabel = /^admin_/i.test(options.userId) ? "Administrador" : options.userId;
+        targetName = targetName ? `${targetName} e atendente ${fallbackLabel}` : `atendente ${fallbackLabel}`;
+      }
     }
 
     logMessageText = `Conversa transferida com sucesso para ${targetName || "novo destino"}.`;

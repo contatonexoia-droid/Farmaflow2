@@ -217,14 +217,24 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       if (user) {
         let extraData: any = {};
         try {
-          const { data: tu } = await supabase
-            .from('tenant_users')
-            .select('id, supabase_user_id, role, tenant_id')
-            .or(`supabase_user_id.eq.${user.id},id.eq.${user.id},email.eq.${user.email}`)
-            .limit(1)
-            .maybeSingle();
-          if (tu) {
-            extraData = tu;
+          const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(user.id || ''));
+          const orConditions: string[] = [];
+          if (isUuid) {
+            orConditions.push(`supabase_user_id.eq.${user.id}`, `id.eq.${user.id}`);
+          }
+          if (user.email) {
+            orConditions.push(`email.eq.${user.email}`);
+          }
+          if (orConditions.length > 0) {
+            const { data: tu } = await supabase
+              .from('tenant_users')
+              .select('id, supabase_user_id, role, tenant_id')
+              .or(orConditions.join(','))
+              .limit(1)
+              .maybeSingle();
+            if (tu) {
+              extraData = tu;
+            }
           }
         } catch (_) {}
 
@@ -693,15 +703,20 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       if (!error && data && data.length > 0) {
         setInboxes(data);
       } else {
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
         const saved = localStorage.getItem(`inboxes_${currentTenantId || tenantId}`);
         if (saved) {
           try {
-            setInboxes(JSON.parse(saved));
+            const parsed = JSON.parse(saved);
+            const validInboxes = Array.isArray(parsed)
+              ? parsed.filter((ib: any) => ib && typeof ib.id === 'string' && uuidRegex.test(ib.id))
+              : [];
+            setInboxes(validInboxes);
           } catch (_) {
-            setInboxes([{ id: `inbox_default_${currentTenantId || tenantId}`, name: 'Geral / Atendimento', store_id: currentTenantId || tenantId }]);
+            setInboxes([]);
           }
         } else {
-          setInboxes([{ id: `inbox_default_${currentTenantId || tenantId}`, name: 'Geral / Atendimento', store_id: currentTenantId || tenantId }]);
+          setInboxes([]);
         }
       }
     } catch (e) {
