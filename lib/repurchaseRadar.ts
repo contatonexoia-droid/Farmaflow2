@@ -4,16 +4,21 @@ import { supabase } from '../services/supabase';
 import { isSupabaseConfigured } from '../services/storage';
 
 export type RepurchaseCycleCategory =
-  | 'bebe_fraldas'
-  | 'uso_continuo_60'
   | 'uso_continuo_30'
-  | 'geral';
+  | 'uso_continuo_60'
+  | 'uso_continuo_90'
+  | 'bebe_fraldas'
+  | 'higiene_diaria'
+  | 'vitaminas_suplementos'
+  | 'outros';
 
 export type RepurchaseFilterKey =
   | 'all'
   | 'uso_continuo'
   | 'bebe_fraldas'
-  | 'geral';
+  | 'higiene_diaria'
+  | 'vitaminas_suplementos'
+  | 'outros';
 
 export type RepurchaseContactStatus = 'contacted' | 'ignored';
 
@@ -34,6 +39,7 @@ export interface RepurchaseItemDetail {
   barcode?: string;
   internalCode?: string;
   name: string;
+  cleanName: string;
   quantity: number;
   lastPurchasedAt: string;
   daysSincePurchase: number;
@@ -41,6 +47,9 @@ export interface RepurchaseItemDetail {
   cycleLabel: string;
   minDays: number;
   maxDays: number;
+  isSecondary: boolean;
+  requiresPrescription: boolean;
+  isIntimateHygiene: boolean;
   inStock: boolean;
   currentUnitPrice: number;
   subtotal: number;
@@ -78,6 +87,274 @@ const CONTACTS_STORAGE_PREFIX = 'farmaflow_repurchase_contacts_';
 const TEMPLATE_STORAGE_PREFIX = 'farmaflow_repurchase_template_';
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+// ============================================================================
+// LISTAS DE CLASSIFICAÇÃO E FILTRAGEM ANTI-FALSO-POSITIVO
+// ============================================================================
+
+const ANTIBIOTIC_KEYWORDS = [
+  'ANTIBIOTICO',
+  'AMOXICILINA',
+  'AZITROMICINA',
+  'CEFALEXINA',
+  'CIPROFLOXACINO',
+  'CLAVULIN',
+];
+
+const ACUTE_BLACKLIST_SUBSTRINGS = [
+  'DIPIRONA',
+  'DORFLEX',
+  'PARACETAMOL',
+  'IBUPROFENO',
+  'NEOSALDINA',
+  'ADVIL',
+  'TYLENOL',
+  'BUSCOPAN',
+  'ENGOV',
+  'SONRISAL',
+  'BENEGRIP',
+  'CIMEGRIP',
+  'RESFENOL',
+  'NALDECON',
+  'VICK',
+  'INALADOR',
+  'PASTILHA',
+  'STREPSILS',
+  'VALDA',
+  'XAROPE',
+  'DESCONGESTIONANTE',
+  'SORINE',
+  'NEOSORO',
+  'LORATADINA',
+  'DESLORATADINA',
+  'ALLEGRA',
+  'HISTAMIN',
+  'POLARAMINE',
+  'DECONGEX',
+  'DRAMIN',
+  'VONAU',
+  'REPOSITOR',
+  'FLORATIL',
+  'REPOFLOR',
+  'ANTIBIOTICO',
+  'AMOXICILINA',
+  'AZITROMICINA',
+  'CEFALEXINA',
+  'CIPROFLOXACINO',
+  'CLAVULIN',
+  'NIMESULIDA',
+  'DICLOFENACO',
+  'TORSILAX',
+  'MIOSAN',
+  'CICLOBENZAPRINA',
+  'PREDNISONA',
+  'PREDNISOLONA',
+  'DEXAMETASONA',
+  'TESTE GRAVIDEZ',
+  'TESTE DE GRAVIDEZ',
+  'TESTE COVID',
+  'TESTE DE COVID',
+  'PRESERVATIVO',
+  'CURATIVO',
+  'BAND-AID',
+  'BAND AID',
+  'BANDAID',
+  'ESPARADRAPO',
+  'GAZE',
+  'ALGODAO',
+  'TERMOMETRO',
+  'SERINGA',
+];
+
+const ACUTE_BLACKLIST_REGEXES = [
+  /\bENO\b/,
+  /\bBENEG/,
+  /\bRINO/,
+];
+
+const SMALL_PACK_REGEXES = [
+  /\bCARTELA\b/,
+  /\bC\/\s*(?:2|4|6|8|10|12)(?!\d)/,
+  /\b(?:4|6|8|10|12)\s*(?:CP|COMP|COMPRIMIDO|COMPRIMIDOS|CAPS|CAPSULA|CAPSULAS)\b/,
+];
+
+const CONTRACEPTIVE_KEYWORDS = [
+  'ANTICONCEPCIONAL',
+  'CICLO 21',
+  'SELENE',
+  'DIANE',
+  'YAZ',
+  'YASMIN',
+  'ELANI',
+  'DESOGESTREL',
+  'CERAZETTE',
+];
+
+const CONTINUOUS_ACTIVE_KEYWORDS = [
+  'LOSARTANA',
+  'ATENOLOL',
+  'ENALAPRIL',
+  'ANLODIPINO',
+  'HIDROCLOROTIAZIDA',
+  'METFORMINA',
+  'GLIFAGE',
+  'GLIBENCLAMIDA',
+  'INSULINA',
+  'SINVASTATINA',
+  'ROSUVASTATINA',
+  'ATORVASTATINA',
+  'LEVOTIROXINA',
+  'PURAN',
+  'EUTHYROX',
+  'OMEPRAZOL',
+  'PANTOPRAZOL',
+  'ESOMEPRAZOL',
+  'BUPROPIONA',
+  'ESCITALOPRAM',
+  'SERTRALINA',
+  'FLUOXETINA',
+  'VENLAFAXINA',
+  'DESVENLAFAXINA',
+  'CLONAZEPAM',
+  'ALPRAZOLAM',
+  'ZOLPIDEM',
+  'QUETIAPINA',
+  'RITALINA',
+  'VENVANSE',
+  ...CONTRACEPTIVE_KEYWORDS,
+  'COLIRIO',
+  'BOMBINHA',
+  'AEROLIN',
+  'ALENIA',
+  'SYMBICORT',
+];
+
+const BABY_DIAPER_KEYWORDS = [
+  'FRALDA',
+  'LEITE',
+  'FORMULA',
+  'APTAMIL',
+  'NESTOGENO',
+  'ENFAMIL',
+  'PREGUN',
+  'LENCO UMEDECIDO',
+  'POMADA ASSADURA',
+  'BEPANTOL BABY',
+  'HIPOGLOS',
+];
+
+const DAILY_HYGIENE_KEYWORDS = [
+  'PROTETOR DIARIO',
+  'ABSORVENTE',
+  'INTIMUS',
+  'ALWAYS',
+  'SABONETE INTIMO',
+  'FRALDA GERIAT',
+  'PLENITUD',
+  'TENA',
+  'BIGFRAL',
+  'DESODORANTE',
+  'CREME DENTAL',
+  'PASTA DE DENTE',
+  'ENXAGUANTE',
+  'SHAMPOO',
+  'CONDICIONADOR',
+];
+
+// Itens capilares/cosméticos de giro longo que NÃO devem entrar no ciclo curto de Higiene Diária
+const LONG_CYCLE_COSMETIC_EXCLUSIONS = [
+  'FINALIZADOR',
+  'FLUIDO',
+  'MASCARA',
+  'TINTURA',
+  'COLORACAO',
+  'TONALIZANTE',
+  'LEAVE-IN',
+  'LEAVE IN',
+  'REPARADOR DE PONTAS',
+];
+
+const VITAMIN_SUPPLEMENT_KEYWORDS = [
+  'VITAMINA',
+  'OMEGA',
+  'MAGNESIO',
+  'COLAGENO',
+  'CREATINA',
+  'WHEY',
+  'CENTRUM',
+  'LAVITAN',
+  'POLIVITAMINICO',
+  'MELATONINA',
+  'FERRO',
+  'CALCIO',
+  'PROBIOTICO',
+];
+
+const INTIMATE_HYGIENE_SUBSTRINGS = [
+  'SABONETE INTIMO',
+  'ABS ',
+  'ABSORVENTE',
+  'PROTETOR DIARIO',
+  'INTIMUS',
+  'ALWAYS',
+];
+
+const LOWERCASE_CONNECTORS = new Set([
+  'de',
+  'da',
+  'do',
+  'das',
+  'dos',
+  'e',
+  'em',
+  'com',
+  'para',
+  'por',
+  'sem',
+  'ao',
+  'aos',
+  'na',
+  'no',
+  'nas',
+  'nos',
+  'c/',
+  's/',
+]);
+
+const UPPERCASE_ACRONYMS = new Set([
+  'FPS',
+  'SPF',
+  'UVA',
+  'UVB',
+  'UV',
+  'RN',
+  'PP',
+  'GG',
+  'XG',
+  'XXG',
+  'XXXG',
+  'LED',
+  'USB',
+  'OTC',
+  'BB',
+  'CC',
+  'DD',
+  'D3',
+  'K2',
+  'B1',
+  'B2',
+  'B3',
+  'B5',
+  'B6',
+  'B12',
+  'Q10',
+  'HD',
+  '3D',
+  '4K',
+  'II',
+  'III',
+  'IV',
+]);
+
 export const normalizeTextUpper = (value?: string | null): string =>
   String(value || '')
     .normalize('NFD')
@@ -112,78 +389,315 @@ export const extractFirstName = (fullName?: string | null): string => {
   return first.charAt(0).toUpperCase() + first.slice(1).toLowerCase();
 };
 
-export const classifyProductCycle = (
+const formatCleanWordSegment = (segment: string, isFirstToken: boolean): string => {
+  if (!segment) return segment;
+
+  const lower = segment.toLowerCase();
+  const upper = segment.toUpperCase();
+
+  // Unidades coladas a números (ex: 500MG -> 500mg, 200ML -> 200ml, 2000UI -> 2000UI, 1L -> 1L)
+  const unitMatch = segment.match(/^(\d+(?:[.,]\d+)?)(mg|ml|mcg|kg|g|l|ui|un|cp|cpr|comp|caps|cm|mm|m)$/i);
+  if (unitMatch) {
+    const [, num, rawUnit] = unitMatch;
+    const unitLower = rawUnit.toLowerCase();
+    if (unitLower === 'ui') return `${num}UI`;
+    if (unitLower === 'l') return `${num}L`;
+    return `${num}${unitLower}`;
+  }
+
+  if (UPPERCASE_ACRONYMS.has(upper)) {
+    return upper;
+  }
+
+  if (lower === 'ph') {
+    return 'pH';
+  }
+
+  if (lower === 'c/' || lower === 's/') {
+    return lower;
+  }
+
+  // Preserva palavras já em capitalização mista (ex: "La", "iPhone", "McDonald")
+  const hasLower = segment !== upper;
+  const hasUpper = segment !== lower;
+  if (hasLower && hasUpper) {
+    return segment;
+  }
+
+  if (!isFirstToken && LOWERCASE_CONNECTORS.has(lower)) {
+    return lower;
+  }
+
+  const matchFirstLetter = lower.match(/^([^a-zA-ZÀ-ÿ]*)([a-zA-ZÀ-ÿ])(.*)$/);
+  if (!matchFirstLetter) return segment;
+
+  const [, prefix, firstChar, rest] = matchFirstLetter;
+  return `${prefix}${firstChar.toUpperCase()}${rest}`;
+};
+
+/**
+ * Limpa nomes vindos do ERP para exibição natural na mensagem de WhatsApp:
+ * - Remove caracteres soltos de ERP (@, *, #) e marcações internas como (C1)/(B1) quando solicitado
+ * - Remove espaços duplos e converte de CAIXA ALTA para Title Case legível
+ */
+export const cleanErpProductName = (
+  rawName?: string | null,
+  options?: { stripControlCodes?: boolean },
+): string => {
+  let cleaned = String(rawName || '')
+    .replace(/[@*#]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (options?.stripControlCodes) {
+    cleaned = cleaned
+      .replace(/\(\s*(?:C1|B1|B2|A1|A2|A3)\s*\)/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  if (!cleaned) return '';
+
+  return cleaned
+    .split(' ')
+    .map((token, tokenIndex) => {
+      const lowerToken = token.toLowerCase();
+      if (lowerToken === 'c/' || lowerToken === 's/') {
+        return lowerToken;
+      }
+
+      const parts = token.split(/([-–/])/);
+      return parts
+        .map((part, partIndex) => {
+          if (part === '-' || part === '–' || part === '/') return part;
+          return formatCleanWordSegment(part, tokenIndex === 0 && partIndex === 0);
+        })
+        .join('');
+    })
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+};
+
+export const isControlledRepurchaseProduct = (
+  name?: string | null,
+  requiresPrescriptionFlag?: boolean | null,
+): boolean => {
+  if (requiresPrescriptionFlag === true) return true;
+  const upper = normalizeTextUpper(name);
+  return /\(\s*C1\s*\)/.test(upper) || /\(\s*B1\s*\)/.test(upper);
+};
+
+export const isIntimateHygieneProduct = (name?: string | null): boolean => {
+  const upper = ` ${normalizeTextUpper(name)} `;
+  if (/\bABS\b/.test(upper)) return true;
+  return INTIMATE_HYGIENE_SUBSTRINGS.some((kw) => upper.includes(kw));
+};
+
+const isAntibioticProduct = (nameUpper: string, categoryUpper: string): boolean => {
+  const combined = `${nameUpper} ${categoryUpper}`;
+  return ANTIBIOTIC_KEYWORDS.some((kw) => combined.includes(kw));
+};
+
+const matchesContinuousKeyword = (nameUpper: string): boolean => {
+  return CONTINUOUS_ACTIVE_KEYWORDS.some((kw) => nameUpper.includes(kw));
+};
+
+const extractBoxPillCount = (textUpper: string): 30 | 60 | 90 | null => {
+  if (
+    /\b90\s*(?:CP|COMP|COMPRIMIDO|COMPRIMIDOS|CAPS|CAPSULA|CAPSULAS)\b/.test(textUpper) ||
+    /\bC\/?\s*90(?!\d)/.test(textUpper)
+  ) {
+    return 90;
+  }
+  if (
+    /\b(?:56|60)\s*(?:CP|COMP|COMPRIMIDO|COMPRIMIDOS|CAPS|CAPSULA|CAPSULAS)\b/.test(textUpper) ||
+    /\bC\/?\s*(?:56|60)(?!\d)/.test(textUpper)
+  ) {
+    return 60;
+  }
+  if (
+    /\b(?:28|30)\s*(?:CP|COMP|COMPRIMIDO|COMPRIMIDOS|CAPS|CAPSULA|CAPSULAS)\b/.test(textUpper) ||
+    /\bC\/?\s*(?:28|30)(?!\d)/.test(textUpper)
+  ) {
+    return 30;
+  }
+  return null;
+};
+
+/**
+ * Retorna true se o produto for pontual/agudo e NUNCA deve ser sugerido no Radar.
+ */
+export const isBlacklistedRepurchaseProduct = (
   name?: string | null,
   category?: string | null,
-  description?: string | null,
-): {
+): boolean => {
+  const nameUpper = normalizeTextUpper(name);
+  const categoryUpper = normalizeTextUpper(category);
+  if (!nameUpper) return true;
+
+  // 1. Sintomáticos, agudos e antibióticos: exclusão absoluta
+  if (isAntibioticProduct(nameUpper, categoryUpper)) {
+    return true;
+  }
+  if (ACUTE_BLACKLIST_SUBSTRINGS.some((kw) => nameUpper.includes(kw))) {
+    return true;
+  }
+  if (ACUTE_BLACKLIST_REGEXES.some((rx) => rx.test(nameUpper))) {
+    return true;
+  }
+
+  // 2. Embalagens pequenas/pontuais (exceto anticoncepcional ou medicamento de uso contínuo listado)
+  const isSmallPack = SMALL_PACK_REGEXES.some((rx) => rx.test(nameUpper));
+  if (isSmallPack && !matchesContinuousKeyword(nameUpper)) {
+    return true;
+  }
+
+  return false;
+};
+
+/**
+ * Aplica multiplicador inteligente pela quantidade comprada no pedido (2x, 3x...).
+ * - Fraldas/Bebê: teto razoável (2 pacotes ≈ 20-35 dias)
+ * - Demais ciclos: escala proporcional (ex.: 2x de 30d ≈ 52-75 dias)
+ */
+export const applyQuantityMultiplier = (
+  baseMin: number,
+  baseMax: number,
+  quantity: number,
+  category: RepurchaseCycleCategory,
+): { minDays: number; maxDays: number } => {
+  const qty = Math.max(1, Math.round(Number(quantity) || 1));
+  if (qty <= 1) {
+    return { minDays: baseMin, maxDays: baseMax };
+  }
+
+  if (category === 'bebe_fraldas') {
+    if (qty === 2) {
+      return { minDays: 20, maxDays: 35 };
+    }
+    const extra = Math.min(qty - 2, 4);
+    return {
+      minDays: Math.min(48, 20 + extra * 8),
+      maxDays: Math.min(65, 35 + extra * 10),
+    };
+  }
+
+  const effectiveQty = Math.min(qty, 4);
+  const mid = (baseMin + baseMax) / 2;
+  const minDays = Math.round(baseMin + (effectiveQty - 1) * mid * 0.97);
+  const maxDays = Math.round(baseMax + (effectiveQty - 1) * mid * 1.13);
+  return { minDays, maxDays };
+};
+
+export interface ProductCycleClassification {
   category: RepurchaseCycleCategory;
   label: string;
   minDays: number;
   maxDays: number;
-} => {
-  const haystack = `${normalizeTextUpper(name)} ${normalizeTextUpper(category)} ${normalizeTextUpper(description)}`;
+  isSecondary: boolean;
+  requiresPrescription: boolean;
+  isIntimateHygiene: boolean;
+}
 
-  // 1. Fraldas, leites infantis e higiene recorrente (12 a 25 dias)
-  const babyKeywords = ['FRALDA', 'LEITE', 'NAN', 'APTAMIL', 'NESTOGENO', 'LENCO'];
-  const matchesBaby = babyKeywords.some((kw) => {
-    if (kw === 'NAN') {
-      return /\bNAN\b/.test(haystack) || haystack.includes('NAN ');
-    }
-    return haystack.includes(kw);
-  });
-  if (matchesBaby) {
-    return {
-      category: 'bebe_fraldas',
-      label: 'Bebê & Fraldas (12-25d)',
-      minDays: 12,
-      maxDays: 25,
-    };
+export const classifyProductCycle = (
+  name?: string | null,
+  category?: string | null,
+  description?: string | null,
+  options?: {
+    requiresPrescription?: boolean | null;
+    quantity?: number;
+  },
+): ProductCycleClassification | null => {
+  const nameUpper = normalizeTextUpper(name);
+  const categoryUpper = normalizeTextUpper(category);
+  const descUpper = normalizeTextUpper(description);
+
+  // Lista negra: nunca sugerir itens pontuais/agudos
+  if (isBlacklistedRepurchaseProduct(name, category)) {
+    return null;
   }
 
-  // 2. Caixas de 60 unidades (50 a 70 dias)
-  if (/\b60\s*(COMP|COMPRIM|CAPS|CP)\b/.test(haystack) || /C\/?\s*60\b/.test(haystack)) {
+  const quantity = Math.max(1, Math.round(Number(options?.quantity) || 1));
+  const requiresPrescription = isControlledRepurchaseProduct(name, options?.requiresPrescription);
+  const isIntimateHygiene = isIntimateHygieneProduct(name);
+  const boxCount = extractBoxPillCount(nameUpper) || extractBoxPillCount(descUpper);
+  const haystackName = ` ${nameUpper} `;
+
+  const finalize = (
+    cycleCategory: RepurchaseCycleCategory,
+    baseName: string,
+    baseMin: number,
+    baseMax: number,
+    isSecondary: boolean,
+  ): ProductCycleClassification => {
+    const { minDays, maxDays } = applyQuantityMultiplier(baseMin, baseMax, quantity, cycleCategory);
+    const qtyTag = quantity > 1 ? ` · ${quantity}x` : '';
     return {
-      category: 'uso_continuo_60',
-      label: 'Uso Contínuo 60un (50-70d)',
-      minDays: 50,
-      maxDays: 70,
+      category: cycleCategory,
+      label: `${baseName} (${minDays}-${maxDays}d${qtyTag})`,
+      minDays,
+      maxDays,
+      isSecondary,
+      requiresPrescription,
+      isIntimateHygiene,
     };
-  }
-
-  // 3. Uso contínuo e caixas de 28/30 unidades (22 a 40 dias)
-  const continuousKeywords = [
-    'LOSARTANA',
-    'METFORMINA',
-    'GLIFAGE',
-    'ATENOLOL',
-    'SINVASTATINA',
-    'OMEPRAZOL',
-    'ANTICONCEPCIONAL',
-    'INSULINA',
-    'PRESSAO',
-  ];
-  const has28or30 =
-    /\b(28|30)\s*(COMP|COMPRIM|CAPS|CP)\b/.test(haystack) || /C\/?\s*(28|30)\b/.test(haystack);
-  const matchesContinuous =
-    has28or30 || continuousKeywords.some((kw) => haystack.includes(kw));
-
-  if (matchesContinuous) {
-    return {
-      category: 'uso_continuo_30',
-      label: 'Uso Contínuo (22-40d)',
-      minDays: 22,
-      maxDays: 40,
-    };
-  }
-
-  // 4. Demais itens recorrentes (25 a 45 dias)
-  return {
-    category: 'geral',
-    label: 'Recorrente Geral (25-45d)',
-    minDays: 25,
-    maxDays: 45,
   };
+
+  // 1. Uso Contínuo & Controlados por princípio ativo ou controle/receita (exceto antibióticos já bloqueados)
+  if (matchesContinuousKeyword(nameUpper) || requiresPrescription) {
+    if (boxCount === 90) {
+      return finalize('uso_continuo_90', 'Uso Contínuo 90cp', 80, 105, false);
+    }
+    if (boxCount === 60) {
+      return finalize('uso_continuo_60', 'Uso Contínuo 60cp', 50, 70, false);
+    }
+    return finalize('uso_continuo_30', 'Uso Contínuo & Controlados', 22, 40, false);
+  }
+
+  // 2. Vitaminas & Suplementos (25-45d para 30cp; 50-70d para 60cp; 75-100d para 90cp)
+  const matchesVitamin = VITAMIN_SUPPLEMENT_KEYWORDS.some((kw) => nameUpper.includes(kw));
+  if (matchesVitamin) {
+    if (boxCount === 90) {
+      return finalize('vitaminas_suplementos', 'Vitaminas & Suplementos 90cp', 75, 100, false);
+    }
+    if (boxCount === 60) {
+      return finalize('vitaminas_suplementos', 'Vitaminas & Suplementos 60cp', 50, 70, false);
+    }
+    return finalize('vitaminas_suplementos', 'Vitaminas & Suplementos', 25, 45, false);
+  }
+
+  // 3. Higiene & Cuidado Diário (28-50d) — checar antes de Bebê para não confundir Fralda Geriátrica
+  const isLongCycleCosmetic = LONG_CYCLE_COSMETIC_EXCLUSIONS.some((kw) => nameUpper.includes(kw));
+  const matchesDailyHygiene =
+    !isLongCycleCosmetic &&
+    (/\bABS\b/.test(haystackName) ||
+      DAILY_HYGIENE_KEYWORDS.some((kw) => nameUpper.includes(kw)));
+  if (matchesDailyHygiene) {
+    return finalize('higiene_diaria', 'Higiene & Cuidado Diário', 28, 50, false);
+  }
+
+  // 4. Bebê & Fraldas (12-28d)
+  const matchesBaby =
+    /\bNAN\b/.test(haystackName) ||
+    BABY_DIAPER_KEYWORDS.some((kw) => nameUpper.includes(kw));
+  if (matchesBaby) {
+    return finalize('bebe_fraldas', 'Bebê & Fraldas', 12, 28, false);
+  }
+
+  // 5. Uso Contínuo por apresentação de caixa (28, 30, 56, 60 ou 90 comprimidos/cápsulas)
+  if (boxCount === 90) {
+    return finalize('uso_continuo_90', 'Uso Contínuo 90cp', 80, 105, false);
+  }
+  if (boxCount === 60) {
+    return finalize('uso_continuo_60', 'Uso Contínuo 60cp', 50, 70, false);
+  }
+  if (boxCount === 30) {
+    return finalize('uso_continuo_30', 'Uso Contínuo 30cp', 22, 40, false);
+  }
+
+  // 6. Secundário opcional: Outros (60-90d) — desativado por padrão na aba principal
+  return finalize('outros', 'Outros', 60, 90, true);
 };
 
 const getEffectiveUnitPrice = (
@@ -338,21 +852,73 @@ export const formatRepurchaseWhatsAppMessage = (
   template: string,
   candidate: RepurchaseCandidate,
   storeName: string,
+  options?: {
+    selectedItems?: RepurchaseItemDetail[];
+    magicLink?: string;
+  },
 ): string => {
-  const targetItems =
-    candidate.inStockItems.length > 0 ? candidate.inStockItems : candidate.items;
-  const productSummary = targetItems
-    .slice(0, 3)
-    .map((item) => (item.quantity > 1 ? `${item.quantity}x ${item.name}` : item.name))
-    .join(', ');
-  const extraCount = targetItems.length > 3 ? ` e mais ${targetItems.length - 3}` : '';
-  const productsText = `${productSummary}${extraCount}`;
+  const activeItems =
+    options?.selectedItems && options.selectedItems.length > 0
+      ? options.selectedItems
+      : candidate.inStockItems.length > 0
+        ? candidate.inStockItems
+        : candidate.items;
 
-  return (template || DEFAULT_REPURCHASE_WHATSAPP_TEMPLATE)
+  const resolvedLink = options?.magicLink || candidate.magicLink;
+  const cleanStore = storeName || 'nossa drogaria';
+
+  const isExclusivelyIntimate =
+    activeItems.length > 0 && activeItems.every((item) => item.isIntimateHygiene);
+  const hasControlledItem = activeItems.some((item) => item.requiresPrescription);
+
+  let productsText = '';
+  if (isExclusivelyIntimate) {
+    productsText = 'seus itens de cuidado diário';
+  } else {
+    const productSummary = activeItems
+      .slice(0, 3)
+      .map((item) => {
+        const displayName =
+          cleanErpProductName(item.name, { stripControlCodes: true }) || item.name;
+        return item.quantity > 1 ? `${item.quantity}x ${displayName}` : displayName;
+      })
+      .join(', ');
+    const extraCount = activeItems.length > 3 ? ` e mais ${activeItems.length - 3}` : '';
+    productsText = `${productSummary}${extraCount}`;
+  }
+
+  let baseTemplate = template || DEFAULT_REPURCHASE_WHATSAPP_TEMPLATE;
+
+  // Ajuste gramatical natural quando for mensagem discreta de higiene íntima
+  if (isExclusivelyIntimate) {
+    baseTemplate = baseTemplate
+      .replace(/seu pedido de \{produtos\}/gi, '{produtos}')
+      .replace(/o pedido de \{produtos\}/gi, '{produtos}')
+      .replace(/de \{produtos\}/gi, '{produtos}')
+      .replace(/\{produtos\}([^.!?\n]*?)já deve estar acabando/gi, '{produtos}$1já devem estar acabando');
+  }
+
+  // Ajuste automático para medicamentos controlados / com receita
+  if (hasControlledItem && !/receita/i.test(baseTemplate)) {
+    const prescriptionPrompt =
+      'Você já está com a receita renovada para agilizarmos sua entrega?';
+    if (/\{link\}/i.test(baseTemplate)) {
+      baseTemplate = baseTemplate.replace(
+        /(\s*Deixei tudo pronto|\s*\{link\})/i,
+        ` ${prescriptionPrompt}$1`,
+      );
+    } else {
+      baseTemplate = `${baseTemplate.trim()} ${prescriptionPrompt}`;
+    }
+  }
+
+  return baseTemplate
     .replace(/\{nome\}/gi, candidate.firstName)
     .replace(/\{produtos\}/gi, productsText)
-    .replace(/\{farmacia\}/gi, storeName || 'nossa drogaria')
-    .replace(/\{link\}/gi, candidate.magicLink);
+    .replace(/\{farmacia\}/gi, cleanStore)
+    .replace(/\{link\}/gi, resolvedLink)
+    .replace(/\s{2,}/g, ' ')
+    .trim();
 };
 
 export const buildRepurchaseWhatsAppHref = (
@@ -371,10 +937,22 @@ export const analyzeRepurchaseCandidates = (params: {
   promotions?: PromotionRule[];
   contacts?: RepurchaseContactRecord[];
   now?: Date;
+  mode?: 'primary' | 'outros';
 }): RepurchaseCandidate[] => {
-  const { orders, products, tenant, promotions = [], contacts = [], now = new Date() } = params;
+  const {
+    orders,
+    products,
+    tenant,
+    promotions = [],
+    contacts = [],
+    now = new Date(),
+    mode = 'primary',
+  } = params;
+
   const nowMs = now.getTime();
-  const ninetyDaysAgoMs = nowMs - 90 * DAY_MS;
+  // Janela ampla (180d) na leitura de pedidos para suportar caixas 90cp (80-105d) e múltiplos (2x/3x),
+  // enquanto cada produto só aparece estritamente dentro do seu [minDays, maxDays] calculado.
+  const lookbackStartMs = nowMs - 180 * DAY_MS;
 
   // Índices rápidos do catálogo atual para conferência real de estoque
   const byId = new Map<string, Product>();
@@ -409,7 +987,7 @@ export const analyzeRepurchaseCandidates = (params: {
     return undefined;
   };
 
-  // 1. Filtra pedidos válidos dos últimos 90 dias
+  // 1. Filtra pedidos válidos na janela de análise
   const validOrders = (orders || []).filter((o) => {
     if (!o || !o.date || !Array.isArray(o.items) || o.items.length === 0) return false;
     const st = String(o.status || '').toLowerCase();
@@ -417,14 +995,13 @@ export const analyzeRepurchaseCandidates = (params: {
       return false;
     }
     const ts = new Date(o.date).getTime();
-    if (Number.isNaN(ts) || ts < ninetyDaysAgoMs || ts > nowMs + DAY_MS) return false;
+    if (Number.isNaN(ts) || ts < lookbackStartMs || ts > nowMs + DAY_MS) return false;
     const phone = normalizePhoneBR(o.customer?.phone);
     return phone.length >= 10;
   });
 
   // 2. Agrupa por telefone normalizado e rastreia a ÚLTIMA compra de cada produto
-  // (Se o cliente já recomprou o mesmo produto mais recentemente, o timestamp mais novo
-  // prevalece e fica abaixo do minDays — ocultando automaticamente quem já recomprou!)
+  // (agregando quantidades caso o mesmo item apareça duplicado no mesmo pedido)
   interface CustomerBucket {
     customerName: string;
     customerPhone: string;
@@ -475,18 +1052,33 @@ export const analyzeRepurchaseCandidates = (params: {
       }
     }
 
+    // Agrega quantidade do mesmo produto dentro do mesmo pedido
+    const orderItemAgg = new Map<
+      string,
+      { item: Order['items'][number]; quantity: number }
+    >();
     for (const item of order.items) {
       if (!item || !item.name) continue;
       const pKey = buildCanonicalProductKey(item);
+      const qty = Math.max(1, Number(item.quantity) || 1);
+      const prevAgg = orderItemAgg.get(pKey);
+      if (prevAgg) {
+        prevAgg.quantity += qty;
+      } else {
+        orderItemAgg.set(pKey, { item, quantity: qty });
+      }
+    }
+
+    for (const [pKey, agg] of orderItemAgg.entries()) {
       const existing = bucket.productMap.get(pKey);
       if (!existing || orderMs > existing.purchasedMs) {
         bucket.productMap.set(pKey, {
           productKey: pKey,
-          item,
+          item: agg.item,
           orderId: order.id,
           purchasedMs: orderMs,
           purchasedAt: order.date,
-          quantity: Math.max(1, Number(item.quantity) || 1),
+          quantity: agg.quantity,
         });
       }
     }
@@ -513,13 +1105,32 @@ export const analyzeRepurchaseCandidates = (params: {
     for (const entry of bucket.productMap.values()) {
       const daysSince = Math.floor((nowMs - entry.purchasedMs) / DAY_MS);
       const matched = findProductFast(entry.item);
-      const cycle = classifyProductCycle(
-        matched?.name || entry.item.name,
-        matched?.category || entry.item.category,
-        matched?.description || entry.item.description,
+      const resolvedName = matched?.name || entry.item.name;
+      const resolvedCategory = matched?.category || entry.item.category;
+      const resolvedDescription = matched?.description || entry.item.description;
+      const requiresPrescriptionFlag = Boolean(
+        matched?.requires_prescription ||
+          (entry.item as any)?.requires_prescription,
       );
 
-      // Só entra no radar se estiver na janela ideal de reposição do seu ciclo
+      const cycle = classifyProductCycle(
+        resolvedName,
+        resolvedCategory,
+        resolvedDescription,
+        {
+          requiresPrescription: requiresPrescriptionFlag,
+          quantity: entry.quantity,
+        },
+      );
+
+      // Excluído pela lista negra (agudos/sintomáticos/cartelas pequenas)
+      if (!cycle) continue;
+
+      // Separa fila principal (4 categorias de alta probabilidade) do filtro secundário "Outros (60-90d)"
+      if (mode === 'primary' && cycle.isSecondary) continue;
+      if (mode === 'outros' && !cycle.isSecondary) continue;
+
+      // Só entra no radar se estiver na janela ideal de reposição (já multiplicada por quantidade)
       if (daysSince < cycle.minDays || daysSince > cycle.maxDays) {
         continue;
       }
@@ -536,7 +1147,8 @@ export const analyzeRepurchaseCandidates = (params: {
         lookupId: String(matched?.id || entry.item.id || entry.item.internalCode || entry.item.barcode || ''),
         barcode: matched?.barcode || entry.item.barcode,
         internalCode: matched?.internalCode || entry.item.internalCode,
-        name: matched?.name || entry.item.name,
+        name: resolvedName,
+        cleanName: cleanErpProductName(resolvedName) || resolvedName,
         quantity: entry.quantity,
         lastPurchasedAt: entry.purchasedAt,
         daysSincePurchase: daysSince,
@@ -544,6 +1156,9 @@ export const analyzeRepurchaseCandidates = (params: {
         cycleLabel: cycle.label,
         minDays: cycle.minDays,
         maxDays: cycle.maxDays,
+        isSecondary: cycle.isSecondary,
+        requiresPrescription: cycle.requiresPrescription,
+        isIntimateHygiene: cycle.isIntimateHygiene,
         inStock,
         currentUnitPrice: unitPrice,
         subtotal,
