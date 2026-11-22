@@ -15854,6 +15854,1193 @@ app.post("/api/v1/contacts/merge", async (req, res) => {
   }
 });
 
+// ============================================================================
+// MÓDULO: STATUS AUTOMÁTICO NO WHATSAPP (EVOLUTION API V2) + STORIES
+// ============================================================================
+const STORY_UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const DEFAULT_STORY_CAPTION_TEMPLATE =
+  "Oferta na {loja}: {produto} por R$ {preco}! Peça com entrega rápida: {link}";
+const WHATSAPP_DISCONNECTED_STATUS_ERROR =
+  "WhatsApp desconectado. Conecte o QR Code antes de publicar no Status.";
+
+function isSafeExternalHttpsUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== "https:") return false;
+    const host = parsed.hostname.toLowerCase();
+    if (
+      !host ||
+      host === "localhost" ||
+      host === "::1" ||
+      host.endsWith(".local") ||
+      host.endsWith(".internal") ||
+      /^127\./.test(host) ||
+      /^10\./.test(host) ||
+      /^192\.168\./.test(host) ||
+      /^169\.254\./.test(host) ||
+      /^0\./.test(host) ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
+    ) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function stripDataImagePrefix(raw?: string | null): string {
+  const s = String(raw || "").trim();
+  if (!s) return "";
+  return s.replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/i, "").replace(/\s+/g, "");
+}
+
+function formatStoryProductNameNatural(rawName: string): string {
+  const clean = String(rawName || "").replace(/\s+/g, " ").trim();
+  if (!clean) return "Oferta Especial";
+  // Se estiver todo em caixa alta (comum vindo de ERP), converte para Title Case natural preservando siglas
+  const letters = clean.replace(/[^a-zA-ZÀ-ÿ]/g, "");
+  const isAllCaps = letters.length >= 4 && letters === letters.toUpperCase();
+  if (!isAllCaps) return clean;
+  const acronyms = new Set(["FPS", "UVA", "UVB", "ML", "MG", "MCG", "UI", "KIT", "PH", "VIT", "B12", "D3", "K2", "C", "B", "A", "E"]);
+  const lowercasePreps = new Set(["de", "da", "do", "das", "dos", "com", "sem", "para", "por", "em", "e", "ou", "a", "o"]);
+  return clean
+    .split(" ")
+    .map((word, idx) => {
+      const upper = word.toUpperCase();
+      if (acronyms.has(upper)) return upper;
+      if (/^\d+(ml|mg|g|kg|mcg|un|cp|caps|cpr)$/i.test(word)) return word.toLowerCase();
+      const lower = word.toLowerCase();
+      if (idx > 0 && lowercasePreps.has(lower)) return lower;
+      return lower.charAt(0).toUpperCase() + lower.slice(1);
+    })
+    .join(" ");
+}
+
+function formatStoryBrl(value: number): string {
+  const safe = Number.isFinite(value) && value >= 0 ? value : 0;
+  return safe.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function buildStoryStoreBaseUrl(tenantRow: any): string {
+  const customDomain = String(tenantRow?.custom_domain || "").trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+  if (customDomain && customDomain.includes(".")) {
+    return `https://${customDomain}`;
+  }
+  const slug = String(tenantRow?.slug || tenantRow?.id || "").trim().toLowerCase();
+  if (slug && /^[a-z0-9-]+$/.test(slug)) {
+    return `https://${slug}.farmaflow.online`;
+  }
+  return "https://farmaflow.online";
+}
+
+async function uploadStoryImageToStorage(
+  storeId: string,
+  imageDataUrl: string
+): Promise<{ publicUrl: string | null; pureBase64: string; mimeType: string }> {
+  const match = String(imageDataUrl || "").trim().match(/^data:(image\/(?:png|jpeg|jpg|webp));base64,([A-Za-z0-9+/=\s]+)$/i);
+  if (!match) {
+    return { publicUrl: null, pureBase64: stripDataImagePrefix(imageDataUrl), mimeType: "image/jpeg" };
+  }
+
+  let mimeType = match[1].toLowerCase();
+  if (mimeType === "image/jpg") mimeType = "image/jpeg";
+  const pureBase64 = match[2].replace(/\s+/g, "");
+  const buffer = Buffer.from(pureBase64, "base64");
+
+  if (buffer.length === 0 || buffer.length > 8 * 1024 * 1024) {
+    throw new Error("A imagem do Story excede o limite de 8 MB ou está inválida.");
+  }
+
+  const ext = mimeType === "image/png" ? "png" : mimeType === "image/webp" ? "webp" : "jpg";
+  const safeStoreId = String(storeId || "store").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64) || "store";
+  const storagePath = `stories/${safeStoreId}/${Date.now()}-${crypto.randomBytes(4).toString("hex")}.${ext}`;
+
+  try {
+    const { error: uploadErr } = await supabaseAdmin.storage
+      .from("product-images")
+      .upload(storagePath, buffer, {
+        contentType: mimeType,
+        upsert: true,
+      });
+
+    if (!uploadErr) {
+      const { data: pubData } = supabaseAdmin.storage
+        .from("product-images")
+        .getPublicUrl(storagePath);
+      if (pubData?.publicUrl && isSafeExternalHttpsUrl(pubData.publicUrl)) {
+        return { publicUrl: pubData.publicUrl, pureBase64, mimeType };
+      }
+    } else {
+      console.warn("[StoryStatus] Aviso ao salvar imagem no Supabase Storage (usará base64 direto):", uploadErr.message);
+    }
+  } catch (err: any) {
+    console.warn("[StoryStatus] Fallback para base64 após aviso no Storage:", err?.message || err);
+  }
+
+  return { publicUrl: null, pureBase64, mimeType };
+}
+
+async function resolveActiveStoreWhatsAppForStatus(storeId: string): Promise<{
+  connected: boolean;
+  state: string;
+  instanceName: string;
+  evoConfig: ResolvedEvolutionConfig;
+  error?: string;
+}> {
+  const cleanRaw = String(storeId || "").trim();
+  const rawTenant = cleanRaw.replace(/^store_/, "").replace(/^tenant_/, "");
+  const cleanStore = rawTenant.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+  const targetStoreIds = Array.from(new Set([cleanRaw, rawTenant, cleanStore, cleanStore ? `store_${cleanStore}` : ""].filter(Boolean)));
+
+  let activeInstanceRow: any = null;
+  try {
+    // Busca a instância ativa da loja usando .limit(1) (nunca .single())
+    const { data: connectedRows } = await supabaseAdmin
+      .from("whatsapp_instances")
+      .select("id, store_id, instance_name, status, evolution_url, evolution_key")
+      .in("store_id", targetStoreIds)
+      .in("status", ["connected", "open", "CONNECTED", "OPEN"])
+      .order("updated_at", { ascending: false })
+      .limit(1);
+
+    if (Array.isArray(connectedRows) && connectedRows.length > 0) {
+      activeInstanceRow = connectedRows[0];
+    } else {
+      const { data: anyRows } = await supabaseAdmin
+        .from("whatsapp_instances")
+        .select("id, store_id, instance_name, status, evolution_url, evolution_key")
+        .in("store_id", targetStoreIds)
+        .order("updated_at", { ascending: false })
+        .limit(1);
+
+      if (Array.isArray(anyRows) && anyRows.length > 0) {
+        activeInstanceRow = anyRows[0];
+      }
+    }
+  } catch (dbErr: any) {
+    console.warn("[StoryStatus] Aviso ao consultar whatsapp_instances:", dbErr?.message || dbErr);
+  }
+
+  const evoConfig = await resolveEvolutionConfig(
+    cleanRaw,
+    activeInstanceRow?.instance_name ? { instanceName: activeInstanceRow.instance_name } : undefined
+  );
+
+  if (!evoConfig.evolutionUrl || !evoConfig.evolutionKey) {
+    return {
+      connected: false,
+      state: "unconfigured",
+      instanceName: evoConfig.instanceName,
+      evoConfig,
+      error: WHATSAPP_DISCONNECTED_STATUS_ERROR,
+    };
+  }
+
+  // Valida estado real de conexão na Evolution API v2 (state === 'open')
+  const stateRes = await evolutionRequestWithFallback(
+    evoConfig,
+    `/instance/connectionState/${encodeURIComponent(evoConfig.instanceName)}`,
+    { method: "GET" },
+    8000,
+    !evoConfig.isCustomServer
+  );
+
+  const liveState = String(
+    stateRes.data?.instance?.state ||
+    stateRes.data?.state ||
+    stateRes.data?.connectionStatus ||
+    ""
+  )
+    .trim()
+    .toLowerCase();
+
+  const isConnected = stateRes.ok && liveState === "open";
+  if (!isConnected) {
+    return {
+      connected: false,
+      state: liveState || (stateRes.ok ? "close" : `http_${stateRes.status || 0}`),
+      instanceName: evoConfig.instanceName,
+      evoConfig,
+      error: WHATSAPP_DISCONNECTED_STATUS_ERROR,
+    };
+  }
+
+  return {
+    connected: true,
+    state: "open",
+    instanceName: evoConfig.instanceName,
+    evoConfig,
+  };
+}
+
+async function sendWhatsAppStatus(params: {
+  storeId: string;
+  imageUrl?: string | null;
+  imageBase64?: string | null;
+  caption?: string | null;
+}): Promise<{
+  ok: boolean;
+  status: number;
+  instanceName: string;
+  response?: any;
+  error?: string;
+}> {
+  const storeId = String(params.storeId || "").trim();
+  if (!storeId) {
+    return { ok: false, status: 400, instanceName: "", error: "storeId é obrigatório." };
+  }
+
+  const conn = await resolveActiveStoreWhatsAppForStatus(storeId);
+  if (!conn.connected) {
+    return {
+      ok: false,
+      status: 409,
+      instanceName: conn.instanceName,
+      error: WHATSAPP_DISCONNECTED_STATUS_ERROR,
+    };
+  }
+
+  const rawImageUrl = String(params.imageUrl || "").trim();
+  const rawImageBase64 = String(params.imageBase64 || "").trim();
+
+  let primaryContent = "";
+  let fallbackBase64 = "";
+
+  if (rawImageUrl.startsWith("data:image/")) {
+    primaryContent = stripDataImagePrefix(rawImageUrl);
+  } else if (rawImageUrl && isSafeExternalHttpsUrl(rawImageUrl)) {
+    primaryContent = rawImageUrl;
+    if (rawImageBase64) {
+      fallbackBase64 = stripDataImagePrefix(rawImageBase64);
+    }
+  } else if (rawImageBase64) {
+    primaryContent = stripDataImagePrefix(rawImageBase64);
+  }
+
+  if (!primaryContent) {
+    return {
+      ok: false,
+      status: 400,
+      instanceName: conn.instanceName,
+      error: "Informe uma URL HTTPS pública válida ou imagem base64 para publicar no Status.",
+    };
+  }
+
+  const cleanCaption = String(params.caption || "").trim().slice(0, 700);
+  const endpoint = `/message/sendStatus/${encodeURIComponent(conn.instanceName)}`;
+
+  // 1ª tentativa: payload padrão Evolution API v2
+  const standardPayload = {
+    type: "image",
+    content: primaryContent,
+    caption: cleanCaption,
+    allContacts: true,
+  };
+
+  let evoRes = await evolutionRequestWithFallback(
+    conn.evoConfig,
+    endpoint,
+    {
+      method: "POST",
+      body: JSON.stringify(standardPayload),
+    },
+    25000,
+    !conn.evoConfig.isCustomServer
+  );
+
+  // 2ª tentativa (apenas em 400/422): formato alternativo wrapper statusMessage usado por algumas builds da Evolution v2
+  if (!evoRes.ok && (evoRes.status === 400 || evoRes.status === 422)) {
+    const wrappedPayload = {
+      statusMessage: {
+        type: "image",
+        content: primaryContent,
+        caption: cleanCaption,
+        allContacts: true,
+      },
+    };
+    const retryWrapped = await evolutionRequestWithFallback(
+      conn.evoConfig,
+      endpoint,
+      {
+        method: "POST",
+        body: JSON.stringify(wrappedPayload),
+      },
+      25000,
+      !conn.evoConfig.isCustomServer
+    );
+    if (retryWrapped.ok) {
+      evoRes = retryWrapped;
+    }
+  }
+
+  // 3ª tentativa: se enviou por URL e falhou mas temos base64 puro sem prefixo, tenta via base64 direto
+  if (!evoRes.ok && fallbackBase64 && primaryContent !== fallbackBase64) {
+    const retryB64 = await evolutionRequestWithFallback(
+      conn.evoConfig,
+      endpoint,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          type: "image",
+          content: fallbackBase64,
+          caption: cleanCaption,
+          allContacts: true,
+        }),
+      },
+      25000,
+      !conn.evoConfig.isCustomServer
+    );
+    if (retryB64.ok) {
+      evoRes = retryB64;
+    }
+  }
+
+  if (evoRes.ok) {
+    console.log(`[StoryStatus] Status publicado no WhatsApp com sucesso | store=${storeId} | instance=${conn.instanceName}`);
+    return {
+      ok: true,
+      status: evoRes.status || 200,
+      instanceName: conn.instanceName,
+      response: evoRes.data ?? evoRes.rawText ?? { ok: true },
+    };
+  }
+
+  const errorDetail =
+    formatEvolutionErrorDetail(evoRes) ||
+    `Falha ao publicar Status na Evolution API (HTTP ${evoRes.status || 500}).`;
+
+  console.error(
+    `[StoryStatus] Falha ao publicar Status no WhatsApp | store=${storeId} | instance=${conn.instanceName} | HTTP ${evoRes.status}:`,
+    errorDetail
+  );
+
+  return {
+    ok: false,
+    status: evoRes.status || 500,
+    instanceName: conn.instanceName,
+    response: evoRes.data ?? evoRes.rawText ?? null,
+    error: errorDetail,
+  };
+}
+
+function normalizeStoryAutomationSettingsInput(storeId: string, body: any) {
+  const enabled = Boolean(body?.enabled);
+
+  const rawTimes = Array.isArray(body?.post_times) ? body.post_times : ["09:00", "14:00", "18:00"];
+  const validTimes = Array.from(
+    new Set(
+      rawTimes
+        .map((t: any) => String(t || "").trim())
+        .filter((t: string) => /^([01]\d|2[0-3]):[0-5]\d$/.test(t))
+    )
+  )
+    .sort()
+    .slice(0, 10);
+
+  const rawDays = Array.isArray(body?.days_of_week) ? body.days_of_week : [1, 2, 3, 4, 5, 6];
+  const validDays = Array.from(
+    new Set(
+      rawDays
+        .map((d: any) => Number(d))
+        .filter((d: number) => Number.isInteger(d) && d >= 0 && d <= 6)
+    )
+  ).sort((a: number, b: number) => a - b);
+
+  const maxPostsRaw = Number(body?.max_posts_per_day);
+  const maxPostsPerDay = Number.isFinite(maxPostsRaw)
+    ? Math.max(1, Math.min(10, Math.round(maxPostsRaw)))
+    : 3;
+
+  const captionTemplate = String(body?.caption_template ?? DEFAULT_STORY_CAPTION_TEMPLATE)
+    .trim()
+    .slice(0, 500) || DEFAULT_STORY_CAPTION_TEMPLATE;
+
+  return {
+    store_id: storeId,
+    enabled,
+    post_times: validTimes.length > 0 ? validTimes : ["09:00", "14:00", "18:00"],
+    days_of_week: validDays.length > 0 ? validDays : [1, 2, 3, 4, 5, 6],
+    max_posts_per_day: maxPostsPerDay,
+    caption_template: captionTemplate,
+    updated_at: new Date().toISOString(),
+  };
+}
+
+function renderAutomatedStoryCaption(
+  template: string,
+  ctx: {
+    storeName: string;
+    productName: string;
+    finalPrice: number;
+    originalPrice: number;
+    discountPercent: number;
+    offerUrl: string;
+  }
+): string {
+  const base = String(template || DEFAULT_STORY_CAPTION_TEMPLATE).trim() || DEFAULT_STORY_CAPTION_TEMPLATE;
+  const discountLabel = ctx.discountPercent > 0 ? `${ctx.discountPercent}% OFF` : "";
+  return base
+    .replace(/\{loja\}/gi, ctx.storeName)
+    .replace(/\{produto\}/gi, ctx.productName)
+    .replace(/\{nome\}/gi, ctx.productName)
+    .replace(/\{preco\}/gi, formatStoryBrl(ctx.finalPrice))
+    .replace(/\{preco_antigo\}/gi, formatStoryBrl(ctx.originalPrice))
+    .replace(/\{desconto\}/gi, discountLabel)
+    .replace(/\{link\}/gi, ctx.offerUrl)
+    .replace(/\s{2,}/g, " ")
+    .trim()
+    .slice(0, 700);
+}
+
+async function runAutomatedStoryPostForStore(
+  storeId: string,
+  setting?: any,
+  sourceLabel: string = "automation"
+): Promise<{ success: boolean; post?: any; error?: string }> {
+  // 1. Busca dados da loja (.limit(1))
+  const { data: tenantRows } = await supabaseAdmin
+    .from("tenants")
+    .select("id, name, slug, custom_domain, whatsapp")
+    .eq("id", storeId)
+    .limit(1);
+
+  const tenantRow = Array.isArray(tenantRows) && tenantRows.length > 0 ? tenantRows[0] : null;
+  const storeName = String(tenantRow?.name || "Nossa Farmácia").trim();
+
+  // 2. Busca produtos elegíveis com foto pública HTTPS e estoque > 0
+  const { data: productRows, error: prodErr } = await supabaseAdmin
+    .from("products")
+    .select("id, name, price, promotional_price, original_price, stock, image, is_featured, internal_code, barcode")
+    .eq("tenant_id", storeId)
+    .gt("stock", 0)
+    .gt("price", 0)
+    .not("image", "is", null)
+    .limit(200);
+
+  if (prodErr) {
+    return { success: false, error: `Erro ao buscar produtos da loja: ${prodErr.message}` };
+  }
+
+  const eligibleProducts = (productRows || []).filter((p: any) => {
+    const img = String(p?.image || "").trim();
+    if (!img || img === "IGNORE" || img === "PENDENTE_CURADORIA" || img.includes("fLz8F3X.png")) return false;
+    return isSafeExternalHttpsUrl(img);
+  });
+
+  if (eligibleProducts.length === 0) {
+    const errMsg = "Nenhum produto elegível com estoque e foto pública HTTPS encontrado para automação de Status.";
+    const { data: failedRows } = await supabaseAdmin
+      .from("story_posts")
+      .insert([{
+        store_id: storeId,
+        product_id: null,
+        caption: "",
+        image_url: null,
+        status: "failed",
+        channel: "whatsapp_status",
+        source: sourceLabel,
+        scheduled_for: new Date().toISOString(),
+        sent_at: null,
+        error_message: errMsg,
+        evolution_response: null,
+      }])
+      .select("*")
+      .limit(1);
+    return { success: false, post: failedRows?.[0] || null, error: errMsg };
+  }
+
+  // 3. Evita repetir produtos publicados nos últimos 7 dias
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const { data: recentPosts } = await supabaseAdmin
+    .from("story_posts")
+    .select("product_id")
+    .eq("store_id", storeId)
+    .eq("status", "sent")
+    .gte("created_at", sevenDaysAgo)
+    .limit(100);
+
+  const recentProductIds = new Set(
+    (recentPosts || []).map((r: any) => String(r?.product_id || "")).filter(Boolean)
+  );
+
+  const scoreProduct = (p: any) => {
+    const sale = Number(p.price) || 0;
+    const promo = Number(p.promotional_price) || 0;
+    const orig = Math.max(Number(p.original_price) || 0, sale);
+    const eff = promo > 0 && promo < sale ? promo : sale;
+    const hasDiscount = orig > eff && eff > 0;
+    const discountPct = hasDiscount ? Math.round(((orig - eff) / orig) * 100) : 0;
+    const notRecent = !recentProductIds.has(String(p.id));
+    return (notRecent ? 1000 : 0) + (hasDiscount ? 200 + discountPct : 0) + (p.is_featured ? 80 : 0);
+  };
+
+  const ranked = [...eligibleProducts].sort((a, b) => scoreProduct(b) - scoreProduct(a));
+  const chosen = ranked[0];
+
+  const salePrice = Number(chosen.price) || 0;
+  const promoPrice = Number(chosen.promotional_price) || 0;
+  const finalPrice = promoPrice > 0 && promoPrice < salePrice ? promoPrice : salePrice;
+  const originalPrice = Math.max(Number(chosen.original_price) || 0, salePrice);
+  const discountPercent = originalPrice > finalPrice && finalPrice > 0
+    ? Math.round(((originalPrice - finalPrice) / originalPrice) * 100)
+    : 0;
+
+  const baseStoreUrl = buildStoryStoreBaseUrl(tenantRow);
+  const prodSlug = buildSeoProductSlug(chosen);
+  const offerUrl = `${baseStoreUrl}/produto/${encodeURIComponent(prodSlug)}?origem=story`;
+
+  const caption = renderAutomatedStoryCaption(
+    setting?.caption_template || DEFAULT_STORY_CAPTION_TEMPLATE,
+    {
+      storeName,
+      productName: formatStoryProductNameNatural(chosen.name),
+      finalPrice,
+      originalPrice,
+      discountPercent,
+      offerUrl,
+    }
+  );
+
+  const sendResult = await sendWhatsAppStatus({
+    storeId,
+    imageUrl: chosen.image,
+    caption,
+  });
+
+  const nowIso = new Date().toISOString();
+  const { data: savedRows } = await supabaseAdmin
+    .from("story_posts")
+    .insert([{
+      store_id: storeId,
+      product_id: chosen.id ? String(chosen.id) : null,
+      caption,
+      image_url: chosen.image,
+      status: sendResult.ok ? "sent" : "failed",
+      channel: "whatsapp_status",
+      source: sourceLabel,
+      scheduled_for: nowIso,
+      sent_at: sendResult.ok ? nowIso : null,
+      error_message: sendResult.ok ? null : (sendResult.error || "Falha ao enviar Status no WhatsApp."),
+      evolution_response: sendResult.response || null,
+    }])
+    .select("*")
+    .limit(1);
+
+  return {
+    success: sendResult.ok,
+    post: savedRows?.[0] || null,
+    error: sendResult.ok ? undefined : sendResult.error,
+  };
+}
+
+// Controle em memória de ticks do agendador (evita duplicação no mesmo minuto)
+let isStorySchedulerRunning = false;
+const firedAutomationSlots = new Set<string>();
+
+function getBrazilNowParts(): { dateStr: string; hhmm: string; dayOfWeek: number } {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    weekday: "short",
+  }).formatToParts(now);
+
+  const get = (type: string) => parts.find((p) => p.type === type)?.value || "";
+  const dateStr = `${get("year")}-${get("month")}-${get("day")}`;
+  const hour = get("hour") === "24" ? "00" : get("hour");
+  const hhmm = `${hour}:${get("minute")}`;
+  const weekdayMap: Record<string, number> = {
+    Sun: 0,
+    Mon: 1,
+    Tue: 2,
+    Wed: 3,
+    Thu: 4,
+    Fri: 5,
+    Sat: 6,
+  };
+  const dayOfWeek = weekdayMap[get("weekday")] ?? now.getDay();
+  return { dateStr, hhmm, dayOfWeek };
+}
+
+async function processScheduledAndAutomatedStoriesTick() {
+  if (isStorySchedulerRunning) return;
+  isStorySchedulerRunning = true;
+  try {
+    const nowIso = new Date().toISOString();
+
+    // A) Processa agendamentos individuais na tabela story_posts (status = 'scheduled' e scheduled_for <= agora)
+    const { data: duePosts } = await supabaseAdmin
+      .from("story_posts")
+      .select("*")
+      .eq("status", "scheduled")
+      .lte("scheduled_for", nowIso)
+      .order("scheduled_for", { ascending: true })
+      .limit(10);
+
+    if (Array.isArray(duePosts) && duePosts.length > 0) {
+      for (const post of duePosts) {
+        try {
+          // Marca como processing de forma condicional para evitar envio duplicado
+          const { data: lockedRows } = await supabaseAdmin
+            .from("story_posts")
+            .update({ status: "processing" })
+            .eq("id", post.id)
+            .eq("status", "scheduled")
+            .select("id")
+            .limit(1);
+
+          if (!Array.isArray(lockedRows) || lockedRows.length === 0) continue;
+
+          const sendResult = await sendWhatsAppStatus({
+            storeId: post.store_id,
+            imageUrl: post.image_url,
+            caption: post.caption,
+          });
+
+          await supabaseAdmin
+            .from("story_posts")
+            .update({
+              status: sendResult.ok ? "sent" : "failed",
+              sent_at: sendResult.ok ? new Date().toISOString() : null,
+              error_message: sendResult.ok ? null : (sendResult.error || "Erro ao publicar Status agendado."),
+              evolution_response: sendResult.response || null,
+            })
+            .eq("id", post.id);
+        } catch (postErr: any) {
+          console.error(`[StoryScheduler] Erro ao processar post agendado ${post.id}:`, postErr?.message || postErr);
+          await supabaseAdmin
+            .from("story_posts")
+            .update({
+              status: "failed",
+              error_message: postErr?.message || "Erro inesperado ao publicar Status.",
+            })
+            .eq("id", post.id);
+        }
+      }
+    }
+
+    // B) Processa automações diárias habilitadas em story_automation_settings
+    const { data: activeSettings } = await supabaseAdmin
+      .from("story_automation_settings")
+      .select("*")
+      .eq("enabled", true)
+      .limit(100);
+
+    if (Array.isArray(activeSettings) && activeSettings.length > 0) {
+      const { dateStr, hhmm, dayOfWeek } = getBrazilNowParts();
+
+      // Limpa chaves antigas de dias anteriores para manter memória enxuta
+      if (firedAutomationSlots.size > 500) {
+        for (const key of firedAutomationSlots) {
+          if (!key.includes(`|${dateStr}|`)) firedAutomationSlots.delete(key);
+        }
+      }
+
+      for (const setting of activeSettings) {
+        try {
+          const sId = String(setting.store_id || "").trim();
+          if (!sId) continue;
+
+          const days: number[] = Array.isArray(setting.days_of_week)
+            ? setting.days_of_week.map((d: any) => Number(d))
+            : [];
+          if (days.length > 0 && !days.includes(dayOfWeek)) continue;
+
+          const times: string[] = Array.isArray(setting.post_times)
+            ? setting.post_times.map((t: any) => String(t).trim())
+            : [];
+          if (!times.includes(hhmm)) continue;
+
+          const slotKey = `${sId}|${dateStr}|${hhmm}`;
+          if (firedAutomationSlots.has(slotKey)) continue;
+          firedAutomationSlots.add(slotKey);
+
+          // Respeita limite máximo diário (max_posts_per_day) no fuso de Brasília
+          const dayStartIso = `${dateStr}T00:00:00-03:00`;
+          const { count: todayCount } = await supabaseAdmin
+            .from("story_posts")
+            .select("id", { count: "exact", head: true })
+            .eq("store_id", sId)
+            .eq("source", "automation")
+            .in("status", ["sent", "processing"])
+            .gte("created_at", dayStartIso);
+
+          const maxPerDay = Math.max(1, Number(setting.max_posts_per_day) || 3);
+          if ((todayCount || 0) >= maxPerDay) continue;
+
+          console.log(`[StoryScheduler] Disparando Status automático | store=${sId} | slot=${dateStr} ${hhmm}`);
+          await runAutomatedStoryPostForStore(sId, setting, "automation");
+        } catch (autoErr: any) {
+          console.error(`[StoryScheduler] Erro na automação da loja ${setting?.store_id}:`, autoErr?.message || autoErr);
+        }
+      }
+    }
+  } catch (err: any) {
+    console.warn("[StoryScheduler] Aviso no ciclo do agendador:", err?.message || err);
+  } finally {
+    isStorySchedulerRunning = false;
+  }
+}
+
+// Cron leve a cada minuto (zero Puppeteer/Playwright)
+cron.schedule("* * * * *", async () => {
+  await processScheduledAndAutomatedStoriesTick();
+});
+
+// Helper para extrair storeId validado pelo checkTenantAccess nas rotas /api/v1/stories/*
+function resolveStoryRouteStoreId(req: express.Request): string {
+  return String(
+    (req as any).tenant?.id ||
+    (req.headers["x-tenant-id"] as string) ||
+    (req.query.tenantId as string) ||
+    ""
+  ).trim();
+}
+
+// 1. Verificar estado de conexão do WhatsApp para publicar Status
+app.get("/api/v1/stories/whatsapp-status", checkTenantAccess, async (req, res) => {
+  try {
+    const storeId = resolveStoryRouteStoreId(req);
+    if (!storeId) return res.status(400).json({ error: "storeId é obrigatório." });
+
+    const status = await resolveActiveStoreWhatsAppForStatus(storeId);
+    return res.json({
+      connected: status.connected,
+      state: status.state,
+      instanceName: status.instanceName,
+      message: status.connected
+        ? "WhatsApp conectado e pronto para publicar no Status."
+        : (status.error || WHATSAPP_DISCONNECTED_STATUS_ERROR),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "Erro ao verificar conexão do WhatsApp." });
+  }
+});
+
+// 2. Ler configurações de automação (story_automation_settings)
+app.get("/api/v1/stories/settings", checkTenantAccess, async (req, res) => {
+  try {
+    const storeId = resolveStoryRouteStoreId(req);
+    if (!storeId) return res.status(400).json({ error: "storeId é obrigatório." });
+
+    const { data: rows, error } = await supabaseAdmin
+      .from("story_automation_settings")
+      .select("*")
+      .eq("store_id", storeId)
+      .limit(1);
+
+    if (error) {
+      return res.status(500).json({ error: `Erro ao consultar story_automation_settings: ${error.message}` });
+    }
+
+    const existing = Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+    if (existing) {
+      return res.json({ settings: existing });
+    }
+
+    return res.json({
+      settings: {
+        store_id: storeId,
+        enabled: false,
+        post_times: ["09:00", "14:00", "18:00"],
+        days_of_week: [1, 2, 3, 4, 5, 6],
+        max_posts_per_day: 3,
+        caption_template: DEFAULT_STORY_CAPTION_TEMPLATE,
+        updated_at: null,
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "Erro ao carregar configurações de automação." });
+  }
+});
+
+// 3. Salvar configurações de automação (story_automation_settings)
+app.put(["/api/v1/stories/settings", "/api/v1/stories/automation-settings"], checkTenantAccess, async (req, res) => {
+  try {
+    const storeId = resolveStoryRouteStoreId(req);
+    if (!storeId) return res.status(400).json({ error: "storeId é obrigatório." });
+
+    const payload = normalizeStoryAutomationSettingsInput(storeId, req.body);
+
+    const { data: existingRows } = await supabaseAdmin
+      .from("story_automation_settings")
+      .select("id")
+      .eq("store_id", storeId)
+      .limit(1);
+
+    let savedRow: any = null;
+    if (Array.isArray(existingRows) && existingRows.length > 0 && existingRows[0]?.id) {
+      const { data: updated, error: updErr } = await supabaseAdmin
+        .from("story_automation_settings")
+        .update(payload)
+        .eq("id", existingRows[0].id)
+        .eq("store_id", storeId)
+        .select("*")
+        .limit(1);
+      if (updErr) {
+        return res.status(500).json({ error: `Erro ao atualizar automação: ${updErr.message}` });
+      }
+      savedRow = updated?.[0] || payload;
+    } else {
+      const { data: inserted, error: insErr } = await supabaseAdmin
+        .from("story_automation_settings")
+        .insert([payload])
+        .select("*")
+        .limit(1);
+      if (insErr) {
+        return res.status(500).json({ error: `Erro ao salvar automação: ${insErr.message}` });
+      }
+      savedRow = inserted?.[0] || payload;
+    }
+
+    return res.json({ success: true, settings: savedRow });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "Erro ao salvar configurações de automação." });
+  }
+});
+
+// 4. Listar histórico e agendamentos (story_posts)
+app.get("/api/v1/stories/posts", checkTenantAccess, async (req, res) => {
+  try {
+    const storeId = resolveStoryRouteStoreId(req);
+    if (!storeId) return res.status(400).json({ error: "storeId é obrigatório." });
+
+    const { data: posts, error } = await supabaseAdmin
+      .from("story_posts")
+      .select("*")
+      .eq("store_id", storeId)
+      .order("created_at", { ascending: false })
+      .limit(40);
+
+    if (error) {
+      return res.status(500).json({ error: `Erro ao listar story_posts: ${error.message}` });
+    }
+
+    return res.json({ posts: posts || [] });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "Erro ao carregar histórico de Stories." });
+  }
+});
+
+// 5. Publicar Story agora no Status do WhatsApp (Evolution API v2)
+app.post("/api/v1/stories/publish", checkTenantAccess, async (req, res) => {
+  try {
+    const storeId = resolveStoryRouteStoreId(req);
+    if (!storeId) return res.status(400).json({ error: "storeId é obrigatório." });
+
+    const caption = String(req.body?.caption || "").trim().slice(0, 700);
+    const productId = req.body?.productId ? String(req.body.productId).trim() : null;
+    const source = String(req.body?.source || "manual").trim().slice(0, 40) || "manual";
+    const rawImageDataUrl = typeof req.body?.imageDataUrl === "string" ? req.body.imageDataUrl.trim() : "";
+    const rawImageBase64 = typeof req.body?.imageBase64 === "string" ? req.body.imageBase64.trim() : "";
+    const rawImageUrl = typeof req.body?.imageUrl === "string" ? req.body.imageUrl.trim() : "";
+
+    let persistedImageUrl: string | null = null;
+    let fallbackBase64: string | null = null;
+
+    if (rawImageDataUrl.startsWith("data:image/")) {
+      const uploaded = await uploadStoryImageToStorage(storeId, rawImageDataUrl);
+      persistedImageUrl = uploaded.publicUrl;
+      fallbackBase64 = uploaded.pureBase64;
+    } else if (rawImageUrl) {
+      if (!isSafeExternalHttpsUrl(rawImageUrl)) {
+        return res.status(400).json({ error: "A URL da imagem deve ser um endereço HTTPS público válido." });
+      }
+      persistedImageUrl = rawImageUrl;
+    } else if (rawImageBase64) {
+      const uploaded = await uploadStoryImageToStorage(
+        storeId,
+        rawImageBase64.startsWith("data:image/") ? rawImageBase64 : `data:image/jpeg;base64,${rawImageBase64}`
+      );
+      persistedImageUrl = uploaded.publicUrl;
+      fallbackBase64 = uploaded.pureBase64;
+    }
+
+    if (!persistedImageUrl && !fallbackBase64) {
+      return res.status(400).json({ error: "Envie a imagem do Story (PNG/JPEG) ou uma URL HTTPS pública." });
+    }
+
+    const sendResult = await sendWhatsAppStatus({
+      storeId,
+      imageUrl: persistedImageUrl,
+      imageBase64: fallbackBase64,
+      caption,
+    });
+
+    const nowIso = new Date().toISOString();
+    const { data: savedRows } = await supabaseAdmin
+      .from("story_posts")
+      .insert([{
+        store_id: storeId,
+        product_id: productId,
+        caption,
+        image_url: persistedImageUrl,
+        status: sendResult.ok ? "sent" : "failed",
+        channel: "whatsapp_status",
+        source,
+        scheduled_for: nowIso,
+        sent_at: sendResult.ok ? nowIso : null,
+        error_message: sendResult.ok ? null : (sendResult.error || "Erro ao publicar Status no WhatsApp."),
+        evolution_response: sendResult.response || null,
+      }])
+      .select("*")
+      .limit(1);
+
+    const savedPost = savedRows?.[0] || null;
+
+    if (!sendResult.ok) {
+      return res.status(sendResult.status === 409 ? 409 : 502).json({
+        success: false,
+        error: sendResult.error || "Não foi possível publicar no Status do WhatsApp.",
+        instanceName: sendResult.instanceName,
+        post: savedPost,
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: "Story publicado no Status do WhatsApp com sucesso!",
+      instanceName: sendResult.instanceName,
+      post: savedPost,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "Erro interno ao publicar no Status do WhatsApp." });
+  }
+});
+
+// 6. Agendar Story para publicação automática no Status do WhatsApp
+app.post("/api/v1/stories/schedule", checkTenantAccess, async (req, res) => {
+  try {
+    const storeId = resolveStoryRouteStoreId(req);
+    if (!storeId) return res.status(400).json({ error: "storeId é obrigatório." });
+
+    const caption = String(req.body?.caption || "").trim().slice(0, 700);
+    const productId = req.body?.productId ? String(req.body.productId).trim() : null;
+    const rawScheduledFor = String(req.body?.scheduledFor || req.body?.scheduled_for || "").trim();
+    const scheduledDate = new Date(rawScheduledFor);
+
+    if (!rawScheduledFor || Number.isNaN(scheduledDate.getTime())) {
+      return res.status(400).json({ error: "Data e horário de agendamento inválidos." });
+    }
+
+    const rawImageDataUrl = typeof req.body?.imageDataUrl === "string" ? req.body.imageDataUrl.trim() : "";
+    const rawImageUrl = typeof req.body?.imageUrl === "string" ? req.body.imageUrl.trim() : "";
+    let persistedImageUrl: string | null = null;
+
+    if (rawImageDataUrl.startsWith("data:image/")) {
+      const uploaded = await uploadStoryImageToStorage(storeId, rawImageDataUrl);
+      persistedImageUrl = uploaded.publicUrl;
+      if (!persistedImageUrl) {
+        return res.status(500).json({
+          error: "Não foi possível salvar a imagem no Storage para agendamento. Verifique as permissões do bucket product-images.",
+        });
+      }
+    } else if (rawImageUrl) {
+      if (!isSafeExternalHttpsUrl(rawImageUrl)) {
+        return res.status(400).json({ error: "A URL da imagem deve ser um endereço HTTPS público válido." });
+      }
+      persistedImageUrl = rawImageUrl;
+    } else {
+      return res.status(400).json({ error: "Envie a imagem do Story para agendar." });
+    }
+
+    const { data: savedRows, error: insErr } = await supabaseAdmin
+      .from("story_posts")
+      .insert([{
+        store_id: storeId,
+        product_id: productId,
+        caption,
+        image_url: persistedImageUrl,
+        status: "scheduled",
+        channel: "whatsapp_status",
+        source: "scheduled",
+        scheduled_for: scheduledDate.toISOString(),
+        sent_at: null,
+        error_message: null,
+        evolution_response: null,
+      }])
+      .select("*")
+      .limit(1);
+
+    if (insErr) {
+      return res.status(500).json({ error: `Erro ao agendar Story: ${insErr.message}` });
+    }
+
+    return res.json({
+      success: true,
+      message: "Story agendado com sucesso para o Status do WhatsApp!",
+      post: savedRows?.[0] || null,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "Erro interno ao agendar Story." });
+  }
+});
+
+// 7. Registrar compartilhamento via Atalho do Instagram Stories no histórico
+app.post("/api/v1/stories/log-instagram", checkTenantAccess, async (req, res) => {
+  try {
+    const storeId = resolveStoryRouteStoreId(req);
+    if (!storeId) return res.status(400).json({ error: "storeId é obrigatório." });
+
+    const caption = String(req.body?.caption || "").trim().slice(0, 700);
+    const productId = req.body?.productId ? String(req.body.productId).trim() : null;
+    const rawImageUrl = typeof req.body?.imageUrl === "string" ? req.body.imageUrl.trim() : "";
+    const safeImageUrl = rawImageUrl && isSafeExternalHttpsUrl(rawImageUrl) ? rawImageUrl : null;
+    const nowIso = new Date().toISOString();
+
+    const { data: savedRows } = await supabaseAdmin
+      .from("story_posts")
+      .insert([{
+        store_id: storeId,
+        product_id: productId,
+        caption,
+        image_url: safeImageUrl,
+        status: "sent",
+        channel: "instagram_story",
+        source: "manual",
+        scheduled_for: nowIso,
+        sent_at: nowIso,
+        error_message: null,
+        evolution_response: null,
+      }])
+      .select("*")
+      .limit(1);
+
+    return res.json({ success: true, post: savedRows?.[0] || null });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "Erro ao registrar histórico do Instagram Stories." });
+  }
+});
+
+// 8. Reenviar ou publicar imediatamente um post agendado/com falha
+app.post("/api/v1/stories/posts/:id/retry", checkTenantAccess, async (req, res) => {
+  try {
+    const storeId = resolveStoryRouteStoreId(req);
+    const postId = String(req.params.id || "").trim();
+    if (!storeId) return res.status(400).json({ error: "storeId é obrigatório." });
+    if (!STORY_UUID_REGEX.test(postId)) {
+      return res.status(400).json({ error: "ID da publicação inválido." });
+    }
+
+    const { data: rows, error: findErr } = await supabaseAdmin
+      .from("story_posts")
+      .select("*")
+      .eq("id", postId)
+      .eq("store_id", storeId)
+      .limit(1);
+
+    if (findErr || !Array.isArray(rows) || rows.length === 0) {
+      return res.status(404).json({ error: "Publicação não encontrada para esta loja." });
+    }
+
+    const post = rows[0];
+    if (!post.image_url) {
+      return res.status(400).json({ error: "Esta publicação não possui imagem salva para reenvio." });
+    }
+
+    const sendResult = await sendWhatsAppStatus({
+      storeId,
+      imageUrl: post.image_url,
+      caption: post.caption,
+    });
+
+    const nowIso = new Date().toISOString();
+    const { data: updatedRows } = await supabaseAdmin
+      .from("story_posts")
+      .update({
+        status: sendResult.ok ? "sent" : "failed",
+        sent_at: sendResult.ok ? nowIso : null,
+        error_message: sendResult.ok ? null : (sendResult.error || "Erro ao publicar Status no WhatsApp."),
+        evolution_response: sendResult.response || null,
+      })
+      .eq("id", postId)
+      .eq("store_id", storeId)
+      .select("*")
+      .limit(1);
+
+    if (!sendResult.ok) {
+      return res.status(sendResult.status === 409 ? 409 : 502).json({
+        success: false,
+        error: sendResult.error,
+        post: updatedRows?.[0] || post,
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: "Status publicado com sucesso no WhatsApp!",
+      post: updatedRows?.[0] || post,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "Erro ao reenviar Status." });
+  }
+});
+
+// 9. Excluir ou cancelar publicação agendada/histórico
+app.delete("/api/v1/stories/posts/:id", checkTenantAccess, async (req, res) => {
+  try {
+    const storeId = resolveStoryRouteStoreId(req);
+    const postId = String(req.params.id || "").trim();
+    if (!storeId) return res.status(400).json({ error: "storeId é obrigatório." });
+    if (!STORY_UUID_REGEX.test(postId)) {
+      return res.status(400).json({ error: "ID da publicação inválido." });
+    }
+
+    const { error: delErr } = await supabaseAdmin
+      .from("story_posts")
+      .delete()
+      .eq("id", postId)
+      .eq("store_id", storeId);
+
+    if (delErr) {
+      return res.status(500).json({ error: `Erro ao excluir publicação: ${delErr.message}` });
+    }
+
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "Erro ao excluir publicação." });
+  }
+});
+
+// 10. Disparar 1 oferta automática imediatamente (teste da automação)
+app.post("/api/v1/stories/automation/run-now", checkTenantAccess, async (req, res) => {
+  try {
+    const storeId = resolveStoryRouteStoreId(req);
+    if (!storeId) return res.status(400).json({ error: "storeId é obrigatório." });
+
+    const { data: settingsRows } = await supabaseAdmin
+      .from("story_automation_settings")
+      .select("*")
+      .eq("store_id", storeId)
+      .limit(1);
+
+    const setting = Array.isArray(settingsRows) && settingsRows.length > 0 ? settingsRows[0] : null;
+    const result = await runAutomatedStoryPostForStore(storeId, setting, "automation_manual_test");
+
+    if (!result.success) {
+      return res.status(result.error === WHATSAPP_DISCONNECTED_STATUS_ERROR ? 409 : 400).json({
+        success: false,
+        error: result.error || "Não foi possível publicar oferta automática.",
+        post: result.post || null,
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: "Oferta automática publicada no Status do WhatsApp!",
+      post: result.post || null,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "Erro ao executar automação de Status." });
+  }
+});
+
 // --- ENDPOINTS DE CHAT ---
 app.get("/api/v1/chat/conversations", async (req, res) => {
   try {

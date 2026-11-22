@@ -20,11 +20,93 @@ import {
   MessageCircle,
   Tag,
   Link2,
+  Send,
+  Clock,
+  Calendar,
+  RefreshCw,
+  CheckCircle2,
+  AlertCircle,
+  Instagram,
+  Sliders,
+  History,
+  Play,
+  X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { PharmacyConfig, Product, PromotionRule } from '../types';
 import { buildProductSlug, getStoreUrl } from '../lib/store';
 import { appendOriginParam } from '../lib/orderOrigin';
+import { supabase } from '../services/supabase';
+
+interface StoryAutomationSettings {
+  id?: string;
+  store_id: string;
+  enabled: boolean;
+  post_times: string[];
+  days_of_week: number[];
+  max_posts_per_day: number;
+  caption_template: string;
+  updated_at?: string | null;
+}
+
+interface StoryPostRecord {
+  id: string;
+  store_id: string;
+  product_id?: string | null;
+  caption?: string | null;
+  image_url?: string | null;
+  status: string;
+  channel?: string | null;
+  source?: string | null;
+  scheduled_for?: string | null;
+  sent_at?: string | null;
+  error_message?: string | null;
+  created_at?: string | null;
+}
+
+type StoryGeneratorTab = 'studio' | 'automation' | 'history';
+
+const WEEKDAY_OPTIONS: Array<{ value: number; short: string; label: string }> = [
+  { value: 0, short: 'Dom', label: 'Domingo' },
+  { value: 1, short: 'Seg', label: 'Segunda' },
+  { value: 2, short: 'Ter', label: 'Terça' },
+  { value: 3, short: 'Qua', label: 'Quarta' },
+  { value: 4, short: 'Qui', label: 'Quinta' },
+  { value: 5, short: 'Sex', label: 'Sexta' },
+  { value: 6, short: 'Sáb', label: 'Sábado' },
+];
+
+const CAPTION_PLACEHOLDERS = [
+  { token: '{produto}', label: 'Produto' },
+  { token: '{preco}', label: 'Preço' },
+  { token: '{preco_antigo}', label: 'Preço antigo' },
+  { token: '{desconto}', label: 'Desconto' },
+  { token: '{loja}', label: 'Farmácia' },
+  { token: '{link}', label: 'Link direto' },
+];
+
+const DEFAULT_AUTOMATION_CAPTION =
+  'Oferta na {loja}: {produto} por R$ {preco}! Peça com entrega rápida: {link}';
+
+const getDefaultNextScheduleLocal = (): string => {
+  const d = new Date(Date.now() + 60 * 60 * 1000);
+  d.setMinutes(0, 0, 0);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+
+const formatStoryDateTimeBR = (iso?: string | null): string => {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString('pt-BR', {
+    day: '2-digit',
+    month: '2-digit',
+    year: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+};
 
 interface AdminStoryGeneratorProps {
   products: Product[];
@@ -568,6 +650,160 @@ export const AdminStoryGenerator: React.FC<AdminStoryGeneratorProps> = ({
   const [isSharing, setIsSharing] = useState<boolean>(false);
   const [copiedState, setCopiedState] = useState<'idle' | 'link' | 'caption'>('idle');
   const [canNativeShare, setCanNativeShare] = useState<boolean>(false);
+
+  // Abas internas e estados de Status Automático no WhatsApp + Instagram Stories
+  const [activeTab, setActiveTab] = useState<StoryGeneratorTab>('studio');
+  const [includeLinkInStatus, setIncludeLinkInStatus] = useState<boolean>(true);
+  const [whatsappStatus, setWhatsappStatus] = useState<{
+    loading: boolean;
+    connected: boolean;
+    state: string;
+    instanceName: string;
+    message: string;
+  }>({
+    loading: true,
+    connected: false,
+    state: 'checking',
+    instanceName: '',
+    message: '',
+  });
+
+  const [isPublishingStatus, setIsPublishingStatus] = useState<boolean>(false);
+  const [showScheduleBox, setShowScheduleBox] = useState<boolean>(false);
+  const [scheduleDateTime, setScheduleDateTime] = useState<string>(getDefaultNextScheduleLocal);
+  const [isSchedulingStatus, setIsSchedulingStatus] = useState<boolean>(false);
+  const [isRunningInstagramShortcut, setIsRunningInstagramShortcut] = useState<boolean>(false);
+  const [instagramReadyBanner, setInstagramReadyBanner] = useState<boolean>(false);
+
+  // Automação de Status (story_automation_settings)
+  const [automationLoading, setAutomationLoading] = useState<boolean>(false);
+  const [automationSaving, setAutomationSaving] = useState<boolean>(false);
+  const [automationRunningNow, setAutomationRunningNow] = useState<boolean>(false);
+  const [newPostTime, setNewPostTime] = useState<string>('11:00');
+  const [automationSettings, setAutomationSettings] = useState<StoryAutomationSettings>({
+    store_id: tenant?.id || '',
+    enabled: false,
+    post_times: ['09:00', '14:00', '18:00'],
+    days_of_week: [1, 2, 3, 4, 5, 6],
+    max_posts_per_day: 3,
+    caption_template: DEFAULT_AUTOMATION_CAPTION,
+    updated_at: null,
+  });
+
+  // Histórico e agendados (story_posts)
+  const [postsLoading, setPostsLoading] = useState<boolean>(false);
+  const [storyPosts, setStoryPosts] = useState<StoryPostRecord[]>([]);
+  const [historyFilter, setHistoryFilter] = useState<'all' | 'sent' | 'scheduled' | 'failed'>('all');
+  const [retryingPostId, setRetryingPostId] = useState<string | null>(null);
+  const [deletingPostId, setDeletingPostId] = useState<string | null>(null);
+
+  const buildAuthHeaders = useCallback(async (): Promise<Record<string, string>> => {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'x-tenant-id': tenant?.id || '',
+    };
+    try {
+      const { data } = await supabase.auth.getSession();
+      if (data?.session?.access_token) {
+        headers.Authorization = `Bearer ${data.session.access_token}`;
+      }
+    } catch {
+      // Fallback para sessão legada autenticada via x-tenant-id
+    }
+    return headers;
+  }, [tenant?.id]);
+
+  const fetchWhatsAppStatus = useCallback(async () => {
+    if (!tenant?.id) return;
+    setWhatsappStatus((prev) => ({ ...prev, loading: true }));
+    try {
+      const headers = await buildAuthHeaders();
+      const res = await fetch(
+        `/api/v1/stories/whatsapp-status?storeId=${encodeURIComponent(tenant.id)}`,
+        { headers }
+      );
+      const data = await res.json().catch(() => ({}));
+      setWhatsappStatus({
+        loading: false,
+        connected: Boolean(res.ok && data?.connected),
+        state: String(data?.state || (res.ok ? 'close' : 'error')),
+        instanceName: String(data?.instanceName || ''),
+        message: String(
+          data?.message ||
+            data?.error ||
+            'WhatsApp desconectado. Conecte o QR Code antes de publicar no Status.'
+        ),
+      });
+    } catch {
+      setWhatsappStatus({
+        loading: false,
+        connected: false,
+        state: 'error',
+        instanceName: '',
+        message: 'Não foi possível verificar o status do WhatsApp agora.',
+      });
+    }
+  }, [tenant?.id, buildAuthHeaders]);
+
+  const fetchAutomationSettings = useCallback(async () => {
+    if (!tenant?.id) return;
+    setAutomationLoading(true);
+    try {
+      const headers = await buildAuthHeaders();
+      const res = await fetch(
+        `/api/v1/stories/settings?storeId=${encodeURIComponent(tenant.id)}`,
+        { headers }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data?.settings) {
+        setAutomationSettings({
+          id: data.settings.id,
+          store_id: data.settings.store_id || tenant.id,
+          enabled: Boolean(data.settings.enabled),
+          post_times: Array.isArray(data.settings.post_times) && data.settings.post_times.length > 0
+            ? data.settings.post_times
+            : ['09:00', '14:00', '18:00'],
+          days_of_week: Array.isArray(data.settings.days_of_week) && data.settings.days_of_week.length > 0
+            ? data.settings.days_of_week.map((d: any) => Number(d))
+            : [1, 2, 3, 4, 5, 6],
+          max_posts_per_day: Number(data.settings.max_posts_per_day) || 3,
+          caption_template: data.settings.caption_template || DEFAULT_AUTOMATION_CAPTION,
+          updated_at: data.settings.updated_at || null,
+        });
+      }
+    } catch {
+      // mantém padrões locais
+    } finally {
+      setAutomationLoading(false);
+    }
+  }, [tenant?.id, buildAuthHeaders]);
+
+  const fetchStoryPosts = useCallback(async () => {
+    if (!tenant?.id) return;
+    setPostsLoading(true);
+    try {
+      const headers = await buildAuthHeaders();
+      const res = await fetch(
+        `/api/v1/stories/posts?storeId=${encodeURIComponent(tenant.id)}`,
+        { headers }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && Array.isArray(data?.posts)) {
+        setStoryPosts(data.posts);
+      }
+    } catch {
+      // mantém lista atual
+    } finally {
+      setPostsLoading(false);
+    }
+  }, [tenant?.id, buildAuthHeaders]);
+
+  useEffect(() => {
+    if (!tenant?.id) return;
+    fetchWhatsAppStatus();
+    fetchAutomationSettings();
+    fetchStoryPosts();
+  }, [tenant?.id, fetchWhatsAppStatus, fetchAutomationSettings, fetchStoryPosts]);
 
   const availableProducts = useMemo(() => {
     return (products || []).filter((p) => p && p.name && parseNumericPrice(p.price) > 0);
@@ -1510,33 +1746,522 @@ export const AdminStoryGenerator: React.FC<AdminStoryGeneratorProps> = ({
     setCaptionText(autoShortCaption);
   };
 
+  const exportCanvasToJpegDataUrl = async (): Promise<string | null> => {
+    await renderStoryCanvas();
+    const canvas = canvasRef.current;
+    if (!canvas) return null;
+    try {
+      return canvas.toDataURL('image/jpeg', 0.92);
+    } catch (err) {
+      console.error('[StoryGenerator] Erro ao exportar dataURL:', err);
+      return null;
+    }
+  };
+
+  const buildWhatsAppStatusCaption = (): string => {
+    const base = captionText.trim() || autoShortCaption;
+    if (includeLinkInStatus && offerShareUrl) {
+      return `${base}\n\n${offerShareUrl}`.slice(0, 700);
+    }
+    return base.slice(0, 700);
+  };
+
+  const handlePublishWhatsAppStatus = async () => {
+    if (selectedProducts.length === 0) {
+      toast.error('Selecione pelo menos 1 produto para publicar no Status.');
+      return;
+    }
+    if (!tenant?.id) return;
+
+    setIsPublishingStatus(true);
+    try {
+      const imageDataUrl = await exportCanvasToJpegDataUrl();
+      if (!imageDataUrl) {
+        toast.error('Não foi possível renderizar a arte do Story. Tente novamente.');
+        return;
+      }
+
+      const headers = await buildAuthHeaders();
+      const res = await fetch('/api/v1/stories/publish', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          storeId: tenant.id,
+          productId: selectedProducts[0]?.id || null,
+          imageDataUrl,
+          caption: buildWhatsAppStatusCaption(),
+          source: 'manual',
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok || !data?.success) {
+        toast.error(data?.error || 'Não foi possível publicar no Status do WhatsApp.');
+        fetchWhatsAppStatus();
+        fetchStoryPosts();
+        return;
+      }
+
+      toast.success('Story publicado no Status do WhatsApp!', {
+        description: data?.instanceName ? `Enviado pela instância ${data.instanceName}.` : undefined,
+      });
+      fetchWhatsAppStatus();
+      fetchStoryPosts();
+    } catch (err: any) {
+      toast.error(err?.message || 'Erro de comunicação ao publicar no Status do WhatsApp.');
+    } finally {
+      setIsPublishingStatus(false);
+    }
+  };
+
+  const handleScheduleWhatsAppStatus = async () => {
+    if (selectedProducts.length === 0) {
+      toast.error('Selecione pelo menos 1 produto antes de agendar.');
+      return;
+    }
+    if (!scheduleDateTime) {
+      toast.error('Escolha uma data e horário para o agendamento.');
+      return;
+    }
+    const parsedDate = new Date(scheduleDateTime);
+    if (Number.isNaN(parsedDate.getTime()) || parsedDate.getTime() < Date.now() - 60 * 1000) {
+      toast.error('Selecione uma data e horário futuros para agendar o Status.');
+      return;
+    }
+    if (!tenant?.id) return;
+
+    setIsSchedulingStatus(true);
+    try {
+      const imageDataUrl = await exportCanvasToJpegDataUrl();
+      if (!imageDataUrl) {
+        toast.error('Falha ao preparar a imagem do Story para agendamento.');
+        return;
+      }
+
+      const headers = await buildAuthHeaders();
+      const res = await fetch('/api/v1/stories/schedule', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          storeId: tenant.id,
+          productId: selectedProducts[0]?.id || null,
+          imageDataUrl,
+          caption: buildWhatsAppStatusCaption(),
+          scheduledFor: parsedDate.toISOString(),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok || !data?.success) {
+        toast.error(data?.error || 'Não foi possível agendar o Status.');
+        return;
+      }
+
+      toast.success('Status agendado com sucesso!', {
+        description: `Será publicado automaticamente em ${formatStoryDateTimeBR(parsedDate.toISOString())}.`,
+      });
+      setShowScheduleBox(false);
+      setScheduleDateTime(getDefaultNextScheduleLocal());
+      fetchStoryPosts();
+    } catch (err: any) {
+      toast.error(err?.message || 'Erro ao agendar publicação.');
+    } finally {
+      setIsSchedulingStatus(false);
+    }
+  };
+
+  const handleInstagramStoryShortcut = async () => {
+    if (selectedProducts.length === 0) {
+      toast.error('Selecione pelo menos 1 produto para gerar o Story.');
+      return;
+    }
+
+    setIsRunningInstagramShortcut(true);
+    try {
+      // 1. Copia automaticamente o link limpo para colar na figurinha de Link do Instagram Stories
+      try {
+        await navigator.clipboard.writeText(offerShareUrl);
+      } catch {
+        // segue normalmente mesmo se clipboard exigir interação extra
+      }
+
+      const blob = await exportCanvasToBlob();
+      if (!blob) {
+        toast.error('Não foi possível gerar a imagem PNG para o Instagram.');
+        return;
+      }
+
+      const file = new File([blob], buildFileName(), { type: 'image/png' });
+      const nav = navigator as Navigator & { canShare?: (data?: ShareData) => boolean };
+      let sharedNatively = false;
+
+      if (typeof navigator !== 'undefined' && typeof navigator.share === 'function' && nav.canShare?.({ files: [file] })) {
+        try {
+          await navigator.share({
+            files: [file],
+            title: headline.trim() || tenant?.name || 'Oferta',
+            text: captionText.trim().slice(0, MAX_CAPTION_LENGTH),
+          });
+          sharedNatively = true;
+          toast.success('Link copiado! Escolha "Instagram Stories" e cole na figurinha de Link.');
+        } catch (shareErr: any) {
+          if (shareErr?.name === 'AbortError') {
+            return;
+          }
+        }
+      }
+
+      if (!sharedNatively) {
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = buildFileName();
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+
+        setInstagramReadyBanner(true);
+        toast.success('Arte 1080×1920 baixada e link copiado!', {
+          description: 'Abra o Instagram Stories, escolha a arte na galeria e cole o link na figurinha.',
+        });
+      }
+
+      // Registra no histórico de forma silenciosa
+      if (tenant?.id) {
+        buildAuthHeaders()
+          .then((headers) =>
+            fetch('/api/v1/stories/log-instagram', {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({
+                storeId: tenant.id,
+                productId: selectedProducts[0]?.id || null,
+                imageUrl: isUsableImageUrl(selectedProducts[0]?.image) && selectedProducts[0]?.image?.startsWith('https://')
+                  ? selectedProducts[0].image
+                  : null,
+                caption: captionText.trim().slice(0, MAX_CAPTION_LENGTH),
+              }),
+            })
+          )
+          .then(() => fetchStoryPosts())
+          .catch(() => {});
+      }
+    } finally {
+      setIsRunningInstagramShortcut(false);
+    }
+  };
+
+  const handleSaveAutomationSettings = async () => {
+    if (!tenant?.id) return;
+    if (automationSettings.post_times.length === 0) {
+      toast.error('Adicione pelo menos 1 horário de publicação.');
+      return;
+    }
+    if (automationSettings.days_of_week.length === 0) {
+      toast.error('Selecione pelo menos 1 dia da semana.');
+      return;
+    }
+
+    setAutomationSaving(true);
+    try {
+      const headers = await buildAuthHeaders();
+      const res = await fetch('/api/v1/stories/settings', {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({
+          storeId: tenant.id,
+          enabled: automationSettings.enabled,
+          post_times: automationSettings.post_times,
+          days_of_week: automationSettings.days_of_week,
+          max_posts_per_day: automationSettings.max_posts_per_day,
+          caption_template: automationSettings.caption_template,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        toast.error(data?.error || 'Não foi possível salvar as configurações de automação.');
+        return;
+      }
+      if (data.settings) {
+        setAutomationSettings((prev) => ({ ...prev, ...data.settings }));
+      }
+      toast.success(
+        automationSettings.enabled
+          ? 'Automação de Status ativada e salva!'
+          : 'Configurações de automação salvas!'
+      );
+    } catch (err: any) {
+      toast.error(err?.message || 'Erro ao salvar automação.');
+    } finally {
+      setAutomationSaving(false);
+    }
+  };
+
+  const handleRunAutomationNow = async () => {
+    if (!tenant?.id) return;
+    setAutomationRunningNow(true);
+    try {
+      const headers = await buildAuthHeaders();
+      const res = await fetch('/api/v1/stories/automation/run-now', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ storeId: tenant.id }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        toast.error(data?.error || 'Não foi possível disparar a oferta automática.');
+        fetchWhatsAppStatus();
+        fetchStoryPosts();
+        return;
+      }
+      toast.success('Oferta automática publicada no Status do WhatsApp!');
+      fetchStoryPosts();
+    } catch (err: any) {
+      toast.error(err?.message || 'Erro ao disparar oferta automática.');
+    } finally {
+      setAutomationRunningNow(false);
+    }
+  };
+
+  const handleRetryPost = async (postId: string) => {
+    if (!tenant?.id) return;
+    setRetryingPostId(postId);
+    try {
+      const headers = await buildAuthHeaders();
+      const res = await fetch(`/api/v1/stories/posts/${encodeURIComponent(postId)}/retry`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ storeId: tenant.id }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        toast.error(data?.error || 'Falha ao publicar este Status.');
+        fetchWhatsAppStatus();
+        fetchStoryPosts();
+        return;
+      }
+      toast.success('Status publicado no WhatsApp com sucesso!');
+      fetchStoryPosts();
+    } catch (err: any) {
+      toast.error(err?.message || 'Erro ao reenviar publicação.');
+    } finally {
+      setRetryingPostId(null);
+    }
+  };
+
+  const handleDeletePost = async (postId: string) => {
+    if (!tenant?.id) return;
+    setDeletingPostId(postId);
+    try {
+      const headers = await buildAuthHeaders();
+      const res = await fetch(
+        `/api/v1/stories/posts/${encodeURIComponent(postId)}?storeId=${encodeURIComponent(tenant.id)}`,
+        { method: 'DELETE', headers }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        toast.error(data?.error || 'Não foi possível remover a publicação.');
+        return;
+      }
+      setStoryPosts((prev) => prev.filter((p) => p.id !== postId));
+      toast.success('Publicação removida.');
+    } catch (err: any) {
+      toast.error(err?.message || 'Erro ao excluir publicação.');
+    } finally {
+      setDeletingPostId(null);
+    }
+  };
+
+  const handleAddPostTime = () => {
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(newPostTime)) {
+      toast.error('Informe um horário válido no formato HH:MM.');
+      return;
+    }
+    setAutomationSettings((prev) => {
+      if (prev.post_times.includes(newPostTime)) return prev;
+      if (prev.post_times.length >= 10) {
+        toast.info('Máximo de 10 horários por dia.');
+        return prev;
+      }
+      return { ...prev, post_times: [...prev.post_times, newPostTime].sort() };
+    });
+  };
+
+  const handleRemovePostTime = (timeToRemove: string) => {
+    setAutomationSettings((prev) => ({
+      ...prev,
+      post_times: prev.post_times.filter((t) => t !== timeToRemove),
+    }));
+  };
+
+  const handleToggleWeekday = (dayVal: number) => {
+    setAutomationSettings((prev) => {
+      const exists = prev.days_of_week.includes(dayVal);
+      const next = exists
+        ? prev.days_of_week.filter((d) => d !== dayVal)
+        : [...prev.days_of_week, dayVal].sort((a, b) => a - b);
+      return { ...prev, days_of_week: next };
+    });
+  };
+
+  const sampleAutomationCaption = useMemo(() => {
+    const sampleProd = selectedProducts[0] || availableProducts[0];
+    const pricing = sampleProd ? resolveProductPricing(sampleProd, promotions) : null;
+    const sampleUrl = sampleProd
+      ? appendOriginParam(
+          `${getStoreUrl(tenant).replace(/\/+$/, '')}/produto/${encodeURIComponent(buildProductSlug(sampleProd))}`,
+          'story'
+        )
+      : offerShareUrl;
+    return (automationSettings.caption_template || DEFAULT_AUTOMATION_CAPTION)
+      .replace(/\{loja\}/gi, tenant?.name || 'Minha Farmácia')
+      .replace(/\{produto\}/gi, sampleProd?.name || 'Protetor Solar FPS 60')
+      .replace(/\{nome\}/gi, sampleProd?.name || 'Protetor Solar FPS 60')
+      .replace(/\{preco\}/gi, formatBRL(pricing?.finalPrice || 49.9))
+      .replace(/\{preco_antigo\}/gi, formatBRL(pricing?.originalPrice || 64.9))
+      .replace(/\{desconto\}/gi, pricing?.hasDiscount ? `${pricing.discountPercent}% OFF` : '20% OFF')
+      .replace(/\{link\}/gi, sampleUrl);
+  }, [automationSettings.caption_template, selectedProducts, availableProducts, promotions, tenant, offerShareUrl]);
+
+  const filteredStoryPosts = useMemo(() => {
+    if (historyFilter === 'all') return storyPosts;
+    return storyPosts.filter((p) => p.status === historyFilter);
+  }, [storyPosts, historyFilter]);
+
+  const scheduledCount = useMemo(
+    () => storyPosts.filter((p) => p.status === 'scheduled').length,
+    [storyPosts]
+  );
+
+  const isMobileDevice =
+    typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
   return (
     <div className="space-y-6 pb-12 animate-in fade-in duration-300">
       {/* Cabeçalho do Módulo */}
-      <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 border-b border-gray-200 pb-5">
-        <div>
-          <p className="text-xs font-semibold text-gray-500">
-            Divulgação · Instagram Stories e Status do WhatsApp · 1080×1920 (9:16)
-          </p>
-          <h1 className="text-2xl sm:text-3xl font-black tracking-tight text-gray-900 mt-1">
-            Gerador de Stories
-          </h1>
-          <p className="text-sm text-gray-600 mt-1 max-w-2xl">
-            Crie artes prontas com os produtos do seu estoque, identidade da farmácia e link direto para vender mais todos os dias.
-          </p>
+      <div className="flex flex-col gap-4 border-b border-gray-200 pb-5">
+        <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4">
+          <div>
+            <p className="text-xs font-semibold text-gray-500">
+              Divulgação · Status do WhatsApp (Evolution API) e Instagram Stories · 1080×1920 (9:16)
+            </p>
+            <h1 className="text-2xl sm:text-3xl font-black tracking-tight text-gray-900 mt-1">
+              Gerador de Stories &amp; Status Automático
+            </h1>
+            <p className="text-sm text-gray-600 mt-1 max-w-2xl">
+              Crie artes 9:16 com seu estoque, publique direto no Status do WhatsApp, agende ofertas automáticas e compartilhe no Instagram Stories.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2.5 self-start lg:self-auto">
+            {/* Indicador de Conexão do WhatsApp para Status */}
+            <div
+              className={`inline-flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-bold ${
+                whatsappStatus.loading
+                  ? 'bg-gray-50 border-gray-200 text-gray-600'
+                  : whatsappStatus.connected
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : 'bg-amber-50 border-amber-200 text-amber-800'
+              }`}
+              title={whatsappStatus.message}
+            >
+              {whatsappStatus.loading ? (
+                <Loader2 size={14} className="animate-spin shrink-0" />
+              ) : whatsappStatus.connected ? (
+                <CheckCircle2 size={14} className="text-emerald-600 shrink-0" />
+              ) : (
+                <AlertCircle size={14} className="text-amber-600 shrink-0" />
+              )}
+              <span className="whitespace-nowrap">
+                {whatsappStatus.loading
+                  ? 'Verificando WhatsApp...'
+                  : whatsappStatus.connected
+                  ? `WhatsApp conectado${whatsappStatus.instanceName ? ` (${whatsappStatus.instanceName})` : ''}`
+                  : 'WhatsApp desconectado'}
+              </span>
+              <button
+                type="button"
+                onClick={fetchWhatsAppStatus}
+                disabled={whatsappStatus.loading}
+                title="Atualizar status da conexão"
+                className="p-0.5 rounded hover:bg-black/5 transition-colors"
+              >
+                <RefreshCw size={12} className={whatsappStatus.loading ? 'animate-spin' : ''} />
+              </button>
+            </div>
+
+            {activeTab === 'studio' && (
+              <button
+                type="button"
+                onClick={handleResetTexts}
+                className="inline-flex items-center justify-center gap-2 px-3.5 py-2 text-xs font-bold text-gray-600 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 hover:text-gray-900 transition-colors whitespace-nowrap shrink-0"
+              >
+                <RotateCcw size={14} />
+                Restaurar Textos
+              </button>
+            )}
+          </div>
         </div>
 
-        <button
-          type="button"
-          onClick={handleResetTexts}
-          className="inline-flex items-center justify-center gap-2 px-4 py-2 text-xs font-bold text-gray-600 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 hover:text-gray-900 transition-colors whitespace-nowrap shrink-0 self-start sm:self-auto"
-        >
-          <RotateCcw size={14} />
-          Restaurar Textos
-        </button>
+        {/* Sub-navegação: Criar & Publicar | Automação de Status | Histórico & Agendados */}
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="inline-flex p-1 bg-gray-100 rounded-xl">
+            <button
+              type="button"
+              onClick={() => setActiveTab('studio')}
+              className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-bold transition-colors whitespace-nowrap ${
+                activeTab === 'studio'
+                  ? 'bg-white text-gray-900 shadow-xs'
+                  : 'text-gray-600 hover:text-gray-900'
+              }`}
+            >
+              <Smartphone size={14} />
+              Criar &amp; Publicar
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('automation')}
+              className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-bold transition-colors whitespace-nowrap ${
+                activeTab === 'automation'
+                  ? 'bg-white text-gray-900 shadow-xs'
+                  : 'text-gray-600 hover:text-gray-900'
+              }`}
+            >
+              <Sliders size={14} />
+              Status Automático
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  automationSettings.enabled ? 'bg-emerald-500' : 'bg-gray-300'
+                }`}
+              />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('history');
+                fetchStoryPosts();
+              }}
+              className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-bold transition-colors whitespace-nowrap ${
+                activeTab === 'history'
+                  ? 'bg-white text-gray-900 shadow-xs'
+                  : 'text-gray-600 hover:text-gray-900'
+              }`}
+            >
+              <History size={14} />
+              Histórico &amp; Agendados
+              {scheduledCount > 0 && (
+                <span className="px-1.5 py-0.5 text-[10px] font-black rounded-md bg-emerald-100 text-emerald-800 tabular-nums">
+                  {scheduledCount}
+                </span>
+              )}
+            </button>
+          </div>
+        </div>
       </div>
 
-      {/* Layout Principal: Controles (esquerda) + Preview Celular 9:16 (direita) */}
+      {/* ABA 1: CRIAR & PUBLICAR (Studio 9:16 existente + WhatsApp Status + Instagram Stories) */}
+      {activeTab === 'studio' && (
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
         {/* COLUNA ESQUERDA: Controles de Criação */}
         <div className="lg:col-span-7 space-y-6">
@@ -2096,73 +2821,205 @@ export const AdminStoryGenerator: React.FC<AdminStoryGeneratorProps> = ({
 
             {/* Botões de Ação */}
             <div className="w-full space-y-2.5 mt-5">
+              {/* Toggle opcional para incluir link da oferta na legenda do Status do WhatsApp */}
+              <label className="flex items-center gap-2 text-xs font-medium text-gray-600 px-1 pb-0.5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={includeLinkInStatus}
+                  onChange={(e) => setIncludeLinkInStatus(e.target.checked)}
+                  className="w-4 h-4 rounded border-gray-300 accent-emerald-600"
+                />
+                Incluir link direto da oferta na legenda do Status do WhatsApp
+              </label>
+
+              {/* Publicar Direto no Status do WhatsApp (Evolution API v2) */}
               <button
                 type="button"
-                onClick={handleDownloadPng}
-                disabled={isExporting || selectedProducts.length === 0}
-                className="w-full flex items-center justify-center gap-2 py-3.5 px-5 rounded-xl bg-gray-900 hover:bg-gray-800 disabled:opacity-50 text-white text-sm font-bold transition-all active:scale-[0.99] whitespace-nowrap"
+                onClick={handlePublishWhatsAppStatus}
+                disabled={isPublishingStatus || selectedProducts.length === 0}
+                className="w-full flex items-center justify-center gap-2 py-3.5 px-5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-sm font-bold transition-all active:scale-[0.99] whitespace-nowrap shadow-xs"
               >
-                {isExporting ? (
+                {isPublishingStatus ? (
                   <Loader2 size={18} className="animate-spin" />
                 ) : (
-                  <Download size={18} />
+                  <Send size={17} />
                 )}
-                Baixar Story (PNG Alta Qualidade)
+                {isPublishingStatus ? 'Publicando no Status...' : 'Publicar no Status do WhatsApp'}
               </button>
 
-              <div className="grid grid-cols-2 gap-2.5">
-                <button
-                  type="button"
-                  onClick={handleCopyLink}
-                  className="flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-white hover:bg-gray-50 text-gray-900 border border-gray-300 text-sm font-bold transition-all active:scale-[0.99] whitespace-nowrap"
-                >
-                  {copiedState === 'link' ? (
-                    <>
-                      <Check size={16} className="text-emerald-600 shrink-0" />
-                      <span className="text-emerald-700">Copiado!</span>
-                    </>
-                  ) : (
-                    <>
-                      <Link2 size={16} className="text-gray-500 shrink-0" />
-                      <span>Copiar Link</span>
-                    </>
-                  )}
-                </button>
+              {!whatsappStatus.loading && !whatsappStatus.connected && (
+                <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 leading-snug">
+                  <strong>WhatsApp desconectado:</strong> conecte o QR Code na aba WhatsApp/Chat antes de publicar no Status.
+                </p>
+              )}
 
-                <button
-                  type="button"
-                  onClick={handleCopyCaption}
-                  className="flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-white hover:bg-gray-50 text-gray-900 border border-gray-300 text-sm font-bold transition-all active:scale-[0.99] whitespace-nowrap"
-                >
-                  {copiedState === 'caption' ? (
-                    <>
-                      <Check size={16} className="text-emerald-600 shrink-0" />
-                      <span className="text-emerald-700">Copiada!</span>
-                    </>
-                  ) : (
-                    <>
-                      <Copy size={16} className="text-gray-500 shrink-0" />
-                      <span>Copiar Legenda</span>
-                    </>
-                  )}
-                </button>
-              </div>
+              {/* Agendar no Status do WhatsApp */}
+              <button
+                type="button"
+                onClick={() => setShowScheduleBox((v) => !v)}
+                disabled={selectedProducts.length === 0}
+                className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-emerald-50 hover:bg-emerald-100/80 disabled:opacity-50 text-emerald-900 border border-emerald-200 text-sm font-bold transition-all whitespace-nowrap"
+              >
+                <Calendar size={16} />
+                {showScheduleBox ? 'Fechar Agendamento' : 'Agendar no Status do WhatsApp'}
+              </button>
 
-              {canNativeShare && (
+              {showScheduleBox && (
+                <div className="p-3.5 rounded-xl bg-gray-50 border border-gray-200 space-y-3">
+                  <div className="space-y-1">
+                    <label
+                      htmlFor="story-schedule-datetime"
+                      className="block text-xs font-bold text-gray-700"
+                    >
+                      Data e horário da publicação automática
+                    </label>
+                    <input
+                      id="story-schedule-datetime"
+                      type="datetime-local"
+                      value={scheduleDateTime}
+                      onChange={(e) => setScheduleDateTime(e.target.value)}
+                      className="w-full px-3 py-2 text-sm bg-white border border-gray-300 rounded-lg focus:border-emerald-600 focus:outline-none"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleScheduleWhatsAppStatus}
+                    disabled={isSchedulingStatus}
+                    className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg bg-gray-900 hover:bg-gray-800 disabled:opacity-50 text-white text-xs font-bold transition-colors"
+                  >
+                    {isSchedulingStatus ? (
+                      <Loader2 size={14} className="animate-spin" />
+                    ) : (
+                      <Clock size={14} />
+                    )}
+                    {isSchedulingStatus ? 'Agendando...' : 'Confirmar Agendamento'}
+                  </button>
+                </div>
+              )}
+
+              {/* Atalho 1 Clique para Instagram Stories */}
+              <button
+                type="button"
+                onClick={handleInstagramStoryShortcut}
+                disabled={isRunningInstagramShortcut || selectedProducts.length === 0}
+                className="w-full flex items-center justify-center gap-2 py-3 px-5 rounded-xl bg-gradient-to-r from-fuchsia-600 via-pink-600 to-amber-500 hover:opacity-95 disabled:opacity-50 text-white text-sm font-bold transition-all active:scale-[0.99] whitespace-nowrap"
+              >
+                {isRunningInstagramShortcut ? (
+                  <Loader2 size={17} className="animate-spin" />
+                ) : (
+                  <Instagram size={17} />
+                )}
+                Atalho para Instagram Stories
+              </button>
+
+              {instagramReadyBanner && (
+                <div className="p-3 rounded-xl bg-pink-50 border border-pink-200 text-xs text-pink-950 space-y-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="font-bold">Arte baixada e link da oferta copiado!</p>
+                    <button
+                      type="button"
+                      onClick={() => setInstagramReadyBanner(false)}
+                      className="text-pink-600 hover:text-pink-900 p-0.5"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-pink-800 leading-relaxed">
+                    1. Abra o Instagram Stories e selecione a imagem salva.<br />
+                    2. Toque na figurinha <strong>Link</strong> e cole a URL já copiada.
+                  </p>
+                  <div className="flex items-center gap-2 pt-0.5">
+                    <a
+                      href={isMobileDevice ? 'instagram://story-camera' : 'https://www.instagram.com/'}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-pink-600 hover:bg-pink-700 text-white text-[11px] font-bold transition-colors"
+                    >
+                      <Instagram size={13} />
+                      Abrir Instagram
+                      <ExternalLink size={11} />
+                    </a>
+                    <button
+                      type="button"
+                      onClick={handleCopyLink}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white border border-pink-200 text-pink-900 text-[11px] font-bold hover:bg-pink-100/50"
+                    >
+                      <Link2 size={12} />
+                      Copiar Link de Novo
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="border-t border-gray-100 pt-2.5 space-y-2.5">
                 <button
                   type="button"
-                  onClick={handleNativeShare}
-                  disabled={isSharing || selectedProducts.length === 0}
-                  className="w-full flex items-center justify-center gap-2 py-3 px-5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-sm font-bold transition-all active:scale-[0.99] whitespace-nowrap"
+                  onClick={handleDownloadPng}
+                  disabled={isExporting || selectedProducts.length === 0}
+                  className="w-full flex items-center justify-center gap-2 py-3 px-5 rounded-xl bg-gray-900 hover:bg-gray-800 disabled:opacity-50 text-white text-sm font-bold transition-all active:scale-[0.99] whitespace-nowrap"
                 >
-                  {isSharing ? (
+                  {isExporting ? (
                     <Loader2 size={17} className="animate-spin" />
                   ) : (
-                    <Share2 size={17} />
+                    <Download size={17} />
                   )}
-                  Compartilhar Agora
+                  Baixar Story (PNG Alta Qualidade)
                 </button>
-              )}
+
+                <div className="grid grid-cols-2 gap-2.5">
+                  <button
+                    type="button"
+                    onClick={handleCopyLink}
+                    className="flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-white hover:bg-gray-50 text-gray-900 border border-gray-300 text-xs font-bold transition-all active:scale-[0.99] whitespace-nowrap"
+                  >
+                    {copiedState === 'link' ? (
+                      <>
+                        <Check size={15} className="text-emerald-600 shrink-0" />
+                        <span className="text-emerald-700">Copiado!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Link2 size={15} className="text-gray-500 shrink-0" />
+                        <span>Copiar Link</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleCopyCaption}
+                    className="flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-white hover:bg-gray-50 text-gray-900 border border-gray-300 text-xs font-bold transition-all active:scale-[0.99] whitespace-nowrap"
+                  >
+                    {copiedState === 'caption' ? (
+                      <>
+                        <Check size={15} className="text-emerald-600 shrink-0" />
+                        <span className="text-emerald-700">Copiada!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy size={15} className="text-gray-500 shrink-0" />
+                        <span>Copiar Legenda</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {canNativeShare && (
+                  <button
+                    type="button"
+                    onClick={handleNativeShare}
+                    disabled={isSharing || selectedProducts.length === 0}
+                    className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-gray-100 hover:bg-gray-200 disabled:opacity-50 text-gray-800 text-xs font-bold transition-all whitespace-nowrap"
+                  >
+                    {isSharing ? (
+                      <Loader2 size={15} className="animate-spin" />
+                    ) : (
+                      <Share2 size={15} />
+                    )}
+                    Compartilhar pelo Sistema
+                  </button>
+                )}
+              </div>
 
               <p className="text-[11px] text-gray-500 text-center leading-relaxed pt-1">
                 <MessageCircle size={12} className="inline mr-1 -mt-0.5 text-emerald-600" />
@@ -2172,6 +3029,416 @@ export const AdminStoryGenerator: React.FC<AdminStoryGeneratorProps> = ({
           </div>
         </div>
       </div>
+      )}
+
+      {/* ABA 2: AUTOMAÇÃO DIÁRIA DE STATUS NO WHATSAPP */}
+      {activeTab === 'automation' && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          <div className="lg:col-span-7 bg-white border border-gray-200 rounded-2xl p-5 sm:p-6 space-y-6">
+            <div className="flex items-start justify-between gap-4 border-b border-gray-100 pb-4">
+              <div>
+                <h2 className="text-base font-bold text-gray-900">
+                  Publicação Automática no Status do WhatsApp
+                </h2>
+                <p className="text-xs text-gray-500 mt-1">
+                  O sistema seleciona automaticamente ofertas em estoque com foto (priorizando promoções e evitando repetições recentes) e publica nos horários escolhidos.
+                </p>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                <input
+                  type="checkbox"
+                  checked={automationSettings.enabled}
+                  onChange={(e) =>
+                    setAutomationSettings((prev) => ({ ...prev, enabled: e.target.checked }))
+                  }
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-600" />
+              </label>
+            </div>
+
+            {automationLoading ? (
+              <div className="py-10 flex items-center justify-center gap-2 text-sm text-gray-500">
+                <Loader2 size={18} className="animate-spin" />
+                Carregando configurações...
+              </div>
+            ) : (
+              <div className="space-y-5">
+                {/* Horários Diários (Horário de Brasília) */}
+                <div className="space-y-2.5">
+                  <label className="block text-xs font-bold text-gray-700">
+                    Horários de disparo automático (Horário de Brasília)
+                  </label>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {automationSettings.post_times.map((t) => (
+                      <span
+                        key={t}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-100 border border-gray-200 text-xs font-bold text-gray-800 tabular-nums"
+                      >
+                        <Clock size={12} className="text-gray-500" />
+                        {t}
+                        <button
+                          type="button"
+                          onClick={() => handleRemovePostTime(t)}
+                          title="Remover horário"
+                          className="text-gray-400 hover:text-red-600 ml-0.5"
+                        >
+                          <X size={13} />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-2 pt-1">
+                    <input
+                      type="time"
+                      value={newPostTime}
+                      onChange={(e) => setNewPostTime(e.target.value)}
+                      className="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-gray-900 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleAddPostTime}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold transition-colors"
+                    >
+                      <Plus size={14} />
+                      Adicionar Horário
+                    </button>
+                  </div>
+                </div>
+
+                {/* Dias da Semana */}
+                <div className="space-y-2 border-t border-gray-100 pt-4">
+                  <label className="block text-xs font-bold text-gray-700">
+                    Dias da semana ativos
+                  </label>
+                  <div className="flex flex-wrap gap-2">
+                    {WEEKDAY_OPTIONS.map((day) => {
+                      const active = automationSettings.days_of_week.includes(day.value);
+                      return (
+                        <button
+                          key={day.value}
+                          type="button"
+                          onClick={() => handleToggleWeekday(day.value)}
+                          className={`px-3 py-2 rounded-xl text-xs font-bold border transition-colors ${
+                            active
+                              ? 'bg-emerald-600 text-white border-emerald-600'
+                              : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
+                          }`}
+                        >
+                          {day.short}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Limite máximo diário */}
+                <div className="space-y-2 border-t border-gray-100 pt-4">
+                  <div className="flex items-center justify-between">
+                    <label
+                      htmlFor="story-max-posts"
+                      className="text-xs font-bold text-gray-700"
+                    >
+                      Máximo de Status automáticos por dia
+                    </label>
+                    <span className="text-xs font-black text-gray-900 tabular-nums">
+                      {automationSettings.max_posts_per_day} / dia
+                    </span>
+                  </div>
+                  <input
+                    id="story-max-posts"
+                    type="range"
+                    min={1}
+                    max={10}
+                    value={automationSettings.max_posts_per_day}
+                    onChange={(e) =>
+                      setAutomationSettings((prev) => ({
+                        ...prev,
+                        max_posts_per_day: Number(e.target.value) || 1,
+                      }))
+                    }
+                    className="w-full accent-emerald-600"
+                  />
+                </div>
+
+                {/* Modelo de Legenda */}
+                <div className="space-y-2 border-t border-gray-100 pt-4">
+                  <label
+                    htmlFor="story-auto-caption-template"
+                    className="block text-xs font-bold text-gray-700"
+                  >
+                    Modelo de Legenda Automática
+                  </label>
+                  <textarea
+                    id="story-auto-caption-template"
+                    rows={3}
+                    maxLength={500}
+                    value={automationSettings.caption_template}
+                    onChange={(e) =>
+                      setAutomationSettings((prev) => ({
+                        ...prev,
+                        caption_template: e.target.value,
+                      }))
+                    }
+                    className="w-full px-3.5 py-2.5 text-sm text-gray-900 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-gray-900 focus:outline-none resize-none"
+                  />
+                  <div className="flex flex-wrap gap-1.5">
+                    {CAPTION_PLACEHOLDERS.map((ph) => (
+                      <button
+                        key={ph.token}
+                        type="button"
+                        onClick={() =>
+                          setAutomationSettings((prev) => ({
+                            ...prev,
+                            caption_template: `${prev.caption_template}${prev.caption_template.endsWith(' ') ? '' : ' '}${ph.token}`.slice(0, 500),
+                          }))
+                        }
+                        className="px-2.5 py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-[11px] font-bold text-gray-700 transition-colors"
+                      >
+                        + {ph.label} <span className="font-mono text-gray-500">{ph.token}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-gray-100">
+                  <button
+                    type="button"
+                    onClick={handleSaveAutomationSettings}
+                    disabled={automationSaving}
+                    className="inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-gray-900 hover:bg-gray-800 disabled:opacity-50 text-white text-sm font-bold transition-colors"
+                  >
+                    {automationSaving ? (
+                      <Loader2 size={16} className="animate-spin" />
+                    ) : (
+                      <Check size={16} />
+                    )}
+                    {automationSaving ? 'Salvando...' : 'Salvar Automação'}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleRunAutomationNow}
+                    disabled={automationRunningNow}
+                    className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-sm font-bold transition-colors"
+                  >
+                    {automationRunningNow ? (
+                      <Loader2 size={16} className="animate-spin" />
+                    ) : (
+                      <Play size={15} />
+                    )}
+                    {automationRunningNow ? 'Publicando...' : 'Testar Disparo Automático Agora'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Coluna Direita: Prévia da Legenda e Regras */}
+          <div className="lg:col-span-5 space-y-4">
+            <div className="bg-white border border-gray-200 rounded-2xl p-5 space-y-3">
+              <h3 className="text-sm font-bold text-gray-900">Prévia da legenda automática</h3>
+              <div className="p-3.5 rounded-xl bg-emerald-50/70 border border-emerald-200 text-xs text-gray-800 whitespace-pre-wrap leading-relaxed break-words">
+                {sampleAutomationCaption}
+              </div>
+              <p className="text-[11px] text-gray-500 leading-relaxed">
+                O link inclui automaticamente <code className="font-mono">?origem=story</code> para medir o retorno no painel de ROI.
+              </p>
+            </div>
+
+            <div className="bg-white border border-gray-200 rounded-2xl p-5 space-y-2.5 text-xs text-gray-600">
+              <h3 className="text-sm font-bold text-gray-900">Como a automação seleciona os produtos</h3>
+              <ul className="space-y-1.5 list-disc pl-4">
+                <li>Seleciona apenas produtos com <strong>estoque positivo</strong> e <strong>foto pública HTTPS</strong>.</li>
+                <li>Prioriza ofertas com desconto ativo e produtos em destaque na vitrine.</li>
+                <li>Evita repetir produtos já publicados nos últimos 7 dias.</li>
+                <li>Valida automaticamente se o WhatsApp está conectado (<code className="font-mono">state === open</code>) antes de cada envio.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ABA 3: HISTÓRICO & AGENDADOS */}
+      {activeTab === 'history' && (
+        <div className="bg-white border border-gray-200 rounded-2xl p-5 sm:p-6 space-y-5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-gray-100 pb-4">
+            <div>
+              <h2 className="text-base font-bold text-gray-900">
+                Histórico de Publicações &amp; Agendamentos
+              </h2>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Acompanhe tudo que foi publicado no Status do WhatsApp, agendado ou compartilhado no Instagram Stories.
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <div className="inline-flex p-1 bg-gray-100 rounded-xl">
+                {[
+                  { id: 'all', label: 'Todos' },
+                  { id: 'sent', label: 'Publicados' },
+                  { id: 'scheduled', label: 'Agendados' },
+                  { id: 'failed', label: 'Falhas' },
+                ].map((f) => (
+                  <button
+                    key={f.id}
+                    type="button"
+                    onClick={() => setHistoryFilter(f.id as any)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors whitespace-nowrap ${
+                      historyFilter === f.id
+                        ? 'bg-white text-gray-900 shadow-xs'
+                        : 'text-gray-600 hover:text-gray-900'
+                    }`}
+                  >
+                    {f.label}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={fetchStoryPosts}
+                disabled={postsLoading}
+                className="p-2 rounded-xl border border-gray-200 text-gray-600 hover:bg-gray-50"
+                title="Atualizar histórico"
+              >
+                <RefreshCw size={15} className={postsLoading ? 'animate-spin' : ''} />
+              </button>
+            </div>
+          </div>
+
+          {postsLoading && storyPosts.length === 0 ? (
+            <div className="py-12 flex items-center justify-center gap-2 text-sm text-gray-500">
+              <Loader2 size={18} className="animate-spin" />
+              Carregando histórico...
+            </div>
+          ) : filteredStoryPosts.length === 0 ? (
+            <div className="py-12 text-center space-y-2">
+              <p className="text-sm font-bold text-gray-700">Nenhuma publicação encontrada</p>
+              <p className="text-xs text-gray-500">
+                Publique ou agende seu primeiro Story na aba &ldquo;Criar &amp; Publicar&rdquo; ou ative o Status Automático.
+              </p>
+            </div>
+          ) : (
+            <div className="divide-y divide-gray-100 border border-gray-200 rounded-xl overflow-hidden">
+              {filteredStoryPosts.map((post) => {
+                const isInstagram = post.channel === 'instagram_story';
+                const statusBadge =
+                  post.status === 'sent'
+                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                    : post.status === 'scheduled'
+                    ? 'bg-sky-50 text-sky-700 border-sky-200'
+                    : post.status === 'processing'
+                    ? 'bg-amber-50 text-amber-700 border-amber-200'
+                    : 'bg-red-50 text-red-700 border-red-200';
+                const statusLabel =
+                  post.status === 'sent'
+                    ? 'Publicado'
+                    : post.status === 'scheduled'
+                    ? 'Agendado'
+                    : post.status === 'processing'
+                    ? 'Enviando...'
+                    : 'Falha';
+
+                return (
+                  <div
+                    key={post.id}
+                    className="flex flex-col sm:flex-row sm:items-center gap-4 p-4 bg-white hover:bg-gray-50/50 transition-colors"
+                  >
+                    <div className="w-14 h-20 rounded-xl bg-gray-100 border border-gray-200 overflow-hidden flex items-center justify-center shrink-0">
+                      {post.image_url && /^https?:\/\//i.test(post.image_url) ? (
+                        <img
+                          src={post.image_url}
+                          alt="Story"
+                          referrerPolicy="no-referrer"
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <ImageIcon size={18} className="text-gray-300" />
+                      )}
+                    </div>
+
+                    <div className="min-w-0 flex-1 space-y-1.5">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span
+                          className={`inline-flex items-center px-2 py-0.5 rounded-md border text-[11px] font-bold ${statusBadge}`}
+                        >
+                          {statusLabel}
+                        </span>
+                        <span className="inline-flex items-center gap-1 text-[11px] font-bold text-gray-600">
+                          {isInstagram ? (
+                            <>
+                              <Instagram size={12} className="text-pink-600" />
+                              Instagram Stories
+                            </>
+                          ) : (
+                            <>
+                              <MessageCircle size={12} className="text-emerald-600" />
+                              Status do WhatsApp
+                            </>
+                          )}
+                        </span>
+                        {post.source && (
+                          <span className="text-[11px] text-gray-400">
+                            · {post.source === 'automation' || post.source === 'automation_manual_test' ? 'Automático' : post.source === 'scheduled' ? 'Agendado' : 'Manual'}
+                          </span>
+                        )}
+                        <span className="text-[11px] text-gray-400 tabular-nums">
+                          · {post.status === 'scheduled'
+                            ? `Agendado para ${formatStoryDateTimeBR(post.scheduled_for)}`
+                            : formatStoryDateTimeBR(post.sent_at || post.created_at)}
+                        </span>
+                      </div>
+
+                      {post.caption && (
+                        <p className="text-xs text-gray-700 line-clamp-2 break-words">
+                          {post.caption}
+                        </p>
+                      )}
+
+                      {post.error_message && (
+                        <p className="text-xs font-medium text-red-700 bg-red-50 border border-red-100 rounded-lg px-2.5 py-1.5">
+                          {post.error_message}
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                      {!isInstagram && (post.status === 'failed' || post.status === 'scheduled') && post.image_url && (
+                        <button
+                          type="button"
+                          onClick={() => handleRetryPost(post.id)}
+                          disabled={retryingPostId === post.id}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-bold transition-colors whitespace-nowrap"
+                        >
+                          {retryingPostId === post.id ? (
+                            <Loader2 size={13} className="animate-spin" />
+                          ) : (
+                            <Send size={13} />
+                          )}
+                          {post.status === 'scheduled' ? 'Publicar Agora' : 'Tentar Novamente'}
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleDeletePost(post.id)}
+                        disabled={deletingPostId === post.id}
+                        title="Excluir registro"
+                        className="p-2 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                      >
+                        {deletingPostId === post.id ? (
+                          <Loader2 size={14} className="animate-spin" />
+                        ) : (
+                          <Trash2 size={14} />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 };
