@@ -12582,25 +12582,70 @@ const requireChatEnabled = async (req: any, res: any, next: any) => {
 // --- EVOLUTION API WHATSAPP INSTANCE ENDPOINTS ---
 
 const DEFAULT_EVOLUTION_URL = 'https://evolution.nexoia.online';
+const DEFAULT_CHAT_WEBHOOK_URL = 'https://farmaflow.online/api/v1/chat/webhook';
+const EVOLUTION_WEBHOOK_EVENTS = [
+  'QRCODE_UPDATED',
+  'CONNECTION_UPDATE',
+  'MESSAGES_UPSERT',
+  'MESSAGES_UPDATE',
+  'SEND_MESSAGE',
+];
 
 function normalizeEvolutionUrl(url?: string): string {
   if (!url) return DEFAULT_EVOLUTION_URL;
-  let cleaned = url.trim();
+  let cleaned = String(url).trim();
   if (!cleaned) return DEFAULT_EVOLUTION_URL;
-  
+
   if (!/^https?:\/\//i.test(cleaned)) {
     cleaned = `https://${cleaned}`;
   }
-  
+
   try {
     const parsed = new URL(cleaned);
     const protocol = parsed.protocol.toLowerCase();
     const host = parsed.host.toLowerCase();
-    const pathname = parsed.pathname.replace(/\/+$/, '');
+    const pathname = parsed.pathname
+      .replace(/\/manager(?:\/.*)?$/i, '')
+      .replace(/\/+$/, '');
     return `${protocol}//${host}${pathname}`;
   } catch (e) {
-    return cleaned.replace(/\/+$/, '');
+    return cleaned
+      .replace(/[?#].*$/, '')
+      .replace(/\/manager(?:\/.*)?$/i, '')
+      .replace(/\/+$/, '');
   }
+}
+
+function resolveChatWebhookUrl(req: express.Request): string {
+  const envUrl = String(process.env.CHAT_WEBHOOK_URL || '').trim();
+  if (envUrl && /^https?:\/\//i.test(envUrl)) {
+    return envUrl.replace(/\/+$/, '');
+  }
+
+  const rawHost = String(
+    req.headers['x-forwarded-host'] || req.headers.host || ''
+  )
+    .split(',')[0]
+    .trim()
+    .toLowerCase();
+  const hostWithoutPort = rawHost.split(':')[0];
+
+  if (
+    !hostWithoutPort ||
+    hostWithoutPort === 'localhost' ||
+    hostWithoutPort === '127.0.0.1' ||
+    hostWithoutPort === 'farmaflow.online' ||
+    hostWithoutPort === 'www.farmaflow.online' ||
+    hostWithoutPort.endsWith('.farmaflow.online')
+  ) {
+    return DEFAULT_CHAT_WEBHOOK_URL;
+  }
+
+  const proto = String(req.headers['x-forwarded-proto'] || 'https')
+    .split(',')[0]
+    .trim()
+    .toLowerCase();
+  return `${proto === 'http' ? 'http' : 'https'}://${rawHost}/api/v1/chat/webhook`;
 }
 
 async function safeEvolutionRequest(
@@ -12652,6 +12697,155 @@ async function safeEvolutionRequest(
       error: errMsg
     };
   }
+}
+
+interface EvolutionWebhookRegistrationResult {
+  ok: boolean;
+  status: number;
+  formatUsed?: string;
+  webhookUrl: string;
+  events: string[];
+  error?: string;
+  response?: any;
+  attempts: Array<{ format: string; status: number; detail?: any }>;
+}
+
+async function registerEvolutionWebhook(params: {
+  evolutionUrl: string;
+  evolutionKey: string;
+  instanceName: string;
+  webhookUrl: string;
+}): Promise<EvolutionWebhookRegistrationResult> {
+  const cleanUrl = normalizeEvolutionUrl(params.evolutionUrl);
+  const cleanKey = String(params.evolutionKey || '').trim();
+  const cleanInstance = String(params.instanceName || '').trim();
+  const targetWebhookUrl = String(params.webhookUrl || DEFAULT_CHAT_WEBHOOK_URL).trim();
+
+  const headers = {
+    'Content-Type': 'application/json',
+    apikey: cleanKey,
+    apiKey: cleanKey,
+    Authorization: `Bearer ${cleanKey}`,
+  };
+
+  const endpoint = `${cleanUrl}/webhook/set/${encodeURIComponent(cleanInstance)}`;
+
+  // Sequência de compatibilidade Evolution API:
+  // 1º) v2.2+  2º) v2.0/v2.1  3º) v1 (plano)
+  const payloads: Array<{ format: string; body: Record<string, any> }> = [
+    {
+      format: 'Evolution v2.2+',
+      body: {
+        webhook: {
+          enabled: true,
+          url: targetWebhookUrl,
+          byEvents: false,
+          base64: true,
+          events: EVOLUTION_WEBHOOK_EVENTS,
+        },
+      },
+    },
+    {
+      format: 'Evolution v2.0/v2.1',
+      body: {
+        webhook: {
+          enabled: true,
+          url: targetWebhookUrl,
+          webhookByEvents: false,
+          webhookBase64: true,
+          events: EVOLUTION_WEBHOOK_EVENTS,
+        },
+      },
+    },
+    {
+      format: 'Evolution v1',
+      body: {
+        enabled: true,
+        url: targetWebhookUrl,
+        webhook_by_events: false,
+        webhook_base64: true,
+        events: EVOLUTION_WEBHOOK_EVENTS,
+      },
+    },
+  ];
+
+  const attempts: Array<{ format: string; status: number; detail?: any }> = [];
+  let lastStatus = 0;
+  let lastResponse: any = null;
+  let lastErrorMsg = '';
+
+  for (const attempt of payloads) {
+    const res = await safeEvolutionRequest(
+      endpoint,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(attempt.body),
+      },
+      8000
+    );
+
+    const detail = res.data ?? (res.rawText || res.error || null);
+    attempts.push({ format: attempt.format, status: res.status, detail });
+    lastStatus = res.status;
+    lastResponse = detail;
+
+    if (res.ok) {
+      console.log(
+        `[Evolution Webhook] Webhook registrado com sucesso em "${cleanInstance}" via ${attempt.format} (HTTP ${res.status}) -> ${targetWebhookUrl}`
+      );
+      return {
+        ok: true,
+        status: res.status,
+        formatUsed: attempt.format,
+        webhookUrl: targetWebhookUrl,
+        events: EVOLUTION_WEBHOOK_EVENTS,
+        response: detail,
+        attempts,
+      };
+    }
+
+    const detailString =
+      typeof detail === 'string'
+        ? detail
+        : JSON.stringify(detail || res.error || 'Sem corpo de resposta');
+
+    lastErrorMsg =
+      res.error ||
+      (typeof res.data?.message === 'string'
+        ? res.data.message
+        : Array.isArray(res.data?.response?.message)
+          ? res.data.response.message.join('; ')
+          : typeof res.data?.response?.message === 'string'
+            ? res.data.response.message
+            : typeof res.data?.error === 'string'
+              ? res.data.error
+              : detailString);
+
+    console.warn(
+      `[Evolution Webhook] Falha ao registrar webhook em "${cleanInstance}" (${attempt.format}, HTTP ${res.status}): ${detailString}`
+    );
+
+    // Só avança para o próximo formato de compatibilidade em erro de validação/payload (400 ou 422)
+    if (res.status !== 400 && res.status !== 422) {
+      break;
+    }
+  }
+
+  console.error(
+    `[Evolution Webhook] Registro de webhook FALHOU para "${cleanInstance}" em ${endpoint} (HTTP ${lastStatus}):`,
+    JSON.stringify(lastResponse || lastErrorMsg)
+  );
+
+  return {
+    ok: false,
+    status: lastStatus || 500,
+    webhookUrl: targetWebhookUrl,
+    events: EVOLUTION_WEBHOOK_EVENTS,
+    error: `HTTP ${lastStatus || 500}: ${lastErrorMsg || 'Falha ao registrar webhook na Evolution API.'}`,
+    response: lastResponse,
+    attempts,
+  };
 }
 
 async function resolveEvolutionConfig(tenantId: string, inboxId?: string, override?: any) {
@@ -13052,13 +13246,13 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
       });
     }
 
-    const hostOrigin = req.headers.origin || `https://${req.headers.host}`;
-    const webhookUrl = `${hostOrigin}/api/v1/chat/webhook?instance=${encodeURIComponent(instanceName)}&tenantId=${encodeURIComponent(tenantId)}`;
+    const webhookUrl = resolveChatWebhookUrl(req);
 
     let base64: string | null = null;
     let isEvolutionLive = false;
     let isConnected = false;
     let phoneNumber: string | null = null;
+    let webhookResult: EvolutionWebhookRegistrationResult | null = null;
 
     try {
       const evoHeaders = {
@@ -13068,11 +13262,51 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
         "Authorization": `Bearer ${evolutionKey}`
       };
 
-      const createPayload = {
+      const createPayloadV2 = {
+        instanceName: instanceName,
+        token: instanceName,
+        qrcode: true,
+        integration: "WHATSAPP-BAILEYS",
+        webhook: {
+          url: webhookUrl,
+          byEvents: false,
+          base64: true,
+          events: EVOLUTION_WEBHOOK_EVENTS
+        }
+      };
+
+      const createPayloadMinimal = {
         instanceName: instanceName,
         token: instanceName,
         qrcode: true,
         integration: "WHATSAPP-BAILEYS"
+      };
+
+      const createInstanceCompat = async () => {
+        let resCreate = await safeEvolutionRequest(`${evolutionUrl}/instance/create`, {
+          method: "POST",
+          headers: evoHeaders,
+          body: JSON.stringify(createPayloadV2)
+        }, 9000);
+
+        if (!resCreate.ok && (resCreate.status === 400 || resCreate.status === 422)) {
+          const errTxt = JSON.stringify(resCreate.data || '').toLowerCase();
+          const isAlreadyExists =
+            errTxt.includes('already exist') ||
+            errTxt.includes('já existe') ||
+            errTxt.includes('in use');
+          if (!isAlreadyExists) {
+            console.warn(
+              `[Evolution API] /instance/create com bloco webhook retornou HTTP ${resCreate.status} (${errTxt}). Tentando payload mínimo e configurando via /webhook/set...`
+            );
+            resCreate = await safeEvolutionRequest(`${evolutionUrl}/instance/create`, {
+              method: "POST",
+              headers: evoHeaders,
+              body: JSON.stringify(createPayloadMinimal)
+            }, 9000);
+          }
+        }
+        return resCreate;
       };
 
       // Se solicitado recriação forçada, apaga a instância anterior da Evolution API primeiro
@@ -13119,11 +13353,7 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
 
         // Se ainda não temos QR Code ou foi forçado, cria a instância via POST /instance/create
         if (!base64 && !isConnected) {
-          let createRes = await safeEvolutionRequest(`${evolutionUrl}/instance/create`, {
-            method: "POST",
-            headers: evoHeaders,
-            body: JSON.stringify(createPayload)
-          }, 9000);
+          let createRes = await createInstanceCompat();
 
           // Se a instância já existia na Evolution mas estava sem QR Code ativo, deleta e recria do zero
           if (!createRes.ok && (createRes.status === 403 || createRes.status === 400)) {
@@ -13136,11 +13366,7 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
               }, 5000).catch(() => {});
               await new Promise(r => setTimeout(r, 800));
 
-              createRes = await safeEvolutionRequest(`${evolutionUrl}/instance/create`, {
-                method: "POST",
-                headers: evoHeaders,
-                body: JSON.stringify(createPayload)
-              }, 9000);
+              createRes = await createInstanceCompat();
             }
           }
 
@@ -13184,26 +13410,16 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
             }
           }
         }
+      }
 
-        // 3. Configurar Webhook automaticamente na Evolution API para receber mensagens e conexão em tempo real
-        safeEvolutionRequest(`${evolutionUrl}/webhook/set/${instanceName}`, {
-          method: "POST",
-          headers: evoHeaders,
-          body: JSON.stringify({
-            enabled: true,
-            url: webhookUrl,
-            webhookByEvents: true,
-            webhook_by_events: true,
-            events: [
-              "MESSAGES_UPSERT",
-              "MESSAGES_UPDATE",
-              "SEND_MESSAGE",
-              "CONNECTION_UPDATE",
-              "QRCODE_UPDATED",
-              "CONTACTS_SET"
-            ]
-          })
-        }, 3000).catch(() => {});
+      // 3. Reforça o registro do Webhook na Evolution API (compatível com v2.2+, v2.0/v2.1 e v1)
+      if (isConnected || base64 || isEvolutionLive) {
+        webhookResult = await registerEvolutionWebhook({
+          evolutionUrl,
+          evolutionKey,
+          instanceName,
+          webhookUrl,
+        });
       }
 
     } catch (evolutionError: any) {
@@ -13217,7 +13433,8 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
       return res.status(400).json({
         error: "A Evolution API não retornou a imagem do QR Code. Verifique se a URL e a Chave API estão corretas na aba Configurações.",
         instanceName,
-        evolutionUrl
+        evolutionUrl,
+        webhook: webhookResult
       });
     }
 
@@ -13278,7 +13495,8 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
         phone_number: phoneNumber,
         instanceName,
         evolutionUrl,
-        isEvolutionLive: true
+        isEvolutionLive: true,
+        webhook: webhookResult
       });
     }
 
@@ -13288,7 +13506,8 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
       qrcodeBase64: base64,
       isEvolutionLive: true,
       instanceName,
-      evolutionUrl
+      evolutionUrl,
+      webhook: webhookResult
     });
 
   } catch (error: any) {
@@ -13437,28 +13656,56 @@ app.post("/api/v1/chat/instance/recreate", requireChatEnabled, async (req, res) 
       return res.status(400).json({ error: "Configurações da Evolution API incompletas." });
     }
 
+    const webhookUrl = resolveChatWebhookUrl(req);
+    const evoHeaders = {
+      "Content-Type": "application/json",
+      "apikey": evolutionKey,
+      "apiKey": evolutionKey,
+      "Authorization": `Bearer ${evolutionKey}`
+    };
+
     // 1. Deleta instância existente na Evolution
     console.log(`[Evolution API] Recriando instância do zero: ${instanceName}`);
     await safeEvolutionRequest(`${evolutionUrl}/instance/delete/${instanceName}`, {
       method: "DELETE",
-      headers: { "apikey": evolutionKey }
+      headers: evoHeaders
     }, 6000).catch(() => {});
 
     await new Promise(r => setTimeout(r, 1000));
 
-    // 2. Cria nova instância
-    const createRes = await safeEvolutionRequest(`${evolutionUrl}/instance/create`, {
+    // 2. Cria nova instância já enviando bloco webhook no padrão Evolution v2 (com fallback mínimo para v1)
+    let createRes = await safeEvolutionRequest(`${evolutionUrl}/instance/create`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "apikey": evolutionKey
-      },
+      headers: evoHeaders,
       body: JSON.stringify({
         instanceName,
+        token: instanceName,
         qrcode: true,
-        integration: "WHATSAPP-BAILEYS"
+        integration: "WHATSAPP-BAILEYS",
+        webhook: {
+          url: webhookUrl,
+          byEvents: false,
+          base64: true,
+          events: EVOLUTION_WEBHOOK_EVENTS
+        }
       })
     }, 10000);
+
+    if (!createRes.ok && (createRes.status === 400 || createRes.status === 422)) {
+      console.warn(
+        `[Evolution API] /instance/create (recreate) com bloco webhook retornou HTTP ${createRes.status}. Tentando payload mínimo...`
+      );
+      createRes = await safeEvolutionRequest(`${evolutionUrl}/instance/create`, {
+        method: "POST",
+        headers: evoHeaders,
+        body: JSON.stringify({
+          instanceName,
+          token: instanceName,
+          qrcode: true,
+          integration: "WHATSAPP-BAILEYS"
+        })
+      }, 10000);
+    }
 
     let base64 = createRes.ok && createRes.data ? await extractEvolutionQrCode(createRes.data) : null;
 
@@ -13467,7 +13714,7 @@ app.post("/api/v1/chat/instance/recreate", requireChatEnabled, async (req, res) 
       for (let i = 0; i < 6; i++) {
         await new Promise(r => setTimeout(r, 1200));
         const cRes = await safeEvolutionRequest(`${evolutionUrl}/instance/connect/${instanceName}`, {
-          headers: { "apikey": evolutionKey }
+          headers: evoHeaders
         }, 4000);
         if (cRes.ok && cRes.data) {
           const qr = await extractEvolutionQrCode(cRes.data);
@@ -13479,27 +13726,13 @@ app.post("/api/v1/chat/instance/recreate", requireChatEnabled, async (req, res) 
       }
     }
 
-    // 4. Configura webhook
-    const hostOrigin = req.headers.origin || `https://${req.headers.host}`;
-    const webhookUrl = `${hostOrigin}/api/v1/chat/webhook?instance=${encodeURIComponent(instanceName)}&tenantId=${encodeURIComponent(tenantId)}`;
-    safeEvolutionRequest(`${evolutionUrl}/webhook/set/${instanceName}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "apikey": evolutionKey },
-      body: JSON.stringify({
-        enabled: true,
-        url: webhookUrl,
-        webhookByEvents: true,
-        webhook_by_events: true,
-        events: [
-          "MESSAGES_UPSERT",
-          "MESSAGES_UPDATE",
-          "SEND_MESSAGE",
-          "CONNECTION_UPDATE",
-          "QRCODE_UPDATED",
-          "CONTACTS_SET"
-        ]
-      })
-    }, 3000).catch(() => {});
+    // 4. Reforça configuração do webhook via /webhook/set (v2.2+ -> v2.0/v2.1 -> v1) com diagnóstico completo
+    const webhookResult = await registerEvolutionWebhook({
+      evolutionUrl,
+      evolutionKey,
+      instanceName,
+      webhookUrl,
+    });
 
     // 5. Atualiza no banco
     try {
@@ -13526,10 +13759,64 @@ app.post("/api/v1/chat/instance/recreate", requireChatEnabled, async (req, res) 
       status: 'QRCODE',
       qrcodeBase64: base64,
       instanceName,
-      evolutionUrl
+      evolutionUrl,
+      webhook: webhookResult
     });
   } catch (err: any) {
     return res.status(500).json({ error: err.message || "Erro ao recriar instância" });
+  }
+});
+
+app.post("/api/v1/chat/instance/configure-webhook", requireChatEnabled, async (req, res) => {
+  try {
+    const tenantId = (req as any).tenantId || req.body.tenantId || (req.headers["x-tenant-id"] as string);
+    const inboxId = req.body.inboxId;
+    if (!tenantId) {
+      return res.status(400).json({ ok: false, error: "Tenant ID é obrigatório." });
+    }
+
+    const { evolutionUrl, evolutionKey, instanceName } = await resolveEvolutionConfig(
+      tenantId,
+      inboxId,
+      req.body
+    );
+
+    if (!evolutionUrl || !evolutionKey) {
+      return res.status(400).json({
+        ok: false,
+        error: "Configure a URL e a Chave Global (AUTHENTICATION_API_KEY) da Evolution API antes de reconfigurar o webhook.",
+        evolutionUrl,
+        instanceName,
+      });
+    }
+
+    const webhookUrl = resolveChatWebhookUrl(req);
+    const webhookResult = await registerEvolutionWebhook({
+      evolutionUrl,
+      evolutionKey,
+      instanceName,
+      webhookUrl,
+    });
+
+    return res.status(200).json({
+      ok: webhookResult.ok,
+      success: webhookResult.ok,
+      instanceName,
+      evolutionUrl,
+      webhook: webhookResult,
+      message: webhookResult.ok
+        ? `Webhook registrado com sucesso em "${instanceName}" (${webhookResult.formatUsed} · HTTP ${webhookResult.status}).`
+        : undefined,
+      error: webhookResult.ok
+        ? undefined
+        : `Falha ao registrar webhook em "${instanceName}": ${webhookResult.error}`,
+    });
+  } catch (err: any) {
+    console.error("[Evolution Webhook Reconfigure Error]:", err);
+    return res.status(500).json({
+      ok: false,
+      error: err.message || "Erro interno ao reconfigurar webhook na Evolution API.",
+    });
   }
 });
 

@@ -13,6 +13,26 @@ interface WhatsAppConnectModalProps {
   inboxName?: string;
 }
 
+const DEFAULT_EVOLUTION_API_URL = 'https://evolution.nexoia.online';
+
+function sanitizeEvolutionUrl(rawUrl?: string | null): string {
+  const trimmed = String(rawUrl || '').trim();
+  if (!trimmed) return DEFAULT_EVOLUTION_API_URL;
+  const withProto = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  try {
+    const parsed = new URL(withProto);
+    const cleanPath = parsed.pathname
+      .replace(/\/manager(?:\/.*)?$/i, '')
+      .replace(/\/+$/, '');
+    return `${parsed.protocol.toLowerCase()}//${parsed.host.toLowerCase()}${cleanPath}`;
+  } catch {
+    return withProto
+      .replace(/[?#].*$/, '')
+      .replace(/\/manager(?:\/.*)?$/i, '')
+      .replace(/\/+$/, '');
+  }
+}
+
 async function safeFetchJson(url: string, options?: RequestInit): Promise<{ ok: boolean; status: number; data: any; error?: string }> {
   try {
     const res = await fetch(url, options);
@@ -65,10 +85,11 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
   const [showKey, setShowKey] = useState(false);
 
   // Configurações da Evolution API
-  const DEFAULT_EVOLUTION_URL = 'https://evolution.nexoia.online';
+  const DEFAULT_EVOLUTION_URL = DEFAULT_EVOLUTION_API_URL;
   const [evolutionUrl, setEvolutionUrl] = useState(() => {
     if (typeof window !== 'undefined') {
-      return localStorage.getItem(`farmaflow_evo_url_${tenantId}`) || DEFAULT_EVOLUTION_URL;
+      const stored = localStorage.getItem(`farmaflow_evo_url_${tenantId}`);
+      return stored ? sanitizeEvolutionUrl(stored) : DEFAULT_EVOLUTION_URL;
     }
     return DEFAULT_EVOLUTION_URL;
   });
@@ -83,6 +104,11 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string; instancesCount?: number } | null>(null);
   const [copiedWebhook, setCopiedWebhook] = useState(false);
+  const [isConfiguringWebhook, setIsConfiguringWebhook] = useState(false);
+  const [webhookStatus, setWebhookStatus] = useState<{
+    ok: boolean;
+    message: string;
+  } | null>(null);
 
   const cleanStoreName = (tenantId || "principal")
     .replace(/^store_/, '')
@@ -94,15 +120,30 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     ? `inbox_${inboxId.replace(/^inbox_/, '').replace(/[^a-zA-Z0-9]/g, "").toLowerCase()}`
     : (cleanStoreName ? `store_${cleanStoreName}` : 'store_principal');
 
-  const currentWebhookUrl = typeof window !== 'undefined' 
-    ? `${window.location.origin}/api/v1/chat/webhook`
-    : 'https://farmaflow.online/api/v1/chat/webhook';
+  const currentWebhookUrl = (() => {
+    if (typeof window === 'undefined') {
+      return 'https://farmaflow.online/api/v1/chat/webhook';
+    }
+    const host = (window.location.hostname || '').toLowerCase();
+    if (
+      !host ||
+      host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host === 'farmaflow.online' ||
+      host === 'www.farmaflow.online' ||
+      host.endsWith('.farmaflow.online')
+    ) {
+      return 'https://farmaflow.online/api/v1/chat/webhook';
+    }
+    return `${window.location.origin}/api/v1/chat/webhook`;
+  })();
 
   useEffect(() => {
     if (isOpen) {
       setErrorMessage(null);
       setSuccessMessage(null);
       setTestResult(null);
+      setWebhookStatus(null);
       setInstanceName(defaultInstanceName);
       fetchInstanceStatus(true);
     } else {
@@ -156,8 +197,9 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
         // Só atualiza os campos de input se for na carga inicial ou se o usuário não estiver na aba de ajustes
         if (isInit || activeTab !== 'settings') {
           if (data.evolutionUrl) {
-            setEvolutionUrl(data.evolutionUrl);
-            localStorage.setItem(`farmaflow_evo_url_${tenantId}`, data.evolutionUrl);
+            const cleanEvoUrl = sanitizeEvolutionUrl(data.evolutionUrl);
+            setEvolutionUrl(cleanEvoUrl);
+            localStorage.setItem(`farmaflow_evo_url_${tenantId}`, cleanEvoUrl);
           }
           if (data.evolutionKey) {
             setEvolutionKey(data.evolutionKey);
@@ -181,6 +223,11 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     setTestResult(null);
     setErrorMessage(null);
     try {
+      const cleanedUrl = sanitizeEvolutionUrl(evolutionUrl);
+      if (cleanedUrl !== evolutionUrl) {
+        setEvolutionUrl(cleanedUrl);
+      }
+
       const { ok, data, error } = await safeFetchJson('/api/v1/chat/instance/test-evolution', {
         method: 'POST',
         headers: {
@@ -191,7 +238,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
         body: JSON.stringify({
           tenantId,
           inboxId,
-          evolutionUrl: evolutionUrl.trim(),
+          evolutionUrl: cleanedUrl,
           evolutionKey: evolutionKey.trim(),
           instanceName: (instanceName || defaultInstanceName).trim()
         })
@@ -223,7 +270,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     setErrorMessage(null);
     setSuccessMessage(null);
     try {
-      const trimmedUrl = evolutionUrl.trim() || DEFAULT_EVOLUTION_URL;
+      const trimmedUrl = sanitizeEvolutionUrl(evolutionUrl);
       const trimmedKey = evolutionKey.trim();
       const trimmedInstance = (instanceName || defaultInstanceName).trim();
 
@@ -244,7 +291,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
       });
 
       if (ok && data?.success) {
-        const savedUrl = data.evolutionUrl || trimmedUrl;
+        const savedUrl = sanitizeEvolutionUrl(data.evolutionUrl || trimmedUrl);
         setEvolutionUrl(savedUrl);
         localStorage.setItem(`farmaflow_evo_url_${tenantId}`, savedUrl);
         if (trimmedKey) {
@@ -263,6 +310,78 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     }
   };
 
+  const applyWebhookDiagnostic = (webhookData: any) => {
+    if (!webhookData) return;
+    if (webhookData.ok) {
+      setWebhookStatus({
+        ok: true,
+        message: `Webhook registrado automaticamente (${webhookData.formatUsed || 'Evolution'} · HTTP ${webhookData.status || 200}).`,
+      });
+    } else {
+      const detail = webhookData.error || `Erro HTTP ${webhookData.status || 500} ao registrar webhook na Evolution.`;
+      setWebhookStatus({
+        ok: false,
+        message: `Falha no registro automático do webhook: ${detail}`,
+      });
+      setErrorMessage(`Atenção: o webhook não foi registrado automaticamente na Evolution (${detail}). Use "Reconfigurar Webhook" em Configurações.`);
+    }
+  };
+
+  const handleReconfigureWebhook = async () => {
+    if (!tenantId || tenantId === 'undefined') return;
+    setIsConfiguringWebhook(true);
+    setWebhookStatus(null);
+    setErrorMessage(null);
+    try {
+      const cleanedUrl = sanitizeEvolutionUrl(evolutionUrl);
+      if (cleanedUrl !== evolutionUrl) {
+        setEvolutionUrl(cleanedUrl);
+      }
+
+      const { ok, data, error } = await safeFetchJson('/api/v1/chat/instance/configure-webhook', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-tenant-id': tenantId,
+          'Authorization': `Bearer ${localStorage.getItem('farmaflow_admin_token') || ''}`
+        },
+        body: JSON.stringify({
+          tenantId,
+          inboxId,
+          evolutionUrl: cleanedUrl,
+          evolutionKey: evolutionKey.trim(),
+          instanceName: (instanceName || defaultInstanceName).trim()
+        })
+      });
+
+      if (ok && data?.ok) {
+        setWebhookStatus({
+          ok: true,
+          message:
+            data.message ||
+            `Webhook registrado com sucesso (${data.webhook?.formatUsed || 'Evolution'} · HTTP ${data.webhook?.status || 200}).`,
+        });
+      } else {
+        const detail =
+          data?.error ||
+          data?.webhook?.error ||
+          error ||
+          'Não foi possível registrar o webhook na Evolution API.';
+        setWebhookStatus({
+          ok: false,
+          message: detail,
+        });
+      }
+    } catch (err: any) {
+      setWebhookStatus({
+        ok: false,
+        message: err?.message || 'Erro de conexão ao reconfigurar o webhook na Evolution API.',
+      });
+    } finally {
+      setIsConfiguringWebhook(false);
+    }
+  };
+
   const handleGenerateQRCode = async () => {
     if (!tenantId || tenantId === 'undefined' || tenantId === '') {
       setErrorMessage("Identificador da loja não encontrado.");
@@ -278,7 +397,14 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     setIsLoading(true);
     setErrorMessage(null);
     setSuccessMessage(null);
+    setWebhookStatus(null);
     try {
+      const cleanedUrl = sanitizeEvolutionUrl(evolutionUrl);
+      if (cleanedUrl !== evolutionUrl) {
+        setEvolutionUrl(cleanedUrl);
+        localStorage.setItem(`farmaflow_evo_url_${tenantId}`, cleanedUrl);
+      }
+
       const { ok, data, error } = await safeFetchJson('/api/v1/chat/instance/create', {
         method: 'POST',
         headers: {
@@ -289,13 +415,19 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
         body: JSON.stringify({ 
           tenantId, 
           inboxId,
-          evolutionUrl: evolutionUrl.trim(),
+          evolutionUrl: cleanedUrl,
           evolutionKey: evolutionKey.trim(),
           instanceName: (instanceName || defaultInstanceName).trim()
         })
       });
 
       if (ok && data) {
+        if (data.evolutionUrl) {
+          const serverCleanUrl = sanitizeEvolutionUrl(data.evolutionUrl);
+          setEvolutionUrl(serverCleanUrl);
+          localStorage.setItem(`farmaflow_evo_url_${tenantId}`, serverCleanUrl);
+        }
+
         if (data.status === 'CONNECTED') {
           setStatus('CONNECTED');
           setPhoneNumber(data.phoneNumber || data.phone_number || null);
@@ -313,8 +445,13 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
         } else {
           setErrorMessage(data.error || "Aguardando resposta da Evolution API. Clique em 'Recriar Instância' caso não apareça.");
         }
+
+        applyWebhookDiagnostic(data.webhook);
       } else {
         setErrorMessage(error || data?.error || "Não foi possível criar a instância na Evolution API. Verifique a URL e a API Key na aba Configurações.");
+        if (data?.webhook) {
+          applyWebhookDiagnostic(data.webhook);
+        }
       }
     } catch (e: any) {
       console.error("[WhatsAppConnectModal] Erro ao gerar QR Code:", e);
@@ -329,8 +466,15 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     setIsLoading(true);
     setErrorMessage(null);
     setSuccessMessage(null);
+    setWebhookStatus(null);
     setQrCodeBase64(null);
     try {
+      const cleanedUrl = sanitizeEvolutionUrl(evolutionUrl);
+      if (cleanedUrl !== evolutionUrl) {
+        setEvolutionUrl(cleanedUrl);
+        localStorage.setItem(`farmaflow_evo_url_${tenantId}`, cleanedUrl);
+      }
+
       const { ok, data, error } = await safeFetchJson('/api/v1/chat/instance/recreate', {
         method: 'POST',
         headers: {
@@ -341,7 +485,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
         body: JSON.stringify({
           tenantId,
           inboxId,
-          evolutionUrl: evolutionUrl.trim(),
+          evolutionUrl: cleanedUrl,
           evolutionKey: evolutionKey.trim(),
           instanceName: (instanceName || defaultInstanceName).trim()
         })
@@ -358,6 +502,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
         setStatus('QRCODE');
         setIsPolling(true);
         setSuccessMessage("Instância reiniciada com sucesso na Evolution API! QR Code gerado.");
+        applyWebhookDiagnostic(data.webhook);
       } else {
         setErrorMessage(error || data?.error || "Erro ao recriar instância na Evolution API.");
       }
@@ -373,6 +518,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     setIsDisconnecting(true);
     setErrorMessage(null);
     try {
+      const cleanedUrl = sanitizeEvolutionUrl(evolutionUrl);
       const { ok } = await safeFetchJson('/api/v1/chat/instance/disconnect', {
         method: 'POST',
         headers: {
@@ -383,7 +529,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
         body: JSON.stringify({ 
           tenantId, 
           inboxId,
-          evolutionUrl: evolutionUrl.trim(),
+          evolutionUrl: cleanedUrl,
           evolutionKey: evolutionKey.trim(),
           instanceName: (instanceName || defaultInstanceName).trim()
         })
@@ -746,11 +892,16 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
                   type="url"
                   value={evolutionUrl}
                   onChange={(e) => setEvolutionUrl(e.target.value)}
+                  onBlur={() => {
+                    if (evolutionUrl.trim()) {
+                      setEvolutionUrl(sanitizeEvolutionUrl(evolutionUrl));
+                    }
+                  }}
                   placeholder="https://evolution.nexoia.online"
                   className="w-full p-2.5 text-xs bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-hidden font-mono"
                 />
                 <p className="text-[11px] text-gray-500">
-                  Informe o endereço da sua Evolution API (ex: <code className="text-emerald-800 font-bold bg-emerald-50 px-1 py-0.5 rounded">https://evolution.nexoia.online</code> ou seu domínio/IP personalizado).
+                  Informe o endereço da sua Evolution API (ex: <code className="text-emerald-800 font-bold bg-emerald-50 px-1 py-0.5 rounded">https://evolution.nexoia.online</code>). Sufixos como <code className="font-mono">/manager</code> e barras finais são removidos automaticamente.
                 </p>
               </div>
 
@@ -831,14 +982,27 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
 
               {/* Webhook Info */}
               <div className="mt-4 pt-4 border-t border-gray-100 space-y-2">
-                <div className="flex items-center gap-1.5 text-xs font-bold text-gray-800">
-                  <Info className="w-4 h-4 text-emerald-600" /> Webhook Integrado Automático:
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-gray-800">
+                    <Info className="w-4 h-4 text-emerald-600 shrink-0" /> Webhook Integrado Automático:
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleReconfigureWebhook}
+                    disabled={isConfiguringWebhook}
+                    className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-lg text-[11px] font-bold flex items-center gap-1.5 transition-colors disabled:opacity-60 whitespace-nowrap"
+                    title="Força o registro do webhook e eventos na Evolution API para instâncias já conectadas"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${isConfiguringWebhook ? 'animate-spin' : ''}`} />
+                    {isConfiguringWebhook ? 'Registrando...' : 'Reconfigurar Webhook'}
+                  </button>
                 </div>
                 
-                <div className="p-3 bg-gray-50 border border-gray-200 rounded-xl space-y-1.5 text-xs text-gray-600">
+                <div className="p-3 bg-gray-50 border border-gray-200 rounded-xl space-y-2 text-xs text-gray-600">
                   <div className="flex items-center justify-between">
                     <span className="font-semibold text-gray-700">URL Registrada Automaticamente:</span>
                     <button
+                      type="button"
                       onClick={handleCopyWebhook}
                       className="text-emerald-700 hover:text-emerald-800 font-bold flex items-center gap-1 text-[11px]"
                     >
@@ -850,8 +1014,25 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
                     {currentWebhookUrl}
                   </div>
                   <p className="text-[11px] text-gray-500">
-                    Ao gerar o QR Code, o sistema registra os eventos automaticamente na Evolution API.
+                    Ao criar a instância ou gerar o QR Code, o sistema grava automaticamente a URL e os eventos (v2/v1) na Evolution API. Para instâncias já conectadas, clique em <strong>Reconfigurar Webhook</strong>.
                   </p>
+
+                  {webhookStatus && (
+                    <div
+                      className={`p-2.5 rounded-lg border text-[11px] flex items-start gap-2 ${
+                        webhookStatus.ok
+                          ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                          : 'bg-red-50 border-red-200 text-red-700'
+                      }`}
+                    >
+                      {webhookStatus.ok ? (
+                        <CheckCircle className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                      ) : (
+                        <AlertCircle className="w-3.5 h-3.5 text-red-500 shrink-0 mt-0.5" />
+                      )}
+                      <span className="break-words">{webhookStatus.message}</span>
+                    </div>
+                  )}
                 </div>
               </div>
 
