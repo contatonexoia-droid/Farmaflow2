@@ -15862,6 +15862,11 @@ const DEFAULT_STORY_CAPTION_TEMPLATE =
   "Oferta na {loja}: {produto} por R$ {preco}! Peça com entrega rápida: {link}";
 const WHATSAPP_DISCONNECTED_STATUS_ERROR =
   "WhatsApp desconectado. Conecte o QR Code antes de publicar no Status.";
+const EVOLUTION_CONNECTION_STATE_TIMEOUT_MS = 15000;
+const EVOLUTION_SEND_STATUS_TIMEOUT_MS = 120000;
+const STORY_IMAGE_DOWNLOAD_TIMEOUT_MS = 15000;
+const STORY_PROCESSING_STALE_MS = 5 * 60 * 1000;
+const STORY_IMAGE_MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024;
 
 function isSafeExternalHttpsUrl(rawUrl: string): boolean {
   try {
@@ -15893,6 +15898,118 @@ function stripDataImagePrefix(raw?: string | null): string {
   const s = String(raw || "").trim();
   if (!s) return "";
   return s.replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/i, "").replace(/\s+/g, "");
+}
+
+function isLikelyImageBuffer(buf: Buffer): boolean {
+  if (buf.length < 12) return false;
+  // JPEG (FF D8 FF), PNG (89 50 4E 47), GIF (47 49 46 38), WEBP (52 49 46 46 ... 57 45 42 50)
+  const isJpeg = buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+  const isPng = buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
+  const isGif = buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38;
+  const isWebp =
+    buf[0] === 0x52 &&
+    buf[1] === 0x49 &&
+    buf[2] === 0x46 &&
+    buf[3] === 0x46 &&
+    buf[8] === 0x57 &&
+    buf[9] === 0x45 &&
+    buf[10] === 0x42 &&
+    buf[11] === 0x50;
+  return isJpeg || isPng || isGif || isWebp;
+}
+
+async function downloadImageUrlToPureBase64(
+  imageUrl: string,
+  timeoutMs: number = STORY_IMAGE_DOWNLOAD_TIMEOUT_MS
+): Promise<{ ok: boolean; base64?: string; sizeBytes?: number; error?: string; durationMs: number }> {
+  const startMs = Date.now();
+  const cleanUrl = String(imageUrl || "").trim();
+  if (!isSafeExternalHttpsUrl(cleanUrl)) {
+    return { ok: false, error: "URL da imagem inválida ou não permitida.", durationMs: Date.now() - startMs };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    let currentUrl = cleanUrl;
+    let res: Response | null = null;
+    for (let hop = 0; hop < 4; hop++) {
+      if (!isSafeExternalHttpsUrl(currentUrl)) {
+        clearTimeout(timer);
+        return {
+          ok: false,
+          error: "Redirecionamento da imagem bloqueado por segurança.",
+          durationMs: Date.now() - startMs,
+        };
+      }
+      res = await fetch(currentUrl, {
+        method: "GET",
+        redirect: "manual",
+        signal: controller.signal,
+      });
+      if (res.status >= 300 && res.status < 400) {
+        const location = res.headers.get("location");
+        if (!location) break;
+        currentUrl = new URL(location, currentUrl).toString();
+        continue;
+      }
+      break;
+    }
+    clearTimeout(timer);
+
+    if (!res || res.status !== 200) {
+      return {
+        ok: false,
+        error: `Falha ao baixar imagem do Story (HTTP ${res?.status || 0}).`,
+        durationMs: Date.now() - startMs,
+      };
+    }
+
+    const contentLengthHeader = Number(res.headers.get("content-length") || 0);
+    if (contentLengthHeader > STORY_IMAGE_MAX_DOWNLOAD_BYTES) {
+      return {
+        ok: false,
+        error: "A imagem do Story excede o tamanho máximo permitido (10 MB).",
+        durationMs: Date.now() - startMs,
+      };
+    }
+
+    const arrayBuf = await res.arrayBuffer();
+    const buffer = Buffer.from(arrayBuf);
+    if (buffer.length === 0 || buffer.length > STORY_IMAGE_MAX_DOWNLOAD_BYTES) {
+      return {
+        ok: false,
+        error: "Arquivo de imagem vazio ou acima de 10 MB.",
+        durationMs: Date.now() - startMs,
+      };
+    }
+
+    const contentType = String(res.headers.get("content-type") || "").toLowerCase();
+    if (!contentType.startsWith("image/") && !isLikelyImageBuffer(buffer)) {
+      return {
+        ok: false,
+        error: `Conteúdo retornado não é uma imagem válida (${contentType || "desconhecido"}).`,
+        durationMs: Date.now() - startMs,
+      };
+    }
+
+    return {
+      ok: true,
+      base64: buffer.toString("base64"),
+      sizeBytes: buffer.length,
+      durationMs: Date.now() - startMs,
+    };
+  } catch (err: any) {
+    clearTimeout(timer);
+    const isTimeout = err?.name === "AbortError" || String(err?.message || "").includes("aborted");
+    return {
+      ok: false,
+      error: isTimeout
+        ? `Tempo limite esgotado (${timeoutMs / 1000}s) ao baixar imagem do Story.`
+        : `Erro ao baixar imagem do Story: ${err?.message || "falha de rede"}`,
+      durationMs: Date.now() - startMs,
+    };
+  }
 }
 
 function formatStoryProductNameNatural(rawName: string): string {
@@ -16037,12 +16154,12 @@ async function resolveActiveStoreWhatsAppForStatus(storeId: string): Promise<{
     };
   }
 
-  // Valida estado real de conexão na Evolution API v2 (state === 'open')
+  // Valida estado real de conexão na Evolution API v2 (state === 'open') — timeout curto (15s)
   const stateRes = await evolutionRequestWithFallback(
     evoConfig,
     `/instance/connectionState/${encodeURIComponent(evoConfig.instanceName)}`,
     { method: "GET" },
-    8000,
+    EVOLUTION_CONNECTION_STATE_TIMEOUT_MS,
     !evoConfig.isCustomServer
   );
 
@@ -16083,6 +16200,9 @@ async function sendWhatsAppStatus(params: {
   ok: boolean;
   status: number;
   instanceName: string;
+  sendMode?: "base64" | "url";
+  payloadKb?: number;
+  durationMs?: number;
   response?: any;
   error?: string;
 }> {
@@ -16104,18 +16224,37 @@ async function sendWhatsAppStatus(params: {
   const rawImageUrl = String(params.imageUrl || "").trim();
   const rawImageBase64 = String(params.imageBase64 || "").trim();
 
+  // Unifica o formato entre manual, agendado e automático: prioriza SEMPRE base64 puro (sem prefixo data:image)
+  // para evitar que a Evolution API trave tentando baixar a imagem externamente.
   let primaryContent = "";
-  let fallbackBase64 = "";
+  let sendMode: "base64" | "url" = "base64";
+  let fallbackUrl = "";
 
-  if (rawImageUrl.startsWith("data:image/")) {
-    primaryContent = stripDataImagePrefix(rawImageUrl);
-  } else if (rawImageUrl && isSafeExternalHttpsUrl(rawImageUrl)) {
-    primaryContent = rawImageUrl;
-    if (rawImageBase64) {
-      fallbackBase64 = stripDataImagePrefix(rawImageBase64);
-    }
-  } else if (rawImageBase64) {
+  if (rawImageBase64) {
     primaryContent = stripDataImagePrefix(rawImageBase64);
+    sendMode = "base64";
+    if (rawImageUrl && isSafeExternalHttpsUrl(rawImageUrl)) {
+      fallbackUrl = rawImageUrl;
+    }
+  } else if (rawImageUrl.startsWith("data:image/")) {
+    primaryContent = stripDataImagePrefix(rawImageUrl);
+    sendMode = "base64";
+  } else if (rawImageUrl && isSafeExternalHttpsUrl(rawImageUrl)) {
+    const dl = await downloadImageUrlToPureBase64(rawImageUrl, STORY_IMAGE_DOWNLOAD_TIMEOUT_MS);
+    if (dl.ok && dl.base64) {
+      primaryContent = dl.base64;
+      sendMode = "base64";
+      fallbackUrl = rawImageUrl;
+      console.log(
+        `[StoryStatus] Imagem baixada pelo backend em ${dl.durationMs}ms (${((dl.sizeBytes || 0) / 1024).toFixed(1)} KB) e convertida para base64 puro | store=${storeId}`
+      );
+    } else {
+      console.warn(
+        `[StoryStatus] Aviso ao baixar imagem para base64 (${dl.durationMs}ms): ${dl.error || "erro desconhecido"} | Usando fallback por URL | store=${storeId}`
+      );
+      primaryContent = rawImageUrl;
+      sendMode = "url";
+    }
   }
 
   if (!primaryContent) {
@@ -16130,22 +16269,26 @@ async function sendWhatsAppStatus(params: {
   const cleanCaption = String(params.caption || "").trim().slice(0, 700);
   const endpoint = `/message/sendStatus/${encodeURIComponent(conn.instanceName)}`;
 
-  // 1ª tentativa: payload padrão Evolution API v2
+  // 1ª tentativa: payload padrão Evolution API v2 com timeout dedicado de 120s (120000ms)
   const standardPayload = {
     type: "image",
     content: primaryContent,
     caption: cleanCaption,
     allContacts: true,
   };
+  let payloadJson = JSON.stringify(standardPayload);
+  let payloadKb = Number((Buffer.byteLength(payloadJson, "utf8") / 1024).toFixed(1));
+  let activeMode: "base64" | "url" = sendMode;
 
+  const evoStartMs = Date.now();
   let evoRes = await evolutionRequestWithFallback(
     conn.evoConfig,
     endpoint,
     {
       method: "POST",
-      body: JSON.stringify(standardPayload),
+      body: payloadJson,
     },
-    25000,
+    EVOLUTION_SEND_STATUS_TIMEOUT_MS,
     !conn.evoConfig.isCustomServer
   );
 
@@ -16159,49 +16302,63 @@ async function sendWhatsAppStatus(params: {
         allContacts: true,
       },
     };
+    const wrappedJson = JSON.stringify(wrappedPayload);
     const retryWrapped = await evolutionRequestWithFallback(
       conn.evoConfig,
       endpoint,
       {
         method: "POST",
-        body: JSON.stringify(wrappedPayload),
+        body: wrappedJson,
       },
-      25000,
+      EVOLUTION_SEND_STATUS_TIMEOUT_MS,
       !conn.evoConfig.isCustomServer
     );
     if (retryWrapped.ok) {
       evoRes = retryWrapped;
+      payloadJson = wrappedJson;
+      payloadKb = Number((Buffer.byteLength(payloadJson, "utf8") / 1024).toFixed(1));
     }
   }
 
-  // 3ª tentativa: se enviou por URL e falhou mas temos base64 puro sem prefixo, tenta via base64 direto
-  if (!evoRes.ok && fallbackBase64 && primaryContent !== fallbackBase64) {
-    const retryB64 = await evolutionRequestWithFallback(
+  // 3ª tentativa (apenas se erro 400/422 em base64 e temos URL HTTPS pública válida de fallback)
+  if (!evoRes.ok && (evoRes.status === 400 || evoRes.status === 422) && activeMode === "base64" && fallbackUrl) {
+    const urlPayloadJson = JSON.stringify({
+      type: "image",
+      content: fallbackUrl,
+      caption: cleanCaption,
+      allContacts: true,
+    });
+    const retryUrl = await evolutionRequestWithFallback(
       conn.evoConfig,
       endpoint,
       {
         method: "POST",
-        body: JSON.stringify({
-          type: "image",
-          content: fallbackBase64,
-          caption: cleanCaption,
-          allContacts: true,
-        }),
+        body: urlPayloadJson,
       },
-      25000,
+      EVOLUTION_SEND_STATUS_TIMEOUT_MS,
       !conn.evoConfig.isCustomServer
     );
-    if (retryB64.ok) {
-      evoRes = retryB64;
+    if (retryUrl.ok) {
+      evoRes = retryUrl;
+      activeMode = "url";
+      payloadJson = urlPayloadJson;
+      payloadKb = Number((Buffer.byteLength(payloadJson, "utf8") / 1024).toFixed(1));
     }
   }
 
+  const durationMs = Date.now() - evoStartMs;
+
   if (evoRes.ok) {
-    console.log(`[StoryStatus] Status publicado no WhatsApp com sucesso | store=${storeId} | instance=${conn.instanceName}`);
+    console.log(
+      `[StoryStatus] Status publicado no WhatsApp com sucesso | store=${storeId} | instance=${conn.instanceName} | modo=${activeMode} | payload=${payloadKb} KB | tempo=${durationMs}ms | HTTP ${evoRes.status}`
+    );
     return {
       ok: true,
       status: evoRes.status || 200,
       instanceName: conn.instanceName,
+      sendMode: activeMode,
+      payloadKb,
+      durationMs,
       response: evoRes.data ?? evoRes.rawText ?? { ok: true },
     };
   }
@@ -16211,7 +16368,7 @@ async function sendWhatsAppStatus(params: {
     `Falha ao publicar Status na Evolution API (HTTP ${evoRes.status || 500}).`;
 
   console.error(
-    `[StoryStatus] Falha ao publicar Status no WhatsApp | store=${storeId} | instance=${conn.instanceName} | HTTP ${evoRes.status}:`,
+    `[StoryStatus] Falha ao publicar Status no WhatsApp | store=${storeId} | instance=${conn.instanceName} | modo=${activeMode} | payload=${payloadKb} KB | tempo=${durationMs}ms | HTTP ${evoRes.status}:`,
     errorDetail
   );
 
@@ -16219,6 +16376,9 @@ async function sendWhatsAppStatus(params: {
     ok: false,
     status: evoRes.status || 500,
     instanceName: conn.instanceName,
+    sendMode: activeMode,
+    payloadKb,
+    durationMs,
     response: evoRes.data ?? evoRes.rawText ?? null,
     error: errorDetail,
   };
@@ -16402,40 +16562,80 @@ async function runAutomatedStoryPostForStore(
     }
   );
 
-  const sendResult = await sendWhatsAppStatus({
-    storeId,
-    imageUrl: chosen.image,
-    caption,
-  });
-
-  const nowIso = new Date().toISOString();
-  const { data: savedRows } = await supabaseAdmin
+  const startedAtIso = new Date().toISOString();
+  // Grava como 'processing' ANTES de acionar a Evolution API para evitar concorrência entre ciclos
+  const { data: pendingRows } = await supabaseAdmin
     .from("story_posts")
     .insert([{
       store_id: storeId,
       product_id: chosen.id ? String(chosen.id) : null,
       caption,
       image_url: chosen.image,
-      status: sendResult.ok ? "sent" : "failed",
+      status: "processing",
       channel: "whatsapp_status",
       source: sourceLabel,
-      scheduled_for: nowIso,
-      sent_at: sendResult.ok ? nowIso : null,
-      error_message: sendResult.ok ? null : (sendResult.error || "Falha ao enviar Status no WhatsApp."),
-      evolution_response: sendResult.response || null,
+      scheduled_for: startedAtIso,
+      sent_at: null,
+      error_message: null,
+      evolution_response: { processing_started_at: startedAtIso },
     }])
     .select("*")
     .limit(1);
 
+  const createdPostId = pendingRows?.[0]?.id || null;
+
+  const sendResult = await sendWhatsAppStatus({
+    storeId,
+    imageUrl: chosen.image,
+    caption,
+  });
+
+  const finishedAtIso = new Date().toISOString();
+  let savedPost: any = pendingRows?.[0] || null;
+
+  if (createdPostId) {
+    const { data: updatedRows } = await supabaseAdmin
+      .from("story_posts")
+      .update({
+        status: sendResult.ok ? "sent" : "failed",
+        sent_at: sendResult.ok ? finishedAtIso : null,
+        error_message: sendResult.ok ? null : (sendResult.error || "Falha ao enviar Status no WhatsApp."),
+        evolution_response: sendResult.response || null,
+      })
+      .eq("id", createdPostId)
+      .select("*")
+      .limit(1);
+    savedPost = updatedRows?.[0] || savedPost;
+  } else {
+    const { data: savedRows } = await supabaseAdmin
+      .from("story_posts")
+      .insert([{
+        store_id: storeId,
+        product_id: chosen.id ? String(chosen.id) : null,
+        caption,
+        image_url: chosen.image,
+        status: sendResult.ok ? "sent" : "failed",
+        channel: "whatsapp_status",
+        source: sourceLabel,
+        scheduled_for: startedAtIso,
+        sent_at: sendResult.ok ? finishedAtIso : null,
+        error_message: sendResult.ok ? null : (sendResult.error || "Falha ao enviar Status no WhatsApp."),
+        evolution_response: sendResult.response || null,
+      }])
+      .select("*")
+      .limit(1);
+    savedPost = savedRows?.[0] || null;
+  }
+
   return {
     success: sendResult.ok,
-    post: savedRows?.[0] || null,
+    post: savedPost,
     error: sendResult.ok ? undefined : sendResult.error,
   };
 }
 
-// Controle em memória de ticks do agendador (evita duplicação no mesmo minuto)
-let isStorySchedulerRunning = false;
+// Controle em memória de ticks do agendador (evita duplicação no mesmo minuto e controla posts em voo)
+const inFlightStoryPostIds = new Set<string>();
 const firedAutomationSlots = new Set<string>();
 
 function getBrazilNowParts(): { dateStr: string; hhmm: string; dayOfWeek: number } {
@@ -16468,10 +16668,49 @@ function getBrazilNowParts(): { dateStr: string; hhmm: string; dayOfWeek: number
   return { dateStr, hhmm, dayOfWeek };
 }
 
-async function processScheduledAndAutomatedStoriesTick() {
-  if (isStorySchedulerRunning) return;
-  isStorySchedulerRunning = true;
+async function recoverStaleProcessingStoryPosts() {
   try {
+    const { data: processingRows } = await supabaseAdmin
+      .from("story_posts")
+      .select("id, store_id, scheduled_for, created_at, evolution_response")
+      .eq("status", "processing")
+      .limit(50);
+
+    if (!Array.isArray(processingRows) || processingRows.length === 0) return;
+
+    const nowMs = Date.now();
+    for (const row of processingRows) {
+      const startedRaw =
+        row?.evolution_response?.processing_started_at ||
+        row?.scheduled_for ||
+        row?.created_at;
+      const startedMs = startedRaw ? new Date(startedRaw).getTime() : 0;
+      if (startedMs > 0 && nowMs - startedMs > STORY_PROCESSING_STALE_MS) {
+        inFlightStoryPostIds.delete(String(row.id));
+        console.warn(
+          `[StoryScheduler] Registro ${row.id} (store=${row.store_id}) preso em 'processing' há mais de 5 minutos. Marcando como 'failed'.`
+        );
+        await supabaseAdmin
+          .from("story_posts")
+          .update({
+            status: "failed",
+            error_message:
+              "Publicação interrompida: o envio permaneceu em processamento por mais de 5 minutos sem confirmação da Evolution API. Tente reenviar.",
+          })
+          .eq("id", row.id)
+          .eq("status", "processing");
+      }
+    }
+  } catch (err: any) {
+    console.warn("[StoryScheduler] Aviso ao verificar registros presos em processing:", err?.message || err);
+  }
+}
+
+async function processScheduledAndAutomatedStoriesTick() {
+  try {
+    // 0) Recupera qualquer registro preso em 'processing' há mais de 5 minutos
+    await recoverStaleProcessingStoryPosts();
+
     const nowIso = new Date().toISOString();
 
     // A) Processa agendamentos individuais na tabela story_posts (status = 'scheduled' e scheduled_for <= agora)
@@ -16485,43 +16724,60 @@ async function processScheduledAndAutomatedStoriesTick() {
 
     if (Array.isArray(duePosts) && duePosts.length > 0) {
       for (const post of duePosts) {
-        try {
-          // Marca como processing de forma condicional para evitar envio duplicado
-          const { data: lockedRows } = await supabaseAdmin
-            .from("story_posts")
-            .update({ status: "processing" })
-            .eq("id", post.id)
-            .eq("status", "scheduled")
-            .select("id")
-            .limit(1);
+        const postIdStr = String(post.id);
+        if (inFlightStoryPostIds.has(postIdStr)) continue;
+        inFlightStoryPostIds.add(postIdStr);
 
-          if (!Array.isArray(lockedRows) || lockedRows.length === 0) continue;
+        // Marca como 'processing' no Supabase ANTES de chamar sendWhatsAppStatus (evita reenvio no próximo ciclo de 60s)
+        const processingStartedIso = new Date().toISOString();
+        const { data: lockedRows } = await supabaseAdmin
+          .from("story_posts")
+          .update({
+            status: "processing",
+            error_message: null,
+            evolution_response: { processing_started_at: processingStartedIso },
+          })
+          .eq("id", post.id)
+          .eq("status", "scheduled")
+          .select("id")
+          .limit(1);
 
-          const sendResult = await sendWhatsAppStatus({
-            storeId: post.store_id,
-            imageUrl: post.image_url,
-            caption: post.caption,
-          });
-
-          await supabaseAdmin
-            .from("story_posts")
-            .update({
-              status: sendResult.ok ? "sent" : "failed",
-              sent_at: sendResult.ok ? new Date().toISOString() : null,
-              error_message: sendResult.ok ? null : (sendResult.error || "Erro ao publicar Status agendado."),
-              evolution_response: sendResult.response || null,
-            })
-            .eq("id", post.id);
-        } catch (postErr: any) {
-          console.error(`[StoryScheduler] Erro ao processar post agendado ${post.id}:`, postErr?.message || postErr);
-          await supabaseAdmin
-            .from("story_posts")
-            .update({
-              status: "failed",
-              error_message: postErr?.message || "Erro inesperado ao publicar Status.",
-            })
-            .eq("id", post.id);
+        if (!Array.isArray(lockedRows) || lockedRows.length === 0) {
+          inFlightStoryPostIds.delete(postIdStr);
+          continue;
         }
+
+        // Dispara em paralelo sem bloquear o ciclo de 60s de outras lojas caso a Evolution demore até 120s
+        (async () => {
+          try {
+            const sendResult = await sendWhatsAppStatus({
+              storeId: post.store_id,
+              imageUrl: post.image_url,
+              caption: post.caption,
+            });
+
+            await supabaseAdmin
+              .from("story_posts")
+              .update({
+                status: sendResult.ok ? "sent" : "failed",
+                sent_at: sendResult.ok ? new Date().toISOString() : null,
+                error_message: sendResult.ok ? null : (sendResult.error || "Erro ao publicar Status agendado."),
+                evolution_response: sendResult.response || null,
+              })
+              .eq("id", post.id);
+          } catch (postErr: any) {
+            console.error(`[StoryScheduler] Erro ao processar post agendado ${post.id}:`, postErr?.message || postErr);
+            await supabaseAdmin
+              .from("story_posts")
+              .update({
+                status: "failed",
+                error_message: postErr?.message || "Erro inesperado ao publicar Status.",
+              })
+              .eq("id", post.id);
+          } finally {
+            inFlightStoryPostIds.delete(postIdStr);
+          }
+        })();
       }
     }
 
@@ -16575,7 +16831,9 @@ async function processScheduledAndAutomatedStoriesTick() {
           if ((todayCount || 0) >= maxPerDay) continue;
 
           console.log(`[StoryScheduler] Disparando Status automático | store=${sId} | slot=${dateStr} ${hhmm}`);
-          await runAutomatedStoryPostForStore(sId, setting, "automation");
+          runAutomatedStoryPostForStore(sId, setting, "automation").catch((autoErr: any) => {
+            console.error(`[StoryScheduler] Erro na automação da loja ${sId}:`, autoErr?.message || autoErr);
+          });
         } catch (autoErr: any) {
           console.error(`[StoryScheduler] Erro na automação da loja ${setting?.store_id}:`, autoErr?.message || autoErr);
         }
@@ -16583,8 +16841,6 @@ async function processScheduledAndAutomatedStoriesTick() {
     }
   } catch (err: any) {
     console.warn("[StoryScheduler] Aviso no ciclo do agendador:", err?.message || err);
-  } finally {
-    isStorySchedulerRunning = false;
   }
 }
 
@@ -16943,12 +17199,32 @@ app.post("/api/v1/stories/posts/:id/retry", checkTenantAccess, async (req, res) 
     if (!post.image_url) {
       return res.status(400).json({ error: "Esta publicação não possui imagem salva para reenvio." });
     }
+    if (post.status === "processing" || inFlightStoryPostIds.has(postId)) {
+      return res.status(409).json({ error: "Esta publicação já está em processamento na Evolution API. Aguarde a conclusão." });
+    }
 
-    const sendResult = await sendWhatsAppStatus({
-      storeId,
-      imageUrl: post.image_url,
-      caption: post.caption,
-    });
+    inFlightStoryPostIds.add(postId);
+    const processingStartedIso = new Date().toISOString();
+    await supabaseAdmin
+      .from("story_posts")
+      .update({
+        status: "processing",
+        error_message: null,
+        evolution_response: { processing_started_at: processingStartedIso },
+      })
+      .eq("id", postId)
+      .eq("store_id", storeId);
+
+    let sendResult: Awaited<ReturnType<typeof sendWhatsAppStatus>>;
+    try {
+      sendResult = await sendWhatsAppStatus({
+        storeId,
+        imageUrl: post.image_url,
+        caption: post.caption,
+      });
+    } finally {
+      inFlightStoryPostIds.delete(postId);
+    }
 
     const nowIso = new Date().toISOString();
     const { data: updatedRows } = await supabaseAdmin

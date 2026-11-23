@@ -1751,7 +1751,7 @@ export const AdminStoryGenerator: React.FC<AdminStoryGeneratorProps> = ({
     const canvas = canvasRef.current;
     if (!canvas) return null;
     try {
-      return canvas.toDataURL('image/jpeg', 0.92);
+      return canvas.toDataURL('image/jpeg', 0.85);
     } catch (err) {
       console.error('[StoryGenerator] Erro ao exportar dataURL:', err);
       return null;
