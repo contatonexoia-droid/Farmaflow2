@@ -17,6 +17,8 @@ const {
     getFieldIgnoreCase,
     normalizeAndSanitizeSiagoldRecord
 } = require('./src/shared/priceNormalizer');
+const { applyInovaFarmaStrictPromotionRules } = require('./src/shared/inovafarmaPromoResolver');
+const standalonePromoCtx = {};
 
 const BATCH_SIZE = 200;
 const BATCH_DELAY_MS = 500;
@@ -304,6 +306,11 @@ async function syncData() {
             console.log(`[Siagold] Colunas detectadas na View: ${Object.keys(rawRecords[0]).join(', ')}`);
             console.log(`[Siagold] Valores brutos do 1º item:`, JSON.stringify(rawRecords[0]));
         }
+
+        await applyInovaFarmaStrictPromotionRules(pool, rawRecords, {
+            connectorInstance: standalonePromoCtx,
+            dbConfig
+        });
 
         const validRecords = [];
         let fallbackCount = 0;

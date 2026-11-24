@@ -9,6 +9,10 @@ const {
     normalizeAndSanitizeSiagoldRecord
 } = require('../shared/priceNormalizer');
 const { loadSyncCache, extractProductKey } = require('../shared/state');
+const {
+    resolveIgnorePromotionCampaignsFlag,
+    applyInovaFarmaStrictPromotionRules
+} = require('../shared/inovafarmaPromoResolver');
 
 sql.on('error', err => {
     console.error('Erro global na conexão MSSQL (Siagold):', err.message);
@@ -43,6 +47,7 @@ function resolveRecordIdentityKey(record) {
 
 class SiagoldConnector {
     constructor(dbConfig = {}) {
+        this.rawDbConfig = dbConfig;
         this.dbConfig = {
             user: dbConfig.user || 'sa',
             password: dbConfig.password,
@@ -59,6 +64,7 @@ class SiagoldConnector {
         };
         this.viewName = dbConfig.viewName || 'vw_FarmaFlow_Itens';
         this.branchCode = dbConfig.branchCode || null;
+        this.ignorePromotionCampaigns = resolveIgnorePromotionCampaignsFlag(dbConfig);
         this.defaultFuncionarioId =
             dbConfig.defaultFuncionarioId ||
             dbConfig.codigoFuncionario ||
@@ -66,6 +72,8 @@ class SiagoldConnector {
             null;
         this.knownActiveProductKeys = new Set();
         this._hasLoggedViewColumns = false;
+        this._cachedInovaPromoSchema = null;
+        this._hasLoggedPromoRuleSummary = false;
     }
 
     async queryViewRecords(pool, viewName) {
@@ -130,6 +138,17 @@ class SiagoldConnector {
                 console.log(`[Siagold] Colunas detectadas na View (${usedView}): ${Object.keys(rawRecords[0]).join(', ')}`);
                 this._hasLoggedViewColumns = true;
             }
+
+            // Se a base SQL Server for InovaFarma (possui dbo.Produto), aplica a validação estrita de campanhas por data + dia da semana
+            await applyInovaFarmaStrictPromotionRules(pool, rawRecords, {
+                connectorInstance: this,
+                dbConfig: this.rawDbConfig,
+                branchCode: this.branchCode,
+                ignorePromotionCampaigns:
+                    typeof syncOptions.ignorePromotionCampaigns === 'boolean'
+                        ? syncOptions.ignorePromotionCampaigns
+                        : this.ignorePromotionCampaigns
+            });
 
             let fallbackCount = 0;
             let skippedZeroPriceCount = 0;

@@ -2515,6 +2515,47 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
                       </label>
                   </div>
 
+                  <div className="flex items-center justify-between gap-4 pt-4 border-t border-gray-200/70">
+                      <div className="flex-1">
+                          <h4 className="font-black text-gray-900 text-sm">Ignorar campanhas da aba Promoção (usar apenas Preço Prom. do produto)</h4>
+                          <p className="text-xs text-gray-500 mt-1">
+                              Quando ativado, o Aplicativo PC ignora todas as campanhas da aba Promoção do InovaFarma (ex: Sextou com Força) e utiliza exclusivamente o campo <strong>PREÇO PROM.</strong> da aba Estoque do próprio produto (quando &gt; 0 e menor que o Preço Venda).
+                          </p>
+                      </div>
+                      <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                         <input 
+                             type="checkbox" 
+                             className="sr-only peer" 
+                             checked={Boolean(
+                               formData.deliverySettings?.ignore_promotion_campaigns ??
+                               formData.deliverySettings?.ignorePromotionCampaigns
+                             )}
+                             onChange={(e) => {
+                               const checked = e.target.checked;
+                               setFormData({
+                                 ...formData,
+                                 deliverySettings: {
+                                   ...(formData.deliverySettings || { enabled: false, fee: 0 }),
+                                   ignore_promotion_campaigns: checked,
+                                   ignorePromotionCampaigns: checked,
+                                 },
+                               });
+                               if (config.id) {
+                                 fetch('/api/v1/agent/promotion-settings', {
+                                   method: 'POST',
+                                   headers: { 'Content-Type': 'application/json' },
+                                   body: JSON.stringify({
+                                     tenant_id: config.id,
+                                     ignore_promotion_campaigns: checked,
+                                   }),
+                                 }).catch(() => {});
+                               }
+                             }}
+                         />
+                         <div className="w-14 h-7 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-6 after:w-6 after:transition-all peer-checked:bg-brand"></div>
+                      </label>
+                  </div>
+
                   {/* Logs Recentes da Integração ERP/PDV */}
                   <div className="pt-4 border-t border-gray-200/70">
                       <div className="flex items-center justify-between mb-3">

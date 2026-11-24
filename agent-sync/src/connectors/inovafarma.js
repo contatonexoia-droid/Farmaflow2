@@ -1,6 +1,10 @@
 const sql = require('mssql');
 const { normalizeAndSanitizeSiagoldRecord } = require('../shared/priceNormalizer');
 const { loadSyncCache, extractProductKey } = require('../shared/state');
+const {
+    resolveIgnorePromotionCampaignsFlag,
+    applyInovaFarmaStrictPromotionRules
+} = require('../shared/inovafarmaPromoResolver');
 
 sql.on('error', err => {
     console.error('Erro global na conexão MSSQL (InovaFarma):', err.message);
@@ -32,6 +36,7 @@ function isLikelyBarcode(codeStr, eanStr) {
 
 class InovaFarmaConnector {
     constructor(dbConfig = {}) {
+        this.rawDbConfig = dbConfig;
         this.dbConfig = {
             user: dbConfig.user || 'sa',
             password: dbConfig.password,
@@ -48,6 +53,7 @@ class InovaFarmaConnector {
         };
         this.viewName = dbConfig.viewName || 'VW_INTEGRACAO_FARMAFLOW';
         this.branchCode = dbConfig.branchCode || null;
+        this.ignorePromotionCampaigns = resolveIgnorePromotionCampaignsFlag(dbConfig);
         this.defaultFuncionarioId =
             dbConfig.defaultFuncionarioId ||
             dbConfig.codigoFuncionario ||
@@ -55,6 +61,8 @@ class InovaFarmaConnector {
             null;
         this.knownActiveProductKeys = new Set();
         this._hasLoggedViewColumns = false;
+        this._cachedInovaPromoSchema = null;
+        this._hasLoggedPromoRuleSummary = false;
     }
 
     async queryViewRecords(pool, viewName) {
@@ -75,7 +83,9 @@ class InovaFarmaConnector {
     /**
      * Lê os registros da View do InovaFarma sem depender de `data_ultima_alteracao > @lastSync`
      * (pois diversas Views usam GETDATE() como data_ultima_alteracao).
-     * O Delta Sync real é calculado em memória e persistido em `farmaflow_sync_cache.json`.
+     * Em seguida, valida estritamente as campanhas de promoção na tabela nativa do InovaFarma
+     * (data de vigência + dia da semana atual via INFORMATION_SCHEMA.COLUMNS), usando o PREÇO PROM.
+     * da aba Estoque caso nenhuma campanha seja válida para hoje (ou quando ignorePromotionCampaigns estiver ativo).
      */
     async getChangedRecords(lastSyncDate, syncOptions = {}) {
         let pool;
@@ -113,6 +123,17 @@ class InovaFarmaConnector {
                 console.log(`[InovaFarma] Colunas detectadas na View (${usedView}): ${Object.keys(rawRecords[0]).join(', ')}`);
                 this._hasLoggedViewColumns = true;
             }
+
+            // Validação estrita de promoções por data + dia da semana atual (ou usar apenas Preço Prom. do produto)
+            await applyInovaFarmaStrictPromotionRules(pool, rawRecords, {
+                connectorInstance: this,
+                dbConfig: this.rawDbConfig,
+                branchCode: this.branchCode,
+                ignorePromotionCampaigns:
+                    typeof syncOptions.ignorePromotionCampaigns === 'boolean'
+                        ? syncOptions.ignorePromotionCampaigns
+                        : this.ignorePromotionCampaigns
+            });
 
             const sanitizedRecords = [];
             let skippedZeroStockOrInactiveCount = 0;

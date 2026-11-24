@@ -440,7 +440,7 @@ async function sendData(apiKey, data) {
 async function sendHeartbeat(apiKey) {
     const machineId = getMachineId();
     try {
-        await postWithFallback('/integration/heartbeat', {
+        const { response } = await postWithFallback('/integration/heartbeat', {
             apiKey,
             machineId,
             machine_id: machineId
@@ -452,6 +452,7 @@ async function sendHeartbeat(apiKey) {
             },
             timeout: 15000
         });
+        return response?.data || null;
     } catch (error) {
         console.error(`[DEBUG ERROR] Falha ao enviar heartbeat: ${error.message}`);
         throw error;

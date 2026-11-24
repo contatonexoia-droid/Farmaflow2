@@ -6,11 +6,16 @@ interface Tenant {
   name: string;
   erp_type?: string;
   erpType?: string;
+  delivery_settings?: {
+    ignore_promotion_campaigns?: boolean;
+  };
 }
 
 export const ActivationTokenManager: React.FC = () => {
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [selectedTenant, setSelectedTenant] = useState('');
+  const [ignorePromotionCampaigns, setIgnorePromotionCampaigns] = useState(false);
+  const [savingPromoRule, setSavingPromoRule] = useState(false);
   const [generatedToken, setGeneratedToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [fetching, setFetching] = useState(false);
@@ -34,6 +39,47 @@ export const ActivationTokenManager: React.FC = () => {
   useEffect(() => {
     fetchTenants();
   }, []);
+
+  useEffect(() => {
+    if (selectedTenantData) {
+      setIgnorePromotionCampaigns(
+        Boolean(selectedTenantData.delivery_settings?.ignore_promotion_campaigns)
+      );
+    }
+  }, [selectedTenant, selectedTenantData]);
+
+  const handleToggleIgnorePromotionCampaigns = async (checked: boolean) => {
+    setIgnorePromotionCampaigns(checked);
+    if (!selectedTenant) return;
+    setSavingPromoRule(true);
+    try {
+      await fetch('/api/v1/agent/promotion-settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tenant_id: selectedTenant,
+          ignore_promotion_campaigns: checked,
+        }),
+      });
+      setTenants(prev =>
+        prev.map(t =>
+          t.id === selectedTenant
+            ? {
+                ...t,
+                delivery_settings: {
+                  ...(t.delivery_settings || {}),
+                  ignore_promotion_campaigns: checked,
+                },
+              }
+            : t
+        )
+      );
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setSavingPromoRule(false);
+    }
+  };
 
   const fetchTenants = async () => {
     try {
@@ -72,7 +118,10 @@ export const ActivationTokenManager: React.FC = () => {
       const response = await fetch('/api/v1/agent/generate-token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tenant_id: selectedTenant })
+        body: JSON.stringify({
+          tenant_id: selectedTenant,
+          ignore_promotion_campaigns: ignorePromotionCampaigns,
+        })
       });
 
       if (!response.ok) {
@@ -208,6 +257,29 @@ Qualquer dúvida, estou à disposição!`;
           </select>
           {fetching && <p className="text-xs font-bold text-gray-400 mt-1.5">Carregando farmácias...</p>}
         </div>
+
+        {selectedTenant && (
+          <div className="flex items-center justify-between gap-4 p-4 bg-gray-50/80 border border-gray-200/80 rounded-2xl">
+            <div className="flex-1">
+              <h4 className="font-black text-gray-900 text-sm">
+                Ignorar campanhas da aba Promoção (usar apenas Preço Prom. do produto)
+              </h4>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Quando desativado (padrão), o Aplicativo PC valida estritamente se a campanha da aba Promoção está ativa na data e no <strong>dia da semana de hoje</strong> (ex: Sextou com Força só vale na sexta-feira), usando o <strong>PREÇO PROM.</strong> da aba Estoque nos demais dias. Quando ativado, ignora todas as campanhas da aba Promoção e usa sempre apenas o <strong>PREÇO PROM.</strong> do produto.
+              </p>
+            </div>
+            <label className="relative inline-flex items-center cursor-pointer shrink-0">
+              <input
+                type="checkbox"
+                className="sr-only peer"
+                disabled={savingPromoRule}
+                checked={ignorePromotionCampaigns}
+                onChange={(e) => handleToggleIgnorePromotionCampaigns(e.target.checked)}
+              />
+              <div className="w-12 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-600"></div>
+            </label>
+          </div>
+        )}
 
         {error && (
           <div className="p-4 bg-red-50 text-red-700 text-sm font-medium rounded-xl border border-red-100">

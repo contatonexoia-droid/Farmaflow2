@@ -41,6 +41,42 @@ async function askForToken() {
     });
 }
 
+async function askIgnorePromotionCampaigns(defaultValue = false) {
+    if (!process.stdin.isTTY) {
+        return Boolean(defaultValue);
+    }
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout
+    });
+
+    const defaultHint = defaultValue ? 'S/n' : 's/N';
+    return new Promise(resolve => {
+        rl.question(
+            `Ignorar campanhas da aba Promoção (usar apenas Preço Prom. do produto)? (${defaultHint}): `,
+            (answer) => {
+                rl.close();
+                const cleaned = String(answer || '').trim().toLowerCase();
+                if (!cleaned) {
+                    return resolve(Boolean(defaultValue));
+                }
+                resolve(['s', 'sim', 'y', 'yes', '1', 'true'].includes(cleaned));
+            }
+        );
+    });
+}
+
+function resolveCliIgnorePromoFlag() {
+    const args = process.argv.slice(2).map(a => String(a || '').trim().toLowerCase());
+    if (args.includes('--ignore-promo-campaigns') || args.includes('--ignorar-campanhas')) {
+        return true;
+    }
+    if (args.includes('--use-promo-campaigns') || args.includes('--usar-campanhas')) {
+        return false;
+    }
+    return undefined;
+}
+
 function resolveMaxSyncDate(records) {
     let maxTimestamp = 0;
     for (const r of records) {
@@ -68,6 +104,7 @@ async function startAgent(expectedErpType, ConnectorClass) {
     console.log('===================================================\n');
 
     let config = loadConfig();
+    const cliIgnorePromo = resolveCliIgnorePromoFlag();
 
     if (!config || !config.activated) {
         console.log('⚠️ Agente não configurado.');
@@ -87,10 +124,25 @@ async function startAgent(expectedErpType, ConnectorClass) {
                 process.exit(1);
             }
 
+            const remoteIgnorePromo = Boolean(
+                apiConfig.ignorePromotionCampaigns ??
+                apiConfig.ignore_promotion_campaigns ??
+                apiConfig.dbConfig?.ignorePromotionCampaigns ??
+                false
+            );
+            const ignorePromotionCampaigns =
+                typeof cliIgnorePromo === 'boolean'
+                    ? cliIgnorePromo
+                    : await askIgnorePromotionCampaigns(remoteIgnorePromo);
+
             config = {
                 activated: true,
                 erpType: apiConfig.erpType,
-                dbConfig: apiConfig.dbConfig,
+                dbConfig: {
+                    ...(apiConfig.dbConfig || {}),
+                    ignorePromotionCampaigns
+                },
+                ignorePromotionCampaigns,
                 apiKey: apiConfig.apiKey,
                 apiUrl: 'https://farmaflow.online/api/v1',
                 lastSyncDate: '1970-01-01T00:00:00.000Z'
@@ -101,15 +153,56 @@ async function startAgent(expectedErpType, ConnectorClass) {
             console.error('❌ Falha na ativação:', error.message);
             process.exit(1);
         }
+    } else if (typeof cliIgnorePromo === 'boolean' && config.ignorePromotionCampaigns !== cliIgnorePromo) {
+        config.ignorePromotionCampaigns = cliIgnorePromo;
+        if (config.dbConfig && typeof config.dbConfig === 'object') {
+            config.dbConfig.ignorePromotionCampaigns = cliIgnorePromo;
+        }
+        saveConfig(config);
     }
 
+    const effectiveIgnorePromo = Boolean(
+        config.ignorePromotionCampaigns ??
+        config.ignore_promotion_campaigns ??
+        config.dbConfig?.ignorePromotionCampaigns ??
+        false
+    );
+    if (config.dbConfig && typeof config.dbConfig === 'object') {
+        config.dbConfig.ignorePromotionCampaigns = effectiveIgnorePromo;
+    }
+
+    console.log(
+        `🏷️  Ignorar campanhas da aba Promoção (usar apenas Preço Prom. do produto): ${
+            effectiveIgnorePromo ? 'SIM (Ativado)' : 'NÃO (Valida campanhas por Data + Dia da Semana)'
+        }`
+    );
+
     const connector = new ConnectorClass(config.dbConfig);
+    connector.ignorePromotionCampaigns = effectiveIgnorePromo;
     const processedOrderIds = new Map();
     const syncCache = loadSyncCache();
 
     async function heartbeatLoop() {
         try {
-            await sendHeartbeat(config.apiKey);
+            const hbData = await sendHeartbeat(config.apiKey);
+            if (hbData && typeof hbData.ignore_promotion_campaigns === 'boolean') {
+                const cloudFlag = hbData.ignore_promotion_campaigns;
+                if (Boolean(connector.ignorePromotionCampaigns) !== cloudFlag) {
+                    console.log(
+                        `\n🔄 [Configuração Remota] Opção "Ignorar campanhas da aba Promoção (usar apenas Preço Prom. do produto)" alterada no painel para: ${
+                            cloudFlag ? 'SIM' : 'NÃO'
+                        }`
+                    );
+                    connector.ignorePromotionCampaigns = cloudFlag;
+                    config.ignorePromotionCampaigns = cloudFlag;
+                    if (config.dbConfig && typeof config.dbConfig === 'object') {
+                        config.dbConfig.ignorePromotionCampaigns = cloudFlag;
+                    }
+                    saveConfig(config);
+                    syncCache.lastFullSyncAt = 0;
+                    saveSyncCache(syncCache);
+                }
+            }
         } catch (hbError) {
             console.log(`⚠️ Alerta: Não foi possível atualizar o status (heartbeat) com o servidor: ${hbError.message}`);
         }

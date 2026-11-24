@@ -203,6 +203,8 @@ export interface DeliverySettingsConfig {
   defaultNeighborhoodFee?: number;
   minOrderForFreeDelivery?: number;
   storePickupEnabled?: boolean;
+  ignore_promotion_campaigns?: boolean;
+  ignorePromotionCampaigns?: boolean;
 }
 
 export interface AiAgentConfig {

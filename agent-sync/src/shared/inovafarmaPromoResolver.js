@@ -1,0 +1,767 @@
+const sql = require('mssql');
+const { loadConfig } = require('./state');
+const { getFieldIgnoreCase, extractBarcode, extractInternalCode } = require('./priceNormalizer');
+
+function roundMoney(val) {
+    const n = Number(val);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
+function normalizeIdentifier(name) {
+    return String(name || '')
+        .trim()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, '');
+}
+
+function findMatchingColumn(columns, candidates) {
+    if (!Array.isArray(columns) || columns.length === 0) return null;
+    const normMap = new Map();
+    for (const col of columns) {
+        const colName = typeof col === 'string' ? col : col.COLUMN_NAME;
+        if (!colName) continue;
+        const nk = normalizeIdentifier(colName);
+        if (nk && !normMap.has(nk)) {
+            normMap.set(nk, colName);
+        }
+    }
+    for (const candidate of candidates) {
+        if (candidate instanceof RegExp) {
+            for (const col of columns) {
+                const colName = typeof col === 'string' ? col : col.COLUMN_NAME;
+                const nk = normalizeIdentifier(colName);
+                if (candidate.test(nk) || candidate.test(colName)) {
+                    return colName;
+                }
+            }
+        } else {
+            const nk = normalizeIdentifier(candidate);
+            if (normMap.has(nk)) {
+                return normMap.get(nk);
+            }
+        }
+    }
+    return null;
+}
+
+function findAllMatchingColumns(columns, candidates) {
+    if (!Array.isArray(columns) || columns.length === 0) return [];
+    const matched = [];
+    const seen = new Set();
+    for (const col of columns) {
+        const colName = typeof col === 'string' ? col : col.COLUMN_NAME;
+        if (!colName) continue;
+        const nk = normalizeIdentifier(colName);
+        for (const candidate of candidates) {
+            const isMatch =
+                candidate instanceof RegExp
+                    ? candidate.test(nk) || candidate.test(colName)
+                    : nk === normalizeIdentifier(candidate);
+            if (isMatch && !seen.has(colName)) {
+                seen.add(colName);
+                matched.push(colName);
+                break;
+            }
+        }
+    }
+    return matched;
+}
+
+/**
+ * Verifica se a opção "Ignorar campanhas da aba Promoção (usar apenas Preço Prom. do produto)"
+ * está ativa na configuração local (farmaflow_config.json), variáveis de ambiente (.env) ou opções em tempo de execução.
+ */
+function resolveIgnorePromotionCampaignsFlag(dbConfig = {}, runtimeOptions = {}) {
+    if (runtimeOptions && typeof runtimeOptions.ignorePromotionCampaigns === 'boolean') {
+        return runtimeOptions.ignorePromotionCampaigns;
+    }
+    if (runtimeOptions && typeof runtimeOptions.ignore_promotion_campaigns === 'boolean') {
+        return runtimeOptions.ignore_promotion_campaigns;
+    }
+    if (dbConfig && typeof dbConfig.ignorePromotionCampaigns === 'boolean') {
+        return dbConfig.ignorePromotionCampaigns;
+    }
+    if (dbConfig && typeof dbConfig.ignore_promotion_campaigns === 'boolean') {
+        return dbConfig.ignore_promotion_campaigns;
+    }
+
+    const envVal = String(
+        process.env.IGNORE_PROMOTION_CAMPAIGNS ||
+        process.env.IGNORAR_CAMPANHAS_PROMOCAO ||
+        ''
+    ).trim().toLowerCase();
+    if (['true', '1', 's', 'sim', 'yes'].includes(envVal)) {
+        return true;
+    }
+    if (['false', '0', 'n', 'nao', 'não', 'no'].includes(envVal)) {
+        return false;
+    }
+
+    try {
+        const savedCfg = loadConfig();
+        if (savedCfg) {
+            if (typeof savedCfg.ignorePromotionCampaigns === 'boolean') {
+                return savedCfg.ignorePromotionCampaigns;
+            }
+            if (typeof savedCfg.ignore_promotion_campaigns === 'boolean') {
+                return savedCfg.ignore_promotion_campaigns;
+            }
+            if (savedCfg.dbConfig && typeof savedCfg.dbConfig.ignorePromotionCampaigns === 'boolean') {
+                return savedCfg.dbConfig.ignorePromotionCampaigns;
+            }
+            if (savedCfg.dbConfig && typeof savedCfg.dbConfig.ignore_promotion_campaigns === 'boolean') {
+                return savedCfg.dbConfig.ignore_promotion_campaigns;
+            }
+        }
+    } catch (_) {}
+
+    return false;
+}
+
+/**
+ * Inspeciona dinamicamente via INFORMATION_SCHEMA.COLUMNS as tabelas de Produto/Estoque e Promoção/Campanha
+ * do InovaFarma (ex: V1.81.104), incluindo as colunas de controle de dias da semana (Seg..Dom ou DiasSemana).
+ */
+async function inspectInovaFarmaSchema(pool) {
+    try {
+        const checkProd = await pool.request().query(`
+            SELECT CASE WHEN OBJECT_ID('dbo.Produto', 'U') IS NOT NULL THEN 1 ELSE 0 END AS HasProduto;
+        `);
+        if (!checkProd?.recordset?.[0]?.HasProduto) {
+            return { isInovaFarma: false };
+        }
+
+        const colsRes = await pool.request().query(`
+            SELECT
+                TABLE_NAME,
+                COLUMN_NAME,
+                LOWER(DATA_TYPE) AS DATA_TYPE
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = 'dbo'
+              AND (
+                TABLE_NAME IN (
+                    'Produto', 'Produto_Loja', 'Produto_Filial', 'Produto_Empresa', 'Produto_Preco', 'Estoque', 'Estoque_Loja',
+                    'Promocao', 'Promocao_Produto', 'PromocaoProduto', 'Promocao_Item', 'PromocaoItem', 'Promocao_Itens',
+                    'Promocao_Empresa', 'Promocao_Filial', 'Promocao_Loja',
+                    'Campanha', 'Campanha_Produto', 'CampanhaProduto', 'TabelaPromocao', 'TabelaPromocao_Produto'
+                )
+                OR TABLE_NAME LIKE 'Promo%'
+                OR TABLE_NAME LIKE 'Campanha%'
+              )
+            ORDER BY TABLE_NAME, ORDINAL_POSITION;
+        `);
+
+        const tablesMap = new Map();
+        for (const row of colsRes?.recordset || []) {
+            const tName = row.TABLE_NAME;
+            if (!tablesMap.has(tName)) {
+                tablesMap.set(tName, []);
+            }
+            tablesMap.get(tName).push(row);
+        }
+
+        const produtoCols = tablesMap.get('Produto') || [];
+        const prodIdCol = findMatchingColumn(produtoCols, ['CodigoProduto', 'IdProduto', 'CodProduto', 'Codigo']);
+        if (!prodIdCol) {
+            return { isInovaFarma: false };
+        }
+
+        const prodSellingPriceCol = findMatchingColumn(produtoCols, [
+            'PrecoVenda', 'Preco_Venda', 'ValorVenda', 'VlVenda', 'Preco', 'PrecoBruto'
+        ]);
+        const prodPromoPriceCol = findMatchingColumn(produtoCols, [
+            'PrecoPromocao', 'PrecoPromocional', 'Preco_Promocao', 'Preco_Promocional',
+            'ValorPromocao', 'VlPromocao', 'PrecoOferta', 'PrecoDesconto', 'PrecoEspecial'
+        ]);
+        const prodPromoStartCol = findMatchingColumn(produtoCols, [
+            'DataInicioPromocao', 'DataInicialPromocao', 'InicioPromocao', 'DtInicioPromocao', 'PromocaoDataInicial', 'PromocaoDataInicio'
+        ]);
+        const prodPromoEndCol = findMatchingColumn(produtoCols, [
+            'DataFimPromocao', 'DataFinalPromocao', 'FimPromocao', 'DtFimPromocao', 'ValidadePromocao', 'PromocaoDataFinal', 'PromocaoDataFim'
+        ]);
+
+        // Verifica se existe tabela de preço/estoque por filial (ex: Produto_Loja, Produto_Empresa, Produto_Filial, Estoque)
+        let branchStockTable = null;
+        const candidateBranchTables = ['Produto_Loja', 'Produto_Empresa', 'Produto_Filial', 'Produto_Preco', 'Estoque_Loja', 'Estoque'];
+        for (const bt of candidateBranchTables) {
+            if (!tablesMap.has(bt)) continue;
+            const bCols = tablesMap.get(bt);
+            const bProdIdCol = findMatchingColumn(bCols, ['CodigoProduto', 'IdProduto', 'CodProduto']);
+            const bBranchCol = findMatchingColumn(bCols, ['CodigoEmpresa', 'CodigoFilial', 'CodigoLoja', 'IdEmpresa', 'IdFilial', 'IdLoja', 'Filial', 'Loja']);
+            const bSellingCol = findMatchingColumn(bCols, ['PrecoVenda', 'Preco_Venda', 'ValorVenda', 'VlVenda', 'Preco']);
+            const bPromoCol = findMatchingColumn(bCols, [
+                'PrecoPromocao', 'PrecoPromocional', 'Preco_Promocao', 'Preco_Promocional',
+                'ValorPromocao', 'VlPromocao', 'PrecoOferta', 'PrecoDesconto', 'PrecoEspecial'
+            ]);
+            if (bProdIdCol && bBranchCol && (bSellingCol || bPromoCol)) {
+                branchStockTable = {
+                    tableName: bt,
+                    prodIdCol: bProdIdCol,
+                    branchCol: bBranchCol,
+                    sellingPriceCol: bSellingCol,
+                    promoPriceCol: bPromoCol,
+                    promoStartCol: findMatchingColumn(bCols, [
+                        'DataInicioPromocao', 'DataInicialPromocao', 'InicioPromocao', 'DtInicioPromocao'
+                    ]),
+                    promoEndCol: findMatchingColumn(bCols, [
+                        'DataFimPromocao', 'DataFinalPromocao', 'FimPromocao', 'DtFimPromocao', 'ValidadePromocao'
+                    ])
+                };
+                break;
+            }
+        }
+
+        // Inspeciona tabelas de Campanhas / Promoções (aba PROMOÇÃO)
+        const extractTablePromoMeta = (tableName, cols) => {
+            const weekdayCols = {
+                0: findMatchingColumn(cols, [
+                    'Segunda', 'SegundaFeira', 'Segunda_Feira', 'Seg', 'DiaSegunda', 'Dia_Segunda',
+                    'FlSegunda', 'FlagSegunda', 'IndSegunda', 'PromoSegunda', 'PromocaoSegunda'
+                ]),
+                1: findMatchingColumn(cols, [
+                    'Terca', 'TercaFeira', 'Terca_Feira', 'Ter', 'DiaTerca', 'Dia_Terca',
+                    'FlTerca', 'FlagTerca', 'IndTerca', 'PromoTerca', 'PromocaoTerca'
+                ]),
+                2: findMatchingColumn(cols, [
+                    'Quarta', 'QuartaFeira', 'Quarta_Feira', 'Qua', 'DiaQuarta', 'Dia_Quarta',
+                    'FlQuarta', 'FlagQuarta', 'IndQuarta', 'PromoQuarta', 'PromocaoQuarta'
+                ]),
+                3: findMatchingColumn(cols, [
+                    'Quinta', 'QuintaFeira', 'Quinta_Feira', 'Qui', 'DiaQuinta', 'Dia_Quinta',
+                    'FlQuinta', 'FlagQuinta', 'IndQuinta', 'PromoQuinta', 'PromocaoQuinta'
+                ]),
+                4: findMatchingColumn(cols, [
+                    'Sexta', 'SextaFeira', 'Sexta_Feira', 'Sex', 'DiaSexta', 'Dia_Sexta',
+                    'FlSexta', 'FlagSexta', 'IndSexta', 'PromoSexta', 'PromocaoSexta'
+                ]),
+                5: findMatchingColumn(cols, [
+                    'Sabado', 'Sab', 'DiaSabado', 'Dia_Sabado',
+                    'FlSabado', 'FlagSabado', 'IndSabado', 'PromoSabado', 'PromocaoSabado'
+                ]),
+                6: findMatchingColumn(cols, [
+                    'Domingo', 'Dom', 'DiaDomingo', 'Dia_Domingo',
+                    'FlDomingo', 'FlagDomingo', 'IndDomingo', 'PromoDomingo', 'PromocaoDomingo'
+                ])
+            };
+
+            const hasIndividualWeekdayCols = Object.values(weekdayCols).some(Boolean);
+            const combinedWeekdayCol = findMatchingColumn(cols, [
+                'DiasSemana', 'DiaSemana', 'Dias_Semana', 'Dia_Semana',
+                'DiasValidos', 'DiasPromocao', 'DiasCampanha', 'Dias'
+            ]);
+
+            return {
+                tableName,
+                cols,
+                promoIdCol: findMatchingColumn(cols, ['CodigoPromocao', 'IdPromocao', 'CodPromocao', 'CodigoCampanha', 'IdCampanha', 'Codigo']),
+                prodIdCol: findMatchingColumn(cols, ['CodigoProduto', 'IdProduto', 'CodProduto', 'Produto']),
+                branchCol: findMatchingColumn(cols, ['CodigoEmpresa', 'CodigoFilial', 'CodigoLoja', 'IdEmpresa', 'IdFilial', 'IdLoja', 'Filial', 'Loja']),
+                promoPriceCol: findMatchingColumn(cols, [
+                    'PrecoPromocao', 'PrecoPromocional', 'Preco_Promocao', 'Preco_Promocional',
+                    'ValorPromocao', 'ValorPromocional', 'VlPromocao', 'PrecoOferta',
+                    'PrecoLiquido', 'PrecoDesconto', 'PrecoVenda', 'Preco', 'Valor'
+                ]),
+                discountPctCol: findMatchingColumn(cols, [
+                    'PercentualDesconto', 'PercDesconto', 'DescontoPercentual', 'AliquotaDesconto', 'Desconto'
+                ]),
+                startDateCol: findMatchingColumn(cols, [
+                    'DataInicial', 'DataInicio', 'DtInicial', 'DtInicio', 'Data_Inicial', 'Data_Inicio',
+                    'VigenciaInicio', 'DataVigenciaInicial', 'DataHoraInicial', 'DataHoraInicio', 'Inicio'
+                ]),
+                endDateCol: findMatchingColumn(cols, [
+                    'DataFinal', 'DataFim', 'DtFinal', 'DtFim', 'Data_Final', 'Data_Fim',
+                    'VigenciaFim', 'DataVigenciaFinal', 'DataHoraFinal', 'DataHoraFim', 'Validade', 'Fim'
+                ]),
+                positiveActiveCols: findAllMatchingColumns(cols, ['Ativo', 'Ativa', 'FlAtivo', 'FlagAtivo', 'IndAtivo']),
+                negativeInactiveCols: findAllMatchingColumns(cols, [
+                    'Eliminado', 'Excluido', 'Cancelado', 'Cancelada', 'Inativo', 'Inativa',
+                    'Bloqueado', 'Bloqueada', 'Encerrado', 'Encerrada', 'Finalizado', 'Finalizada', 'Desativado', 'Desativada'
+                ]),
+                statusCols: findAllMatchingColumns(cols, ['Situacao', 'Status']),
+                cancelDateCols: findAllMatchingColumns(cols, [
+                    'DataCancelamento', 'DataExclusao', 'DataEncerramento', 'DataInativacao', 'DataFinalizacao'
+                ]),
+                nameCol: findMatchingColumn(cols, [
+                    'Descricao', 'Nome', 'NomePromocao', 'DescricaoPromocao', 'NomeCampanha', 'DescricaoCampanha', 'Titulo', 'Campanha'
+                ]),
+                weekdayCols,
+                hasIndividualWeekdayCols,
+                combinedWeekdayCol
+            };
+        };
+
+        const headerCandidateNames = ['Promocao', 'Campanha', 'TabelaPromocao'];
+        const itemCandidateNames = [
+            'Promocao_Produto', 'PromocaoProduto', 'Promocao_Item', 'PromocaoItem', 'Promocao_Itens',
+            'Campanha_Produto', 'CampanhaProduto', 'TabelaPromocao_Produto'
+        ];
+
+        // Adiciona quaisquer outras tabelas descobertas que comecem com Promo ou Campanha
+        for (const tName of tablesMap.keys()) {
+            if (/^promo/i.test(tName) || /^campanha/i.test(tName)) {
+                if (/produto|item|itens/i.test(tName)) {
+                    if (!itemCandidateNames.includes(tName)) itemCandidateNames.push(tName);
+                } else if (!/empresa|filial|loja/i.test(tName)) {
+                    if (!headerCandidateNames.includes(tName)) headerCandidateNames.push(tName);
+                }
+            }
+        }
+
+        let campaignSource = null;
+
+        // 1. Tenta par Cabeçalho + Itens (ex: dbo.Promocao + dbo.Promocao_Produto)
+        for (const hName of headerCandidateNames) {
+            if (!tablesMap.has(hName)) continue;
+            const hMeta = extractTablePromoMeta(hName, tablesMap.get(hName));
+            if (!hMeta.promoIdCol) continue;
+
+            for (const iName of itemCandidateNames) {
+                if (!tablesMap.has(iName) || iName === hName) continue;
+                const iMeta = extractTablePromoMeta(iName, tablesMap.get(iName));
+                const joinColOnItem = findMatchingColumn(iMeta.cols, [
+                    hMeta.promoIdCol, 'CodigoPromocao', 'IdPromocao', 'CodPromocao', 'CodigoCampanha', 'IdCampanha'
+                ]);
+                if (joinColOnItem && iMeta.prodIdCol && (iMeta.promoPriceCol || iMeta.discountPctCol || hMeta.promoPriceCol || hMeta.discountPctCol)) {
+                    campaignSource = {
+                        mode: 'header_detail',
+                        header: hMeta,
+                        item: { ...iMeta, joinCol: joinColOnItem }
+                    };
+                    break;
+                }
+            }
+            if (campaignSource) break;
+        }
+
+        // 2. Fallback: Tabela única de promoção que já contém CodigoProduto (ex: dbo.Promocao com CodigoProduto)
+        if (!campaignSource) {
+            for (const tName of [...headerCandidateNames, ...itemCandidateNames]) {
+                if (!tablesMap.has(tName)) continue;
+                const tMeta = extractTablePromoMeta(tName, tablesMap.get(tName));
+                if (tMeta.prodIdCol && (tMeta.promoPriceCol || tMeta.discountPctCol)) {
+                    campaignSource = {
+                        mode: 'single_table',
+                        header: tMeta,
+                        item: null
+                    };
+                    break;
+                }
+            }
+        }
+
+        return {
+            isInovaFarma: true,
+            produto: {
+                tableName: 'Produto',
+                prodIdCol,
+                sellingPriceCol: prodSellingPriceCol,
+                promoPriceCol: prodPromoPriceCol,
+                promoStartCol: prodPromoStartCol,
+                promoEndCol: prodPromoEndCol
+            },
+            branchStockTable,
+            campaignSource
+        };
+    } catch (err) {
+        console.warn(`[InovaFarma Promo Inspector] Aviso ao inspecionar schema SQL: ${err.message}`);
+        return { isInovaFarma: false, error: err.message };
+    }
+}
+
+/**
+ * Gera as cláusulas SQL de validação estrita de campanha ativa, dentro da validade (data inicial/final)
+ * e válida para o DIA DA SEMANA ATUAL usando ((DATEPART(WEEKDAY, GETDATE()) + @@DATEFIRST - 2) % 7) (0=Seg..6=Dom).
+ */
+function buildCampaignWhereConditions(alias, meta, hasBranchParam = false) {
+    if (!meta) return [];
+    const conds = [];
+
+    // 1. Filial / Loja (se existir coluna de empresa/filial na tabela de promoção)
+    if (hasBranchParam && meta.branchCol) {
+        conds.push(`(${alias}.[${meta.branchCol}] IS NULL OR ${alias}.[${meta.branchCol}] = 0 OR CAST(${alias}.[${meta.branchCol}] AS VARCHAR(20)) = @branchCode)`);
+    }
+
+    // 2. Flags negativas (Eliminado, Cancelado, Inativo, Excluido, Encerrado)
+    for (const negCol of meta.negativeInactiveCols || []) {
+        conds.push(`UPPER(LTRIM(RTRIM(CAST(ISNULL(${alias}.[${negCol}], '0') AS VARCHAR(15))))) IN ('0', 'N', 'NAO', 'NÃO', 'FALSE', 'F', '')`);
+    }
+
+    // 3. Flags positivas (Ativo, Ativa)
+    for (const posCol of meta.positiveActiveCols || []) {
+        conds.push(`UPPER(LTRIM(RTRIM(CAST(ISNULL(${alias}.[${posCol}], '1') AS VARCHAR(15))))) IN ('1', 'S', 'SIM', 'TRUE', 'T', 'Y', 'A', 'ATIVO', 'ATIVA')`);
+    }
+
+    // 4. Status / Situação
+    for (const stCol of meta.statusCols || []) {
+        conds.push(`UPPER(LTRIM(RTRIM(CAST(ISNULL(${alias}.[${stCol}], '') AS VARCHAR(20))))) NOT IN ('I', 'C', 'E', 'B', 'N', 'FALSE', 'INATIVO', 'INATIVA', 'CANCELADO', 'CANCELADA', 'ENCERRADO', 'ENCERRADA', 'EXCLUIDO', 'FINALIZADO', 'FINALIZADA')`);
+    }
+
+    // 5. Datas de cancelamento / exclusão / encerramento
+    for (const cDateCol of meta.cancelDateCols || []) {
+        conds.push(`(${alias}.[${cDateCol}] IS NULL OR YEAR(${alias}.[${cDateCol}]) <= 1900)`);
+    }
+
+    // 6. Data Inicial e Data Final da campanha (comparando com CAST(GETDATE() AS DATE))
+    if (meta.startDateCol) {
+        conds.push(`(${alias}.[${meta.startDateCol}] IS NULL OR YEAR(${alias}.[${meta.startDateCol}]) <= 1900 OR @HojeData >= CAST(${alias}.[${meta.startDateCol}] AS DATE))`);
+    }
+    if (meta.endDateCol) {
+        conds.push(`(${alias}.[${meta.endDateCol}] IS NULL OR (YEAR(${alias}.[${meta.endDateCol}]) > 1900 AND @HojeData <= CAST(${alias}.[${meta.endDateCol}] AS DATE)))`);
+    }
+
+    // 7. Validação estrita do DIA DA SEMANA ATUAL (@HojeDiaSemana: 0=Seg, 1=Ter, 2=Qua, 3=Qui, 4=Sex, 5=Sab, 6=Dom)
+    if (meta.hasIndividualWeekdayCols) {
+        const cases = [];
+        for (let dayIdx = 0; dayIdx <= 6; dayIdx++) {
+            const colName = meta.weekdayCols[dayIdx];
+            if (colName) {
+                cases.push(
+                    `WHEN ${dayIdx} THEN CASE WHEN UPPER(LTRIM(RTRIM(CAST(ISNULL(${alias}.[${colName}], '0') AS VARCHAR(10))))) IN ('1', 'S', 'SIM', 'TRUE', 'T', 'Y', 'X') THEN 1 ELSE 0 END`
+                );
+            } else {
+                cases.push(`WHEN ${dayIdx} THEN 1`);
+            }
+        }
+        conds.push(`(CASE @HojeDiaSemana ${cases.join(' ')} ELSE 0 END = 1)`);
+    }
+
+    if (meta.combinedWeekdayCol) {
+        const cCol = `${alias}.[${meta.combinedWeekdayCol}]`;
+        const strExpr = `UPPER(LTRIM(RTRIM(CAST(ISNULL(${cCol}, '') AS VARCHAR(100)))))`;
+        conds.push(`(
+            ${cCol} IS NULL
+            OR ${strExpr} IN ('', 'TODOS', 'ALL', '1111111', 'SSSSSSS', '1234567', '0123456', '127')
+            OR (
+                CASE @HojeDiaSemana
+                    WHEN 0 THEN CASE WHEN ${strExpr} LIKE '%SEG%' OR (LEN(${strExpr}) = 7 AND SUBSTRING(${strExpr}, 1, 1) IN ('1', 'S', 'X')) THEN 1 ELSE 0 END
+                    WHEN 1 THEN CASE WHEN ${strExpr} LIKE '%TER%' OR (LEN(${strExpr}) = 7 AND SUBSTRING(${strExpr}, 2, 1) IN ('1', 'S', 'X')) THEN 1 ELSE 0 END
+                    WHEN 2 THEN CASE WHEN ${strExpr} LIKE '%QUA%' OR (LEN(${strExpr}) = 7 AND SUBSTRING(${strExpr}, 3, 1) IN ('1', 'S', 'X')) THEN 1 ELSE 0 END
+                    WHEN 3 THEN CASE WHEN ${strExpr} LIKE '%QUI%' OR (LEN(${strExpr}) = 7 AND SUBSTRING(${strExpr}, 4, 1) IN ('1', 'S', 'X')) THEN 1 ELSE 0 END
+                    WHEN 4 THEN CASE WHEN ${strExpr} LIKE '%SEX%' OR (LEN(${strExpr}) = 7 AND SUBSTRING(${strExpr}, 5, 1) IN ('1', 'S', 'X')) THEN 1 ELSE 0 END
+                    WHEN 5 THEN CASE WHEN ${strExpr} LIKE '%SAB%' OR ${strExpr} LIKE '%SÁB%' OR (LEN(${strExpr}) = 7 AND SUBSTRING(${strExpr}, 6, 1) IN ('1', 'S', 'X')) THEN 1 ELSE 0 END
+                    WHEN 6 THEN CASE WHEN ${strExpr} LIKE '%DOM%' OR (LEN(${strExpr}) = 7 AND SUBSTRING(${strExpr}, 7, 1) IN ('1', 'S', 'X')) THEN 1 ELSE 0 END
+                    ELSE 0
+                END = 1
+            )
+        )`);
+    }
+
+    // 8. Salvaguarda adicional por nome da campanha para campanhas nominais de dia específico (ex: "SEXTOU COM FORÇA")
+    if (meta.nameCol) {
+        const nameExpr = `UPPER(LTRIM(RTRIM(CAST(ISNULL(${alias}.[${meta.nameCol}], '') AS VARCHAR(200)))))`;
+        conds.push(`(
+            NOT (${nameExpr} LIKE '%SEXTOU%' OR ${nameExpr} LIKE '%SEXTA%')
+            OR @HojeDiaSemana = 4
+        )`);
+    }
+
+    return conds;
+}
+
+/**
+ * Monta a query SQL completa do conector InovaFarma que lê:
+ * - PrecoVendaEstoque (PREÇO VENDA da aba Estoque)
+ * - PrecoPromocaoEstoque (PREÇO PROM. da aba Estoque do próprio produto)
+ * - PrecoCampanhaValidaHoje (menor preço de campanha da aba Promoção estritamente ativa hoje + dia da semana atual)
+ * - PrecoPromocionalFinal (prioriza campanha válida hoje; se não houver nenhuma válida para hoje, usa obrigatoriamente o PREÇO PROM. do produto)
+ */
+function buildStrictInovaFarmaPriceQuery(schemaMeta, options = {}) {
+    if (!schemaMeta || !schemaMeta.isInovaFarma) return null;
+
+    const hasBranch = Boolean(options.branchCode);
+    const p = schemaMeta.produto;
+    const b = schemaMeta.branchStockTable;
+
+    // 1. Expressão para PrecoVendaEstoque
+    const prodSellingExpr = p.sellingPriceCol ? `ISNULL(CAST(p.[${p.sellingPriceCol}] AS DECIMAL(18, 2)), 0)` : '0';
+    let finalSellingExpr = prodSellingExpr;
+    if (b && b.sellingPriceCol) {
+        finalSellingExpr = `CASE WHEN ISNULL(CAST(b.[${b.sellingPriceCol}] AS DECIMAL(18, 2)), 0) > 0 THEN CAST(b.[${b.sellingPriceCol}] AS DECIMAL(18, 2)) ELSE ${prodSellingExpr} END`;
+    }
+
+    // 2. Expressão para PrecoPromocaoEstoque (PREÇO PROM. da aba ESTOQUE)
+    let prodPromoRawExpr = p.promoPriceCol ? `ISNULL(CAST(p.[${p.promoPriceCol}] AS DECIMAL(18, 2)), 0)` : '0';
+    const prodDateChecks = [];
+    if (p.promoStartCol) {
+        prodDateChecks.push(`(p.[${p.promoStartCol}] IS NULL OR YEAR(p.[${p.promoStartCol}]) <= 1900 OR @HojeData >= CAST(p.[${p.promoStartCol}] AS DATE))`);
+    }
+    if (p.promoEndCol) {
+        prodDateChecks.push(`(p.[${p.promoEndCol}] IS NULL OR (YEAR(p.[${p.promoEndCol}]) > 1900 AND @HojeData <= CAST(p.[${p.promoEndCol}] AS DATE)))`);
+    }
+    if (prodDateChecks.length > 0) {
+        prodPromoRawExpr = `CASE WHEN ${prodDateChecks.join(' AND ')} THEN ${prodPromoRawExpr} ELSE 0 END`;
+    }
+
+    let finalStockPromoExpr = prodPromoRawExpr;
+    if (b && b.promoPriceCol) {
+        let branchPromoRaw = `ISNULL(CAST(b.[${b.promoPriceCol}] AS DECIMAL(18, 2)), 0)`;
+        const branchDateChecks = [];
+        if (b.promoStartCol) {
+            branchDateChecks.push(`(b.[${b.promoStartCol}] IS NULL OR YEAR(b.[${b.promoStartCol}]) <= 1900 OR @HojeData >= CAST(b.[${b.promoStartCol}] AS DATE))`);
+        }
+        if (b.promoEndCol) {
+            branchDateChecks.push(`(b.[${b.promoEndCol}] IS NULL OR (YEAR(b.[${b.promoEndCol}]) > 1900 AND @HojeData <= CAST(b.[${b.promoEndCol}] AS DATE)))`);
+        }
+        if (branchDateChecks.length > 0) {
+            branchPromoRaw = `CASE WHEN ${branchDateChecks.join(' AND ')} THEN ${branchPromoRaw} ELSE 0 END`;
+        }
+        finalStockPromoExpr = `CASE WHEN (${branchPromoRaw}) > 0 THEN (${branchPromoRaw}) ELSE (${prodPromoRawExpr}) END`;
+    }
+
+    // 3. Subquery OUTER APPLY para Campanhas da aba PROMOÇÃO válidas hoje (Data + Dia da Semana)
+    let campaignOuterApplySql = `OUTER APPLY (SELECT CAST(NULL AS DECIMAL(18, 2)) AS PrecoCampanhaHoje) camp`;
+
+    const cs = schemaMeta.campaignSource;
+    if (cs) {
+        if (cs.mode === 'header_detail' && cs.header && cs.item) {
+            const h = cs.header;
+            const i = cs.item;
+            const whereConds = [
+                `pi.[${i.prodIdCol}] = p.[${p.prodIdCol}]`,
+                ...buildCampaignWhereConditions('pr', h, hasBranch),
+                ...buildCampaignWhereConditions('pi', i, hasBranch)
+            ];
+
+            let priceValExpr = '0';
+            if (i.promoPriceCol) {
+                priceValExpr = `ISNULL(CAST(pi.[${i.promoPriceCol}] AS DECIMAL(18, 2)), 0)`;
+            } else if (h.promoPriceCol) {
+                priceValExpr = `ISNULL(CAST(pr.[${h.promoPriceCol}] AS DECIMAL(18, 2)), 0)`;
+            }
+
+            if (i.discountPctCol) {
+                priceValExpr = `CASE WHEN ${priceValExpr} > 0 THEN ${priceValExpr} WHEN ISNULL(CAST(pi.[${i.discountPctCol}] AS DECIMAL(18, 4)), 0) > 0 AND ISNULL(CAST(pi.[${i.discountPctCol}] AS DECIMAL(18, 4)), 0) < 100 THEN ROUND((${finalSellingExpr}) * (1.0 - (CAST(pi.[${i.discountPctCol}] AS DECIMAL(18, 4)) / 100.0)), 2) ELSE 0 END`;
+            } else if (h.discountPctCol) {
+                priceValExpr = `CASE WHEN ${priceValExpr} > 0 THEN ${priceValExpr} WHEN ISNULL(CAST(pr.[${h.discountPctCol}] AS DECIMAL(18, 4)), 0) > 0 AND ISNULL(CAST(pr.[${h.discountPctCol}] AS DECIMAL(18, 4)), 0) < 100 THEN ROUND((${finalSellingExpr}) * (1.0 - (CAST(pr.[${h.discountPctCol}] AS DECIMAL(18, 4)) / 100.0)), 2) ELSE 0 END`;
+            }
+
+            whereConds.push(`(${priceValExpr}) > 0`);
+
+            campaignOuterApplySql = `
+            OUTER APPLY (
+                SELECT MIN(CAST(${priceValExpr} AS DECIMAL(18, 2))) AS PrecoCampanhaHoje
+                FROM dbo.[${i.tableName}] pi WITH (NOLOCK)
+                INNER JOIN dbo.[${h.tableName}] pr WITH (NOLOCK)
+                    ON pr.[${h.promoIdCol}] = pi.[${i.joinCol}]
+                WHERE ${whereConds.join('\n                  AND ')}
+            ) camp`;
+        } else if (cs.mode === 'single_table' && cs.header) {
+            const h = cs.header;
+            const whereConds = [
+                `pr.[${h.prodIdCol}] = p.[${p.prodIdCol}]`,
+                ...buildCampaignWhereConditions('pr', h, hasBranch)
+            ];
+
+            let priceValExpr = h.promoPriceCol
+                ? `ISNULL(CAST(pr.[${h.promoPriceCol}] AS DECIMAL(18, 2)), 0)`
+                : '0';
+            if (h.discountPctCol) {
+                priceValExpr = `CASE WHEN ${priceValExpr} > 0 THEN ${priceValExpr} WHEN ISNULL(CAST(pr.[${h.discountPctCol}] AS DECIMAL(18, 4)), 0) > 0 AND ISNULL(CAST(pr.[${h.discountPctCol}] AS DECIMAL(18, 4)), 0) < 100 THEN ROUND((${finalSellingExpr}) * (1.0 - (CAST(pr.[${h.discountPctCol}] AS DECIMAL(18, 4)) / 100.0)), 2) ELSE 0 END`;
+            }
+
+            whereConds.push(`(${priceValExpr}) > 0`);
+
+            campaignOuterApplySql = `
+            OUTER APPLY (
+                SELECT MIN(CAST(${priceValExpr} AS DECIMAL(18, 2))) AS PrecoCampanhaHoje
+                FROM dbo.[${h.tableName}] pr WITH (NOLOCK)
+                WHERE ${whereConds.join('\n                  AND ')}
+            ) camp`;
+        }
+    }
+
+    const branchJoinSql = b
+        ? `LEFT JOIN dbo.[${b.tableName}] b WITH (NOLOCK) ON b.[${b.prodIdCol}] = p.[${p.prodIdCol}]${
+              hasBranch ? ` AND CAST(b.[${b.branchCol}] AS VARCHAR(20)) = @branchCode` : ''
+          }`
+        : '';
+
+    return `
+        DECLARE @HojeData DATE = CAST(GETDATE() AS DATE);
+        -- Cálculo independente de DATEFIRST: 0=Seg, 1=Ter, 2=Qua, 3=Qui, 4=Sex, 5=Sab, 6=Dom
+        DECLARE @HojeDiaSemana INT = ((DATEPART(WEEKDAY, GETDATE()) + @@DATEFIRST - 2) % 7);
+
+        SELECT
+            p.[${p.prodIdCol}] AS CodigoProduto,
+            CAST(${finalSellingExpr} AS DECIMAL(18, 2)) AS PrecoVendaEstoque,
+            CASE
+                WHEN (${finalStockPromoExpr}) > 0 AND (${finalStockPromoExpr}) < (${finalSellingExpr})
+                    THEN CAST(${finalStockPromoExpr} AS DECIMAL(18, 2))
+                ELSE NULL
+            END AS PrecoPromocaoEstoque,
+            CASE
+                WHEN @IgnorePromotionCampaigns = 1 THEN NULL
+                WHEN camp.PrecoCampanhaHoje IS NOT NULL AND camp.PrecoCampanhaHoje > 0 AND camp.PrecoCampanhaHoje < (${finalSellingExpr})
+                    THEN CAST(camp.PrecoCampanhaHoje AS DECIMAL(18, 2))
+                ELSE NULL
+            END AS PrecoCampanhaValidaHoje,
+            CASE
+                WHEN @IgnorePromotionCampaigns = 1 THEN
+                    CASE
+                        WHEN (${finalStockPromoExpr}) > 0 AND (${finalStockPromoExpr}) < (${finalSellingExpr})
+                            THEN CAST(${finalStockPromoExpr} AS DECIMAL(18, 2))
+                        ELSE NULL
+                    END
+                WHEN camp.PrecoCampanhaHoje IS NOT NULL AND camp.PrecoCampanhaHoje > 0 AND camp.PrecoCampanhaHoje < (${finalSellingExpr})
+                    THEN CAST(camp.PrecoCampanhaHoje AS DECIMAL(18, 2))
+                WHEN (${finalStockPromoExpr}) > 0 AND (${finalStockPromoExpr}) < (${finalSellingExpr})
+                    THEN CAST(${finalStockPromoExpr} AS DECIMAL(18, 2))
+                ELSE NULL
+            END AS PrecoPromocionalFinal
+        FROM dbo.[${p.tableName}] p WITH (NOLOCK)
+        ${branchJoinSql}
+        ${campaignOuterApplySql};
+    `;
+}
+
+/**
+ * Aplica a validação estrita de promoções por data + dia da semana (ou a opção de ignorar campanhas da aba Promoção)
+ * sobre todos os registros lidos da View do InovaFarma, garantindo que campanhas de outros dias da semana
+ * (como "SEXTOU COM FORÇA" na segunda-feira) NUNCA sobrescrevam o "PREÇO PROM." da aba Estoque.
+ */
+async function applyInovaFarmaStrictPromotionRules(pool, rawRecords, options = {}) {
+    if (!Array.isArray(rawRecords) || rawRecords.length === 0) {
+        return rawRecords;
+    }
+
+    try {
+        if (!options.connectorInstance?._cachedInovaPromoSchema) {
+            const schemaMeta = await inspectInovaFarmaSchema(pool);
+            if (options.connectorInstance) {
+                options.connectorInstance._cachedInovaPromoSchema = schemaMeta;
+            }
+        }
+
+        const schemaMeta = options.connectorInstance?._cachedInovaPromoSchema || await inspectInovaFarmaSchema(pool);
+        if (!schemaMeta || !schemaMeta.isInovaFarma) {
+            return rawRecords;
+        }
+
+        const ignorePromotionCampaigns = resolveIgnorePromotionCampaignsFlag(options.dbConfig, options);
+        const querySql = buildStrictInovaFarmaPriceQuery(schemaMeta, {
+            branchCode: options.branchCode
+        });
+        if (!querySql) {
+            return rawRecords;
+        }
+
+        const req = pool.request();
+        req.input('IgnorePromotionCampaigns', sql.Bit, ignorePromotionCampaigns ? 1 : 0);
+        if (options.branchCode) {
+            req.input('branchCode', sql.VarChar(20), String(options.branchCode).trim());
+        }
+
+        const priceRes = await req.query(querySql);
+        const priceRows = priceRes?.recordset || [];
+        if (priceRows.length === 0) {
+            return rawRecords;
+        }
+
+        const priceByCodigoMap = new Map();
+        for (const pr of priceRows) {
+            const cod = Number(pr.CodigoProduto);
+            if (Number.isInteger(cod) && cod > 0) {
+                priceByCodigoMap.set(cod, {
+                    precoVendaEstoque: roundMoney(pr.PrecoVendaEstoque),
+                    precoPromocaoEstoque: pr.PrecoPromocaoEstoque !== null && pr.PrecoPromocaoEstoque !== undefined
+                        ? roundMoney(pr.PrecoPromocaoEstoque)
+                        : null,
+                    precoCampanhaValidaHoje: pr.PrecoCampanhaValidaHoje !== null && pr.PrecoCampanhaValidaHoje !== undefined
+                        ? roundMoney(pr.PrecoCampanhaValidaHoje)
+                        : null,
+                    precoPromocionalFinal: pr.PrecoPromocionalFinal !== null && pr.PrecoPromocionalFinal !== undefined
+                        ? roundMoney(pr.PrecoPromocionalFinal)
+                        : null
+                });
+            }
+        }
+
+        if (!options.connectorInstance?._hasLoggedPromoRuleSummary) {
+            const cs = schemaMeta.campaignSource;
+            const weekdayInfo = cs
+                ? (cs.header?.hasIndividualWeekdayCols
+                    ? `Flags Seg..Dom (${Object.values(cs.header.weekdayCols).filter(Boolean).join(', ')})`
+                    : (cs.header?.combinedWeekdayCol ? `Coluna ${cs.header.combinedWeekdayCol}` : 'Filtro nominal + datas'))
+                : 'Apenas Preço Prom. da aba Estoque';
+            console.log(
+                `[InovaFarma Promo Filter] Regra estrita ativa (Ignorar Campanhas=${ignorePromotionCampaigns ? 'SIM' : 'NÃO'} | ` +
+                `Controle Dias da Semana: ${weekdayInfo} | ${priceByCodigoMap.size} produtos verificados).`
+            );
+            if (options.connectorInstance) {
+                options.connectorInstance._hasLoggedPromoRuleSummary = true;
+            }
+        }
+
+        for (const row of rawRecords) {
+            if (!row || typeof row !== 'object') continue;
+            const bc = extractBarcode(row);
+            const rawCode =
+                getFieldIgnoreCase(row, [
+                    'CodigoProduto', 'codigo_produto', 'cod_produto', 'codigo_interno', 'cod_interno',
+                    'id_produto', 'ID_PRODUTO', 'codigo', 'CODIGO', 'internal_code'
+                ]) || extractInternalCode(row, bc);
+
+            const codNum = Number(String(rawCode || '').trim());
+            if (!Number.isInteger(codNum) || codNum <= 0) continue;
+
+            const strictPrices = priceByCodigoMap.get(codNum);
+            if (!strictPrices) continue;
+
+            const { precoVendaEstoque, precoPromocionalFinal } = strictPrices;
+            const validPromo =
+                precoPromocionalFinal !== null &&
+                precoPromocionalFinal > 0 &&
+                (precoVendaEstoque <= 0 || precoPromocionalFinal < precoVendaEstoque)
+                    ? precoPromocionalFinal
+                    : null;
+
+            // Garante que o preço de venda base (PREÇO VENDA da aba Estoque) não seja sobrescrito pelo preço da campanha
+            if (precoVendaEstoque > 0) {
+                row.PrecoVenda = precoVendaEstoque;
+                row.preco_venda = precoVendaEstoque;
+                row.Preco_Bruto = precoVendaEstoque;
+                row.preco_bruto = precoVendaEstoque;
+                row.price = precoVendaEstoque;
+            }
+
+            // Sobrescreve todos os campos de preço promocional/líquido com o valor validado para HOJE (ou PREÇO PROM. da aba Estoque)
+            const promoFieldsToSync = [
+                'preco_promocional', 'Preco_Promocional', 'PRECO_PROMOCIONAL',
+                'PrecoPromocao', 'preco_promocao', 'PRECO_PROMOCAO',
+                'promotional_price', 'promotionalPrice',
+                'vl_promocao', 'Vl_Promocao', 'VL_PROMOCAO',
+                'Vlr_Promocao', 'vlr_promocao',
+                'preco_oferta', 'Preco_Oferta', 'PRECO_OFERTA',
+                'preco_por', 'Preco_Por', 'PRECO_POR',
+                'valor_promocional', 'Valor_Promocional'
+            ];
+            for (const field of promoFieldsToSync) {
+                if (field in row || field === 'preco_promocional' || field === 'promotional_price' || field === 'PrecoPromocao') {
+                    row[field] = validPromo;
+                }
+            }
+
+            const liquidPrice = validPromo !== null ? validPromo : (precoVendaEstoque > 0 ? precoVendaEstoque : row.Preco_Liquido);
+            for (const liqField of ['Preco_Liquido', 'preco_liquido', 'PRECO_LIQUIDO', 'Vl_Liquido', 'vl_liquido', 'Pr_Liquido', 'pr_liquido']) {
+                if (liqField in row || liqField === 'Preco_Liquido') {
+                    row[liqField] = liquidPrice;
+                }
+            }
+        }
+
+        return rawRecords;
+    } catch (err) {
+        console.warn(`[InovaFarma Promo Filter] Aviso ao validar promoções por dia da semana: ${err.message}`);
+        return rawRecords;
+    }
+}
+
+module.exports = {
+    resolveIgnorePromotionCampaignsFlag,
+    inspectInovaFarmaSchema,
+    buildStrictInovaFarmaPriceQuery,
+    applyInovaFarmaStrictPromotionRules
+};
