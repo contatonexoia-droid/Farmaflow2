@@ -107,8 +107,62 @@ class InboxStore {
     return merged;
   }
 
-  public async createInbox(storeId: string, name: string, description?: string, whatsappInstanceId?: string | null, channelType?: string | null): Promise<InboxItem> {
-    const validInstId = isValidUuid(whatsappInstanceId) ? whatsappInstanceId : null;
+  /**
+   * Busca o UUID da instância CONNECTED mais recente desta loja em public.whatsapp_instances.
+   * Usado como vínculo padrão (modo Compartilhado) ao criar ou atualizar caixas de entrada.
+   */
+  public async findStoreConnectedInstanceId(storeId: string): Promise<string | null> {
+    if (!storeId) return null;
+    try {
+      const cleanId = String(storeId).trim().replace(/^store_/, "").replace(/^tenant_/, "");
+      const candidateIds = Array.from(new Set([storeId.trim(), cleanId, `store_${cleanId}`].filter(Boolean)));
+
+      const { data: connectedRows } = await supabaseAdmin
+        .from("whatsapp_instances")
+        .select("id")
+        .in("store_id", candidateIds)
+        .eq("status", "CONNECTED")
+        .order("updated_at", { ascending: false })
+        .limit(1);
+
+      if (connectedRows?.[0]?.id && isValidUuid(connectedRows[0].id)) {
+        return connectedRows[0].id;
+      }
+
+      // Se nenhuma estiver CONNECTED ainda, tenta a instância mais recente da loja
+      const { data: anyRows } = await supabaseAdmin
+        .from("whatsapp_instances")
+        .select("id")
+        .in("store_id", candidateIds)
+        .order("updated_at", { ascending: false })
+        .limit(1);
+
+      if (anyRows?.[0]?.id && isValidUuid(anyRows[0].id)) {
+        return anyRows[0].id;
+      }
+    } catch (err: any) {
+      console.warn("[InboxStore] Erro ao buscar instância conectada da loja:", err.message);
+    }
+    return null;
+  }
+
+  public async createInbox(
+    storeId: string,
+    name: string,
+    description?: string,
+    whatsappInstanceId?: string | null,
+    channelType?: string | null,
+    channelMode: "shared" | "exclusive" = "shared"
+  ): Promise<InboxItem> {
+    const resolvedChannelType = channelType || "whatsapp";
+    let validInstId: string | null = isValidUuid(whatsappInstanceId) ? whatsappInstanceId.trim() : null;
+
+    // Modo Compartilhado (padrão): vincula automaticamente à instância CONNECTED da loja
+    // sem criar uma nova instância na Evolution API.
+    if (resolvedChannelType === "whatsapp" && channelMode !== "exclusive" && !validInstId) {
+      validInstId = await this.findStoreConnectedInstanceId(storeId);
+    }
+
     const generatedUuid = crypto.randomUUID();
 
     const newInbox: InboxItem = {
@@ -117,7 +171,7 @@ class InboxStore {
       name,
       description: description || "",
       whatsapp_instance_id: validInstId,
-      channel_type: channelType || "whatsapp",
+      channel_type: resolvedChannelType,
       created_at: new Date().toISOString()
     };
 
@@ -139,7 +193,7 @@ class InboxStore {
       if (!error && data) {
         const item: InboxItem = {
           ...data,
-          channel_type: channelType || data.channel_type || "whatsapp"
+          channel_type: resolvedChannelType || data.channel_type || "whatsapp"
         };
         this.inboxes = this.inboxes.filter(i => i.id !== item.id && isValidUuid(i.id));
         this.inboxes.push(item);
@@ -159,8 +213,25 @@ class InboxStore {
     return newInbox;
   }
 
-  public async updateInbox(id: string, name: string, description?: string, whatsappInstanceId?: string | null, channelType?: string | null): Promise<InboxItem> {
-    const validInstId = isValidUuid(whatsappInstanceId) ? whatsappInstanceId : null;
+  public async updateInbox(
+    id: string,
+    name: string,
+    description?: string,
+    whatsappInstanceId?: string | null,
+    channelType?: string | null,
+    options?: { storeId?: string; channelMode?: "shared" | "exclusive" }
+  ): Promise<InboxItem> {
+    const resolvedChannelType = channelType || "whatsapp";
+    let validInstId: string | null = isValidUuid(whatsappInstanceId) ? whatsappInstanceId.trim() : null;
+
+    if (
+      resolvedChannelType === "whatsapp" &&
+      options?.channelMode !== "exclusive" &&
+      !validInstId &&
+      options?.storeId
+    ) {
+      validInstId = await this.findStoreConnectedInstanceId(options.storeId);
+    }
 
     const payload: any = {
       name,
@@ -178,7 +249,7 @@ class InboxStore {
           .single();
 
         if (!error && data) {
-          const updatedItem = { ...data, channel_type: channelType || "whatsapp" };
+          const updatedItem = { ...data, channel_type: resolvedChannelType };
           this.inboxes = this.inboxes.map(i => i.id === id ? updatedItem : i);
           this.saveToFile();
           return updatedItem;
@@ -188,16 +259,16 @@ class InboxStore {
       }
     }
 
-    const localPayload = { ...payload, channel_type: channelType || "whatsapp" };
+    const localPayload = { ...payload, channel_type: resolvedChannelType };
     const index = this.inboxes.findIndex(i => i.id === id);
     if (index >= 0) {
       this.inboxes[index] = { ...this.inboxes[index], ...localPayload };
     } else if (isValidUuid(id)) {
-      const created = { id, store_id: "default", created_at: new Date().toISOString(), ...localPayload };
+      const created = { id, store_id: options?.storeId || "default", created_at: new Date().toISOString(), ...localPayload };
       this.inboxes.push(created);
     }
     this.saveToFile();
-    return this.inboxes.find(i => i.id === id) || { id, store_id: "default", created_at: new Date().toISOString(), ...localPayload };
+    return this.inboxes.find(i => i.id === id) || { id, store_id: options?.storeId || "default", created_at: new Date().toISOString(), ...localPayload };
   }
 
   public async deleteInbox(id: string): Promise<boolean> {

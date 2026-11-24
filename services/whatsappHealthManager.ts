@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { EventEmitter } from "events";
+import { safeUpdateWhatsappInstance, syncStoreInboxesToConnectedInstance } from "./evolutionApiService.js";
 
 const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || "https://nalshjhoiecxooejpiaw.supabase.co";
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_Y2lAqlvDUhdjSNtv80GkJA_SiOgynYy";
@@ -157,16 +158,17 @@ export class WhatsappHealthManager extends EventEmitter {
     if (newStatus !== previousStatus) {
       console.log(`[WhatsappHealthManager] Status change for store ${storeId}: ${previousStatus} -> ${newStatus} (${reason})`);
 
-      // Atualizar banco de dados
-      await supabaseAdmin.from("whatsapp_instances").upsert(
-        {
-          store_id: storeId,
-          instance_name: instanceName,
-          status: newStatus,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "store_id" }
+      // Atualizar banco de dados por instance_name (limpando QR codes ao conectar e sincronizando inboxes da loja)
+      const { data: updatedInst } = await safeUpdateWhatsappInstance(
+        "instance_name",
+        instanceName,
+        { status: newStatus },
+        newStatus === "CONNECTED"
       );
+
+      if (newStatus === "CONNECTED" && updatedInst?.id) {
+        await syncStoreInboxesToConnectedInstance(updatedInst.store_id || storeId, updatedInst.id);
+      }
 
       // Emitir evento em tempo real para o painel via EventEmitter e WebSockets
       this.emit("instance_status_changed", {

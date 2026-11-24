@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Search, Send, FileText, Image as ImageIcon, Paperclip, User, Users, Clock, ShoppingBag, CreditCard, MessageSquare, Lock, AlertCircle, RefreshCw, Smartphone, ChevronLeft, ChevronDown, ChevronUp, Info, BarChart2, CheckCircle2, UserPlus, Inbox, MoreVertical, Kanban, LayoutList, Columns, QrCode, Pill, Sparkles, Calendar, X, Download, Smile } from 'lucide-react';
+import { Search, Send, FileText, Image as ImageIcon, Paperclip, User, Users, Clock, ShoppingBag, CreditCard, MessageSquare, Lock, AlertCircle, RefreshCw, RotateCcw, Smartphone, ChevronLeft, ChevronDown, ChevronUp, Info, BarChart2, CheckCircle2, UserPlus, Inbox, MoreVertical, Kanban, LayoutList, Columns, QrCode, Pill, Sparkles, Calendar, X, Download, Smile } from 'lucide-react';
+import { toast } from 'sonner';
 import { ChatTransferModal } from './ChatTransferModal';
 import { AiChatCopilot } from './AiChatCopilot';
 import { ChatKanban } from './ChatKanban';
@@ -45,6 +46,8 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   const activeViewRef = useRef<'LIST' | 'CHAT' | 'SIDEBAR'>('LIST');
   const userClosedChatRef = useRef<boolean>(false);
   const optimisticLockRef = useRef<Record<string, { until: number; patch: any }>>({});
+  // Preserva mensagens locais com falha ou em envio entre atualizações de polling
+  const pendingLocalMessagesRef = useRef<Record<string, any[]>>({});
 
   useEffect(() => {
     selectedChatIdRef.current = selectedConversation?.id || null;
@@ -870,6 +873,27 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
     }
   };
 
+  const mergeWithPendingLocalMessages = (conversationId: string, serverMessages: any[]) => {
+    const locals = pendingLocalMessagesRef.current[conversationId] || [];
+    if (locals.length === 0) return serverMessages;
+    const serverIds = new Set(serverMessages.map(m => m.id));
+    const remainingLocals = locals.filter(m => !serverIds.has(m.id));
+    return [...serverMessages, ...remainingLocals];
+  };
+
+  const upsertPendingLocalMessage = (conversationId: string, msg: any) => {
+    const current = pendingLocalMessagesRef.current[conversationId] || [];
+    const exists = current.some(m => m.id === msg.id);
+    pendingLocalMessagesRef.current[conversationId] = exists
+      ? current.map(m => (m.id === msg.id ? msg : m))
+      : [...current, msg];
+  };
+
+  const removePendingLocalMessage = (conversationId: string, tempId: string) => {
+    const current = pendingLocalMessagesRef.current[conversationId] || [];
+    pendingLocalMessagesRef.current[conversationId] = current.filter(m => m.id !== tempId);
+  };
+
   const fetchMessages = async (conversationId: string) => {
     try {
       const queryParams = userId ? `&userId=${userId}&role=${cleanRole}` : '';
@@ -877,7 +901,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       if (res.ok) {
         const json = await res.json();
         if (json.data) {
-          setMessages(json.data);
+          setMessages(mergeWithPendingLocalMessages(conversationId, json.data));
           return;
         }
       }
@@ -914,28 +938,16 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
             reactions: parsedReactions
           };
         });
-        setMessages(formatted);
+        setMessages(mergeWithPendingLocalMessages(conversationId, formatted));
       }
     } catch (e) {
       console.warn("Error fetching messages", e);
     }
   };
 
-  const handleSendMessage = async () => {
-    if (!messageInput.trim() || !selectedConversation) return;
-    const textToSend = messageInput.trim();
-    setMessageInput('');
-
-    const tempMsg = {
-      id: `temp_${Date.now()}`,
-      conversation_id: selectedConversation.id,
-      sender_type: 'USER',
-      content: textToSend,
-      is_private: isPrivateNote,
-      created_at: new Date().toISOString()
-    };
-
-    setMessages(prev => [...prev, tempMsg]);
+  const dispatchChatSendRequest = async (targetMsg: any) => {
+    const convId = targetMsg.conversation_id;
+    const isMedia = Boolean(targetMsg.media_url || targetMsg.mediaUrl);
 
     try {
       const res = await fetch('/api/v1/chat/send', {
@@ -945,58 +957,125 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
           'x-tenant-id': tenantId
         },
         body: JSON.stringify({
-          conversation_id: selectedConversation.id,
-          content: textToSend,
-          is_private: isPrivateNote,
+          conversation_id: convId,
+          content: targetMsg.content,
+          is_private: Boolean(targetMsg.is_private),
           sender_type: 'USER',
-          userId: userId,
-          role: cleanRole
+          userId: effectiveUserId || userId,
+          role: cleanRole,
+          ...(isMedia
+            ? {
+                media_url: targetMsg.media_url || targetMsg.mediaUrl,
+                mediaUrl: targetMsg.media_url || targetMsg.mediaUrl,
+                media_type: targetMsg.media_type || targetMsg.type,
+                type: targetMsg.media_type || targetMsg.type
+              }
+            : {})
         })
       });
 
-      if (res.ok) {
-        const json = await res.json();
-        if (json.data) {
-          setMessages(prev => {
-            const alreadyExists = prev.some(m => m.id === json.data.id);
-            if (alreadyExists) {
-              return prev.filter(m => m.id !== tempMsg.id);
+      let json: any = null;
+      try {
+        json = await res.json();
+      } catch (_) {
+        json = null;
+      }
+
+      if (res.ok && json?.data) {
+        removePendingLocalMessage(convId, targetMsg.id);
+        const confirmedMsg = isMedia
+          ? {
+              ...json.data,
+              mediaUrl: json.data.mediaUrl || json.data.media_url || targetMsg.mediaUrl,
+              media_url: json.data.media_url || json.data.mediaUrl || targetMsg.media_url,
+              type: json.data.type || json.data.media_type || targetMsg.type,
+              localStatus: 'sent'
             }
-            return prev.map(m => m.id === tempMsg.id ? json.data : m);
-          });
-          setSelectedConversation((prev: any) => prev ? {
-            ...prev,
-            last_message_content: textToSend,
-            last_message_at: new Date().toISOString(),
-            assigned_user_id: prev.assigned_user_id || effectiveUserId,
-            is_human_controlled: true,
-            is_bot_active: false,
-            status: 'human_takeover',
-            kanban_stage: 'em_atendimento'
-          } : prev);
-          fetchConversations();
-          return;
-        }
+          : { ...json.data, localStatus: 'sent' };
+
+        setMessages(prev => {
+          const alreadyExists = prev.some(m => m.id === confirmedMsg.id);
+          if (alreadyExists) {
+            return prev.filter(m => m.id !== targetMsg.id);
+          }
+          return prev.map(m => (m.id === targetMsg.id ? confirmedMsg : m));
+        });
+
+        setSelectedConversation((prev: any) =>
+          prev && prev.id === convId
+            ? {
+                ...prev,
+                last_message_content: targetMsg.content,
+                last_message_at: new Date().toISOString(),
+                assigned_user_id: prev.assigned_user_id || effectiveUserId,
+                is_human_controlled: true,
+                is_bot_active: false,
+                status: 'human_takeover',
+                kanban_stage: 'em_atendimento'
+              }
+            : prev
+        );
+        fetchConversations();
+        return;
       }
 
-      // Supabase direct fallback
-      const { data, error } = await supabase
-        .from('chat_messages')
-        .insert([{
-          conversation_id: selectedConversation.id,
-          sender_type: 'USER',
-          content: textToSend,
-          is_private: isPrivateNote
-        }])
-        .select()
-        .single();
+      const serverError =
+        json?.error ||
+        json?.message ||
+        `Falha ao enviar mensagem pelo WhatsApp (HTTP ${res.status}).`;
 
-      if (!error && data) {
-        setMessages(prev => prev.map(m => m.id === tempMsg.id ? data : m));
-      }
-    } catch (e) {
-      console.warn("Error sending message:", e);
+      const failedMsg = {
+        ...targetMsg,
+        localStatus: 'failed',
+        errorMessage: serverError
+      };
+      upsertPendingLocalMessage(convId, failedMsg);
+      setMessages(prev => prev.map(m => (m.id === targetMsg.id ? failedMsg : m)));
+      toast.error(serverError);
+    } catch (err: any) {
+      const networkError =
+        err?.message || 'Erro de conexão com o servidor ao enviar a mensagem.';
+      const failedMsg = {
+        ...targetMsg,
+        localStatus: 'failed',
+        errorMessage: networkError
+      };
+      upsertPendingLocalMessage(convId, failedMsg);
+      setMessages(prev => prev.map(m => (m.id === targetMsg.id ? failedMsg : m)));
+      toast.error(networkError);
     }
+  };
+
+  const handleSendMessage = async () => {
+    if (!messageInput.trim() || !selectedConversation) return;
+    const textToSend = messageInput.trim();
+    setMessageInput('');
+
+    const tempMsg = {
+      id: `temp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      conversation_id: selectedConversation.id,
+      sender_type: 'USER',
+      content: textToSend,
+      is_private: isPrivateNote,
+      localStatus: 'sending',
+      created_at: new Date().toISOString()
+    };
+
+    upsertPendingLocalMessage(selectedConversation.id, tempMsg);
+    setMessages(prev => [...prev, tempMsg]);
+    await dispatchChatSendRequest(tempMsg);
+  };
+
+  const handleRetryMessage = async (failedMsg: any) => {
+    if (!failedMsg) return;
+    const retryingMsg = {
+      ...failedMsg,
+      localStatus: 'sending',
+      errorMessage: undefined
+    };
+    upsertPendingLocalMessage(failedMsg.conversation_id, retryingMsg);
+    setMessages(prev => prev.map(m => (m.id === failedMsg.id ? retryingMsg : m)));
+    await dispatchChatSendRequest(retryingMsg);
   };
 
   const handleFileAttachmentUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1011,60 +1090,29 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
     const labelText = messageInput.trim() || (isImg ? '[Imagem]' : isAud ? '[Áudio]' : isVid ? '[Vídeo]' : file.name);
     if (messageInput.trim()) setMessageInput('');
 
+    const convId = selectedConversation.id;
     const reader = new FileReader();
     reader.onload = async () => {
       const dataUrl = String(reader.result || '');
       if (!dataUrl) return;
 
       const tempMsg = {
-        id: `temp_media_${Date.now()}`,
-        conversation_id: selectedConversation.id,
+        id: `temp_media_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        conversation_id: convId,
         sender_type: 'USER',
         content: labelText,
         type: mediaType,
+        media_type: mediaType,
         mediaUrl: dataUrl,
         media_url: dataUrl,
         is_private: isPrivateNote,
+        localStatus: 'sending',
         created_at: new Date().toISOString()
       };
 
+      upsertPendingLocalMessage(convId, tempMsg);
       setMessages(prev => [...prev, tempMsg]);
-
-      try {
-        const res = await fetch('/api/v1/chat/send', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-tenant-id': tenantId
-          },
-          body: JSON.stringify({
-            conversation_id: selectedConversation.id,
-            content: labelText,
-            type: mediaType,
-            mediaUrl: dataUrl,
-            is_private: isPrivateNote,
-            sender_type: 'USER',
-            userId: effectiveUserId,
-            role: cleanRole
-          })
-        });
-
-        if (res.ok) {
-          const json = await res.json();
-          if (json.data) {
-            const returnedMsg = { ...json.data, mediaUrl: json.data.mediaUrl || dataUrl, type: mediaType };
-            setMessages(prev => prev.map(m => m.id === tempMsg.id ? returnedMsg : m));
-            setSelectedConversation((prev: any) => prev ? {
-              ...prev,
-              last_message_content: labelText,
-              last_message_at: new Date().toISOString()
-            } : prev);
-            fetchConversations();
-          }
-        }
-      } catch (err) {
-        console.warn('Erro ao enviar anexo:', err);
-      }
+      await dispatchChatSendRequest(tempMsg);
     };
     reader.readAsDataURL(file);
   };
@@ -1937,11 +1985,13 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                 return (
                   <div key={`${msg.id || 'msg'}_${index}`} className={`flex ${msg.sender_type === 'CUSTOMER' ? 'justify-start' : 'justify-end'} group relative`}>
                     <div className={`max-w-[85%] md:max-w-[70%] p-3 rounded-2xl shadow-sm relative ${
-                      msg.is_private 
-                        ? 'bg-[#fff9c4] border border-[#fbc02d] text-gray-800 rounded-tr-none' 
-                        : msg.sender_type === 'CUSTOMER' 
-                          ? 'bg-white text-gray-800 rounded-tl-none' 
-                          : 'bg-[#dcf8c6] text-gray-800 rounded-tr-none'
+                      msg.localStatus === 'failed'
+                        ? 'bg-red-50 border border-red-300 text-gray-800 rounded-tr-none'
+                        : msg.is_private 
+                          ? 'bg-[#fff9c4] border border-[#fbc02d] text-gray-800 rounded-tr-none' 
+                          : msg.sender_type === 'CUSTOMER' 
+                            ? 'bg-white text-gray-800 rounded-tl-none' 
+                            : 'bg-[#dcf8c6] text-gray-800 rounded-tr-none'
                     }`}>
                       {msg.is_private && (
                         <div className="flex items-center gap-1 text-[10px] font-black text-[#f57f17] uppercase mb-1">
@@ -2025,9 +2075,38 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                         <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
                       )}
 
-                      <span className="text-[10px] text-gray-500 block text-right mt-1">
-                        {msg.created_at ? new Date(msg.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' }) : ''}
-                      </span>
+                      <div className="flex items-center justify-end gap-2 mt-1">
+                        {msg.localStatus === 'sending' && (
+                          <span className="text-[10px] text-gray-500 italic">Enviando...</span>
+                        )}
+                        <span className="text-[10px] text-gray-500">
+                          {msg.created_at ? new Date(msg.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' }) : ''}
+                        </span>
+                      </div>
+
+                      {msg.localStatus === 'failed' && (
+                        <div className="mt-2 pt-2 border-t border-red-200/80 flex flex-col gap-1.5">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="inline-flex items-center gap-1 text-[11px] font-bold text-red-600">
+                              <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                              Falha ao enviar
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleRetryMessage(msg)}
+                              className="inline-flex items-center gap-1 text-[11px] font-bold text-red-700 hover:text-red-900 bg-red-100 hover:bg-red-200 px-2.5 py-1 rounded-lg transition-colors"
+                            >
+                              <RotateCcw className="w-3 h-3" />
+                              Tentar novamente
+                            </button>
+                          </div>
+                          {msg.errorMessage && (
+                            <p className="text-[11px] text-red-600/90 leading-snug break-words">
+                              {msg.errorMessage}
+                            </p>
+                          )}
+                        </div>
+                      )}
 
                       {/* WhatsApp-Native Reaction Floating Badge */}
                       {((Array.isArray(msg.reactions) && msg.reactions.length > 0) || msg.reaction) && (

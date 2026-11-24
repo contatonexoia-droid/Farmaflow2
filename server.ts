@@ -28,7 +28,13 @@ import { inboxStore } from "./services/inboxStore.js";
 import { chatStore } from "./services/chatStore.js";
 import { teamStore } from "./services/teamStore.js";
 import { aiAgentService, DEFAULT_AI_AGENT_PROMPT, isolateUrlsInText, extractUrlAndCleanText, ensureStoreUrlCacheBuster, formatToWhatsAppMarkdown, cleanSearchInterjections, PHARMA_EXPANSIONS, extractProductSize, productMatchesSize } from "./services/aiAgentService.js";
-import { evolutionApiService } from "./services/evolutionApiService.js";
+import {
+  evolutionApiService,
+  safeUpdateWhatsappInstance,
+  syncStoreInboxesToConnectedInstance,
+  isValidUuid,
+  resolveStoreCandidateIds,
+} from "./services/evolutionApiService.js";
 import { transcribeAudio } from "./services/audioAiService.js";
 import ogHandler, { buildCrawlerHtml, isCrawlerRequest } from "./api/og-handler.js";
 import QRCode from "qrcode";
@@ -3177,11 +3183,21 @@ app.get("/api/v1/inboxes", async (req, res) => {
 
 app.post("/api/v1/inboxes", async (req, res) => {
   try {
-    const { store_id, name, description, whatsapp_instance_id, channel_type } = req.body;
+    const { store_id, name, description, whatsapp_instance_id, channel_type, channel_mode, channelMode } = req.body;
     const storeId = store_id || (req.headers["x-tenant-id"] as string) || "default";
     if (!name) return res.status(400).json({ error: "Nome é obrigatório." });
 
-    const created = await inboxStore.createInbox(storeId, name, description, whatsapp_instance_id, channel_type);
+    const resolvedMode: "shared" | "exclusive" =
+      channel_mode === "exclusive" || channelMode === "exclusive" ? "exclusive" : "shared";
+
+    const created = await inboxStore.createInbox(
+      storeId,
+      name,
+      description,
+      whatsapp_instance_id,
+      channel_type,
+      resolvedMode
+    );
     return res.status(201).json({ data: created });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
@@ -3191,10 +3207,21 @@ app.post("/api/v1/inboxes", async (req, res) => {
 app.put("/api/v1/inboxes/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, description, whatsapp_instance_id, channel_type } = req.body;
+    const { store_id, name, description, whatsapp_instance_id, channel_type, channel_mode, channelMode } = req.body;
+    const storeId = store_id || (req.headers["x-tenant-id"] as string) || undefined;
     if (!name) return res.status(400).json({ error: "Nome é obrigatório." });
 
-    const updated = await inboxStore.updateInbox(id, name, description, whatsapp_instance_id, channel_type);
+    const resolvedMode: "shared" | "exclusive" =
+      channel_mode === "exclusive" || channelMode === "exclusive" ? "exclusive" : "shared";
+
+    const updated = await inboxStore.updateInbox(
+      id,
+      name,
+      description,
+      whatsapp_instance_id,
+      channel_type,
+      { storeId, channelMode: resolvedMode }
+    );
     return res.json({ data: updated });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
@@ -10478,24 +10505,7 @@ async function resolveTenantForAgent(req: express.Request): Promise<AgentTenantR
       } catch (e) {}
     }
 
-    // 2. Busca por slug na tabela tenants
-    if (!foundTenant) {
-      for (const key of keyArray) {
-        try {
-          const { data: bySlugRows } = await supabaseAdmin
-            .from('tenants')
-            .select('*')
-            .eq('slug', key)
-            .limit(1);
-          if (bySlugRows && bySlugRows.length > 0) {
-            foundTenant = bySlugRows[0];
-            break;
-          }
-        } catch (e) {}
-      }
-    }
-
-    // 3. Busca por id (string ou UUID) na tabela tenants
+    // 2. Busca prioritária por id (string ou UUID) na tabela tenants
     if (!foundTenant) {
       for (const key of keyArray) {
         try {
@@ -10506,6 +10516,23 @@ async function resolveTenantForAgent(req: express.Request): Promise<AgentTenantR
             .limit(1);
           if (byIdRows && byIdRows.length > 0) {
             foundTenant = byIdRows[0];
+            break;
+          }
+        } catch (e) {}
+      }
+    }
+
+    // 3. Fallback por slug na tabela tenants
+    if (!foundTenant) {
+      for (const key of keyArray) {
+        try {
+          const { data: bySlugRows } = await supabaseAdmin
+            .from('tenants')
+            .select('*')
+            .eq('slug', key)
+            .limit(1);
+          if (bySlugRows && bySlugRows.length > 0) {
+            foundTenant = bySlugRows[0];
             break;
           }
         } catch (e) {}
@@ -13527,7 +13554,8 @@ async function resolveEvolutionConfig(
   const rawTenant = (tenantId || "principal").replace(/^store_/, '').replace(/^tenant_/, '');
   const cleanStore = rawTenant.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
-  // 1. Identificar ou resolver o nome exclusivo da instância
+  // 1. Identificar ou resolver o nome da instância
+  const isExclusiveRequest = Boolean(override?.exclusive === true || override?.exclusive === "true");
   if (!instanceName) {
     if (inboxId && inboxId !== "default" && !inboxId.includes("default")) {
       try {
@@ -13538,7 +13566,7 @@ async function resolveEvolutionConfig(
           .maybeSingle();
 
         if (inboxRow?.whatsapp_instance_id) {
-          const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(inboxRow.whatsapp_instance_id);
+          const isUuid = isValidUuid(inboxRow.whatsapp_instance_id);
           let linkedInst: any = null;
 
           if (isUuid) {
@@ -13566,8 +13594,32 @@ async function resolveEvolutionConfig(
       } catch (e) {}
 
       if (!instanceName) {
-        const cleanInbox = inboxId.replace(/^inbox_/, '').replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-        instanceName = `inbox_${cleanInbox}`;
+        if (isExclusiveRequest) {
+          const cleanInbox = inboxId.replace(/^inbox_/, '').replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+          instanceName = `inbox_${cleanInbox}`;
+        } else {
+          // Modo compartilhado: busca instância CONNECTED da loja antes de cair no padrão store_<loja>
+          try {
+            const candidateStoreIds = await resolveStoreCandidateIds(tenantId);
+            if (candidateStoreIds.length > 0) {
+              const { data: storeInst } = await supabaseAdmin
+                .from('whatsapp_instances')
+                .select('instance_name')
+                .in('store_id', candidateStoreIds)
+                .eq('status', 'CONNECTED')
+                .order('updated_at', { ascending: false })
+                .limit(1)
+                .maybeSingle();
+              if (storeInst?.instance_name) {
+                instanceName = storeInst.instance_name;
+              }
+            }
+          } catch (_) {}
+
+          if (!instanceName) {
+            instanceName = cleanStore ? `store_${cleanStore}` : 'store_principal';
+          }
+        }
       }
     } else {
       instanceName = cleanStore ? `store_${cleanStore}` : 'store_principal';
@@ -14199,7 +14251,8 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
       });
     }
 
-    // Salvar no banco os dados atualizados e vincular à Caixa de Entrada
+    // Salvar no banco os dados atualizados e sincronizar Caixas de Entrada
+    const isExclusiveConnect = Boolean(req.body.exclusive === true || req.body.exclusive === "true");
     try {
       const updateData: any = {
         store_id: tenantId,
@@ -14226,23 +14279,32 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
       let instId = existing?.id;
 
       if (existing) {
-        await supabaseAdmin.from('whatsapp_instances').update(updateData).eq('id', existing.id);
+        await safeUpdateWhatsappInstance('id', existing.id, updateData, isConnected);
       } else {
-        const { data: inserted } = await supabaseAdmin.from('whatsapp_instances').insert(updateData).select('id').maybeSingle();
-        if (inserted?.id) instId = inserted.id;
+        const { data: inserted } = await supabaseAdmin
+          .from('whatsapp_instances')
+          .insert(updateData)
+          .select('id')
+          .maybeSingle();
+        if (inserted?.id) {
+          instId = inserted.id;
+          if (isConnected) {
+            await safeUpdateWhatsappInstance('id', instId, { status: 'CONNECTED' }, true);
+          }
+        }
       }
 
-      if (inboxId && instId) {
-        try {
-          await supabaseAdmin.from('inboxes').update({ whatsapp_instance_id: instId }).eq('id', inboxId);
-        } catch (e) {}
-        try {
-          const inboxes = await inboxStore.getInboxes(tenantId);
-          const targetInbox = inboxes.find(i => i.id === inboxId);
-          if (targetInbox) {
-            await inboxStore.updateInbox(inboxId, targetInbox.name, targetInbox.description, instId, targetInbox.channel_type);
-          }
-        } catch (e) {}
+      if (instId) {
+        if (isConnected) {
+          await syncStoreInboxesToConnectedInstance(tenantId, instId, {
+            specificInboxId: inboxId,
+            exclusive: isExclusiveConnect,
+          });
+        } else if (inboxId && isValidUuid(inboxId)) {
+          try {
+            await supabaseAdmin.from('inboxes').update({ whatsapp_instance_id: instId }).eq('id', inboxId);
+          } catch (e) {}
+        }
       }
     } catch (dbErr: any) {
       console.warn("[WhatsApp DB Warning]:", dbErr.message);
@@ -14322,16 +14384,21 @@ app.get("/api/v1/chat/instance/status", requireChatEnabled, async (req, res) => 
               const connectionState = stateRes.data?.instance?.state || stateRes.data?.state;
               if (connectionState === "open") {
                   const phoneNumber = stateRes.data?.instance?.owner?.split('@')[0] || stateRes.data?.owner?.split('@')[0] || null;
+                  const isExclusiveStatus = req.query.exclusive === "true";
                   
                   const { data: existing } = await supabaseAdmin.from('whatsapp_instances').select('id').eq('instance_name', instanceName).maybeSingle();
                   let instId = existing?.id;
 
                   if (existing) {
-                      await supabaseAdmin.from('whatsapp_instances').update({
-                         status: 'CONNECTED',
-                         ...(phoneNumber ? { phone_number: phoneNumber } : {}),
-                         updated_at: new Date().toISOString()
-                      }).eq('id', existing.id);
+                      await safeUpdateWhatsappInstance(
+                        'id',
+                        existing.id,
+                        {
+                          status: 'CONNECTED',
+                          ...(phoneNumber ? { phone_number: phoneNumber } : {}),
+                        },
+                        true
+                      );
                   } else {
                       const { data: inserted } = await supabaseAdmin.from('whatsapp_instances').insert({
                          store_id: tenantId,
@@ -14342,13 +14409,17 @@ app.get("/api/v1/chat/instance/status", requireChatEnabled, async (req, res) => 
                          evolution_key: evoConfig.evolutionKey,
                          updated_at: new Date().toISOString()
                       }).select('id').maybeSingle();
-                      if (inserted?.id) instId = inserted.id;
+                      if (inserted?.id) {
+                        instId = inserted.id;
+                        await safeUpdateWhatsappInstance('id', instId, { status: 'CONNECTED' }, true);
+                      }
                   }
 
-                  if (inboxId && instId) {
-                    try {
-                      await supabaseAdmin.from('inboxes').update({ whatsapp_instance_id: instId }).eq('id', inboxId);
-                    } catch (e) {}
+                  if (instId) {
+                    await syncStoreInboxesToConnectedInstance(String(tenantId), instId, {
+                      specificInboxId: inboxId,
+                      exclusive: isExclusiveStatus,
+                    });
                   }
 
                   return res.json({ 
@@ -14374,9 +14445,9 @@ app.get("/api/v1/chat/instance/status", requireChatEnabled, async (req, res) => 
                   // Se não veio na resposta do connect, verifica se temos salvo no banco (do webhook)
                   if (!base64) {
                     try {
-                      const { data: dbInst } = await supabaseAdmin.from('whatsapp_instances').select('qrcode_base64').eq('instance_name', instanceName).maybeSingle();
-                      if (dbInst?.qrcode_base64) {
-                        base64 = dbInst.qrcode_base64;
+                      const { data: dbInst } = await supabaseAdmin.from('whatsapp_instances').select('*').eq('instance_name', instanceName).maybeSingle();
+                      if (dbInst?.qrcode_base64 || dbInst?.qr_code_base64) {
+                        base64 = dbInst.qrcode_base64 || dbInst.qr_code_base64;
                       }
                     } catch (e) {}
                   }
@@ -14397,15 +14468,16 @@ app.get("/api/v1/chat/instance/status", requireChatEnabled, async (req, res) => 
         try {
           const { data: existing } = await supabaseAdmin.from('whatsapp_instances').select('*').eq('instance_name', instanceName).maybeSingle();
           if (existing) {
+            const dbQr = existing.qrcode_base64 || existing.qr_code_base64 || null;
             const resolvedStatus = existing.status === 'CONNECTED' 
               ? 'CONNECTED' 
-              : (existing.qrcode_base64 ? 'QRCODE' : 'DISCONNECTED');
+              : (dbQr ? 'QRCODE' : 'DISCONNECTED');
 
             return res.json({ 
               status: resolvedStatus,
               phoneNumber: existing.phone_number || null,
               phone_number: existing.phone_number || null,
-              qrcodeBase64: existing.qrcode_base64 || null,
+              qrcodeBase64: resolvedStatus === 'CONNECTED' ? null : dbQr,
               ...buildStatusMeta(),
               hasKey: !!evoConfig.evolutionKey || !!sanitizeEvolutionApiKey(existing.evolution_key),
             });
@@ -14643,7 +14715,8 @@ app.post(["/api/v1/chat/instance/recreate", "/api/v1/chat/instance/restart"], re
       evoConfig,
     });
 
-    // 5. Atualiza no banco
+    // 5. Atualiza no banco (limpando QR codes quando CONNECTED e sincronizando inboxes da loja)
+    const isExclusiveRecreate = Boolean(req.body.exclusive === true || req.body.exclusive === "true");
     try {
       const { data: upserted } = await supabaseAdmin.from('whatsapp_instances').upsert({
         store_id: tenantId,
@@ -14656,10 +14729,19 @@ app.post(["/api/v1/chat/instance/recreate", "/api/v1/chat/instance/restart"], re
         updated_at: new Date().toISOString()
       }, { onConflict: 'instance_name' }).select('id').maybeSingle();
 
-      if (inboxId && upserted?.id) {
-        try {
-          await supabaseAdmin.from('inboxes').update({ whatsapp_instance_id: upserted.id }).eq('id', inboxId);
-        } catch (e) {}
+      const instId = upserted?.id;
+      if (instId) {
+        if (isConnected) {
+          await safeUpdateWhatsappInstance('id', instId, { status: 'CONNECTED' }, true);
+          await syncStoreInboxesToConnectedInstance(tenantId, instId, {
+            specificInboxId: inboxId,
+            exclusive: isExclusiveRecreate,
+          });
+        } else if (inboxId && isValidUuid(inboxId)) {
+          try {
+            await supabaseAdmin.from('inboxes').update({ whatsapp_instance_id: instId }).eq('id', inboxId);
+          } catch (e) {}
+        }
       }
     } catch (e) {}
 
@@ -14753,15 +14835,20 @@ app.post("/api/v1/chat/instance/confirm", requireChatEnabled, async (req, res) =
 
     const { instanceName, evolutionUrl, evolutionKey } = await resolveEvolutionConfig(tenantId, req.body);
 
+    const isExclusiveConfirm = Boolean(req.body.exclusive === true || req.body.exclusive === "true");
     const { data: existing } = await supabaseAdmin.from('whatsapp_instances').select('id').eq('instance_name', instanceName).maybeSingle();
     let instId = existing?.id;
 
     if (existing) {
-      await supabaseAdmin.from('whatsapp_instances').update({
-        status: 'CONNECTED',
-        phone_number: phoneNumber,
-        updated_at: new Date().toISOString()
-      }).eq('id', existing.id);
+      await safeUpdateWhatsappInstance(
+        'id',
+        existing.id,
+        {
+          status: 'CONNECTED',
+          phone_number: phoneNumber,
+        },
+        true
+      );
     } else {
       const { data: inserted } = await supabaseAdmin.from('whatsapp_instances').insert({
         store_id: tenantId,
@@ -14772,13 +14859,17 @@ app.post("/api/v1/chat/instance/confirm", requireChatEnabled, async (req, res) =
         evolution_key: evolutionKey,
         updated_at: new Date().toISOString()
       }).select('id').maybeSingle();
-      if (inserted?.id) instId = inserted.id;
+      if (inserted?.id) {
+        instId = inserted.id;
+        await safeUpdateWhatsappInstance('id', instId, { status: 'CONNECTED' }, true);
+      }
     }
 
-    if (inboxId && instId) {
-      try {
-        await supabaseAdmin.from('inboxes').update({ whatsapp_instance_id: instId }).eq('id', inboxId);
-      } catch (e) {}
+    if (instId) {
+      await syncStoreInboxesToConnectedInstance(tenantId, instId, {
+        specificInboxId: inboxId,
+        exclusive: isExclusiveConfirm,
+      });
     }
 
     return res.json({ success: true, status: 'CONNECTED', phoneNumber, instanceName });
@@ -14804,14 +14895,17 @@ app.post("/api/v1/chat/instance/disconnect", requireChatEnabled, async (req, res
       ).catch(() => {});
     }
 
-    // Update status in supabase for this specific instance
+    // Update status in supabase for this specific instance (clearing both QR columns)
     try {
-      await supabaseAdmin.from('whatsapp_instances').update({
-        status: 'DISCONNECTED',
-        phone_number: null,
-        qrcode_base64: null,
-        updated_at: new Date().toISOString()
-      }).eq('instance_name', evoConfig.instanceName);
+      await safeUpdateWhatsappInstance(
+        'instance_name',
+        evoConfig.instanceName,
+        {
+          status: 'DISCONNECTED',
+          phone_number: null,
+        },
+        true
+      );
     } catch (e) {}
 
     return res.json({ success: true, status: 'DISCONNECTED', instanceName: evoConfig.instanceName });
@@ -15630,11 +15724,16 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
             // Auto-registro dinâmico da instância na tabela whatsapp_instances (Plug-and-Play)
             try {
               const rawInst = String(instanceName).trim();
-              await supabaseAdmin.from("whatsapp_instances").upsert({
+              const { data: autoUpserted } = await supabaseAdmin.from("whatsapp_instances").upsert({
                 store_id: fallbackTenant.id,
                 instance_name: rawInst,
-                status: "CONNECTED"
-              }, { onConflict: "instance_name" });
+                status: "CONNECTED",
+                updated_at: new Date().toISOString()
+              }, { onConflict: "instance_name" }).select("id, store_id").maybeSingle();
+              if (autoUpserted?.id) {
+                await safeUpdateWhatsappInstance("id", autoUpserted.id, { status: "CONNECTED" }, true);
+                await syncStoreInboxesToConnectedInstance(autoUpserted.store_id || fallbackTenant.id, autoUpserted.id);
+              }
               console.log(`[WEBHOOK AUTO-REGISTRATION] Instância "${rawInst}" auto-registrada para a drogaria "${fallbackTenant.name}"`);
             } catch (autoRegErr: any) {
               console.warn("[WEBHOOK AUTO-REGISTRATION] Aviso ao auto-registrar instância:", autoRegErr.message);
@@ -16259,11 +16358,18 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
         const ownerPhone = data?.owner?.split('@')[0] || data?.instance?.owner?.split('@')[0] || null;
         if (instanceName) {
           try {
-            await supabaseAdmin.from("whatsapp_instances").update({
-              status: "CONNECTED",
-              ...(ownerPhone ? { phone_number: ownerPhone } : {}),
-              updated_at: new Date().toISOString()
-            }).eq("instance_name", instanceName);
+            const { data: updatedInst } = await safeUpdateWhatsappInstance(
+              "instance_name",
+              instanceName,
+              {
+                status: "CONNECTED",
+                ...(ownerPhone ? { phone_number: ownerPhone } : {}),
+              },
+              true
+            );
+            if (updatedInst?.id && updatedInst?.store_id) {
+              await syncStoreInboxesToConnectedInstance(updatedInst.store_id, updatedInst.id);
+            }
           } catch (e) {}
         }
       } else if (rawState === "close" || rawState === "disconnected") {
@@ -17932,11 +18038,24 @@ app.get("/api/v1/chat/messages", async (req, res) => {
 // Envio e persistência de mensagem pelo Balconista/Atendente
 app.post("/api/v1/chat/send", requireChatEnabled, async (req, res) => {
   try {
-    const { conversation_id, content, is_private, media_url, media_type, sender_type, userId, role } = req.body;
+    const {
+      conversation_id,
+      content,
+      is_private,
+      media_url,
+      mediaUrl,
+      media_type,
+      type,
+      sender_type,
+      userId,
+      role
+    } = req.body;
     const storeId = (req.headers["x-tenant-id"] as string) || "default";
+    const resolvedMediaUrl = media_url || mediaUrl || undefined;
+    const resolvedMediaType = media_type || type || undefined;
 
-    if (!conversation_id || (!content && !media_url)) {
-      return res.status(400).json({ error: "conversation_id e conteúdo são obrigatórios." });
+    if (!conversation_id || (!content && !resolvedMediaUrl)) {
+      return res.status(400).json({ success: false, error: "conversation_id e conteúdo são obrigatórios." });
     }
 
     const isOperator = userId && (role?.toLowerCase() === "operador" || role?.toLowerCase() === "operator");
@@ -17955,45 +18074,36 @@ app.post("/api/v1/chat/send", requireChatEnabled, async (req, res) => {
         const allowedInboxIds = memberRows ? memberRows.map(r => r.inbox_id) : [];
 
         if (!allowedInboxIds.includes(convData.inbox_id)) {
-          return res.status(403).json({ error: "Permissão negada para enviar mensagens nesta conversa." });
+          return res.status(403).json({ success: false, error: "Permissão negada para enviar mensagens nesta conversa." });
         }
       }
     }
 
-    // Resolve instanceName from conversation's inbox if available
+    // Resolução blindada da instância CONNECTED para mensagens enviadas ao cliente:
+    // 1) inbox.whatsapp_instance_id (status = 'CONNECTED')
+    // 2) fallback automático: store_id (status = 'CONNECTED' ORDER BY updated_at DESC LIMIT 1)
+    // 3) NUNCA inventar instance_name inexistente (como inbox_<uuid>)
     let resolvedInstance: string | undefined = undefined;
-    try {
-      const { data: conv } = await supabaseAdmin
-        .from("chat_conversations")
-        .select("inbox_id")
-        .eq("id", conversation_id)
-        .maybeSingle();
+    if (!is_private) {
+      const connectedInst = await evolutionApiService.resolveConnectedInstanceForSending({
+        storeId,
+        conversationId: conversation_id,
+      });
 
-      if (conv?.inbox_id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(conv.inbox_id))) {
-        const { data: inbox } = await supabaseAdmin
-          .from("inboxes")
-          .select("whatsapp_instance_id")
-          .eq("id", conv.inbox_id)
-          .maybeSingle();
-
-        if (inbox?.whatsapp_instance_id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(inbox.whatsapp_instance_id))) {
-          const { data: inst } = await supabaseAdmin
-            .from("whatsapp_instances")
-            .select("instance_name")
-            .eq("id", inbox.whatsapp_instance_id)
-            .maybeSingle();
-
-          if (inst?.instance_name) {
-            resolvedInstance = inst.instance_name;
-            console.log(`[Chat API] Using specific instance "${resolvedInstance}" for inbox ${conv.inbox_id}`);
-          }
-        }
+      if (!connectedInst) {
+        return res.status(422).json({
+          success: false,
+          error: "Nenhuma instância do WhatsApp conectada foi encontrada para esta loja/caixa de entrada. Conecte o WhatsApp via QR Code antes de enviar mensagens."
+        });
       }
-    } catch (resolveErr: any) {
-      console.warn("[Chat API] Warning resolving instance name for conversation:", resolveErr.message);
+
+      resolvedInstance = connectedInst.instance_name;
+      console.log(
+        `[Chat API] Instância resolvida "${resolvedInstance}" (origem: ${connectedInst.source}) para conversa ${conversation_id}`
+      );
     }
 
-    // Persistir mensagem e despachar via Evolution API se não for privada
+    // Persistir mensagem e despachar via Evolution API com validação síncrona de entrega (strictDelivery)
     const senderUserId = userId || (req.headers["x-user-id"] as string) || undefined;
     const { message, conversation } = await chatStore.addMessage(
       storeId,
@@ -18001,11 +18111,12 @@ app.post("/api/v1/chat/send", requireChatEnabled, async (req, res) => {
       sender_type || "USER",
       content || "",
       Boolean(is_private),
-      media_url,
-      media_type,
+      resolvedMediaUrl,
+      resolvedMediaType,
       resolvedInstance,
       false,
-      senderUserId
+      senderUserId,
+      { strictDelivery: !is_private }
     );
 
     // Transmitir via SSE
@@ -18020,11 +18131,15 @@ app.post("/api/v1/chat/send", requireChatEnabled, async (req, res) => {
       return res.status(200).json({ success: true, data: message, is_private: true });
     }
 
-    console.log(`[Chat API] Mensagem de chat salva e processada para conversa ${conversation_id}: ${content}`);
+    console.log(`[Chat API] Mensagem de chat salva e entregue para conversa ${conversation_id}: ${content}`);
     return res.status(200).json({ success: true, data: message, conversation });
   } catch (error: any) {
     console.error("[Chat API] Erro ao enviar mensagem:", error);
-    return res.status(500).json({ error: error.message || "Erro interno." });
+    const statusCode = typeof error?.statusCode === "number" ? error.statusCode : 500;
+    return res.status(statusCode).json({
+      success: false,
+      error: error?.message || "Erro interno ao enviar mensagem pelo WhatsApp."
+    });
   }
 });
 

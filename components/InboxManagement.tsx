@@ -22,9 +22,18 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
   const [inboxes, setInboxes] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [formData, setFormData] = useState({ id: '', name: '', description: '', whatsapp_instance_id: '', channel_type: 'whatsapp' });
+  const [formData, setFormData] = useState({
+    id: '',
+    name: '',
+    description: '',
+    whatsapp_instance_id: '',
+    channel_type: 'whatsapp',
+    channel_mode: 'shared' as 'shared' | 'exclusive'
+  });
   const [formLoading, setFormLoading] = useState(false);
   const [connectInboxId, setConnectInboxId] = useState<string | null>(null);
+  const [connectInboxExclusive, setConnectInboxExclusive] = useState<boolean>(false);
+  const [connectInitialInstanceName, setConnectInitialInstanceName] = useState<string | undefined>(undefined);
   const [isGlobalConnectModalOpen, setIsGlobalConnectModalOpen] = useState(false);
   
   // Managing members/access
@@ -214,6 +223,13 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
     }
   };
 
+  const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  const primaryConnectedInstance =
+    whatsappInstances.find(i => i.status === 'CONNECTED' && UUID_PATTERN.test(String(i.id || ''))) ||
+    whatsappInstances.find(i => UUID_PATTERN.test(String(i.id || ''))) ||
+    null;
+
   const handleSaveInbox = async () => {
     const trimmedName = (formData.name || '').trim();
     if (!trimmedName) {
@@ -223,7 +239,22 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
     setFormLoading(true);
     try {
       let savedInbox: any = null;
-      const cleanInstanceId = formData.whatsapp_instance_id && formData.whatsapp_instance_id.trim() !== '' ? formData.whatsapp_instance_id.trim() : null;
+      const isWhatsappChannel = !formData.channel_type || formData.channel_type === 'whatsapp';
+      const channelMode: 'shared' | 'exclusive' = formData.channel_mode === 'exclusive' ? 'exclusive' : 'shared';
+
+      // No modo Compartilhado (padrão), vincula automaticamente à instância CONNECTED da loja
+      // sem criar nova instância na Evolution API.
+      const rawSelectedId = formData.whatsapp_instance_id && formData.whatsapp_instance_id.trim() !== ''
+        ? formData.whatsapp_instance_id.trim()
+        : null;
+      const cleanInstanceId = !isWhatsappChannel
+        ? null
+        : channelMode === 'shared'
+          ? (primaryConnectedInstance?.id || (rawSelectedId && UUID_PATTERN.test(rawSelectedId) ? rawSelectedId : null))
+          : (rawSelectedId && UUID_PATTERN.test(rawSelectedId) ? rawSelectedId : null);
+
+      const shouldOpenExclusiveConnectAfterSave =
+        isWhatsappChannel && channelMode === 'exclusive' && !cleanInstanceId;
 
       if (formData.id) {
         // Edit existing
@@ -234,10 +265,12 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
             'x-tenant-id': tenantId
           },
           body: JSON.stringify({
+            store_id: tenantId,
             name: trimmedName,
             description: formData.description || '',
             whatsapp_instance_id: cleanInstanceId,
-            channel_type: formData.channel_type || 'whatsapp'
+            channel_type: formData.channel_type || 'whatsapp',
+            channel_mode: channelMode
           })
         });
 
@@ -246,7 +279,7 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
           savedInbox = json.data;
         } else {
           // Direct Supabase fallback (omits channel_type to match DB schema)
-          const isUuid = cleanInstanceId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanInstanceId);
+          const isUuid = cleanInstanceId && UUID_PATTERN.test(cleanInstanceId);
           const dbPayload: any = { 
             name: trimmedName, 
             description: formData.description || '', 
@@ -256,11 +289,12 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
           savedInbox = { id: formData.id, store_id: tenantId, ...dbPayload, channel_type: formData.channel_type || 'whatsapp' };
         }
 
+        const resolvedInstId = savedInbox?.whatsapp_instance_id ?? cleanInstanceId;
         setInboxes(prev => prev.map(item => item.id === formData.id ? { 
           ...item, 
           name: trimmedName, 
           description: formData.description || '', 
-          whatsapp_instance_id: cleanInstanceId, 
+          whatsapp_instance_id: resolvedInstId, 
           channel_type: formData.channel_type || 'whatsapp' 
         } : item));
         toast.success('Caixa de entrada atualizada com sucesso!');
@@ -277,7 +311,8 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
             name: trimmedName,
             description: formData.description || '',
             whatsapp_instance_id: cleanInstanceId,
-            channel_type: formData.channel_type || 'whatsapp'
+            channel_type: formData.channel_type || 'whatsapp',
+            channel_mode: channelMode
           })
         });
 
@@ -285,24 +320,26 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
           const json = await res.json();
           savedInbox = json.data;
         } else {
-          const newId = `inbox_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-          const isUuid = cleanInstanceId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanInstanceId);
+          const isUuid = cleanInstanceId && UUID_PATTERN.test(cleanInstanceId);
           const dbPayload = {
             store_id: tenantId,
             name: trimmedName,
             description: formData.description || null,
             whatsapp_instance_id: isUuid ? cleanInstanceId : null
           };
-          try {
-            const { data } = await supabase.from('inboxes').insert([dbPayload]).select().single();
-            savedInbox = data ? { ...data, channel_type: formData.channel_type || 'whatsapp' } : { id: newId, ...dbPayload, channel_type: formData.channel_type || 'whatsapp', created_at: new Date().toISOString() };
-          } catch (_) {
-            savedInbox = { id: newId, ...dbPayload, channel_type: formData.channel_type || 'whatsapp', created_at: new Date().toISOString() };
+          const { data, error } = await supabase.from('inboxes').insert([dbPayload]).select().single();
+          if (error || !data) {
+            throw new Error(error?.message || 'Não foi possível criar a caixa de entrada no banco de dados.');
           }
+          savedInbox = { ...data, channel_type: formData.channel_type || 'whatsapp' };
         }
 
         setInboxes(prev => [...prev, savedInbox]);
-        toast.success('Caixa de entrada criada com sucesso!');
+        toast.success(
+          channelMode === 'shared'
+            ? 'Caixa de entrada criada e vinculada ao WhatsApp da loja!'
+            : 'Caixa de entrada criada! Conecte o número exclusivo via QR Code.'
+        );
       }
 
       // Save associated teams
@@ -314,37 +351,34 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
         }).catch(err => console.warn("Error saving inbox teams:", err));
       }
 
-      // Update localStorage fallback
+      // Update localStorage cache
       const currentInboxes = JSON.parse(localStorage.getItem(`inboxes_${tenantId}`) || '[]');
       if (formData.id) {
         const updated = currentInboxes.map((i: any) => i.id === formData.id ? { 
           ...i, 
           name: trimmedName, 
           description: formData.description || '', 
-          whatsapp_instance_id: cleanInstanceId, 
+          whatsapp_instance_id: savedInbox?.whatsapp_instance_id ?? cleanInstanceId, 
           channel_type: formData.channel_type || 'whatsapp' 
         } : i);
         localStorage.setItem(`inboxes_${tenantId}`, JSON.stringify(updated));
-      } else {
+      } else if (savedInbox) {
         localStorage.setItem(`inboxes_${tenantId}`, JSON.stringify([...currentInboxes, savedInbox]));
       }
 
       setIsModalOpen(false);
-      fetchInboxes();
+      await fetchInboxes();
+      await fetchWhatsappInstances();
+
+      // Apenas abre o modal exclusivo se o usuário escolheu explicitamente "Conectar outro número (Exclusivo)"
+      if (shouldOpenExclusiveConnectAfterSave && savedInbox?.id) {
+        setConnectInboxId(savedInbox.id);
+        setConnectInboxExclusive(true);
+        setConnectInitialInstanceName(undefined);
+      }
     } catch (e: any) {
-      console.warn("[InboxManagement] Exception saving inbox, executing resilient fallback:", e);
-      const fallbackInbox = {
-        id: formData.id || `inbox_${Date.now()}`,
-        store_id: tenantId,
-        name: formData.name,
-        description: formData.description || '',
-        whatsapp_instance_id: formData.whatsapp_instance_id || null,
-        channel_type: formData.channel_type || 'whatsapp',
-        created_at: new Date().toISOString()
-      };
-      setInboxes(prev => formData.id ? prev.map(i => i.id === formData.id ? fallbackInbox : i) : [...prev, fallbackInbox]);
-      toast.success('Caixa de entrada salva localmente!');
-      setIsModalOpen(false);
+      console.error("[InboxManagement] Erro ao salvar caixa de entrada:", e);
+      toast.error(e?.message || 'Erro ao salvar caixa de entrada. Tente novamente.');
     } finally {
       setFormLoading(false);
     }
@@ -725,7 +759,14 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
           
           <button 
             onClick={() => {
-              setFormData({ id: '', name: '', description: '', whatsapp_instance_id: '', channel_type: 'whatsapp' });
+              setFormData({
+                id: '',
+                name: '',
+                description: '',
+                whatsapp_instance_id: primaryConnectedInstance?.id || '',
+                channel_type: 'whatsapp',
+                channel_mode: 'shared'
+              });
               setSelectedTeamIds([]);
               setIsModalOpen(true);
             }}
@@ -765,12 +806,22 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                 <div className="flex gap-2">
                   <button 
                     onClick={() => {
+                      const linkedInst = whatsappInstances.find(
+                        i => i.id === inbox.whatsapp_instance_id || i.instance_name === inbox.whatsapp_instance_id
+                      );
+                      const isExclusiveInst = Boolean(
+                        linkedInst &&
+                        primaryConnectedInstance &&
+                        linkedInst.id !== primaryConnectedInstance.id &&
+                        String(linkedInst.instance_name || '').startsWith('inbox_')
+                      );
                       setFormData({
                         id: inbox.id,
                         name: inbox.name,
                         description: inbox.description || '',
-                        whatsapp_instance_id: inbox.whatsapp_instance_id || '',
-                        channel_type: inbox.channel_type || 'whatsapp'
+                        whatsapp_instance_id: inbox.whatsapp_instance_id || primaryConnectedInstance?.id || '',
+                        channel_type: inbox.channel_type || 'whatsapp',
+                        channel_mode: isExclusiveInst ? 'exclusive' : 'shared'
                       });
                       setSelectedTeamIds([]);
                       fetchInboxTeams(inbox.id);
@@ -803,59 +854,84 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                     <span className="flex items-center gap-1.5 text-pink-500"><Instagram className="w-4 h-4" /> Instagram</span>
                   ) : (
                     <div className="flex flex-col gap-2 w-full">
-                      <div className="flex items-center justify-between">
-                        <span className="flex items-center gap-1.5 text-emerald-700 font-bold"><Smartphone className="w-4 h-4" /> WhatsApp Evolution</span>
-                        <span className="text-[10px] bg-emerald-100/80 text-emerald-900 px-2 py-0.5 rounded-md font-semibold">Exclusivo</span>
-                      </div>
-                      
                       {(() => {
-                        const instance = whatsappInstances.find(i => i.id === inbox.whatsapp_instance_id || i.instance_name === inbox.whatsapp_instance_id);
+                        const directInstance = whatsappInstances.find(
+                          i => i.id === inbox.whatsapp_instance_id || i.instance_name === inbox.whatsapp_instance_id
+                        );
+                        const instance = directInstance || primaryConnectedInstance;
                         const isConnected = instance?.status === 'CONNECTED';
-                        const instName = instance?.instance_name || `inbox_${inbox.id.replace(/^inbox_/, '').replace(/[^a-zA-Z0-9]/g, "").toLowerCase()}`;
+                        const isExclusive = Boolean(
+                          directInstance &&
+                          String(directInstance.instance_name || '').startsWith('inbox_')
+                        );
+                        const instName = instance?.instance_name || 'Aguardando conexão';
                         const phone = instance?.phone_number;
 
+                        const openConnectModal = () => {
+                          if (isExclusive) {
+                            setConnectInboxId(inbox.id);
+                            setConnectInboxExclusive(true);
+                            setConnectInitialInstanceName(directInstance?.instance_name);
+                          } else {
+                            setIsGlobalConnectModalOpen(true);
+                          }
+                        };
+
                         return (
-                          <div className="flex flex-col gap-1.5 w-full bg-white p-2.5 rounded-xl border border-gray-200/80 shadow-xs">
+                          <>
                             <div className="flex items-center justify-between">
-                              <span className="text-[10px] uppercase font-black tracking-wider text-gray-400">Instância</span>
-                              <span className="text-[11px] font-mono font-bold text-gray-700 bg-gray-100 px-1.5 py-0.5 rounded truncate max-w-[140px]">
-                                {instName}
+                              <span className="flex items-center gap-1.5 text-emerald-700 font-bold"><Smartphone className="w-4 h-4" /> WhatsApp Evolution</span>
+                              <span className={`text-[10px] px-2 py-0.5 rounded-md font-semibold ${
+                                isExclusive
+                                  ? 'bg-indigo-100 text-indigo-900'
+                                  : 'bg-emerald-100/80 text-emerald-900'
+                              }`}>
+                                {isExclusive ? 'Exclusivo' : 'Compartilhado'}
                               </span>
                             </div>
 
-                            {phone && (
+                            <div className="flex flex-col gap-1.5 w-full bg-white p-2.5 rounded-xl border border-gray-200/80 shadow-xs">
                               <div className="flex items-center justify-between">
-                                <span className="text-[10px] uppercase font-black tracking-wider text-gray-400">Número</span>
-                                <span className="text-[11px] font-bold text-gray-800">
-                                  {phone}
+                                <span className="text-[10px] uppercase font-black tracking-wider text-gray-400">Instância</span>
+                                <span className="text-[11px] font-mono font-bold text-gray-700 bg-gray-100 px-1.5 py-0.5 rounded truncate max-w-[140px]">
+                                  {instName}
                                 </span>
                               </div>
-                            )}
 
-                            <div className="flex items-center justify-between pt-1 border-t border-gray-100 mt-0.5">
-                              <span className="text-[10px] uppercase font-black tracking-wider text-gray-400">Status</span>
-                              {isConnected ? (
-                                <div className="flex items-center gap-2">
-                                  <span className="text-xs font-bold text-emerald-600 flex items-center gap-1">
-                                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span> Conectado
+                              {phone && (
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[10px] uppercase font-black tracking-wider text-gray-400">Número</span>
+                                  <span className="text-[11px] font-bold text-gray-800">
+                                    {phone}
                                   </span>
-                                  <button
-                                    onClick={() => setConnectInboxId(inbox.id)}
-                                    className="text-[11px] font-bold text-gray-500 hover:text-emerald-700 underline ml-1"
-                                  >
-                                    Gerenciar
-                                  </button>
                                 </div>
-                              ) : (
-                                <button
-                                  onClick={() => setConnectInboxId(inbox.id)}
-                                  className="text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 shadow-xs"
-                                >
-                                  <QrCode className="w-3.5 h-3.5" /> Conectar WhatsApp
-                                </button>
                               )}
+
+                              <div className="flex items-center justify-between pt-1 border-t border-gray-100 mt-0.5">
+                                <span className="text-[10px] uppercase font-black tracking-wider text-gray-400">Status</span>
+                                {isConnected ? (
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-xs font-bold text-emerald-600 flex items-center gap-1">
+                                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span> Conectado
+                                    </span>
+                                    <button
+                                      onClick={openConnectModal}
+                                      className="text-[11px] font-bold text-gray-500 hover:text-emerald-700 underline ml-1"
+                                    >
+                                      Gerenciar
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    onClick={openConnectModal}
+                                    className="text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 shadow-xs"
+                                  >
+                                    <QrCode className="w-3.5 h-3.5" /> Conectar WhatsApp
+                                  </button>
+                                )}
+                              </div>
                             </div>
-                          </div>
+                          </>
                         );
                       })()}
                     </div>
@@ -870,20 +946,24 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
         )}
       </div>
 
-      {/* WhatsApp Modal for specific inbox */}
+      {/* WhatsApp Modal for specific exclusive inbox */}
       <WhatsAppConnectModal
         isOpen={!!connectInboxId}
         onClose={() => {
           setConnectInboxId(null);
+          setConnectInboxExclusive(false);
+          setConnectInitialInstanceName(undefined);
           fetchInboxes();
           fetchWhatsappInstances();
         }}
         tenantId={tenantId}
         inboxId={connectInboxId || undefined}
         inboxName={inboxes.find(i => i.id === connectInboxId)?.name}
+        exclusive={connectInboxExclusive}
+        initialInstanceName={connectInitialInstanceName}
       />
 
-      {/* WhatsApp Modal for Global Store instance */}
+      {/* WhatsApp Modal for Global Store instance (Compartilhado) */}
       <WhatsAppConnectModal
         isOpen={isGlobalConnectModalOpen}
         onClose={() => {
@@ -892,6 +972,7 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
           fetchWhatsappInstances();
         }}
         tenantId={tenantId}
+        initialInstanceName={primaryConnectedInstance?.instance_name}
       />
 
       {/* Modal Caixa de Entrada */}
@@ -927,10 +1008,10 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                </div>
 
                {(formData.channel_type === 'whatsapp' || !formData.channel_type) && (
-                 <div className="space-y-2 bg-emerald-50/50 p-4 rounded-2xl border border-emerald-100">
+                 <div className="space-y-3 bg-emerald-50/50 p-4 rounded-2xl border border-emerald-100">
                     <div className="flex items-center justify-between">
                       <label className="text-[11px] font-black text-emerald-900 uppercase tracking-widest flex items-center gap-1.5">
-                        <Smartphone className="w-3.5 h-3.5 text-emerald-600"/> Instância WhatsApp Vinculada
+                        <Smartphone className="w-3.5 h-3.5 text-emerald-600"/> Vínculo com WhatsApp
                       </label>
                       <button 
                         type="button" 
@@ -940,27 +1021,103 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                         <RefreshCw className="w-3 h-3" /> Atualizar
                       </button>
                     </div>
-                    
-                    <select 
-                      value={formData.whatsapp_instance_id} 
-                      onChange={e => setFormData({...formData, whatsapp_instance_id: e.target.value})} 
-                      className="w-full bg-white border border-emerald-200 focus:border-emerald-500 rounded-xl py-2.5 px-3 outline-none font-bold text-gray-800 text-xs"
-                    >
-                      <option value="">(Instância Padrão da Loja)</option>
-                      {whatsappInstances.map(inst => (
-                        <option key={inst.id || inst.instance_name} value={inst.id || inst.instance_name}>
-                          {inst.instance_name} {inst.phone_number ? `(${inst.phone_number})` : ''} - {inst.status || 'OFFLINE'}
-                        </option>
-                      ))}
-                    </select>
 
-                    <button
-                      type="button"
-                      onClick={() => setIsGlobalConnectModalOpen(true)}
-                      className="w-full mt-2 py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 transition-colors shadow-xs"
-                    >
-                      <QrCode className="w-3.5 h-3.5" /> Conectar / Gerar QR Code WhatsApp
-                    </button>
+                    <div className="space-y-2">
+                      <label
+                        onClick={() =>
+                          setFormData({
+                            ...formData,
+                            channel_mode: 'shared',
+                            whatsapp_instance_id: primaryConnectedInstance?.id || ''
+                          })
+                        }
+                        className={`flex items-start gap-2.5 p-3 rounded-xl border-2 cursor-pointer transition-all ${
+                          formData.channel_mode !== 'exclusive'
+                            ? 'border-emerald-500 bg-white shadow-xs'
+                            : 'border-transparent bg-white/70 hover:border-emerald-200'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="whatsapp_channel_mode"
+                          checked={formData.channel_mode !== 'exclusive'}
+                          onChange={() =>
+                            setFormData({
+                              ...formData,
+                              channel_mode: 'shared',
+                              whatsapp_instance_id: primaryConnectedInstance?.id || ''
+                            })
+                          }
+                          className="mt-0.5 accent-emerald-600"
+                        />
+                        <div className="text-xs">
+                          <div className="font-bold text-gray-900">
+                            Compartilhado (Mesmo WhatsApp da loja)
+                          </div>
+                          <p className="text-[11px] text-gray-500 mt-0.5">
+                            {primaryConnectedInstance
+                              ? `Usa automaticamente ${primaryConnectedInstance.instance_name}${primaryConnectedInstance.phone_number ? ` (${primaryConnectedInstance.phone_number})` : ''} sem criar nova instância.`
+                              : 'Será vinculado automaticamente assim que o WhatsApp da loja for conectado.'}
+                          </p>
+                        </div>
+                      </label>
+
+                      <label
+                        onClick={() =>
+                          setFormData({
+                            ...formData,
+                            channel_mode: 'exclusive',
+                            whatsapp_instance_id: ''
+                          })
+                        }
+                        className={`flex items-start gap-2.5 p-3 rounded-xl border-2 cursor-pointer transition-all ${
+                          formData.channel_mode === 'exclusive'
+                            ? 'border-indigo-500 bg-white shadow-xs'
+                            : 'border-transparent bg-white/70 hover:border-indigo-200'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="whatsapp_channel_mode"
+                          checked={formData.channel_mode === 'exclusive'}
+                          onChange={() =>
+                            setFormData({
+                              ...formData,
+                              channel_mode: 'exclusive',
+                              whatsapp_instance_id: ''
+                            })
+                          }
+                          className="mt-0.5 accent-indigo-600"
+                        />
+                        <div className="text-xs">
+                          <div className="font-bold text-gray-900">
+                            Conectar outro número de WhatsApp (Exclusivo)
+                          </div>
+                          <p className="text-[11px] text-gray-500 mt-0.5">
+                            Cria ou vincula uma instância dedicada apenas para esta caixa de entrada.
+                          </p>
+                        </div>
+                      </label>
+                    </div>
+
+                    {formData.channel_mode === 'exclusive' && (
+                      <div className="pt-1 space-y-2">
+                        <select 
+                          value={formData.whatsapp_instance_id} 
+                          onChange={e => setFormData({...formData, whatsapp_instance_id: e.target.value})} 
+                          className="w-full bg-white border border-indigo-200 focus:border-indigo-500 rounded-xl py-2.5 px-3 outline-none font-bold text-gray-800 text-xs"
+                        >
+                          <option value="">(Conectar novo número exclusivo via QR Code ao salvar)</option>
+                          {whatsappInstances
+                            .filter(inst => UUID_PATTERN.test(String(inst.id || '')))
+                            .map(inst => (
+                              <option key={inst.id} value={inst.id}>
+                                {inst.instance_name} {inst.phone_number ? `(${inst.phone_number})` : ''} - {inst.status || 'OFFLINE'}
+                              </option>
+                            ))}
+                        </select>
+                      </div>
+                    )}
                  </div>
                )}
 

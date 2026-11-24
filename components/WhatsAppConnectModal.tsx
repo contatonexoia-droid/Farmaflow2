@@ -11,6 +11,8 @@ interface WhatsAppConnectModalProps {
   tenantId: string;
   inboxId?: string;
   inboxName?: string;
+  exclusive?: boolean;
+  initialInstanceName?: string;
 }
 
 const DEFAULT_EVOLUTION_API_URL = 'https://evolution.nexoia.online';
@@ -90,7 +92,9 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
   onClose, 
   tenantId, 
   inboxId,
-  inboxName 
+  inboxName,
+  exclusive = false,
+  initialInstanceName
 }) => {
   const [activeTab, setActiveTab] = useState<'connect' | 'settings'>('connect');
   const [status, setStatus] = useState<'CONNECTED' | 'DISCONNECTED' | 'QRCODE'>('DISCONNECTED');
@@ -127,9 +131,11 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     .replace(/[^a-zA-Z0-9]/g, "")
     .toLowerCase();
 
-  const defaultInstanceName = inboxId && inboxId !== 'default' && !inboxId.includes('default')
-    ? `inbox_${inboxId.replace(/^inbox_/, '').replace(/[^a-zA-Z0-9]/g, "").toLowerCase()}`
-    : (cleanStoreName ? `store_${cleanStoreName}` : 'store_principal');
+  const defaultInstanceName = initialInstanceName && initialInstanceName.trim()
+    ? initialInstanceName.trim()
+    : (exclusive && inboxId && inboxId !== 'default' && !inboxId.includes('default'))
+      ? `inbox_${inboxId.replace(/^inbox_/, '').replace(/[^a-zA-Z0-9]/g, "").toLowerCase()}`
+      : (cleanStoreName ? `store_${cleanStoreName}` : 'store_principal');
 
   const currentWebhookUrl = (() => {
     if (typeof window === 'undefined') {
@@ -180,6 +186,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     try {
       let url = `/api/v1/chat/instance/status?tenantId=${encodeURIComponent(tenantId)}`;
       if (inboxId) url += `&inboxId=${encodeURIComponent(inboxId)}`;
+      if (exclusive) url += `&exclusive=true`;
       
       const { ok, data } = await safeFetchJson(url, {
         headers: {
@@ -252,6 +259,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
       tenantId,
       inboxId,
       instanceName: cleanedInstance,
+      exclusive: Boolean(exclusive),
     };
     if (cleanedUrl) {
       payload.url = cleanedUrl;

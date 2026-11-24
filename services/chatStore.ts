@@ -666,7 +666,8 @@ class ChatStore {
     mediaType?: string,
     explicitInstanceName?: string,
     skipWhatsAppDispatch = false,
-    assignedUserId?: string
+    assignedUserId?: string,
+    options?: { strictDelivery?: boolean }
   ): Promise<{ message: ChatMessage; conversation: ChatConversation }> {
     const now = new Date().toISOString();
     const msgUuid = crypto.randomUUID();
@@ -709,61 +710,96 @@ class ChatStore {
     }
 
     // Evolution API Dispatch (for USER/BOT messages, if not private and not already dispatched)
+    const strictDelivery = Boolean(options?.strictDelivery);
     if ((senderType === "USER" || senderType === "BOT") && !isPrivate && !skipWhatsAppDispatch) {
+      let phoneToSend: string | null = null;
+      let convInboxId: string | null = null;
+      let convStoreId: string = storeId;
+
       try {
-        let phoneToSend: string | null = null;
-        try {
-          const { data: convData } = await supabaseAdmin
-            .from("chat_conversations")
-            .select("contact_id")
-            .eq("id", conversationId)
+        const { data: convData } = await supabaseAdmin
+          .from("chat_conversations")
+          .select("contact_id, inbox_id, store_id")
+          .eq("id", conversationId)
+          .maybeSingle();
+
+        if (convData?.inbox_id) convInboxId = convData.inbox_id;
+        if (convData?.store_id) convStoreId = convData.store_id;
+
+        if (convData?.contact_id) {
+          const { data: contactData } = await supabaseAdmin
+            .from("chat_contacts")
+            .select("phone_number")
+            .eq("id", convData.contact_id)
             .maybeSingle();
-
-          if (convData?.contact_id) {
-            const { data: contactData } = await supabaseAdmin
-              .from("chat_contacts")
-              .select("phone_number")
-              .eq("id", convData.contact_id)
-              .maybeSingle();
-            if (contactData?.phone_number) phoneToSend = contactData.phone_number;
-          }
-        } catch (_) {}
-
-        if (!phoneToSend) {
-          const match = conversationId.match(/_(\d{10,15})_/);
-          if (match) phoneToSend = match[1];
+          if (contactData?.phone_number) phoneToSend = contactData.phone_number;
         }
+      } catch (_) {}
 
-        const targetInstance = await evolutionApiService.resolveInstanceName(storeId, actualInstanceName);
+      if (!phoneToSend) {
+        const match = conversationId.match(/_(\d{10,15})_/);
+        if (match) phoneToSend = match[1];
+      }
 
-        if (targetInstance && phoneToSend) {
-          if (actualMediaUrl && (resolvedType === "image" || resolvedType === "audio" || resolvedType === "video" || resolvedType === "document")) {
-            evolutionApiService.sendMediaMessage(
-              targetInstance,
-              phoneToSend,
-              actualMediaUrl,
-              resolvedType as any,
-              content && !content.startsWith("[") ? content : ""
-            ).catch(err => {
-              console.error(`[ChatStore] [ERRO EVOLUTION] Falha assíncrona ao despachar mídia (${resolvedType}) para WhatsApp:`, err.message || err);
-            });
-          } else {
-            evolutionApiService.sendTextMessage(targetInstance, phoneToSend, content, {
-              delay: 1000,
-              linkPreview: true
-            }).catch(err => {
-              console.error(`[ChatStore] [ERRO EVOLUTION] Falha assíncrona ao despachar para WhatsApp:`, err.message || err);
-            });
+      // Resolução blindada: 1) inbox.whatsapp_instance_id (CONNECTED); 2) fallback store_id (CONNECTED); 3) NUNCA inventar inbox_<uuid>
+      const resolvedConnected = await evolutionApiService.resolveConnectedInstanceForSending({
+        storeId: convStoreId || storeId,
+        conversationId,
+        inboxId: convInboxId,
+        explicitInstanceName: actualInstanceName,
+      });
+
+      const targetInstance = resolvedConnected?.instance_name || null;
+
+      if (!targetInstance) {
+        const noInstErr = "Nenhuma instância do WhatsApp conectada encontrada para esta loja/caixa de entrada. Conecte o WhatsApp via QR Code antes de enviar mensagens.";
+        console.warn("[ChatStore] [AVISO EVOLUTION] Instância CONNECTED não localizada:", {
+          storeId: convStoreId || storeId,
+          conversationId,
+          convInboxId,
+        });
+        if (strictDelivery) {
+          const err: any = new Error(noInstErr);
+          err.statusCode = 422;
+          throw err;
+        }
+      } else if (!phoneToSend) {
+        const noPhoneErr = "Número de WhatsApp do contato não localizado nesta conversa.";
+        console.warn("[ChatStore] [AVISO EVOLUTION] Telefone do contato não localizado:", { conversationId });
+        if (strictDelivery) {
+          const err: any = new Error(noPhoneErr);
+          err.statusCode = 422;
+          throw err;
+        }
+      } else {
+        const dispatchPromise =
+          actualMediaUrl && (resolvedType === "image" || resolvedType === "audio" || resolvedType === "video" || resolvedType === "document")
+            ? evolutionApiService.sendMediaMessage(
+                targetInstance,
+                phoneToSend,
+                actualMediaUrl,
+                resolvedType as any,
+                content && !content.startsWith("[") ? content : ""
+              )
+            : evolutionApiService.sendTextMessage(targetInstance, phoneToSend, content, {
+                delay: 1000,
+                linkPreview: true
+              });
+
+        if (strictDelivery) {
+          const evoRes = await dispatchPromise;
+          if (!evoRes || !evoRes.success) {
+            const detail = evoRes?.error || `HTTP ${evoRes?.status || 502}`;
+            console.error(`[ChatStore] [ERRO EVOLUTION] Falha ao enviar para "${targetInstance}":`, detail);
+            const err: any = new Error(`Falha ao enviar mensagem pelo WhatsApp (${targetInstance}): ${detail}`);
+            err.statusCode = evoRes?.status === 404 || evoRes?.status === 400 ? 422 : 502;
+            throw err;
           }
         } else {
-          console.warn("[ChatStore] [AVISO EVOLUTION] Instância ou telefone não localizados para envio:", {
-            targetInstance,
-            phoneToSend,
-            conversationId
+          dispatchPromise.catch(err => {
+            console.error(`[ChatStore] [ERRO EVOLUTION] Falha assíncrona ao despachar para WhatsApp:`, err.message || err);
           });
         }
-      } catch (evoErr: any) {
-        console.error("[ChatStore] [ERRO EVOLUTION] Exceção preparando envio para WhatsApp:", evoErr.message || evoErr);
       }
     }
 
@@ -1856,7 +1892,12 @@ class ChatStore {
         if (match) phoneToSend = match[1];
       }
 
-      const targetInstance = await evolutionApiService.resolveInstanceName(cleanStoreId, explicitInstanceName);
+      const resolvedInst = await evolutionApiService.resolveConnectedInstanceForSending({
+        storeId: cleanStoreId,
+        conversationId,
+        explicitInstanceName,
+      });
+      const targetInstance = resolvedInst?.instance_name || null;
       if (targetInstance && phoneToSend && remoteMsgId) {
         const cleanJid = `${phoneToSend.replace(/\D/g, '')}@s.whatsapp.net`;
         evolutionApiService.sendReaction(targetInstance, {

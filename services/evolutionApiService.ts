@@ -35,59 +35,457 @@ export interface SendMessageOptions {
   quoted?: any;
 }
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isValidUuid(value?: unknown): value is string {
+  return typeof value === "string" && UUID_REGEX.test(value.trim());
+}
+
+export interface ResolvedConnectedInstance {
+  id: string;
+  instance_name: string;
+  store_id: string;
+  phone_number?: string | null;
+  status: string;
+  source: "inbox" | "explicit" | "store_fallback";
+}
+
+/**
+ * Resolve o conjunto de identificadores possíveis de store_id para uma loja,
+ * sempre consultando public.tenants por `id` primeiro (com fallback para `slug`, nunca apenas `slug`).
+ */
+export async function resolveStoreCandidateIds(rawStoreId?: string | null): Promise<string[]> {
+  const raw = String(rawStoreId || "").trim();
+  if (!raw) return [];
+
+  const clean = raw.replace(/^store_/, "").replace(/^tenant_/, "").trim();
+  const dash = clean.replace(/_/g, "-");
+  const candidates = new Set<string>([raw, clean, dash, `store_${clean}`].filter(Boolean));
+
+  try {
+    // 1. Busca prioritária por tenants.id
+    const { data: byId } = await supabaseAdmin
+      .from("tenants")
+      .select("id, slug")
+      .in("id", Array.from(candidates))
+      .limit(1)
+      .maybeSingle();
+
+    if (byId?.id) {
+      candidates.add(String(byId.id).trim());
+      if (byId.slug) candidates.add(String(byId.slug).trim());
+    } else {
+      // 2. Fallback por tenants.slug
+      const { data: bySlug } = await supabaseAdmin
+        .from("tenants")
+        .select("id, slug")
+        .in("slug", Array.from(candidates))
+        .limit(1)
+        .maybeSingle();
+
+      if (bySlug?.id) {
+        candidates.add(String(bySlug.id).trim());
+        if (bySlug.slug) candidates.add(String(bySlug.slug).trim());
+      }
+    }
+  } catch (_) {
+    // Mantém os candidatos já coletados em caso de erro de rede
+  }
+
+  return Array.from(candidates).filter(Boolean);
+}
+
+/**
+ * Atualiza um registro em public.whatsapp_instances limpando AMBAS as colunas
+ * qr_code_base64 e qrcode_base64 quando clearQrCodes=true, com fallback resiliente
+ * caso alguma das colunas não exista no schema atual do Supabase.
+ */
+export async function safeUpdateWhatsappInstance(
+  matchColumn: "id" | "instance_name",
+  matchValue: string,
+  payload: Record<string, any>,
+  clearQrCodes = false
+): Promise<{ data: any; error: any }> {
+  const basePayload: Record<string, any> = {
+    ...payload,
+    updated_at: payload.updated_at || new Date().toISOString(),
+  };
+
+  if (!clearQrCodes) {
+    return supabaseAdmin
+      .from("whatsapp_instances")
+      .update(basePayload)
+      .eq(matchColumn, matchValue)
+      .select("id, store_id, instance_name, status, phone_number")
+      .maybeSingle();
+  }
+
+  // Tenta limpar ambas as colunas (qr_code_base64 e qrcode_base64)
+  const bothPayload = { ...basePayload, qrcode_base64: null, qr_code_base64: null };
+  const firstAttempt = await supabaseAdmin
+    .from("whatsapp_instances")
+    .update(bothPayload)
+    .eq(matchColumn, matchValue)
+    .select("id, store_id, instance_name, status, phone_number")
+    .maybeSingle();
+
+  if (!firstAttempt.error) {
+    return firstAttempt;
+  }
+
+  const errMsg = String(firstAttempt.error?.message || "").toLowerCase();
+  const isMissingCol =
+    firstAttempt.error?.code === "42703" ||
+    firstAttempt.error?.code === "PGRST204" ||
+    errMsg.includes("column") ||
+    errMsg.includes("schema cache");
+
+  if (!isMissingCol) {
+    return firstAttempt;
+  }
+
+  // Fallback: remove a coluna inexistente mantendo a outra limpa
+  if (errMsg.includes("qr_code_base64")) {
+    const retry1 = await supabaseAdmin
+      .from("whatsapp_instances")
+      .update({ ...basePayload, qrcode_base64: null })
+      .eq(matchColumn, matchValue)
+      .select("id, store_id, instance_name, status, phone_number")
+      .maybeSingle();
+    if (!retry1.error) return retry1;
+  } else if (errMsg.includes("qrcode_base64")) {
+    const retry2 = await supabaseAdmin
+      .from("whatsapp_instances")
+      .update({ ...basePayload, qr_code_base64: null })
+      .eq(matchColumn, matchValue)
+      .select("id, store_id, instance_name, status, phone_number")
+      .maybeSingle();
+    if (!retry2.error) return retry2;
+  }
+
+  // Fallback final sem campos de QR caso nenhum exista
+  return supabaseAdmin
+    .from("whatsapp_instances")
+    .update(basePayload)
+    .eq(matchColumn, matchValue)
+    .select("id, store_id, instance_name, status, phone_number")
+    .maybeSingle();
+}
+
+/**
+ * Sincroniza automaticamente public.inboxes.whatsapp_instance_id para a instância CONNECTED
+ * da loja, curando vínculos órfãos/antigos ou nulos enquanto preserva caixas explicitamente
+ * vinculadas a OUTRA instância exclusiva CONNECTED.
+ */
+export async function syncStoreInboxesToConnectedInstance(
+  storeId: string,
+  connectedInstanceId: string,
+  options?: { specificInboxId?: string | null; exclusive?: boolean }
+): Promise<{ updatedCount: number; updatedInboxIds: string[] }> {
+  if (!storeId || !isValidUuid(connectedInstanceId)) {
+    return { updatedCount: 0, updatedInboxIds: [] };
+  }
+
+  try {
+    const candidateStoreIds = await resolveStoreCandidateIds(storeId);
+    if (candidateStoreIds.length === 0) {
+      return { updatedCount: 0, updatedInboxIds: [] };
+    }
+
+    // Se for conexão estritamente exclusiva para uma única caixa específica, atualiza apenas ela
+    if (options?.exclusive && isValidUuid(options.specificInboxId)) {
+      const { error } = await supabaseAdmin
+        .from("inboxes")
+        .update({ whatsapp_instance_id: connectedInstanceId })
+        .eq("id", options.specificInboxId);
+
+      if (!error) {
+        console.log(
+          `[InboxSync] Caixa exclusiva ${options.specificInboxId} vinculada à instância ${connectedInstanceId}`
+        );
+        return { updatedCount: 1, updatedInboxIds: [options.specificInboxId] };
+      }
+      return { updatedCount: 0, updatedInboxIds: [] };
+    }
+
+    // 1. Buscar outras instâncias CONNECTED distintas desta mesma loja (para preservar canais exclusivos ativos)
+    const { data: allInstances } = await supabaseAdmin
+      .from("whatsapp_instances")
+      .select("id, status")
+      .in("store_id", candidateStoreIds);
+
+    const otherConnectedIds = new Set<string>(
+      (allInstances || [])
+        .filter((i: any) => i.status === "CONNECTED" && isValidUuid(i.id) && i.id !== connectedInstanceId)
+        .map((i: any) => i.id)
+    );
+
+    // 2. Buscar todas as caixas de entrada desta loja
+    const { data: storeInboxes, error: inboxErr } = await supabaseAdmin
+      .from("inboxes")
+      .select("id, whatsapp_instance_id")
+      .in("store_id", candidateStoreIds);
+
+    if (inboxErr || !storeInboxes || storeInboxes.length === 0) {
+      if (isValidUuid(options?.specificInboxId)) {
+        await supabaseAdmin
+          .from("inboxes")
+          .update({ whatsapp_instance_id: connectedInstanceId })
+          .eq("id", options.specificInboxId);
+        return { updatedCount: 1, updatedInboxIds: [options.specificInboxId] };
+      }
+      return { updatedCount: 0, updatedInboxIds: [] };
+    }
+
+    const inboxIdsToUpdate: string[] = [];
+    for (const ib of storeInboxes) {
+      if (!isValidUuid(ib.id)) continue;
+
+      const isTargetSpecific = isValidUuid(options?.specificInboxId) && ib.id === options?.specificInboxId;
+      const currentInstId = ib.whatsapp_instance_id;
+
+      // Já está apontando para esta instância
+      if (currentInstId === connectedInstanceId) continue;
+
+      // Se aponta para OUTRA instância exclusiva CONNECTED distinta (e não é o specificInboxId alvo), preserva
+      if (!isTargetSpecific && isValidUuid(currentInstId) && otherConnectedIds.has(currentInstId)) {
+        continue;
+      }
+
+      // Caso contrário (NULL, UUID antigo/órfão/desconectado, ou caixa alvo), sincroniza para a nova instância CONNECTED
+      inboxIdsToUpdate.push(ib.id);
+    }
+
+    if (inboxIdsToUpdate.length > 0) {
+      const { error: updateErr } = await supabaseAdmin
+        .from("inboxes")
+        .update({ whatsapp_instance_id: connectedInstanceId })
+        .in("id", inboxIdsToUpdate);
+
+      if (updateErr) {
+        console.warn("[InboxSync] Aviso ao sincronizar caixas de entrada:", updateErr.message);
+        return { updatedCount: 0, updatedInboxIds: [] };
+      }
+
+      console.log(
+        `[InboxSync] ✅ ${inboxIdsToUpdate.length} caixa(s) de entrada da loja "${storeId}" sincronizada(s) para instância CONNECTED ${connectedInstanceId}.`
+      );
+    }
+
+    return { updatedCount: inboxIdsToUpdate.length, updatedInboxIds: inboxIdsToUpdate };
+  } catch (err: any) {
+    console.warn("[InboxSync] Exceção ao sincronizar inboxes:", err.message || err);
+    return { updatedCount: 0, updatedInboxIds: [] };
+  }
+}
+
 export class EvolutionApiService {
   /**
-   * Resolve o instanceName correto do WhatsApp, garantindo que NUNCA seja repassado um UUID para a Evolution API.
+   * Resolução blindada da instância CONNECTED na Evolution API para envio de mensagens:
+   * 1) Registro em public.whatsapp_instances onde id = inbox.whatsapp_instance_id AND status = 'CONNECTED'
+   * 2) Fallback explícito (se informado explicitInstanceName e existir como CONNECTED em public.whatsapp_instances)
+   * 3) Fallback automático: registro em public.whatsapp_instances onde store_id = conversa.store_id AND status = 'CONNECTED' (updated_at DESC LIMIT 1)
+   * 4) NUNCA inventa instance_name inexistente (como inbox_<uuid>). Retorna null se não houver instância conectada.
+   */
+  public async resolveConnectedInstanceForSending(params: {
+    storeId: string;
+    conversationId?: string | null;
+    inboxId?: string | null;
+    explicitInstanceName?: string | null;
+  }): Promise<ResolvedConnectedInstance | null> {
+    let effectiveStoreId = String(params.storeId || "").trim();
+    let effectiveInboxId = isValidUuid(params.inboxId) ? params.inboxId.trim() : null;
+
+    // 0. Se conversationId foi informado, busca inbox_id e store_id reais da conversa
+    if (params.conversationId && (!effectiveInboxId || !effectiveStoreId || effectiveStoreId === "default")) {
+      try {
+        const { data: conv } = await supabaseAdmin
+          .from("chat_conversations")
+          .select("inbox_id, store_id")
+          .eq("id", params.conversationId)
+          .maybeSingle();
+
+        if (conv) {
+          if (!effectiveInboxId && isValidUuid(conv.inbox_id)) {
+            effectiveInboxId = conv.inbox_id.trim();
+          }
+          if (conv.store_id && (!effectiveStoreId || effectiveStoreId === "default")) {
+            effectiveStoreId = String(conv.store_id).trim();
+          }
+        }
+      } catch (err: any) {
+        console.warn("[EvolutionApiService] Aviso ao consultar conversa para resolução de instância:", err.message);
+      }
+    }
+
+    let inboxRow: { id: string; store_id?: string | null; whatsapp_instance_id?: string | null } | null = null;
+
+    // 1. Tenta instância vinculada à Caixa de Entrada com status = 'CONNECTED'
+    if (effectiveInboxId && isValidUuid(effectiveInboxId)) {
+      try {
+        const { data: ib } = await supabaseAdmin
+          .from("inboxes")
+          .select("id, store_id, whatsapp_instance_id")
+          .eq("id", effectiveInboxId)
+          .maybeSingle();
+
+        if (ib) {
+          inboxRow = ib;
+          if (ib.store_id && (!effectiveStoreId || effectiveStoreId === "default")) {
+            effectiveStoreId = String(ib.store_id).trim();
+          }
+
+          if (isValidUuid(ib.whatsapp_instance_id)) {
+            const { data: linkedInst } = await supabaseAdmin
+              .from("whatsapp_instances")
+              .select("id, instance_name, store_id, phone_number, status")
+              .eq("id", ib.whatsapp_instance_id)
+              .eq("status", "CONNECTED")
+              .maybeSingle();
+
+            if (linkedInst?.instance_name && !isValidUuid(linkedInst.instance_name)) {
+              return {
+                ...linkedInst,
+                source: "inbox",
+              };
+            }
+          }
+        }
+      } catch (err: any) {
+        console.warn("[EvolutionApiService] Aviso ao consultar instância da inbox:", err.message);
+      }
+    }
+
+    // 2. Se um instanceName explícito foi informado, aceita SOMENTE se existir e estiver CONNECTED no banco
+    const cleanExplicit = String(params.explicitInstanceName || "").trim();
+    if (cleanExplicit && !isValidUuid(cleanExplicit)) {
+      try {
+        const { data: expInst } = await supabaseAdmin
+          .from("whatsapp_instances")
+          .select("id, instance_name, store_id, phone_number, status")
+          .eq("instance_name", cleanExplicit)
+          .eq("status", "CONNECTED")
+          .maybeSingle();
+
+        if (expInst?.instance_name && !isValidUuid(expInst.instance_name)) {
+          return {
+            ...expInst,
+            source: "explicit",
+          };
+        }
+      } catch (_) {}
+    }
+
+    // 3. Fallback automático: instância CONNECTED mais recente da loja (store_id)
+    const candidateStoreIds = await resolveStoreCandidateIds(effectiveStoreId || inboxRow?.store_id || params.storeId);
+    if (candidateStoreIds.length > 0) {
+      try {
+        const { data: fallbackRows } = await supabaseAdmin
+          .from("whatsapp_instances")
+          .select("id, instance_name, store_id, phone_number, status, updated_at")
+          .in("store_id", candidateStoreIds)
+          .eq("status", "CONNECTED")
+          .order("updated_at", { ascending: false })
+          .limit(1);
+
+        const fallbackInst = fallbackRows?.[0];
+        if (fallbackInst?.instance_name && !isValidUuid(fallbackInst.instance_name)) {
+          // Auto-cura em background o whatsapp_instance_id órfão/nulo da caixa usada
+          if (inboxRow && isValidUuid(inboxRow.id) && inboxRow.whatsapp_instance_id !== fallbackInst.id) {
+            supabaseAdmin
+              .from("inboxes")
+              .update({ whatsapp_instance_id: fallbackInst.id })
+              .eq("id", inboxRow.id)
+              .then(({ error }) => {
+                if (!error) {
+                  console.log(
+                    `[EvolutionApiService] Auto-cura: inbox ${inboxRow!.id} atualizada para instância CONNECTED ${fallbackInst.id} (${fallbackInst.instance_name})`
+                  );
+                }
+              });
+          }
+
+          return {
+            id: fallbackInst.id,
+            instance_name: fallbackInst.instance_name,
+            store_id: fallbackInst.store_id,
+            phone_number: fallbackInst.phone_number,
+            status: fallbackInst.status,
+            source: "store_fallback",
+          };
+        }
+      } catch (err: any) {
+        console.warn("[EvolutionApiService] Aviso no fallback de instância CONNECTED da loja:", err.message);
+      }
+    }
+
+    // 4. NUNCA inventar instance_name (ex: inbox_<uuid>) que não existe em public.whatsapp_instances
+    return null;
+  }
+
+  /**
+   * Resolve o instanceName correto do WhatsApp, priorizando instâncias CONNECTED em public.whatsapp_instances
+   * e NUNCA fabricando `inbox_<uuid>` inexistente.
    */
   public async resolveInstanceName(
     storeIdOrTenantId: string = "",
     explicitInstanceName?: string
   ): Promise<string> {
-    if (explicitInstanceName && explicitInstanceName.trim() && !/^[0-9a-f-]{36}$/i.test(explicitInstanceName.trim())) {
-      return explicitInstanceName.trim();
+    const cleanExplicit = String(explicitInstanceName || "").trim();
+    if (cleanExplicit && !UUID_REGEX.test(cleanExplicit) && !cleanExplicit.startsWith("inbox_")) {
+      return cleanExplicit;
+    }
+
+    // Se explícito começa com inbox_, valida se realmente existe em whatsapp_instances antes de aceitar
+    if (cleanExplicit && cleanExplicit.startsWith("inbox_")) {
+      try {
+        const { data: existsInst } = await supabaseAdmin
+          .from("whatsapp_instances")
+          .select("instance_name")
+          .eq("instance_name", cleanExplicit)
+          .eq("status", "CONNECTED")
+          .maybeSingle();
+        if (existsInst?.instance_name) {
+          return existsInst.instance_name;
+        }
+      } catch (_) {}
     }
 
     const rawId = String(storeIdOrTenantId || "").trim();
-    const cleanId = rawId.replace(/^store_/, "").replace(/^inbox_/, "").replace(/^tenant_/, "");
+    const candidateStoreIds = await resolveStoreCandidateIds(rawId);
 
     try {
-      // 1. Busca na tabela whatsapp_instances pelo store_id ou instance_name
-      const { data: inst } = await supabaseAdmin
-        .from("whatsapp_instances")
-        .select("instance_name, store_id")
-        .or(`store_id.eq.${rawId},store_id.eq.${cleanId},store_id.eq.store_${cleanId},instance_name.eq.${rawId},instance_name.eq.${cleanId},instance_name.eq.store_${cleanId}`)
-        .limit(1)
-        .maybeSingle();
+      if (candidateStoreIds.length > 0) {
+        // 1. Prioriza instância CONNECTED mais recente da loja
+        const { data: connectedRows } = await supabaseAdmin
+          .from("whatsapp_instances")
+          .select("instance_name, store_id, status")
+          .in("store_id", candidateStoreIds)
+          .eq("status", "CONNECTED")
+          .order("updated_at", { ascending: false })
+          .limit(1);
 
-      if (inst?.instance_name && !/^[0-9a-f-]{36}$/i.test(inst.instance_name)) {
-        return inst.instance_name;
+        if (connectedRows?.[0]?.instance_name && !isValidUuid(connectedRows[0].instance_name)) {
+          return connectedRows[0].instance_name;
+        }
+
+        // 2. Fallback: qualquer instância existente da loja em whatsapp_instances
+        const { data: anyRows } = await supabaseAdmin
+          .from("whatsapp_instances")
+          .select("instance_name, store_id")
+          .in("store_id", candidateStoreIds)
+          .order("updated_at", { ascending: false })
+          .limit(1);
+
+        if (anyRows?.[0]?.instance_name && !isValidUuid(anyRows[0].instance_name)) {
+          return anyRows[0].instance_name;
+        }
       }
     } catch (e: any) {
       console.warn("[EvolutionApiService] Aviso ao consultar whatsapp_instances:", e.message);
     }
 
-    try {
-      // 2. Busca o slug do tenant caso o ID fornecido seja UUID
-      const isUuid = /^[0-9a-f-]{36}$/i.test(cleanId) || /^[0-9a-f-]{36}$/i.test(rawId);
-      if (isUuid) {
-        const targetUuid = /^[0-9a-f-]{36}$/i.test(cleanId) ? cleanId : rawId;
-        const { data: tenant } = await supabaseAdmin
-          .from("tenants")
-          .select("slug")
-          .eq("id", targetUuid)
-          .maybeSingle();
-
-        if (tenant?.slug) {
-          return `store_${tenant.slug.replace(/[^a-zA-Z0-9]/g, "").toLowerCase()}`;
-        }
-      }
-    } catch (e: any) {
-      console.warn("[EvolutionApiService] Aviso ao consultar slug do tenant:", e.message);
-    }
-
-    // 3. Fallback: formata o slug limpo
-    const safeSlug = (cleanId || "default").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-    return `store_${safeSlug}`;
+    return "";
   }
 
   /**
