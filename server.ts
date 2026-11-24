@@ -15203,6 +15203,253 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
   }
 }
 
+// =========================================================================
+// TRAVAS CENTRALIZADAS DE AUTOMAÇÃO / IA NO WEBHOOK DO WHATSAPP
+// =========================================================================
+function parseTenantAiAgentConfig(tenant: any): Record<string, any> {
+  let raw: any =
+    tenant?.ai_agent_config ??
+    tenant?.aiagentconfig ??
+    tenant?.ai_agent_settings ??
+    tenant?.ai_config ??
+    null;
+  if (typeof raw === "string") {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      raw = null;
+    }
+  }
+  return raw && typeof raw === "object" ? raw : {};
+}
+
+function resolveTenantAutomationFlags(tenant: any): {
+  aiEnabled: boolean;
+  welcomeEnabled: boolean;
+  moduleAuthorized: boolean;
+  agentConfigEnabled: boolean;
+  reason: string;
+} {
+  if (!tenant) {
+    return {
+      aiEnabled: false,
+      welcomeEnabled: false,
+      moduleAuthorized: false,
+      agentConfigEnabled: false,
+      reason: "tenant_not_found",
+    };
+  }
+
+  // Primeira mensagem do dia (Saudação Automática)
+  const welcomeEnabled = Boolean(
+    tenant.welcome_message_enabled ?? tenant.welcomemessageenabled ?? false
+  );
+
+  // Liberação do módulo de IA no Super Admin (precisa estar explicitamente true)
+  const moduleAuthorized =
+    tenant.is_ai_agent_enabled === true || tenant.isaiagentenabled === true;
+
+  const cfg = parseTenantAiAgentConfig(tenant);
+  // Precedência: `enabled` (chave principal salva pelo painel AiAgentSettings.tsx) > `active` (legado) > false
+  const agentConfigEnabled =
+    typeof cfg.enabled === "boolean"
+      ? cfg.enabled
+      : typeof cfg.active === "boolean"
+        ? cfg.active
+        : false;
+
+  if (!moduleAuthorized) {
+    return {
+      aiEnabled: false,
+      welcomeEnabled,
+      moduleAuthorized,
+      agentConfigEnabled,
+      reason: "tenant_ai_module_disabled",
+    };
+  }
+
+  if (!agentConfigEnabled) {
+    return {
+      aiEnabled: false,
+      welcomeEnabled,
+      moduleAuthorized,
+      agentConfigEnabled,
+      reason: "tenant_ai_agent_paused",
+    };
+  }
+
+  return {
+    aiEnabled: true,
+    welcomeEnabled,
+    moduleAuthorized,
+    agentConfigEnabled,
+    reason: "ai_enabled",
+  };
+}
+
+function isConversationHumanOrPaused(
+  conversation: any,
+  isWeblojaOrder = false
+): boolean {
+  if (!conversation) return false;
+  const convStatusLower = String(conversation.status || "").toLowerCase();
+  const convStageLower = String(
+    conversation.kanban_stage || conversation.stage || ""
+  ).toLowerCase();
+
+  return (
+    isWeblojaOrder ||
+    conversation.is_human_controlled === true ||
+    conversation.is_bot_active === false ||
+    (conversation as any).ai_enabled === false ||
+    Boolean(conversation.assigned_user_id) ||
+    Boolean((conversation as any).assigned_to) ||
+    convStatusLower === "human" ||
+    convStatusLower === "human_takeover" ||
+    convStatusLower === "paused" ||
+    convStatusLower === "closed" ||
+    convStatusLower === "resolved" ||
+    convStageLower === "em_atendimento"
+  );
+}
+
+/**
+ * Blindagem extra no envio de fallback de erro de transcrição de áudio:
+ * SÓ permite enviar qualquer aviso/fallback se `aiEnabled === true` estiver
+ * explicitamente confirmado para aquele `tenant_id` E a conversa NÃO estiver
+ * em atendimento humano / pausada.
+ */
+async function sendAudioFallbackIfAiExplicitlyEnabled(params: {
+  tenantId: string;
+  tenant: any;
+  conversation: any;
+  instanceName?: string | null;
+  cleanPhone?: string | null;
+  messageText?: string;
+  isWeblojaOrder?: boolean;
+  persistInChat?: boolean;
+}): Promise<{ sent: boolean; blocked: boolean; reason: string }> {
+  const {
+    tenantId,
+    tenant,
+    conversation,
+    instanceName,
+    cleanPhone,
+    isWeblojaOrder = false,
+    persistInChat = true,
+  } = params;
+  const messageText =
+    params.messageText ||
+    "Desculpe, não consegui entender o seu áudio com clareza. Você poderia digitar sua dúvida ou tentar mandar novamente?";
+
+  // 1. Confirmação estrita da configuração de IA do tenant (com reconsulta no banco se necessário)
+  let tenantToCheck = tenant;
+  if (
+    !tenantToCheck ||
+    (tenantToCheck.is_ai_agent_enabled === undefined &&
+      tenantToCheck.isaiagentenabled === undefined)
+  ) {
+    try {
+      const { data: freshTenant } = await supabaseAdmin
+        .from("tenants")
+        .select("*")
+        .eq("id", tenantId)
+        .limit(1)
+        .maybeSingle();
+      if (freshTenant) tenantToCheck = freshTenant;
+    } catch (_) {}
+  }
+
+  const { aiEnabled, reason: aiReason } = resolveTenantAutomationFlags(tenantToCheck);
+  if (aiEnabled !== true) {
+    console.log(
+      `[WEBHOOK - AUDIO FALLBACK GUARD] 🔇 Envio de fallback de áudio BLOQUEADO: IA desligada (${aiReason}) para tenant="${tenantId}".`
+    );
+    return { sent: false, blocked: true, reason: aiReason };
+  }
+
+  // 2. Confirmação estrita de que a conversa não está em atendimento humano / pausada
+  if (isConversationHumanOrPaused(conversation, isWeblojaOrder)) {
+    console.log(
+      `[WEBHOOK - AUDIO FALLBACK GUARD] 🔇 Envio de fallback de áudio BLOQUEADO: conversa ${conversation?.id} está em atendimento humano/pausada.`
+    );
+    return { sent: false, blocked: true, reason: "conversation_human_or_paused" };
+  }
+
+  if (conversation?.id) {
+    try {
+      const { data: freshConv } = await supabaseAdmin
+        .from("chat_conversations")
+        .select("is_bot_active, is_human_controlled, assigned_user_id, kanban_stage, stage, status")
+        .eq("id", conversation.id)
+        .limit(1)
+        .maybeSingle();
+      if (freshConv && isConversationHumanOrPaused(freshConv, isWeblojaOrder)) {
+        console.log(
+          `[WEBHOOK - AUDIO FALLBACK GUARD] 🔇 Envio de fallback de áudio BLOQUEADO (recheck DB): conversa ${conversation.id} em atendimento humano/pausada.`
+        );
+        return { sent: false, blocked: true, reason: "conversation_human_or_paused_db" };
+      }
+    } catch (_) {}
+  }
+
+  // 3. Disparo permitido apenas com aiEnabled === true e conversa ativa no bot
+  if (cleanPhone && instanceName) {
+    const sendFailRes = await evolutionApiService.sendTextMessage(
+      instanceName,
+      cleanPhone,
+      messageText,
+      { delay: 1000 }
+    );
+    const failId =
+      sendFailRes?.data?.key?.id ||
+      sendFailRes?.data?.message?.key?.id ||
+      sendFailRes?.data?.id ||
+      sendFailRes?.data?.messageId ||
+      (sendFailRes as any)?.key?.id;
+    registerBotSentMessage(failId, conversation?.id, cleanPhone);
+  }
+
+  if (persistInChat && conversation?.id) {
+    const failMsgId = crypto.randomUUID();
+    const nowIso = new Date().toISOString();
+    const failBotMsg = {
+      id: failMsgId,
+      conversation_id: conversation.id,
+      sender_type: "BOT",
+      content: messageText,
+      media_url: null,
+      media_type: null,
+      created_at: nowIso,
+    };
+
+    try {
+      await supabaseAdmin.from("chat_messages").insert([failBotMsg]);
+      await supabaseAdmin
+        .from("chat_conversations")
+        .update({
+          last_message_content: messageText,
+          last_message_at: nowIso,
+          updated_at: nowIso,
+        })
+        .eq("id", conversation.id);
+
+      realtimeHub.broadcastToStore(tenantId, "chat_message", {
+        conversationId: conversation.id,
+        message: failBotMsg,
+        conversation,
+      });
+    } catch (dbFailErr: any) {
+      console.warn(
+        "[WEBHOOK - AUDIO] Erro ao registrar mensagem de erro amigável no banco:",
+        dbFailErr.message
+      );
+    }
+  }
+
+  return { sent: true, blocked: false, reason: "sent_with_ai_enabled" };
+}
+
 // 1. Webhook Ultra-Leve para Evolution API (Serverless-friendly)
 app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
   try {
@@ -15410,7 +15657,11 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
       }
 
       storeId = resolvedTenant.id;
-      console.log(`[WEBHOOK SUCCESS] Instância identificada com sucesso: "${instanceName || 'N/A'}" | Loja: "${resolvedTenant.name || resolvedTenant.slug || storeId}" (id: "${storeId}") | Mensagens a processar: ${messages.length}`);
+      const tenantAutomation = resolveTenantAutomationFlags(resolvedTenant);
+      console.log(
+        `[WEBHOOK SUCCESS] Instância identificada com sucesso: "${instanceName || 'N/A'}" | Loja: "${resolvedTenant.name || resolvedTenant.slug || storeId}" (id: "${storeId}") | ` +
+        `IA: ${tenantAutomation.aiEnabled ? 'LIGADA' : `DESLIGADA (${tenantAutomation.reason})`} | Boas-vindas: ${tenantAutomation.welcomeEnabled ? 'LIGADA' : 'DESLIGADA'} | Mensagens: ${messages.length}`
+      );
 
       for (const msg of messages) {
         if (!msg) continue;
@@ -15474,195 +15725,8 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
         console.log(`[WEBHOOK] Mensagem de: ${remoteJid} | fromMe: ${fromMe} | isAudio: ${isAudio} | isDocImg: ${isDocumentOrImage} | Texto: "${typeof text === 'string' ? text.slice(0, 50) : ''}"`);
 
         try {
-          // 1. SEMPRE salva primeiro a mensagem no banco de dados e cria/atualiza o contato e a conversa
+          // 1. SEMPRE salva primeiro a mensagem no banco de dados e cria/atualiza o contato e a conversa na caixa de entrada
           const result = await chatStore.processWhatsAppMessage(storeId, msg, instanceName);
-
-          // Se for mensagem de áudio enviada pelo cliente, transcreve via Whisper / Gemini
-          if (!fromMe && isAudio && result?.message) {
-            try {
-              let audioData: string | null = null;
-              
-              // 1. Verifique primeiro se o base64 do áudio já veio direto no payload
-              const directBase64 = 
-                msg.base64 || 
-                msg.message?.audioMessage?.base64 || 
-                msg.data?.base64 ||
-                msg.data?.message?.audioMessage?.base64 ||
-                (typeof result?.message?.media_url === 'string' && result.message.media_url.length > 50 ? result.message.media_url : null) ||
-                (typeof result?.message?.mediaUrl === 'string' && result.message.mediaUrl.length > 50 ? result.message.mediaUrl : null);
-
-              console.log('[AUDIO_DEBUG] Tentando obter base64 da mensagem...', msg.key?.id || msg.id);
-
-              if (directBase64) {
-                audioData = directBase64;
-                console.log('[AUDIO_DEBUG] Base64 obtido com sucesso direto do payload! Tam:', audioData?.length);
-              } else {
-                // 2. Se não veio no payload, faça a chamada para a Evolution API com tratamento rigoroso de log e erro
-                audioData = await evolutionApiService.getBase64FromMediaMessage(instanceName, msg);
-                console.log('[AUDIO_DEBUG] Base64 obtido com sucesso da Evolution API? Tam:', audioData?.length);
-              }
-
-              if (!audioData) {
-                console.error('[AUDIO_DEBUG] ❌ Não foi possível obter o Base64 do áudio nem do payload nem da Evolution API.');
-              }
-
-              let transcribed: string | null = null;
-              if (audioData) {
-                const tenantAiCfg = resolvedTenant?.ai_agent_config || resolvedTenant?.ai_agent_settings || resolvedTenant?.ai_config || {};
-                const tenantSettings = (resolvedTenant as any)?.settings || {};
-                const openAiKey = 
-                  tenantAiCfg.openai_api_key ||
-                  tenantSettings.openai_api_key ||
-                  (resolvedTenant as any)?.openai_api_key ||
-                  (tenantAiCfg.apiKey?.startsWith('sk-') ? tenantAiCfg.apiKey : undefined) ||
-                  (tenantAiCfg.provider === 'openai' ? (tenantAiCfg.apiKey || tenantAiCfg.api_key) : undefined) ||
-                  process.env.OPENAI_API_KEY;
-
-                console.log('[AUDIO_DEBUG] [server.ts] OpenAI Key encontrada para tenant:', resolvedTenant?.slug || resolvedTenant?.id, Boolean(openAiKey), 'Tam:', openAiKey?.length);
-
-                transcribed = await transcribeAudio({
-                  audioBase64OrUrl: audioData,
-                  mimeType: mimetype || "audio/ogg; codecs=opus",
-                  apiKey: openAiKey,
-                  openaiApiKey: openAiKey,
-                  tenantConfig: tenantAiCfg,
-                  tenant: resolvedTenant
-                });
-              }
-
-              if (transcribed && transcribed.trim().length > 0) {
-                effectiveText = transcribed.trim();
-                const audioDisplay = `🎤 [Áudio]: "${effectiveText}"`;
-                console.log(`[AUDIO_DEBUG] Transcrição Whisper com sucesso: "${effectiveText}"`);
-
-                try {
-                  await supabaseAdmin
-                    .from("chat_messages")
-                    .update({ content: audioDisplay })
-                    .eq("id", result.message.id);
-
-                  if (result.conversation) {
-                    await supabaseAdmin
-                      .from("chat_conversations")
-                      .update({
-                        last_message_content: audioDisplay,
-                        updated_at: new Date().toISOString()
-                      })
-                      .eq("id", result.conversation.id);
-
-                    result.conversation.last_message_content = audioDisplay;
-                  }
-
-                  result.message.content = audioDisplay;
-                } catch (dbAudioErr: any) {
-                  console.warn("[WEBHOOK - AUDIO] Erro ao atualizar transcrição no banco:", dbAudioErr.message);
-                }
-
-                realtimeHub.broadcastToStore(storeId, "chat_message", {
-                  conversationId: result.conversation.id,
-                  message: { ...result.message, content: audioDisplay },
-                  conversation: result.conversation
-                });
-              } else {
-                // 5. SE A TRANSCRIÇÃO FALHAR MESMO ASSIM:
-                // NÃO passe para a IA responder genericamente. Envie uma mensagem direta e amigável
-                console.warn(`[AUDIO_DEBUG] ⚠️ Transcrição do áudio falhou ou retornou vazia para ${remoteJid}. Enviando mensagem amigável direta.`);
-                const audioFailFriendlyMessage = "Desculpe, não consegui entender o seu áudio com clareza. Você poderia digitar sua dúvida ou tentar mandar novamente?";
-                
-                const phone = result?.conversation?.contact?.phone_number || msg.key?.remoteJid?.replace(/@.*$/, '') || remoteJid.replace(/@.*$/, '');
-                const cleanPhone = String(phone || '').replace(/\D/g, '');
-
-                if (cleanPhone && instanceName) {
-                  const sendFailRes = await evolutionApiService.sendTextMessage(instanceName, cleanPhone, audioFailFriendlyMessage, { delay: 1000 });
-                  const failId = sendFailRes?.data?.key?.id || sendFailRes?.data?.message?.key?.id || sendFailRes?.data?.id || sendFailRes?.data?.messageId || sendFailRes?.key?.id;
-                  registerBotSentMessage(failId, result?.conversation?.id, cleanPhone);
-                }
-
-                if (result.conversation) {
-                  const failMsgId = crypto.randomUUID();
-                  const nowIso = new Date().toISOString();
-                  const failBotMsg = {
-                    id: failMsgId,
-                    conversation_id: result.conversation.id,
-                    sender_type: "BOT",
-                    content: audioFailFriendlyMessage,
-                    media_url: null,
-                    media_type: null,
-                    created_at: nowIso
-                  };
-
-                  try {
-                    await supabaseAdmin.from("chat_messages").insert([failBotMsg]);
-                    await supabaseAdmin.from("chat_conversations").update({
-                      last_message_content: audioFailFriendlyMessage,
-                      last_message_at: nowIso,
-                      updated_at: nowIso
-                    }).eq("id", result.conversation.id);
-
-                    realtimeHub.broadcastToStore(storeId, "chat_message", {
-                      conversationId: result.conversation.id,
-                      message: failBotMsg,
-                      conversation: result.conversation
-                    });
-                  } catch (dbFailErr: any) {
-                    console.warn("[WEBHOOK - AUDIO] Erro ao registrar mensagem de erro amigável no banco:", dbFailErr.message);
-                  }
-                }
-
-                if (!res.headersSent) {
-                  return res.status(200).json({ success: true, handled: 'audio_transcription_failed_friendly_replied' });
-                }
-                continue;
-              }
-            } catch (audioErr: any) {
-              console.error("[WEBHOOK - AUDIO] Erro na transcrição de áudio:", audioErr.message);
-              const audioFailFriendlyMessage = "Desculpe, não consegui entender o seu áudio com clareza. Você poderia digitar sua dúvida ou tentar mandar novamente?";
-              const phone = result?.conversation?.contact?.phone_number || msg.key?.remoteJid?.replace(/@.*$/, '') || remoteJid.replace(/@.*$/, '');
-              const cleanPhone = String(phone || '').replace(/\D/g, '');
-
-              if (cleanPhone && instanceName) {
-                const sendFailRes2 = await evolutionApiService.sendTextMessage(instanceName, cleanPhone, audioFailFriendlyMessage, { delay: 1000 });
-                const failId2 = sendFailRes2?.data?.key?.id || sendFailRes2?.data?.message?.key?.id || sendFailRes2?.data?.id || sendFailRes2?.data?.messageId || sendFailRes2?.key?.id;
-                registerBotSentMessage(failId2, result?.conversation?.id, cleanPhone);
-              }
-
-              if (result?.conversation) {
-                const failMsgId = crypto.randomUUID();
-                const nowIso = new Date().toISOString();
-                const failBotMsg = {
-                  id: failMsgId,
-                  conversation_id: result.conversation.id,
-                  sender_type: "BOT",
-                  content: audioFailFriendlyMessage,
-                  media_url: null,
-                  media_type: null,
-                  created_at: nowIso
-                };
-
-                try {
-                  await supabaseAdmin.from("chat_messages").insert([failBotMsg]);
-                  await supabaseAdmin.from("chat_conversations").update({
-                    last_message_content: audioFailFriendlyMessage,
-                    last_message_at: nowIso,
-                    updated_at: nowIso
-                  }).eq("id", result.conversation.id);
-
-                  realtimeHub.broadcastToStore(storeId, "chat_message", {
-                    conversationId: result.conversation.id,
-                    message: failBotMsg,
-                    conversation: result.conversation
-                  });
-                } catch (dbFailErr: any) {
-                  console.warn("[WEBHOOK - AUDIO] Erro ao registrar mensagem de erro amigável no banco:", dbFailErr.message);
-                }
-              }
-
-              if (!res.headersSent) {
-                return res.status(200).json({ success: true, handled: 'audio_error_friendly_replied' });
-              }
-              continue;
-            }
-          }
 
           if (result && result.conversation) {
             const conversation = result.conversation;
@@ -15726,10 +15790,10 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
             }
 
             if (!fromMe) {
-              // Log de Diagnóstico solicitado
-              console.log(`[Webhook Message] Recebida msg de ${remoteJid}. is_bot_active: ${conversation.is_bot_active}, is_human_controlled: ${conversation.is_human_controlled}, is_webloja_order: ${isWeblojaOrder}`);
+              // Log de Diagnóstico
+              console.log(`[Webhook Message] Recebida msg de ${remoteJid}. is_bot_active: ${conversation.is_bot_active}, is_human_controlled: ${conversation.is_human_controlled}, is_webloja_order: ${isWeblojaOrder}, aiEnabled: ${tenantAutomation.aiEnabled}, welcomeEnabled: ${tenantAutomation.welcomeEnabled}`);
 
-              // 3. Processamento CSAT isolado
+              // 3. Processamento CSAT isolado (apenas gravação em banco, sem envio de WhatsApp)
               try {
                 const ratingNum = parseInt(String(effectiveText || text).trim(), 10);
                 if (!isNaN(ratingNum) && ratingNum >= 1 && ratingNum <= 5) {
@@ -15739,25 +15803,177 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                 console.warn("[WEBHOOK] Aviso ao processar CSAT:", csatErr.message);
               }
 
-              // 4. Verificação de elegibilidade para atendimento pela IA (Silêncio Absoluto Pós-Transferência)
-              const convStatusLower = String(conversation.status || "").toLowerCase();
-              const convStageLower = String(conversation.kanban_stage || conversation.stage || "").toLowerCase();
-              const isHumanControlled = 
-                isWeblojaOrder ||
-                conversation.is_human_controlled === true ||
-                conversation.is_bot_active === false ||
-                (conversation as any).ai_enabled === false ||
-                Boolean(conversation.assigned_user_id) ||
-                convStatusLower === "human" ||
-                convStatusLower === "human_takeover" ||
-                convStageLower === "em_atendimento";
-
+              // =========================================================================
+              // 4. TRAVA CENTRALIZADA (EARLY RETURN) ANTES DE TRANSCRIÇÃO, PRESENÇA OU IA
+              // =========================================================================
+              // a) Conversa em atendimento humano / pausada / pedido da loja online
+              const isHumanControlled = isConversationHumanOrPaused(conversation, isWeblojaOrder);
               if (isHumanControlled) {
-                console.log(`[WEBHOOK - IA] 🔇 Silêncio Absoluto Pós-Transferência: Conversa ${conversation.id} está em atendimento humano (is_bot_active: ${conversation.is_bot_active}, is_human_controlled: ${conversation.is_human_controlled}, status: ${conversation.status}, stage: ${conversation.kanban_stage}). Ignorando IA.`);
+                console.log(`[WEBHOOK - GUARD] 🔇 Silêncio Absoluto: Conversa ${conversation.id} está em atendimento humano/pausada (is_bot_active: ${conversation.is_bot_active}, is_human_controlled: ${conversation.is_human_controlled}, status: ${conversation.status}, stage: ${conversation.kanban_stage}). Encerrando sem transcrever áudio nem disparar IA.`);
                 if (!res.headersSent) {
                   return res.status(200).json({ success: true, handled: 'human_controlled' });
                 }
                 continue;
+              }
+
+              // b) Agente de IA DESLIGADO e Primeira Mensagem do Dia DESLIGADA
+              if (!tenantAutomation.aiEnabled && !tenantAutomation.welcomeEnabled) {
+                console.log(`[WEBHOOK - GUARD] 🔇 Automação desativada para loja "${resolvedTenant.name}" (${storeId}): IA=${tenantAutomation.reason}, Boas-vindas=false. Mensagem salva na caixa de entrada; encerrando imediatamente sem transcrever áudio nem enviar fallback.`);
+                if (!res.headersSent) {
+                  return res.status(200).json({ success: true, handled: 'automation_disabled', reason: tenantAutomation.reason });
+                }
+                continue;
+              }
+
+              // c) Agente de IA DESLIGADO, mas Primeira Mensagem do Dia HABILITADA:
+              //    NUNCA transcreve áudio nem envia fallback de áudio; apenas dispara a saudação diária (se aplicável hoje) e encerra.
+              if (!tenantAutomation.aiEnabled && tenantAutomation.welcomeEnabled) {
+                let welcomeOnlySent = false;
+                if (!detectHumanHandoffIntent(effectiveText).isHumanRequested) {
+                  try {
+                    welcomeOnlySent = await handleDailyWelcomeMessage(storeId, conversation, instanceName, effectiveText);
+                  } catch (welcomeErr: any) {
+                    console.error('[WEBHOOK] Exceção ao processar boas-vindas diárias (modo IA desligada):', welcomeErr.message);
+                  }
+                }
+                console.log(`[WEBHOOK - GUARD] 🔇 IA desligada (${tenantAutomation.reason}) para loja "${resolvedTenant.name}". Boas-vindas enviadas: ${welcomeOnlySent}. Encerrando sem transcrever áudio nem chamar IA.`);
+                if (!res.headersSent) {
+                  return res.status(200).json({
+                    success: true,
+                    handled: welcomeOnlySent ? 'welcome_message_only' : 'ai_disabled_welcome_skipped',
+                    reason: tenantAutomation.reason
+                  });
+                }
+                continue;
+              }
+
+              // =========================================================================
+              // A PARTIR DESTE PONTO: tenantAutomation.aiEnabled === true E !isHumanControlled
+              // =========================================================================
+              const phone = conversation.contact?.phone_number || msg.key?.remoteJid?.replace(/@.*$/, '') || remoteJid.replace(/@.*$/, '');
+              const cleanPhone = String(phone || '').replace(/\D/g, '');
+
+              // 4.1. Transcrição de áudio (SOMENTE quando IA está explicitamente LIGADA e conversa ativa no bot)
+              if (isAudio && result?.message) {
+                try {
+                  let audioData: string | null = null;
+                  
+                  const directBase64 = 
+                    msg.base64 || 
+                    msg.message?.audioMessage?.base64 || 
+                    msg.data?.base64 ||
+                    msg.data?.message?.audioMessage?.base64 ||
+                    (typeof result?.message?.media_url === 'string' && result.message.media_url.length > 50 ? result.message.media_url : null) ||
+                    (typeof result?.message?.mediaUrl === 'string' && result.message.mediaUrl.length > 50 ? result.message.mediaUrl : null);
+
+                  console.log('[AUDIO_DEBUG] Tentando obter base64 da mensagem...', msg.key?.id || msg.id);
+
+                  if (directBase64) {
+                    audioData = directBase64;
+                    console.log('[AUDIO_DEBUG] Base64 obtido com sucesso direto do payload! Tam:', audioData?.length);
+                  } else {
+                    audioData = await evolutionApiService.getBase64FromMediaMessage(instanceName, msg);
+                    console.log('[AUDIO_DEBUG] Base64 obtido com sucesso da Evolution API? Tam:', audioData?.length);
+                  }
+
+                  if (!audioData) {
+                    console.error('[AUDIO_DEBUG] ❌ Não foi possível obter o Base64 do áudio nem do payload nem da Evolution API.');
+                  }
+
+                  let transcribed: string | null = null;
+                  if (audioData) {
+                    const tenantAiCfg = parseTenantAiAgentConfig(resolvedTenant);
+                    const tenantSettings = (resolvedTenant as any)?.settings || {};
+                    const openAiKey = 
+                      tenantAiCfg.openai_api_key ||
+                      tenantSettings.openai_api_key ||
+                      (resolvedTenant as any)?.openai_api_key ||
+                      (tenantAiCfg.apiKey?.startsWith('sk-') ? tenantAiCfg.apiKey : undefined) ||
+                      (tenantAiCfg.provider === 'openai' ? (tenantAiCfg.apiKey || tenantAiCfg.api_key) : undefined) ||
+                      process.env.OPENAI_API_KEY;
+
+                    console.log('[AUDIO_DEBUG] [server.ts] OpenAI Key encontrada para tenant:', resolvedTenant?.slug || resolvedTenant?.id, Boolean(openAiKey), 'Tam:', openAiKey?.length);
+
+                    transcribed = await transcribeAudio({
+                      audioBase64OrUrl: audioData,
+                      mimeType: mimetype || "audio/ogg; codecs=opus",
+                      apiKey: openAiKey,
+                      openaiApiKey: openAiKey,
+                      tenantConfig: tenantAiCfg,
+                      tenant: resolvedTenant
+                    });
+                  }
+
+                  if (transcribed && transcribed.trim().length > 0) {
+                    effectiveText = transcribed.trim();
+                    const audioDisplay = `🎤 [Áudio]: "${effectiveText}"`;
+                    console.log(`[AUDIO_DEBUG] Transcrição Whisper com sucesso: "${effectiveText}"`);
+
+                    try {
+                      await supabaseAdmin
+                        .from("chat_messages")
+                        .update({ content: audioDisplay })
+                        .eq("id", result.message.id);
+
+                      await supabaseAdmin
+                        .from("chat_conversations")
+                        .update({
+                          last_message_content: audioDisplay,
+                          updated_at: new Date().toISOString()
+                        })
+                        .eq("id", conversation.id);
+
+                      conversation.last_message_content = audioDisplay;
+                      result.message.content = audioDisplay;
+                    } catch (dbAudioErr: any) {
+                      console.warn("[WEBHOOK - AUDIO] Erro ao atualizar transcrição no banco:", dbAudioErr.message);
+                    }
+
+                    realtimeHub.broadcastToStore(storeId, "chat_message", {
+                      conversationId: conversation.id,
+                      message: { ...result.message, content: audioDisplay },
+                      conversation
+                    });
+                  } else {
+                    console.warn(`[AUDIO_DEBUG] ⚠️ Transcrição do áudio falhou ou retornou vazia para ${remoteJid}. Acionando helper blindado de fallback.`);
+                    const fbRes = await sendAudioFallbackIfAiExplicitlyEnabled({
+                      tenantId: storeId,
+                      tenant: resolvedTenant,
+                      conversation,
+                      instanceName,
+                      cleanPhone,
+                      isWeblojaOrder,
+                      persistInChat: true
+                    });
+
+                    if (!res.headersSent) {
+                      return res.status(200).json({
+                        success: true,
+                        handled: fbRes.sent ? 'audio_transcription_failed_friendly_replied' : 'audio_transcription_failed_silenced'
+                      });
+                    }
+                    continue;
+                  }
+                } catch (audioErr: any) {
+                  console.error("[WEBHOOK - AUDIO] Erro na transcrição de áudio:", audioErr.message);
+                  const fbRes = await sendAudioFallbackIfAiExplicitlyEnabled({
+                    tenantId: storeId,
+                    tenant: resolvedTenant,
+                    conversation,
+                    instanceName,
+                    cleanPhone,
+                    isWeblojaOrder,
+                    persistInChat: true
+                  });
+
+                  if (!res.headersSent) {
+                    return res.status(200).json({
+                      success: true,
+                      handled: fbRes.sent ? 'audio_error_friendly_replied' : 'audio_error_silenced'
+                    });
+                  }
+                  continue;
+                }
               }
 
               // =========================================================================
@@ -15765,8 +15981,6 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
               // =========================================================================
               const currentMessage = result.message;
               const currentMsgTimestamp = currentMessage?.created_at || new Date().toISOString();
-              const phone = conversation.contact?.phone_number || msg.key?.remoteJid?.replace(/@.*$/, '') || remoteJid.replace(/@.*$/, '');
-              const cleanPhone = String(phone || '').replace(/\D/g, '');
 
               // a) Atualiza timestamp da última mensagem na conversa
               try {
@@ -15819,7 +16033,7 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                 }
               }
 
-              // e) Verifica se durante a espera um operador humano assumiu o chat ou já houve transbordo
+              // e) Verifica se durante a espera um operador humano assumiu o chat ou a IA foi desligada
               try {
                 const { data: recheckedConv } = await supabaseAdmin
                   .from('chat_conversations')
@@ -15827,19 +16041,9 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                   .eq('id', conversation.id)
                   .maybeSingle();
 
-                if (recheckedConv) {
-                  const rs = String(recheckedConv.status || '').toLowerCase();
-                  const rk = String(recheckedConv.kanban_stage || recheckedConv.stage || '').toLowerCase();
-                  const nowHuman = recheckedConv.is_human_controlled === true ||
-                    recheckedConv.is_bot_active === false ||
-                    Boolean(recheckedConv.assigned_user_id) ||
-                    rs === 'human' ||
-                    rs === 'human_takeover' ||
-                    rk === 'em_atendimento';
-                  if (nowHuman) {
-                    console.log(`[WEBHOOK DEBOUNCE] 👤 Conversa ${conversation.id} já está em atendimento humano após espera. Abortando IA.`);
-                    return res.status(200).json({ handled: 'human_takeover_during_debounce' });
-                  }
+                if (recheckedConv && isConversationHumanOrPaused(recheckedConv, isWeblojaOrder)) {
+                  console.log(`[WEBHOOK DEBOUNCE] 👤 Conversa ${conversation.id} já está em atendimento humano após espera. Abortando IA.`);
+                  return res.status(200).json({ handled: 'human_takeover_during_debounce' });
                 }
               } catch (convCheckErr: any) {
                 console.warn("[WEBHOOK DEBOUNCE] Erro ao re-verificar conversa:", convCheckErr.message);
@@ -15899,14 +16103,20 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
                 }
 
                 if (isAudioMessage && (!consolidatedText || consolidatedText.startsWith('[') || consolidatedText.trim().length === 0)) {
-                  console.warn(`[WEBHOOK DEBOUNCE] ⚠️ Mensagem de áudio consolidada vazia para conversa ${conversation.id}. Enviando resposta amigável.`);
-                  const failText = "Desculpe, não consegui entender o seu áudio com clareza. Você poderia digitar sua dúvida ou tentar mandar novamente?";
-                  if (instanceName && cleanPhone) {
-                    const sendFailRes3 = await evolutionApiService.sendTextMessage(instanceName, cleanPhone, failText, { delay: 1000 });
-                    const failId3 = sendFailRes3?.data?.key?.id || sendFailRes3?.data?.message?.key?.id || sendFailRes3?.data?.id || sendFailRes3?.data?.messageId || sendFailRes3?.key?.id;
-                    registerBotSentMessage(failId3, conversation.id, cleanPhone);
-                  }
-                  return res.status(200).json({ success: true, handled: 'audio_empty_friendly_replied' });
+                  console.warn(`[WEBHOOK DEBOUNCE] ⚠️ Mensagem de áudio consolidada vazia para conversa ${conversation.id}. Acionando helper blindado de fallback.`);
+                  const fbRes = await sendAudioFallbackIfAiExplicitlyEnabled({
+                    tenantId: storeId,
+                    tenant: resolvedTenant,
+                    conversation,
+                    instanceName,
+                    cleanPhone,
+                    isWeblojaOrder,
+                    persistInChat: false
+                  });
+                  return res.status(200).json({
+                    success: true,
+                    handled: fbRes.sent ? 'audio_empty_friendly_replied' : 'audio_empty_silenced'
+                  });
                 }
               } catch (consolErr: any) {
                 console.warn("[WEBHOOK DEBOUNCE] Erro ao consolidar histórico recente:", consolErr.message);
@@ -15916,7 +16126,7 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
 
               // g) Disparo Único da Mensagem de Boas-Vindas (se elegível hoje e NÃO for pedido de balconista)
               let welcomeSent = false;
-              if (!detectHumanHandoffIntent(consolidatedText).isHumanRequested) {
+              if (tenantAutomation.welcomeEnabled && !detectHumanHandoffIntent(consolidatedText).isHumanRequested) {
                 try {
                   welcomeSent = await handleDailyWelcomeMessage(storeId, conversation, instanceName, consolidatedText);
                 } catch (welcomeErr: any) {

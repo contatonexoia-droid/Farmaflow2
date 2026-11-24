@@ -128,13 +128,17 @@ function resolveIgnorePromotionCampaignsFlag(dbConfig = {}, runtimeOptions = {})
 async function inspectInovaFarmaSchema(pool) {
     try {
         const checkProd = await pool.request().query(`
+            SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+            SET NOCOUNT ON;
             SELECT CASE WHEN OBJECT_ID('dbo.Produto', 'U') IS NOT NULL THEN 1 ELSE 0 END AS HasProduto;
         `);
         if (!checkProd?.recordset?.[0]?.HasProduto) {
-            return { isInovaFarma: false };
+            return { isInovaFarma: false, reason: 'Tabela dbo.Produto não encontrada no banco.' };
         }
 
         const colsRes = await pool.request().query(`
+            SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+            SET NOCOUNT ON;
             SELECT
                 TABLE_NAME,
                 COLUMN_NAME,
@@ -166,7 +170,10 @@ async function inspectInovaFarmaSchema(pool) {
         const produtoCols = tablesMap.get('Produto') || [];
         const prodIdCol = findMatchingColumn(produtoCols, ['CodigoProduto', 'IdProduto', 'CodProduto', 'Codigo']);
         if (!prodIdCol) {
-            return { isInovaFarma: false };
+            return {
+                isInovaFarma: false,
+                reason: 'Coluna de chave primária (CodigoProduto) não encontrada em dbo.Produto.'
+            };
         }
 
         const prodSellingPriceCol = findMatchingColumn(produtoCols, [
@@ -354,6 +361,7 @@ async function inspectInovaFarmaSchema(pool) {
 
         return {
             isInovaFarma: true,
+            discoveredTables: Array.from(tablesMap.keys()),
             produto: {
                 tableName: 'Produto',
                 prodIdCol,
@@ -367,13 +375,116 @@ async function inspectInovaFarmaSchema(pool) {
         };
     } catch (err) {
         console.warn(`[InovaFarma Promo Inspector] Aviso ao inspecionar schema SQL: ${err.message}`);
-        return { isInovaFarma: false, error: err.message };
+        return { isInovaFarma: false, reason: err.message, error: err.message };
     }
+}
+
+/**
+ * Imprime no log inicial do agente o diagnóstico detalhado das tabelas e colunas exatas
+ * detectadas no SQL Server do InovaFarma (ou informa claramente caso tenha caído em fallback para a View).
+ */
+function logInovaFarmaSchemaDetection(schemaMeta, ignorePromotionCampaigns = false) {
+    console.log('\n---------------------------------------------------');
+    console.log('🔍 [Diagnóstico Schema InovaFarma - Promoções & Preços]');
+    if (!schemaMeta || !schemaMeta.isInovaFarma) {
+        console.log(
+            `⚠️  FALLBACK PARA VIEW ATIVO: Schema nativo dbo.Produto não reconhecido (${schemaMeta?.reason || 'Tabela não localizada'}).`
+        );
+        console.log('   -> O agente utilizará exclusivamente os preços retornados pela View principal.');
+        console.log('---------------------------------------------------\n');
+        return;
+    }
+
+    const p = schemaMeta.produto || {};
+    console.log(
+        `✅ Tabela Base: dbo.${p.tableName} | PK: [${p.prodIdCol}] | Preço Venda: [${p.sellingPriceCol || 'N/A'}] | ` +
+        `Preço Prom. Estoque: [${p.promoPriceCol || 'N/A'}] | Vigência Estoque: [${p.promoStartCol || 'N/A'} .. ${p.promoEndCol || 'N/A'}]`
+    );
+
+    const b = schemaMeta.branchStockTable;
+    if (b) {
+        console.log(
+            `✅ Tabela Filial/Estoque: dbo.${b.tableName} | FK Produto: [${b.prodIdCol}] | Filial: [${b.branchCol}] | ` +
+            `Preço Venda: [${b.sellingPriceCol || 'N/A'}] | Preço Prom.: [${b.promoPriceCol || 'N/A'}] | ` +
+            `Vigência: [${b.promoStartCol || 'N/A'} .. ${b.promoEndCol || 'N/A'}]`
+        );
+    } else {
+        console.log('ℹ️  Tabela Filial/Estoque: Nenhuma tabela separada de preço por filial detectada (usando dbo.Produto).');
+    }
+
+    const cs = schemaMeta.campaignSource;
+    if (!cs) {
+        console.log(
+            '⚠️  Tabelas da Aba Promoção: Nenhuma tabela de campanha (dbo.Promocao / dbo.Promocao_Produto) reconhecida. ' +
+            'Usando apenas o PREÇO PROM. da aba Estoque.'
+        );
+    } else if (cs.mode === 'header_detail' && cs.header && cs.item) {
+        const h = cs.header;
+        const i = cs.item;
+        const dayNames = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sab', 'Dom'];
+        const detectedDayCols = dayNames
+            .map((d, idx) => (h.weekdayCols?.[idx] ? `${d}=[${h.weekdayCols[idx]}]` : `${d}=N/A`))
+            .join(', ');
+        console.log(
+            `✅ Aba Promoção (Cabeçalho): dbo.${h.tableName} | PK: [${h.promoIdCol}] | Nome: [${h.nameCol || 'N/A'}] | ` +
+            `Vigência: [${h.startDateCol || 'N/A'} .. ${h.endDateCol || 'N/A'}] | ` +
+            `Ativo: [${(h.positiveActiveCols || []).join(',') || 'N/A'}] | ` +
+            `Inativo/Eliminado: [${(h.negativeInactiveCols || []).join(',') || 'N/A'}]`
+        );
+        console.log(
+            `✅ Aba Promoção (Dias da Semana em dbo.${h.tableName}): ` +
+            (h.hasIndividualWeekdayCols
+                ? `Colunas individuais -> ${detectedDayCols}`
+                : (h.combinedWeekdayCol ? `Coluna combinada -> [${h.combinedWeekdayCol}]` : 'Nenhuma coluna de dia da semana detectada'))
+        );
+        console.log(
+            `✅ Aba Promoção (Itens): dbo.${i.tableName} | Join: [${i.joinCol}] | FK Produto: [${i.prodIdCol}] | ` +
+            `Preço Campanha: [${i.promoPriceCol || h.promoPriceCol || 'N/A'}] | Desconto %: [${i.discountPctCol || h.discountPctCol || 'N/A'}]`
+        );
+    } else if (cs.mode === 'single_table' && cs.header) {
+        const h = cs.header;
+        const dayNames = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sab', 'Dom'];
+        const detectedDayCols = dayNames
+            .map((d, idx) => (h.weekdayCols?.[idx] ? `${d}=[${h.weekdayCols[idx]}]` : `${d}=N/A`))
+            .join(', ');
+        console.log(
+            `✅ Aba Promoção (Tabela Única): dbo.${h.tableName} | FK Produto: [${h.prodIdCol}] | ` +
+            `Preço Campanha: [${h.promoPriceCol || 'N/A'}] | Vigência: [${h.startDateCol || 'N/A'} .. ${h.endDateCol || 'N/A'}]`
+        );
+        console.log(
+            `✅ Aba Promoção (Dias da Semana em dbo.${h.tableName}): ` +
+            (h.hasIndividualWeekdayCols
+                ? `Colunas individuais -> ${detectedDayCols}`
+                : (h.combinedWeekdayCol ? `Coluna combinada -> [${h.combinedWeekdayCol}]` : 'Nenhuma coluna de dia da semana detectada'))
+        );
+    }
+
+    console.log(
+        `🛡️  Modo de Resolução de Promoções: ${
+            ignorePromotionCampaigns
+                ? 'IGNORAR CAMPANHAS DA ABA PROMOÇÃO (usando apenas PREÇO PROM. da aba Estoque)'
+                : 'VALIDAÇÃO ESTRITA (Data + Dia da Semana c/ proteção NULL: se >=1 dia marcado, NULL nos demais = 0/inativo)'
+        }`
+    );
+    console.log('---------------------------------------------------\n');
+}
+
+/**
+ * Monta expressão SQL booleana (1 ou 0) que verifica se uma coluna de dia da semana está marcada como ativa ('1', 'S', 'SIM', 'TRUE', 'T', 'Y', 'X').
+ * Importante: Se o valor for NULL ou '0', retorna 0.
+ */
+function buildWeekdayColActiveExpr(alias, colName) {
+    if (!colName) return '0';
+    return `CASE WHEN UPPER(LTRIM(RTRIM(CAST(ISNULL(${alias}.[${colName}], '0') AS VARCHAR(10))))) IN ('1', 'S', 'SIM', 'TRUE', 'T', 'Y', 'X') THEN 1 ELSE 0 END`;
 }
 
 /**
  * Gera as cláusulas SQL de validação estrita de campanha ativa, dentro da validade (data inicial/final)
  * e válida para o DIA DA SEMANA ATUAL usando ((DATEPART(WEEKDAY, GETDATE()) + @@DATEFIRST - 2) % 7) (0=Seg..6=Dom).
+ *
+ * Regra segura de NULL para dias da semana:
+ * - Se TODOS os dias da semana da campanha forem NULL (ou se não houver colunas de dia da semana), considera válida para todos os dias.
+ * - Se PELO MENOS UM dia estiver marcado (= 1), trata NULL nos demais dias como 0 (inativo).
  */
 function buildCampaignWhereConditions(alias, meta, hasBranchParam = false) {
     if (!meta) return [];
@@ -413,19 +524,35 @@ function buildCampaignWhereConditions(alias, meta, hasBranchParam = false) {
     }
 
     // 7. Validação estrita do DIA DA SEMANA ATUAL (@HojeDiaSemana: 0=Seg, 1=Ter, 2=Qua, 3=Qui, 4=Sex, 5=Sab, 6=Dom)
+    // Regra segura contra NULL:
+    // - Se TODOS os dias da semana forem NULL (allDaysNullExpr), a campanha não tem restrição de dia e vale todos os dias.
+    // - Se PELO MENOS UM dia estiver marcado (= 1), qualquer outro dia com NULL ou 0 vale 0 (inativo).
+    // - Se não houver todos NULL e também nenhum dia marcado (= 1), a campanha não está ativa para nenhum dia (0).
     if (meta.hasIndividualWeekdayCols) {
-        const cases = [];
+        const presentCols = Object.values(meta.weekdayCols).filter(Boolean);
+        const allDaysNullExpr = presentCols.map(c => `${alias}.[${c}] IS NULL`).join(' AND ');
+        const anyDayCheckedExpr = presentCols.map(c => `(${buildWeekdayColActiveExpr(alias, c)} = 1)`).join(' OR ');
+
+        const todayCheckedCases = [];
         for (let dayIdx = 0; dayIdx <= 6; dayIdx++) {
             const colName = meta.weekdayCols[dayIdx];
             if (colName) {
-                cases.push(
-                    `WHEN ${dayIdx} THEN CASE WHEN UPPER(LTRIM(RTRIM(CAST(ISNULL(${alias}.[${colName}], '0') AS VARCHAR(10))))) IN ('1', 'S', 'SIM', 'TRUE', 'T', 'Y', 'X') THEN 1 ELSE 0 END`
-                );
+                // Nunca usa ISNULL(col, 1): se for NULL, buildWeekdayColActiveExpr converte para '0' (inativo)
+                todayCheckedCases.push(`WHEN ${dayIdx} THEN ${buildWeekdayColActiveExpr(alias, colName)}`);
             } else {
-                cases.push(`WHEN ${dayIdx} THEN 1`);
+                // Se a coluna deste dia específico não existir mas outras colunas de dia existirem:
+                // se algum outro dia estiver marcado (= 1), trata este dia como 0; senão 1.
+                todayCheckedCases.push(`WHEN ${dayIdx} THEN CASE WHEN (${anyDayCheckedExpr}) THEN 0 ELSE 1 END`);
             }
         }
-        conds.push(`(CASE @HojeDiaSemana ${cases.join(' ')} ELSE 0 END = 1)`);
+
+        conds.push(`(
+            (${allDaysNullExpr})
+            OR (
+                (${anyDayCheckedExpr})
+                AND (CASE @HojeDiaSemana ${todayCheckedCases.join(' ')} ELSE 0 END = 1)
+            )
+        )`);
     }
 
     if (meta.combinedWeekdayCol) {
@@ -462,7 +589,7 @@ function buildCampaignWhereConditions(alias, meta, hasBranchParam = false) {
 }
 
 /**
- * Monta a query SQL completa do conector InovaFarma que lê:
+ * Monta a query SQL completa do conector InovaFarma (sempre com SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED) que lê:
  * - PrecoVendaEstoque (PREÇO VENDA da aba Estoque)
  * - PrecoPromocaoEstoque (PREÇO PROM. da aba Estoque do próprio produto)
  * - PrecoCampanhaValidaHoje (menor preço de campanha da aba Promoção estritamente ativa hoje + dia da semana atual)
@@ -580,6 +707,9 @@ function buildStrictInovaFarmaPriceQuery(schemaMeta, options = {}) {
         : '';
 
     return `
+        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+        SET NOCOUNT ON;
+
         DECLARE @HojeData DATE = CAST(GETDATE() AS DATE);
         -- Cálculo independente de DATEFIRST: 0=Seg, 1=Ter, 2=Qua, 3=Qui, 4=Sex, 5=Sab, 6=Dom
         DECLARE @HojeDiaSemana INT = ((DATEPART(WEEKDAY, GETDATE()) + @@DATEFIRST - 2) % 7);
@@ -628,10 +758,18 @@ async function applyInovaFarmaStrictPromotionRules(pool, rawRecords, options = {
     }
 
     try {
+        const ignorePromotionCampaigns = resolveIgnorePromotionCampaignsFlag(options.dbConfig, options);
+
         if (!options.connectorInstance?._cachedInovaPromoSchema) {
             const schemaMeta = await inspectInovaFarmaSchema(pool);
             if (options.connectorInstance) {
                 options.connectorInstance._cachedInovaPromoSchema = schemaMeta;
+            }
+            if (!options.connectorInstance?._hasLoggedInovaSchemaDiag) {
+                logInovaFarmaSchemaDetection(schemaMeta, ignorePromotionCampaigns);
+                if (options.connectorInstance) {
+                    options.connectorInstance._hasLoggedInovaSchemaDiag = true;
+                }
             }
         }
 
@@ -640,7 +778,6 @@ async function applyInovaFarmaStrictPromotionRules(pool, rawRecords, options = {
             return rawRecords;
         }
 
-        const ignorePromotionCampaigns = resolveIgnorePromotionCampaignsFlag(options.dbConfig, options);
         const querySql = buildStrictInovaFarmaPriceQuery(schemaMeta, {
             branchCode: options.branchCode
         });
@@ -688,7 +825,7 @@ async function applyInovaFarmaStrictPromotionRules(pool, rawRecords, options = {
                 : 'Apenas Preço Prom. da aba Estoque';
             console.log(
                 `[InovaFarma Promo Filter] Regra estrita ativa (Ignorar Campanhas=${ignorePromotionCampaigns ? 'SIM' : 'NÃO'} | ` +
-                `Controle Dias da Semana: ${weekdayInfo} | ${priceByCodigoMap.size} produtos verificados).`
+                `Controle Dias da Semana: ${weekdayInfo} | ${priceByCodigoMap.size} produtos verificados via READ UNCOMMITTED).`
             );
             if (options.connectorInstance) {
                 options.connectorInstance._hasLoggedPromoRuleSummary = true;
@@ -754,7 +891,7 @@ async function applyInovaFarmaStrictPromotionRules(pool, rawRecords, options = {
 
         return rawRecords;
     } catch (err) {
-        console.warn(`[InovaFarma Promo Filter] Aviso ao validar promoções por dia da semana: ${err.message}`);
+        console.warn(`[InovaFarma Promo Filter] Aviso ao validar promoções por dia da semana (mantendo fallback da View): ${err.message}`);
         return rawRecords;
     }
 }
@@ -762,6 +899,7 @@ async function applyInovaFarmaStrictPromotionRules(pool, rawRecords, options = {
 module.exports = {
     resolveIgnorePromotionCampaignsFlag,
     inspectInovaFarmaSchema,
+    logInovaFarmaSchemaDetection,
     buildStrictInovaFarmaPriceQuery,
     applyInovaFarmaStrictPromotionRules
 };

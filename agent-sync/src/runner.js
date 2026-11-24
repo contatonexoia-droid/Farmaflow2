@@ -22,10 +22,51 @@ const {
     BATCH_SIZE
 } = require('./shared/api');
 
-const SYNC_INTERVAL_MS = 60000;
+const DEFAULT_SYNC_INTERVAL_MS = 5 * 60 * 1000; // 5 minutos por padrão (proteção para caixas / NFC-e)
+const LARGE_CATALOG_MIN_INTERVAL_MS = 5 * 60 * 1000; // Mínimo de 5 minutos para catálogos grandes (>= 2.000 itens)
+const LARGE_CATALOG_THRESHOLD = 2000;
 const RETRY_INTERVAL_MS = 300000;
 const ORDER_POLL_INTERVAL_MS = 5000;
 const FULL_SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000; // Full Sync programado a cada 6 horas
+
+function resolveConfiguredSyncIntervalMs(config = {}) {
+    // 1. CLI flag --interval-minutes=N ou --sync-interval-ms=N
+    const args = process.argv.slice(2).map(a => String(a || '').trim());
+    for (const arg of args) {
+        const minMatch = arg.match(/^--(?:sync-)?interval-minutes=(\d+(?:\.\d+)?)$/i);
+        if (minMatch) {
+            const ms = Math.round(Number(minMatch[1]) * 60000);
+            if (ms >= 30000) return ms;
+        }
+        const msMatch = arg.match(/^--(?:sync-)?interval-ms=(\d+)$/i);
+        if (msMatch) {
+            const ms = parseInt(msMatch[1], 10);
+            if (ms >= 30000) return ms;
+        }
+    }
+
+    // 2. Variáveis de ambiente (.env)
+    if (process.env.SYNC_INTERVAL_MINUTES && !isNaN(Number(process.env.SYNC_INTERVAL_MINUTES))) {
+        const ms = Math.round(Number(process.env.SYNC_INTERVAL_MINUTES) * 60000);
+        if (ms >= 30000) return ms;
+    }
+    if (process.env.SYNC_INTERVAL_MS && !isNaN(Number(process.env.SYNC_INTERVAL_MS))) {
+        const ms = parseInt(process.env.SYNC_INTERVAL_MS, 10);
+        if (ms >= 30000) return ms;
+    }
+
+    // 3. Configuração local (farmaflow_config.json)
+    const cfgMin = Number(config.syncIntervalMinutes ?? config.dbConfig?.syncIntervalMinutes);
+    if (Number.isFinite(cfgMin) && cfgMin > 0) {
+        return Math.max(30000, Math.round(cfgMin * 60000));
+    }
+    const cfgMs = Number(config.syncIntervalMs ?? config.dbConfig?.syncIntervalMs);
+    if (Number.isFinite(cfgMs) && cfgMs >= 30000) {
+        return Math.round(cfgMs);
+    }
+
+    return DEFAULT_SYNC_INTERVAL_MS;
+}
 
 async function askForToken() {
     const rl = readline.createInterface({
@@ -101,6 +142,7 @@ async function startAgent(expectedErpType, ConnectorClass) {
     console.log(`🚀 Agente FarmaFlow Iniciado (Módulo: ${expectedErpType.toUpperCase()})`);
     console.log(`📦 Envio Fracionado Ativo: lotes de até ${BATCH_SIZE} produtos`);
     console.log(`🧠 Delta Sync Inteligente por Hash Ativo (farmaflow_sync_cache.json)`);
+    console.log(`🛡️ Blindagem NFC-e / PDV: SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED em 100% das consultas`);
     console.log('===================================================\n');
 
     let config = loadConfig();
@@ -138,9 +180,13 @@ async function startAgent(expectedErpType, ConnectorClass) {
             config = {
                 activated: true,
                 erpType: apiConfig.erpType,
+                readOnlyMode: true,
+                enablePdvPreSale: false,
+                syncIntervalMinutes: 5,
                 dbConfig: {
                     ...(apiConfig.dbConfig || {}),
-                    ignorePromotionCampaigns
+                    ignorePromotionCampaigns,
+                    enablePdvPreSale: false
                 },
                 ignorePromotionCampaigns,
                 apiKey: apiConfig.apiKey,
@@ -167,18 +213,39 @@ async function startAgent(expectedErpType, ConnectorClass) {
         config.dbConfig?.ignorePromotionCampaigns ??
         false
     );
+    const enablePdvPreSale =
+        String(process.env.ENABLE_PDV_PRESALE ?? config?.enablePdvPreSale ?? 'false')
+            .trim()
+            .toLowerCase() === 'true';
+
     if (config.dbConfig && typeof config.dbConfig === 'object') {
         config.dbConfig.ignorePromotionCampaigns = effectiveIgnorePromo;
+        config.dbConfig.enablePdvPreSale = enablePdvPreSale;
     }
+
+    let currentSyncIntervalMs = resolveConfiguredSyncIntervalMs(config);
+    let hasLoggedLargeCatalogIntervalGuard = false;
+    let isSyncRunning = false;
 
     console.log(
         `🏷️  Ignorar campanhas da aba Promoção (usar apenas Preço Prom. do produto): ${
             effectiveIgnorePromo ? 'SIM (Ativado)' : 'NÃO (Valida campanhas por Data + Dia da Semana)'
         }`
     );
+    console.log(
+        `⏱️  Intervalo de Sincronização: ${(currentSyncIntervalMs / 60000).toFixed(1)} minuto(s) (Mínimo automático de 5 min para catálogos >= ${LARGE_CATALOG_THRESHOLD} itens)`
+    );
+    console.log(
+        `🔒 Modo SQL Server: ${
+            enablePdvPreSale
+                ? 'LEITURA + PRÉ-VENDA PDV (Opt-in ENABLE_PDV_PRESALE=true)'
+                : '100% SOMENTE LEITURA POR PADRÃO (Gravação de pedidos no PDV desativada)'
+        }`
+    );
 
     const connector = new ConnectorClass(config.dbConfig);
     connector.ignorePromotionCampaigns = effectiveIgnorePromo;
+    connector.enablePdvPreSale = enablePdvPreSale;
     const processedOrderIds = new Map();
     const syncCache = loadSyncCache();
 
@@ -210,7 +277,7 @@ async function startAgent(expectedErpType, ConnectorClass) {
     }
 
     async function orderPollLoop() {
-        if (typeof connector.insertPreSaleOrder !== 'function') {
+        if (!enablePdvPreSale || typeof connector.insertPreSaleOrder !== 'function') {
             return;
         }
 
@@ -253,8 +320,18 @@ async function startAgent(expectedErpType, ConnectorClass) {
     }
 
     async function loop() {
+        if (isSyncRunning) {
+            console.warn(
+                `⏳ [Trava de Concorrência] Sincronização anterior ainda está em andamento. Ciclo ignorado para proteger o SQL Server / NFC-e.`
+            );
+            return;
+        }
+
+        isSyncRunning = true;
+        let nextDelayMs = currentSyncIntervalMs;
+
         try {
-            console.log(`\n[${new Date().toISOString()}] Verificando atualizações no banco...`);
+            console.log(`\n[${new Date().toISOString()}] Verificando atualizações no banco (READ UNCOMMITTED)...`);
             const lastSync = getLastSyncDate();
             const nowMs = Date.now();
             const cachedKeysCount = Object.keys(syncCache.items || {}).length;
@@ -265,11 +342,25 @@ async function startAgent(expectedErpType, ConnectorClass) {
 
             const records = await connector.getChangedRecords(lastSync, {
                 syncCacheItems: syncCache.items,
-                isFullSyncDue
+                isFullSyncDue,
+                ignorePromotionCampaigns: connector.ignorePromotionCampaigns
             });
 
             const validRecords = Array.isArray(records) ? records : [];
             const totalRead = typeof records?.totalRead === 'number' ? records.totalRead : validRecords.length;
+
+            // Garante intervalo mínimo de 5 minutos para catálogos grandes (>= 2.000 produtos)
+            if (totalRead >= LARGE_CATALOG_THRESHOLD && currentSyncIntervalMs < LARGE_CATALOG_MIN_INTERVAL_MS) {
+                currentSyncIntervalMs = LARGE_CATALOG_MIN_INTERVAL_MS;
+                nextDelayMs = currentSyncIntervalMs;
+                if (!hasLoggedLargeCatalogIntervalGuard) {
+                    console.log(
+                        `🛡️ [Proteção NFC-e / Catálogo Grande] Catálogo com ${totalRead} itens detectado: ` +
+                        `intervalo mínimo ajustado automaticamente para 5 minutos (${LARGE_CATALOG_MIN_INTERVAL_MS / 1000}s).`
+                    );
+                    hasLoggedLargeCatalogIntervalGuard = true;
+                }
+            }
 
             // Filtra os registros usando o Delta Sync Inteligente por Hash (estoque|preco|preco_promocional|nome)
             const recordsToSend = [];
@@ -296,7 +387,7 @@ async function startAgent(expectedErpType, ConnectorClass) {
                         pendingSignatures.set(key, sig);
                     }
                 } else {
-                    // No Delta Sync (a cada 60s), envia APENAS produtos cujo estoque, preço, promoção ou nome mudaram
+                    // No Delta Sync, envia APENAS produtos cujo estoque, preço, promoção ou nome mudaram
                     if (!prevSig) {
                         if (stockVal > 0 && isActive) {
                             recordsToSend.push(record);
@@ -345,25 +436,24 @@ async function startAgent(expectedErpType, ConnectorClass) {
                 }
             }
 
-            setTimeout(loop, SYNC_INTERVAL_MS);
+            nextDelayMs = currentSyncIntervalMs;
         } catch (error) {
             console.error(`❌ Erro durante a sincronização: ${error.message}`);
             console.log(`⚠️ Tentando novamente em ${RETRY_INTERVAL_MS / 60000} minutos...`);
-            setTimeout(loop, RETRY_INTERVAL_MS);
+            nextDelayMs = RETRY_INTERVAL_MS;
+        } finally {
+            isSyncRunning = false;
+            setTimeout(loop, nextDelayMs);
         }
     }
 
     // Inicia os loops
     heartbeatLoop();
-    const enablePdvPreSale =
-        String(process.env.ENABLE_PDV_PRESALE || config?.enablePdvPreSale || '')
-            .trim()
-            .toLowerCase() === 'true';
     if (enablePdvPreSale && typeof connector.insertPreSaleOrder === 'function') {
         console.log('🛒 Monitoramento de Pedidos para Pré-Venda do PDV ativo (ENABLE_PDV_PRESALE=true, a cada 5s).');
         orderPollLoop();
     } else {
-        console.log('ℹ️ Modo Sincronização de Catálogo/Estoque (vw_FarmaFlow_Itens -> Nuvem). Pré-Venda PDV desativada por padrão.');
+        console.log('ℹ️ Modo Somente Leitura de Catálogo/Estoque/Preços ativo. Gravação de pedidos no PDV desativada por padrão.');
     }
     loop();
 }

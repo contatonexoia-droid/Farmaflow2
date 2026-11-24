@@ -54,6 +54,10 @@ class InovaFarmaConnector {
         this.viewName = dbConfig.viewName || 'VW_INTEGRACAO_FARMAFLOW';
         this.branchCode = dbConfig.branchCode || null;
         this.ignorePromotionCampaigns = resolveIgnorePromotionCampaignsFlag(dbConfig);
+        this.enablePdvPreSale =
+            String(process.env.ENABLE_PDV_PRESALE ?? dbConfig.enablePdvPreSale ?? 'false')
+                .trim()
+                .toLowerCase() === 'true';
         this.defaultFuncionarioId =
             dbConfig.defaultFuncionarioId ||
             dbConfig.codigoFuncionario ||
@@ -63,21 +67,49 @@ class InovaFarmaConnector {
         this._hasLoggedViewColumns = false;
         this._cachedInovaPromoSchema = null;
         this._hasLoggedPromoRuleSummary = false;
+        this._hasLoggedInovaSchemaDiag = false;
     }
 
     async queryViewRecords(pool, viewName) {
         if (this.branchCode) {
             try {
                 const request = pool.request().input('branchCode', sql.VarChar, String(this.branchCode));
-                const result = await request.query(`SELECT * FROM ${viewName} WHERE codigo_filial = @branchCode`);
+                const result = await request.query(`
+                    SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+                    SET NOCOUNT ON;
+                    SELECT * FROM ${viewName} WITH (NOLOCK) WHERE codigo_filial = @branchCode;
+                `);
                 return result.recordset || [];
             } catch (branchErr) {
-                // Fallback se a view não possuir codigo_filial
+                try {
+                    const request = pool.request().input('branchCode', sql.VarChar, String(this.branchCode));
+                    const result = await request.query(`
+                        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+                        SET NOCOUNT ON;
+                        SELECT * FROM ${viewName} WHERE codigo_filial = @branchCode;
+                    `);
+                    return result.recordset || [];
+                } catch (_) {
+                    // Fallback se a view não possuir codigo_filial
+                }
             }
         }
 
-        const result = await pool.request().query(`SELECT * FROM ${viewName}`);
-        return result.recordset || [];
+        try {
+            const result = await pool.request().query(`
+                SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+                SET NOCOUNT ON;
+                SELECT * FROM ${viewName} WITH (NOLOCK);
+            `);
+            return result.recordset || [];
+        } catch (_) {
+            const result = await pool.request().query(`
+                SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+                SET NOCOUNT ON;
+                SELECT * FROM ${viewName};
+            `);
+            return result.recordset || [];
+        }
     }
 
     /**
@@ -203,6 +235,8 @@ class InovaFarmaConnector {
             reqNative.input('ean1', sql.VarChar(30), cleanEan);
             reqNative.input('ean2', sql.VarChar(30), eanNoLeadingZeros);
             const nativeRes = await reqNative.query(`
+                SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+                SET NOCOUNT ON;
                 DECLARE @FoundCodigo INT = NULL;
 
                 IF OBJECT_ID('dbo.Produto_CodigoBarra', 'U') IS NOT NULL
@@ -235,6 +269,8 @@ class InovaFarmaConnector {
             reqView.input('ean1', sql.VarChar(30), cleanEan);
             reqView.input('ean2', sql.VarChar(30), eanNoLeadingZeros);
             const viewRes = await reqView.query(`
+                SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+                SET NOCOUNT ON;
                 SELECT TOP 1 *
                 FROM ${this.viewName} WITH (NOLOCK)
             `);
@@ -249,6 +285,8 @@ class InovaFarmaConnector {
                     reqMatch.input('ean1', sql.VarChar(30), cleanEan);
                     reqMatch.input('ean2', sql.VarChar(30), eanNoLeadingZeros);
                     const matchRes = await reqMatch.query(`
+                        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+                        SET NOCOUNT ON;
                         SELECT TOP 1 [${idCol}] AS CodigoProduto
                         FROM ${this.viewName} WITH (NOLOCK)
                         WHERE LTRIM(RTRIM(CAST([${eanCol}] AS VARCHAR(30)))) IN (@ean1, @ean2)
@@ -267,13 +305,20 @@ class InovaFarmaConnector {
     }
 
     /**
-     * Grava um pedido do FarmaFlow diretamente na Pré-Venda do InovaFarma (SQL Server):
-     * - dbo.Orcamento (cabeçalho com saltos +10 e rowguid = NEWID())
-     * - dbo.Orcamento_Produto (itens com saltos +10 e rowguid = NEWID())
-     * - dbo.Orcamento_PV (vínculo de Pré-Venda na tela do caixa)
-     * - dbo.Entrega (dados de entrega quando aplicável)
+     * Grava um pedido do FarmaFlow diretamente na Pré-Venda do InovaFarma (SQL Server).
+     * IMPORTANTE: Desativado por padrão (somente leitura). Exige opt-in explícito (enablePdvPreSale = true / ENABLE_PDV_PRESALE=true).
      */
     async insertPreSaleOrder(order) {
+        const isPreSaleExplicitlyEnabled =
+            Boolean(this.enablePdvPreSale) ||
+            String(process.env.ENABLE_PDV_PRESALE || '').trim().toLowerCase() === 'true';
+
+        if (!isPreSaleExplicitlyEnabled) {
+            throw new Error(
+                'Modo Somente Leitura ativo por padrão (ENABLE_PDV_PRESALE desativado). Nenhuma gravação foi realizada no SQL Server do PDV.'
+            );
+        }
+
         let pool;
         let transaction;
 

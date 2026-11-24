@@ -1096,7 +1096,10 @@ export class AiAgentService {
    * Valida se a farmácia tem autorização no Super Admin para usar o módulo de IA.
    * Realiza resolução ultra-robusta de tenant via whatsapp_instances, ID direto, slug ou rede.
    */
-  public async verifyTenantAuthorization(tenantId: string): Promise<any> {
+  public async verifyTenantAuthorization(
+    tenantId: string,
+    options?: { allowCopilotOnly?: boolean }
+  ): Promise<any> {
     if (!tenantId) {
       throw new Error("ID da drogaria não informado.");
     }
@@ -1217,8 +1220,14 @@ export class AiAgentService {
       (resolvedProvider === 'gemini' ? process.env.GEMINI_API_KEY : process.env.OPENAI_API_KEY)
     )?.trim();
 
+    const resolvedActive =
+      typeof rawConfig.enabled === 'boolean'
+        ? rawConfig.enabled
+        : typeof rawConfig.active === 'boolean'
+          ? rawConfig.active
+          : false;
+
     tenant.ai_agent_config = {
-      active: rawConfig.active ?? rawConfig.enabled ?? true,
       provider: resolvedProvider,
       model: rawConfig.model || (resolvedProvider === 'openai' ? 'gpt-4o-mini' : 'gemini-2.5-flash'),
       apiKey: resolvedApiKey,
@@ -1234,12 +1243,17 @@ export class AiAgentService {
       antiAbuseGuardrailsEnabled: rawConfig.antiAbuseGuardrailsEnabled !== false,
       strictStoreLinkEnforcement: rawConfig.strictStoreLinkEnforcement !== false,
       storeLink: rawConfig.storeLink || tenant.welcome_message_link || (tenant.custom_domain ? `https://${tenant.custom_domain}` : tenant.slug ? `https://${tenant.slug}.farmaflow.online` : `https://${tenant.id}.farmaflow.online`),
-      ...rawConfig
+      ...rawConfig,
+      active: resolvedActive,
+      enabled: resolvedActive
     };
 
-    console.log(`[AiAgentService] Configurações de IA carregadas dinamicamente para "${tenant.name}" (@${tenant.slug || tenant.id}) - Provedor: ${resolvedProvider}, Chave ativa: ${Boolean(resolvedApiKey)}`);
+    console.log(`[AiAgentService] Configurações de IA carregadas dinamicamente para "${tenant.name}" (@${tenant.slug || tenant.id}) - Provedor: ${resolvedProvider}, Ativo: ${resolvedActive}, Chave ativa: ${Boolean(resolvedApiKey)}`);
 
-    const isEnabled = tenant.is_ai_agent_enabled !== false && tenant.isaiagentenabled !== false;
+    const isEnabled =
+      tenant.is_ai_agent_enabled === true ||
+      tenant.isaiagentenabled === true ||
+      Boolean(options?.allowCopilotOnly && tenant.is_ai_copilot_enabled === true);
     if (!isEnabled) {
       const err = new Error("MÓDULO_NÃO_AUTORIZADO: O Agente de IA está desativado para esta drogaria nas configurações do painel.");
       (err as any).statusCode = 403;
@@ -2316,8 +2330,8 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       const realTenantId = tenant.id || storeId;
       const dbConfig: AiAgentConfig = tenant.ai_agent_config || tenant.aiagentconfig || {};
 
-      if (dbConfig.active === false || dbConfig.enabled === false) {
-        console.log(`[AiAgentService] IA desativada nas configurações da drogaria "${tenant.name}"`);
+      if (dbConfig.active !== true || dbConfig.enabled !== true) {
+        console.log(`[AiAgentService] IA desativada/pausada nas configurações da drogaria "${tenant.name}"`);
         return { handled: false, transferredToHuman: false, reason: "AGENT_PAUSED" };
       }
 
@@ -2785,7 +2799,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
     }
 
     // 1. Validar autorização do tenant no Super Admin usando resolução robusta
-    const tenant = await this.verifyTenantAuthorization(tenantId);
+    const tenant = await this.verifyTenantAuthorization(tenantId, { allowCopilotOnly: true });
 
     const isCopilotAllowed = 
       tenant.is_ai_copilot_enabled === true || 

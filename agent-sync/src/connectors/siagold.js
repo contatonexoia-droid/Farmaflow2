@@ -65,6 +65,10 @@ class SiagoldConnector {
         this.viewName = dbConfig.viewName || 'vw_FarmaFlow_Itens';
         this.branchCode = dbConfig.branchCode || null;
         this.ignorePromotionCampaigns = resolveIgnorePromotionCampaignsFlag(dbConfig);
+        this.enablePdvPreSale =
+            String(process.env.ENABLE_PDV_PRESALE ?? dbConfig.enablePdvPreSale ?? 'false')
+                .trim()
+                .toLowerCase() === 'true';
         this.defaultFuncionarioId =
             dbConfig.defaultFuncionarioId ||
             dbConfig.codigoFuncionario ||
@@ -74,30 +78,60 @@ class SiagoldConnector {
         this._hasLoggedViewColumns = false;
         this._cachedInovaPromoSchema = null;
         this._hasLoggedPromoRuleSummary = false;
+        this._hasLoggedInovaSchemaDiag = false;
     }
 
     async queryViewRecords(pool, viewName) {
-        // IMPORTANTE: Não filtrar por `WHERE data_ultima_alteracao > @lastSync` no SQL,
-        // pois diversas views (como na Drogaria Macabú) usam `GETDATE()` na coluna `data_ultima_alteracao`,
-        // o que fazia todas as linhas parecerem recém-alteradas a cada minuto.
-        // A leitura direta da View + Delta Sync por Hash em memória/cache local (`farmaflow_sync_cache.json`)
-        // garante precisão absoluta sem reenviar lotes desnecessários.
+        // IMPORTANTE:
+        // 1) Sempre inicia com SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED para nunca bloquear caixas / emissão de NFC-e.
+        // 2) Não filtra por `WHERE data_ultima_alteracao > @lastSync` no SQL, pois diversas views usam `GETDATE()`.
         if (this.branchCode) {
             try {
                 const request = pool.request().input('branchCode', sql.VarChar, String(this.branchCode));
-                const result = await request.query(`SELECT * FROM ${viewName} WHERE codigo_filial = @branchCode`);
+                const result = await request.query(`
+                    SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+                    SET NOCOUNT ON;
+                    SELECT * FROM ${viewName} WITH (NOLOCK) WHERE codigo_filial = @branchCode;
+                `);
                 return {
                     records: result.recordset || []
                 };
             } catch (branchErr) {
-                // Fallback caso a view não possua a coluna codigo_filial
+                try {
+                    const request = pool.request().input('branchCode', sql.VarChar, String(this.branchCode));
+                    const result = await request.query(`
+                        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+                        SET NOCOUNT ON;
+                        SELECT * FROM ${viewName} WHERE codigo_filial = @branchCode;
+                    `);
+                    return {
+                        records: result.recordset || []
+                    };
+                } catch (_) {
+                    // Fallback caso a view não possua a coluna codigo_filial
+                }
             }
         }
 
-        const result = await pool.request().query(`SELECT * FROM ${viewName}`);
-        return {
-            records: result.recordset || []
-        };
+        try {
+            const result = await pool.request().query(`
+                SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+                SET NOCOUNT ON;
+                SELECT * FROM ${viewName} WITH (NOLOCK);
+            `);
+            return {
+                records: result.recordset || []
+            };
+        } catch (_) {
+            const result = await pool.request().query(`
+                SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+                SET NOCOUNT ON;
+                SELECT * FROM ${viewName};
+            `);
+            return {
+                records: result.recordset || []
+            };
+        }
     }
 
     async getChangedRecords(lastSyncDate, syncOptions = {}) {
@@ -226,6 +260,8 @@ class SiagoldConnector {
             reqNative.input('ean1', sql.VarChar(30), cleanEan);
             reqNative.input('ean2', sql.VarChar(30), eanNoLeadingZeros);
             const nativeRes = await reqNative.query(`
+                SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+                SET NOCOUNT ON;
                 DECLARE @FoundCodigo INT = NULL;
 
                 IF OBJECT_ID('dbo.Produto_CodigoBarra', 'U') IS NOT NULL
@@ -262,7 +298,11 @@ class SiagoldConnector {
         for (const candidateView of candidateViews) {
             try {
                 const reqView = new sql.Request(poolOrTx);
-                const viewRes = await reqView.query(`SELECT TOP 1 * FROM ${candidateView} WITH (NOLOCK)`);
+                const viewRes = await reqView.query(`
+                    SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+                    SET NOCOUNT ON;
+                    SELECT TOP 1 * FROM ${candidateView} WITH (NOLOCK)
+                `);
                 if (viewRes?.recordset?.length > 0) {
                     const sampleRow = viewRes.recordset[0];
                     const cols = Object.keys(sampleRow);
@@ -274,6 +314,8 @@ class SiagoldConnector {
                         reqMatch.input('ean1', sql.VarChar(30), cleanEan);
                         reqMatch.input('ean2', sql.VarChar(30), eanNoLeadingZeros);
                         const matchRes = await reqMatch.query(`
+                            SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+                            SET NOCOUNT ON;
                             SELECT TOP 1 [${idCol}] AS CodigoProduto
                             FROM ${candidateView} WITH (NOLOCK)
                             WHERE LTRIM(RTRIM(CAST([${eanCol}] AS VARCHAR(30)))) IN (@ean1, @ean2)
@@ -293,11 +335,20 @@ class SiagoldConnector {
     }
 
     /**
-     * Grava um pedido do FarmaFlow diretamente na Pré-Venda do PDV (dbo.Orcamento, dbo.Orcamento_Produto, dbo.Orcamento_PV, dbo.Entrega).
-     * Permite que farmácias rodando farmaflow-siagold.exe em banco SQL Server InovaFarma (ex: Drogaria Macabú)
-     * utilizem o botão "Enviar para o PDV" sem precisar trocar de executável.
+     * Grava um pedido do FarmaFlow diretamente na Pré-Venda do PDV.
+     * IMPORTANTE: Desativado por padrão (somente leitura). Exige opt-in explícito (enablePdvPreSale = true / ENABLE_PDV_PRESALE=true).
      */
     async insertPreSaleOrder(order) {
+        const isPreSaleExplicitlyEnabled =
+            Boolean(this.enablePdvPreSale) ||
+            String(process.env.ENABLE_PDV_PRESALE || '').trim().toLowerCase() === 'true';
+
+        if (!isPreSaleExplicitlyEnabled) {
+            throw new Error(
+                'Modo Somente Leitura ativo por padrão (ENABLE_PDV_PRESALE desativado). Nenhuma gravação foi realizada no SQL Server do PDV.'
+            );
+        }
+
         let pool;
         let transaction;
 

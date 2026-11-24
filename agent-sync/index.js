@@ -95,8 +95,12 @@ function sanitizeUrl(raw) {
 const API_URL = sanitizeUrl(process.env.API_URL || process.env.API_BASE_URL);
 const API_KEY = process.env.API_KEY || '02ebf5a7-ccec-47e1-99ae-4e00729b4df1';
 const VIEW_NAME = process.env.DB_VIEW || 'vw_FarmaFlow_Itens';
-const SYNC_INTERVAL_MS = parseInt(process.env.SYNC_INTERVAL_MS, 10) || 60000;
+const DEFAULT_SYNC_INTERVAL_MS = 5 * 60 * 1000; // 5 minutos por padrão
+const LARGE_CATALOG_MIN_INTERVAL_MS = 5 * 60 * 1000;
+const LARGE_CATALOG_THRESHOLD = 2000;
+let SYNC_INTERVAL_MS = parseInt(process.env.SYNC_INTERVAL_MS, 10) || DEFAULT_SYNC_INTERVAL_MS;
 const RETRY_INTERVAL_MS = parseInt(process.env.RETRY_INTERVAL_MS, 10) || 300000;
+let isStandaloneSyncRunning = false;
 
 const dbConfig = {
     user: process.env.DB_USER || 'sa',
@@ -170,6 +174,8 @@ async function fetchRecordsFromView(pool, lastSync) {
                     const incResult = await pool.request()
                         .input('lastSync', sql.DateTime, new Date(lastSync))
                         .query(`
+                            SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+                            SET NOCOUNT ON;
                             SELECT * FROM ${view}
                             WHERE data_ultima_alteracao > @lastSync
                             ORDER BY data_ultima_alteracao ASC
@@ -184,7 +190,11 @@ async function fetchRecordsFromView(pool, lastSync) {
                 }
             }
 
-            const fullResult = await pool.request().query(`SELECT * FROM ${view}`);
+            const fullResult = await pool.request().query(`
+                SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+                SET NOCOUNT ON;
+                SELECT * FROM ${view}
+            `);
             return {
                 records: fullResult.recordset || [],
                 viewName: view,
@@ -282,9 +292,17 @@ function resolveMaxSyncDate(records) {
 }
 
 async function syncData() {
+    if (isStandaloneSyncRunning) {
+        console.warn('⏳ [Trava de Concorrência] Sincronização anterior ainda em andamento. Ciclo ignorado.');
+        return;
+    }
+
+    isStandaloneSyncRunning = true;
     let pool;
+    let nextDelayMs = SYNC_INTERVAL_MS;
+
     try {
-        console.log(`\n[${new Date().toISOString()}] Iniciando verificação de sincronização...`);
+        console.log(`\n[${new Date().toISOString()}] Iniciando verificação de sincronização (READ UNCOMMITTED)...`);
         const lastSync = getLastSyncDate();
         const hasValidLastSync = Boolean(
             lastSync &&
@@ -298,13 +316,16 @@ async function syncData() {
 
         if (!rawRecords || rawRecords.length === 0) {
             console.log('Tudo atualizado! Nenhum registro novo para sincronizar.');
-            setTimeout(syncData, SYNC_INTERVAL_MS);
             return;
+        }
+
+        if (rawRecords.length >= LARGE_CATALOG_THRESHOLD && SYNC_INTERVAL_MS < LARGE_CATALOG_MIN_INTERVAL_MS) {
+            SYNC_INTERVAL_MS = LARGE_CATALOG_MIN_INTERVAL_MS;
+            nextDelayMs = SYNC_INTERVAL_MS;
         }
 
         if (rawRecords[0]) {
             console.log(`[Siagold] Colunas detectadas na View: ${Object.keys(rawRecords[0]).join(', ')}`);
-            console.log(`[Siagold] Valores brutos do 1º item:`, JSON.stringify(rawRecords[0]));
         }
 
         await applyInovaFarmaStrictPromotionRules(pool, rawRecords, {
@@ -364,7 +385,6 @@ async function syncData() {
 
         if (validRecords.length === 0) {
             console.log('Nenhum produto elegível para sincronizar neste ciclo.');
-            setTimeout(syncData, SYNC_INTERVAL_MS);
             return;
         }
 
@@ -394,17 +414,17 @@ async function syncData() {
         if (successBatches > 0 && failedBatches === 0) {
             console.log(`✅ Todos os ${totalBatches} lotes (${validRecords.length} produtos) sincronizados com sucesso!`);
             saveLastSyncDate(resolveMaxSyncDate(validRecords));
-            setTimeout(syncData, SYNC_INTERVAL_MS);
+            nextDelayMs = SYNC_INTERVAL_MS;
         } else if (successBatches > 0) {
             console.warn(`⚠️ Sincronização parcial: ${successBatches}/${totalBatches} lotes enviados (${failedBatches} falharam).`);
-            setTimeout(syncData, SYNC_INTERVAL_MS);
+            nextDelayMs = SYNC_INTERVAL_MS;
         } else {
             throw new Error(`Falha no envio de todos os ${totalBatches} lotes.`);
         }
     } catch (error) {
         console.error(`❌ Erro durante a sincronização: ${error.message}`);
         console.log(`⚠️ Tentando novamente em ${RETRY_INTERVAL_MS / 1000 / 60} minutos...`);
-        setTimeout(syncData, RETRY_INTERVAL_MS);
+        nextDelayMs = RETRY_INTERVAL_MS;
     } finally {
         if (pool) {
             try {
@@ -413,11 +433,14 @@ async function syncData() {
                 console.error('Erro ao fechar conexão com o banco:', err.message);
             }
         }
+        isStandaloneSyncRunning = false;
+        setTimeout(syncData, nextDelayMs);
     }
 }
 
 console.log('===================================================');
-console.log('🚀 Agente de Sincronização FarmaFlow (Siagold) Iniciado');
+console.log('🚀 Agente de Sincronização FarmaFlow (Siagold/InovaFarma) Iniciado');
 console.log(`📦 Envio Fracionado: lotes de até ${BATCH_SIZE} registros (timeout ${REQUEST_TIMEOUT_MS / 1000}s)`);
+console.log('🛡️ Blindagem NFC-e / PDV: SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED + Modo 100% Somente Leitura');
 console.log('===================================================');
 syncData();
