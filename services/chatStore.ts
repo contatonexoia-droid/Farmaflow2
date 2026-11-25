@@ -3,9 +3,17 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import { inboxStore } from "./inboxStore.js";
-import { evolutionApiService } from "./evolutionApiService.js";
+import { evolutionApiService, resolveStoreCandidateIds } from "./evolutionApiService.js";
 import { isWeblojaOrderMessage, isBotSentOrEcho, registerBotSentMessage, botSentMessageIds } from "./botHandoffManager.js";
 import { realtimeHub } from "./realtimeHub.js";
+
+function normalizeDeptLabel(val?: unknown): string {
+  return String(val || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
 
 export const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -162,6 +170,7 @@ export const VALID_CHAT_CONVERSATION_COLUMNS = new Set([
   "contact_id",
   "assigned_user_id",
   "inbox_id",
+  "team_id",
   "status",
   "unread_count",
   "last_message_at",
@@ -194,6 +203,9 @@ export function sanitizeChatConversationPayload(data: Record<string, any>): Reco
   // Garante que colunas UUID nunca recebam strings sintéticas (ex: inbox_default_*, admin_*)
   if (sanitized.inbox_id !== undefined && sanitized.inbox_id !== null) {
     sanitized.inbox_id = isValidUuid(sanitized.inbox_id) ? sanitized.inbox_id.trim() : null;
+  }
+  if (sanitized.team_id !== undefined && sanitized.team_id !== null) {
+    sanitized.team_id = isValidUuid(sanitized.team_id) ? sanitized.team_id.trim() : null;
   }
   if (sanitized.assigned_user_id !== undefined && sanitized.assigned_user_id !== null) {
     sanitized.assigned_user_id = isValidUuid(sanitized.assigned_user_id) ? sanitized.assigned_user_id.trim() : null;
@@ -402,35 +414,118 @@ class ChatStore {
     this.saveToFile();
   }
 
-  public async getConversations(storeId: string, inboxId?: string, allowedInboxIds?: string[]): Promise<ChatConversation[]> {
+  public async getConversations(
+    storeId: string,
+    inboxId?: string,
+    allowedInboxIds?: string[],
+    operatorFilter?: {
+      allowedTeamIds?: string[];
+      allowedDepartmentNames?: string[];
+      operatorIdentifiers?: string[];
+      selectedInboxName?: string;
+    }
+  ): Promise<ChatConversation[]> {
+    const candidateStoreIds = await resolveStoreCandidateIds(storeId);
+    const effectiveStoreIds = candidateStoreIds.length > 0 ? candidateStoreIds : [storeId];
+
+    const matchesOperatorVisibility = (conv: any): boolean => {
+      if (allowedInboxIds === undefined) return true;
+      const validAllowedInboxes = new Set(allowedInboxIds.filter(Boolean));
+      const validAllowedTeams = new Set((operatorFilter?.allowedTeamIds || []).filter(Boolean));
+      const validAllowedDepts = new Set(
+        (operatorFilter?.allowedDepartmentNames || []).map(normalizeDeptLabel).filter(Boolean)
+      );
+      const opIds = (operatorFilter?.operatorIdentifiers || []).map((v) => String(v).trim().toLowerCase()).filter(Boolean);
+
+      // Condição A: conversa atribuída diretamente ao operador
+      const assignedCandidates = [
+        conv.assigned_user_id,
+        conv.assigned_to,
+        typeof conv.bot_handoff_reason === "string" && conv.bot_handoff_reason.startsWith("ASSIGNED:")
+          ? conv.bot_handoff_reason.slice("ASSIGNED:".length).trim()
+          : null,
+      ]
+        .filter(Boolean)
+        .map((v) => String(v).trim().toLowerCase());
+
+      if (opIds.length > 0 && assignedCandidates.some((id) => opIds.includes(id))) {
+        return true;
+      }
+
+      // Condição B: acesso à caixa de entrada atual
+      if (conv.inbox_id && validAllowedInboxes.has(conv.inbox_id)) {
+        return true;
+      }
+
+      // Condição C: acesso ao departamento / setor / time atual
+      if (conv.team_id && validAllowedTeams.has(conv.team_id)) {
+        return true;
+      }
+      if (conv.department && validAllowedDepts.has(normalizeDeptLabel(conv.department))) {
+        return true;
+      }
+
+      return false;
+    };
+
+    const matchesSelectedInbox = (conv: any): boolean => {
+      if (!inboxId || inboxId === "all") return true;
+      if (!isValidUuid(inboxId)) return true;
+      const targetId = inboxId.trim();
+      if (conv.inbox_id === targetId) return true;
+
+      // Compatibilidade caso conversa transferida por nome de departamento tenha department preenchido
+      if (
+        operatorFilter?.selectedInboxName &&
+        conv.department &&
+        normalizeDeptLabel(conv.department) === normalizeDeptLabel(operatorFilter.selectedInboxName)
+      ) {
+        return true;
+      }
+
+      return false;
+    };
+
     try {
       let query = supabaseAdmin
         .from("chat_conversations")
         .select("*, contact:chat_contacts(*)")
-        .eq("store_id", storeId)
+        .in("store_id", effectiveStoreIds)
         .order("last_message_at", { ascending: false });
 
-      if (inboxId && inboxId !== "all") {
+      // Quando NÃO há filtro complexo de operador (admin/gerente) e um inboxId UUID é passado sem nome alternativo,
+      // aplica filtro direto no banco; para operador/departamento, filtramos em memória após restaurar assigned_user_id
+      // para garantir que conversas atribuídas ao operador ou com department correspondente nunca desapareçam.
+      if (inboxId && inboxId !== "all" && !operatorFilter?.selectedInboxName && allowedInboxIds === undefined) {
         if (isValidUuid(inboxId)) {
           query = query.eq("inbox_id", inboxId.trim());
         } else {
-          // Ignora filtro sintético não-UUID (ex: inbox_default_*) para evitar Postgres 22P02
           console.warn(`[ChatStore] Ignorando filtro inbox_id não-UUID em getConversations: "${inboxId}"`);
-        }
-      }
-
-      if (allowedInboxIds !== undefined) {
-        const validAllowedInboxIds = allowedInboxIds.filter((id) => isValidUuid(id));
-        if (validAllowedInboxIds.length > 0) {
-          query = query.in("inbox_id", validAllowedInboxIds);
-        } else {
-          return [];
         }
       }
 
       const { data, error } = await query;
       if (!error && data) {
-        const conversations = data as any[];
+        const rawConversations = data as any[];
+
+        // Restaura assigned_user_id antes de filtrar por permissão do operador
+        for (const conv of rawConversations) {
+          if (
+            !conv.assigned_user_id &&
+            typeof conv.bot_handoff_reason === "string" &&
+            conv.bot_handoff_reason.startsWith("ASSIGNED:")
+          ) {
+            const extractedUser = conv.bot_handoff_reason.slice("ASSIGNED:".length).trim();
+            if (extractedUser) {
+              conv.assigned_user_id = extractedUser;
+              conv.assigned_to = extractedUser;
+            }
+          }
+        }
+
+        const conversations = rawConversations.filter(
+          (conv) => matchesOperatorVisibility(conv) && matchesSelectedInbox(conv)
+        );
 
         // Batch-fetch labels for all conversations to avoid N+1 queries
         const convIds = conversations.map((c: any) => c.id).filter(Boolean);
@@ -552,10 +647,10 @@ class ChatStore {
 
     // Memory Fallback
     const filtered = this.conversations.filter(c => {
-      const matchStore = c.store_id === storeId;
+      const matchStore = effectiveStoreIds.includes(c.store_id) || c.store_id === storeId;
       if (!matchStore) return false;
-      if (inboxId && inboxId !== "all" && c.inbox_id !== inboxId) return false;
-      if (allowedInboxIds !== undefined && c.inbox_id && !allowedInboxIds.includes(c.inbox_id)) return false;
+      if (!matchesOperatorVisibility(c)) return false;
+      if (!matchesSelectedInbox(c)) return false;
       return true;
     });
 
@@ -2516,6 +2611,8 @@ class ChatStore {
     storeId: string,
     options: {
       inboxId?: string | null;
+      teamId?: string | null;
+      department?: string | null;
       userId?: string | null;
       fromUserId?: string | null;
       reason?: string | null;
@@ -2542,6 +2639,14 @@ class ChatStore {
       }
     }
 
+    if (options.teamId !== undefined) {
+      updates.team_id = options.teamId && isValidUuid(options.teamId) ? options.teamId.trim() : null;
+      if (!options.userId && !updates.kanban_stage) {
+        updates.kanban_stage = "novos_triagem";
+        updates.stage = "novos_triagem";
+      }
+    }
+
     if (options.userId) {
       updates.assigned_user_id = isValidUuid(options.userId) ? options.userId.trim() : null;
       updates.assigned_to = options.userId;
@@ -2554,13 +2659,26 @@ class ChatStore {
       updates.bot_handoff_at = nowIso;
     }
 
+    // Garante que conversas transferidas sempre possuam um estágio Kanban válido
+    if (!updates.kanban_stage) {
+      updates.kanban_stage = options.userId ? "em_atendimento" : "novos_triagem";
+      updates.stage = updates.kanban_stage;
+    }
+
     let targetName = "";
+    let resolvedDepartmentName = options.department ? String(options.department).trim() : "";
     if (options.inboxId && isValidUuid(options.inboxId)) {
       try {
         const { data: ib } = await supabaseAdmin.from("inboxes").select("name").eq("id", options.inboxId.trim()).maybeSingle();
-        if (ib?.name) targetName = `departamento "${ib.name}"`;
+        if (ib?.name) {
+          targetName = `departamento "${ib.name}"`;
+          if (!resolvedDepartmentName) resolvedDepartmentName = String(ib.name).trim();
+        }
       } catch (_) {}
+    } else if (resolvedDepartmentName) {
+      targetName = `departamento "${resolvedDepartmentName}"`;
     }
+
     if (options.userId) {
       if (isValidUuid(options.userId)) {
         try {
@@ -2583,16 +2701,31 @@ class ChatStore {
         .update(sanitizedUpdates)
         .eq("id", conversationId);
       if (error) {
-        if (sanitizedUpdates.assigned_user_id) {
-          const retryPayload = { ...sanitizedUpdates };
+        // Retry degradando campos opcionais (FK de assigned_user_id ou ausência de team_id)
+        const retryPayload = { ...sanitizedUpdates };
+        if (retryPayload.assigned_user_id) {
           delete retryPayload.assigned_user_id;
+        }
+        if (String(error.message || "").toLowerCase().includes("team_id")) {
+          delete retryPayload.team_id;
+        }
+        const { error: retryErr } = await supabaseAdmin
+          .from("chat_conversations")
+          .update(retryPayload)
+          .eq("id", conversationId);
+        if (retryErr) {
+          console.error("[ChatStore] transferConversation Supabase error:", retryErr.message, retryErr);
+        }
+      }
+
+      // Atualiza coluna `department` de forma segura caso ela exista no schema da tabela chat_conversations
+      if (resolvedDepartmentName) {
+        try {
           await supabaseAdmin
             .from("chat_conversations")
-            .update(retryPayload)
+            .update({ department: resolvedDepartmentName } as any)
             .eq("id", conversationId);
-        } else {
-          console.error("[ChatStore] transferConversation Supabase error:", error.message, error);
-        }
+        } catch (_) {}
       }
     } catch (err: any) {
       console.warn("[ChatStore] transferConversation Supabase fallback:", err.message);
@@ -2617,7 +2750,8 @@ class ChatStore {
     if (idx >= 0) {
       this.conversations[idx] = {
         ...this.conversations[idx],
-        ...updates
+        ...updates,
+        ...(resolvedDepartmentName ? { department: resolvedDepartmentName } : {})
       };
       this.saveToFile();
       updatedConv = this.conversations[idx];
@@ -2626,6 +2760,9 @@ class ChatStore {
       if (updatedConv && options.userId && !updatedConv.assigned_user_id) {
         updatedConv.assigned_user_id = options.userId;
         updatedConv.assigned_to = options.userId;
+      }
+      if (updatedConv && resolvedDepartmentName && !(updatedConv as any).department) {
+        (updatedConv as any).department = resolvedDepartmentName;
       }
     }
 

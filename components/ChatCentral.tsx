@@ -3,7 +3,7 @@ import { Search, Send, FileText, Image as ImageIcon, Paperclip, User, Users, Clo
 import { toast } from 'sonner';
 import { ChatTransferModal } from './ChatTransferModal';
 import { AiChatCopilot } from './AiChatCopilot';
-import { ChatKanban } from './ChatKanban';
+import { ChatKanban, isConversationAssignedToIdentifiers, matchesChatVisibilityFilters } from './ChatKanban';
 import { WhatsAppConnectModal } from './WhatsAppConnectModal';
 import { supabase } from '../services/supabase';
 import { calculateItemDepletionForecast, isProductContinuousUse } from '../utils/pharmaContext';
@@ -274,6 +274,30 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   }, [rawUserId, localUser?.email, currentUser?.email, tenantId]);
   const userId = effectiveUserId;
 
+  const operatorIdentifiers = useMemo(() => {
+    const ids = new Set<string>();
+    [
+      effectiveUserId,
+      rawUserId,
+      localUser?.id,
+      localUser?.tenant_user_id,
+      localUser?.supabase_user_id,
+      localUser?.email,
+      currentUser?.id,
+      currentUser?.tenant_user_id,
+      currentUser?.supabase_user_id,
+      currentUser?.email,
+    ].forEach((val) => {
+      if (val && typeof val === 'string' && val.trim()) {
+        ids.add(val.trim());
+      }
+    });
+    return Array.from(ids);
+  }, [effectiveUserId, rawUserId, localUser, currentUser]);
+
+  const fetchConversationsRef = useRef<() => void>(() => {});
+  const fetchMessagesRef = useRef<(convId: string) => void>(() => {});
+
   // Anti-collision state
   const [otherUserViewing, setOtherUserViewing] = useState<string | null>(null);
 
@@ -379,7 +403,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                 return prev;
               });
             }
-            fetchConversations();
+            fetchConversationsRef.current();
           }
         }
       )
@@ -387,17 +411,17 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
         'postgres_changes',
         { event: '*', schema: 'public', table: 'chat_conversations' },
         () => {
-          fetchConversations();
+          fetchConversationsRef.current();
         }
       )
       .subscribe();
 
     // 2. Short-polling fallback seguro para ambientes sem WebSocket ou sincronização garantida
     const intervalId = setInterval(() => {
-      fetchConversations();
+      fetchConversationsRef.current();
       const currentOpenId = selectedChatIdRef.current;
       if (currentOpenId && !userClosedChatRef.current) {
-        fetchMessages(currentOpenId);
+        fetchMessagesRef.current(currentOpenId);
       }
     }, 5000);
 
@@ -413,7 +437,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
 
   useEffect(() => {
     fetchConversations();
-  }, [tenantId, isOperador, userId, selectedInboxId]);
+  }, [tenantId, isOperador, userId, selectedInboxId, inboxes.length]);
 
   // Contadores dinâmicos para as abas de status
   const tabCounters = useMemo(() => {
@@ -423,9 +447,17 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
     let finalizadas = 0;
 
     conversations.forEach((c: any) => {
-      // Se houver filtro de caixa selecionado, considera no cálculo
-      if (selectedInboxId !== 'all' && c.inbox_id !== selectedInboxId) return;
-      if (selectedTeamId !== 'all' && c.team_id !== selectedTeamId) return;
+      const visible = matchesChatVisibilityFilters(c, {
+        isOperador,
+        allowedInboxIds,
+        inboxes,
+        selectedInboxId,
+        selectedTeamId,
+        selectedTagId: 'all',
+        searchQuery: '',
+        operatorIdentifiers,
+      });
+      if (!visible) return;
 
       const isClosed = c.status === 'CLOSED' || c.status === 'finalizado' || c.kanban_stage === 'CLOSED' || c.kanban_stage === 'finalizado';
       if (isClosed) {
@@ -433,21 +465,14 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       } else {
         todas++;
         const assignedVal = String(c.assigned_user_id || c.assigned_to || '').trim();
-        const isMine =
-          Boolean(assignedVal) && (
-            assignedVal === effectiveUserId ||
-            (rawUserId && assignedVal === String(rawUserId)) ||
-            (localUser?.id && assignedVal === String(localUser.id)) ||
-            (localUser?.email && assignedVal === String(localUser.email)) ||
-            assignedVal === 'my-user-id'
-          );
+        const isMine = isConversationAssignedToIdentifiers(c, operatorIdentifiers);
         if (isMine) minhas++;
         if (!assignedVal) naoAtribuidas++;
       }
     });
 
     return { todas, minhas, naoAtribuidas, finalizadas };
-  }, [conversations, selectedInboxId, selectedTeamId, effectiveUserId, rawUserId, localUser]);
+  }, [conversations, selectedInboxId, selectedTeamId, operatorIdentifiers, isOperador, allowedInboxIds, inboxes]);
 
   // Contadores dinâmicos de Atendimentos Hoje e Aguardando na Fila (Dashboard rápido)
   const { atendimentosHoje, aguardandoFila } = useMemo(() => {
@@ -471,8 +496,17 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
     };
 
     conversations.forEach((c: any) => {
-      if (selectedInboxId !== 'all' && c.inbox_id !== selectedInboxId) return;
-      if (selectedTeamId !== 'all' && c.team_id !== selectedTeamId) return;
+      const visible = matchesChatVisibilityFilters(c, {
+        isOperador,
+        allowedInboxIds,
+        inboxes,
+        selectedInboxId,
+        selectedTeamId,
+        selectedTagId: 'all',
+        searchQuery: '',
+        operatorIdentifiers,
+      });
+      if (!visible) return;
 
       const isClosed = c.status === 'CLOSED' || c.kanban_stage === 'CLOSED';
 
@@ -506,62 +540,27 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       atendimentosHoje: hojeCount,
       aguardandoFila: filaCount
     };
-  }, [conversations, selectedInboxId, selectedTeamId]);
+  }, [conversations, selectedInboxId, selectedTeamId, isOperador, allowedInboxIds, inboxes, operatorIdentifiers]);
 
-  // Lista de conversas estritamente filtrada pelo critério ativo na interface
+  // Lista de conversas estritamente filtrada pelo critério ativo na interface (compartilha exatamente a mesma lógica do Painel Kanban)
   const displayedConversations = useMemo(() => {
     return conversations.filter((conv: any) => {
-      // 1. Permissão de Operador por Caixa de Entrada
-      if (isOperador) {
-        if (allowedInboxIds.length === 1) {
-          if (conv.inbox_id && conv.inbox_id !== allowedInboxIds[0]) return false;
-        } else if (allowedInboxIds.length > 1 && conv.inbox_id) {
-          if (!allowedInboxIds.includes(conv.inbox_id)) return false;
-        }
-      }
-
-      // 2. Filtro de Caixa de Entrada selecionada
-      if (selectedInboxId !== 'all' && conv.inbox_id !== selectedInboxId) {
-        return false;
-      }
-
-      // 3. Filtro por Time
-      if (selectedTeamId !== 'all' && conv.team_id !== selectedTeamId) {
-        return false;
-      }
-
-      // 4. Filtro por Etiqueta / Tag
-      if (selectedTagId !== 'all') {
-        const hasTag = conv.labels && Array.isArray(conv.labels) && conv.labels.some((l: any) => l.id === selectedTagId || l.name === selectedTagId);
-        if (!hasTag) return false;
-      }
-
-      // 5. Filtro por Busca Textual (Nome, Telefone ou Última Mensagem)
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase().trim();
-        const contactName = (conv.contact?.name || '').toLowerCase();
-        const contactPhone = (conv.contact?.phone_number || '').replace(/\D/g, '');
-        const qDigits = q.replace(/\D/g, '');
-        const lastMsg = (conv.last_message_content || '').toLowerCase();
-
-        const matchName = contactName.includes(q);
-        const matchPhone = qDigits && contactPhone.includes(qDigits);
-        const matchMsg = lastMsg.includes(q);
-
-        if (!matchName && !matchPhone && !matchMsg) return false;
-      }
+      const passesBaseFilters = matchesChatVisibilityFilters(conv, {
+        isOperador,
+        allowedInboxIds,
+        inboxes,
+        selectedInboxId,
+        selectedTeamId,
+        selectedTagId,
+        searchQuery,
+        operatorIdentifiers,
+      });
+      if (!passesBaseFilters) return false;
 
       // 6. Filtro por Aba de Status (Todas, Minhas, Não Atribuídas, Finalizadas)
       const isClosed = conv.status === 'CLOSED' || conv.status === 'finalizado' || conv.kanban_stage === 'CLOSED' || conv.kanban_stage === 'finalizado';
       const assignedVal = String(conv.assigned_user_id || conv.assigned_to || '').trim();
-      const isMine =
-        Boolean(assignedVal) && (
-          assignedVal === effectiveUserId ||
-          (rawUserId && assignedVal === String(rawUserId)) ||
-          (localUser?.id && assignedVal === String(localUser.id)) ||
-          (localUser?.email && assignedVal === String(localUser.email)) ||
-          assignedVal === 'my-user-id'
-        );
+      const isMine = isConversationAssignedToIdentifiers(conv, operatorIdentifiers);
       const isUnassigned = !assignedVal;
 
       const normalizedFilter = filter.toLowerCase().trim();
@@ -586,7 +585,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       // 'todas' exibe todas as conversas ativas (não fechadas)
       return true;
     });
-  }, [conversations, filter, searchQuery, selectedInboxId, selectedTeamId, selectedTagId, effectiveUserId, rawUserId, localUser, isOperador, allowedInboxIds]);
+  }, [conversations, filter, searchQuery, selectedInboxId, selectedTeamId, selectedTagId, operatorIdentifiers, isOperador, allowedInboxIds, inboxes]);
 
   // Busca mensagens apenas quando o ID da conversa ativa muda (nunca força setActiveView('CHAT') em background polling)
   useEffect(() => {
@@ -633,12 +632,13 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
 
   useEffect(() => {
     if (selectedConversation && isOperador && selectedConversation.inbox_id && allowedInboxIds.length > 0) {
-      if (!allowedInboxIds.includes(selectedConversation.inbox_id)) {
+      const assignedToMe = isConversationAssignedToIdentifiers(selectedConversation, operatorIdentifiers);
+      if (!assignedToMe && !allowedInboxIds.includes(selectedConversation.inbox_id)) {
         setSelectedConversation(null);
-        alert("Acesso negado: Você não tem permissão para visualizar conversas desta caixa de entrada.");
+        toast.error("Acesso negado: Você não tem permissão para visualizar conversas desta caixa de entrada.");
       }
     }
-  }, [selectedConversation, allowedInboxIds, isOperador]);
+  }, [selectedConversation, allowedInboxIds, isOperador, operatorIdentifiers]);
 
   const fetchInboxes = async () => {
     try {
@@ -896,8 +896,21 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
 
   const fetchMessages = async (conversationId: string) => {
     try {
-      const queryParams = userId ? `&userId=${userId}&role=${cleanRole}` : '';
-      const res = await fetch(`/api/v1/chat/messages?conversationId=${conversationId}${queryParams}`);
+      const currentTenantId = tenantId || localUser?.tenant_id || currentUser?.tenant_id || localStorage.getItem('ff_tenant_id') || localStorage.getItem('farmaflow_current_tenant_id') || '';
+      const headers: Record<string, string> = {};
+      if (currentTenantId) headers['x-tenant-id'] = currentTenantId;
+      if (userId) headers['x-user-id'] = userId;
+      if (cleanRole) headers['x-user-role'] = cleanRole;
+
+      try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        if (sessionData?.session?.access_token) {
+          headers['authorization'] = `Bearer ${sessionData.session.access_token}`;
+        }
+      } catch (_) {}
+
+      const queryParams = userId ? `&userId=${encodeURIComponent(userId)}&role=${encodeURIComponent(cleanRole)}&tenantId=${encodeURIComponent(currentTenantId || tenantId || 'default')}` : '';
+      const res = await fetch(`/api/v1/chat/messages?conversationId=${encodeURIComponent(conversationId)}${queryParams}`, { headers });
       if (res.ok) {
         const json = await res.json();
         if (json.data) {
@@ -915,7 +928,8 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       if (!error && data) {
         if (isOperador && allowedInboxIds.length > 0) {
           const conv = conversations.find(c => c.id === conversationId);
-          if (conv && conv.inbox_id && !allowedInboxIds.includes(conv.inbox_id)) {
+          const assignedToMe = conv ? isConversationAssignedToIdentifiers(conv, operatorIdentifiers) : false;
+          if (conv && !assignedToMe && conv.inbox_id && !allowedInboxIds.includes(conv.inbox_id)) {
             setMessages([]);
             return;
           }
@@ -945,19 +959,36 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
     }
   };
 
+  fetchConversationsRef.current = fetchConversations;
+  fetchMessagesRef.current = fetchMessages;
+
   const dispatchChatSendRequest = async (targetMsg: any) => {
     const convId = targetMsg.conversation_id;
     const isMedia = Boolean(targetMsg.media_url || targetMsg.mediaUrl);
+    const currentTenantId = tenantId || localUser?.tenant_id || currentUser?.tenant_id || localStorage.getItem('ff_tenant_id') || localStorage.getItem('farmaflow_current_tenant_id') || 'default';
 
     try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'x-tenant-id': currentTenantId
+      };
+      if (effectiveUserId || userId) headers['x-user-id'] = effectiveUserId || userId;
+      if (cleanRole) headers['x-user-role'] = cleanRole;
+
+      try {
+        const { data: sessionData } = await supabase.auth.getSession();
+        if (sessionData?.session?.access_token) {
+          headers['authorization'] = `Bearer ${sessionData.session.access_token}`;
+        }
+      } catch (_) {}
+
       const res = await fetch('/api/v1/chat/send', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-tenant-id': tenantId
-        },
+        headers,
         body: JSON.stringify({
           conversation_id: convId,
+          storeId: currentTenantId,
+          tenantId: currentTenantId,
           content: targetMsg.content,
           is_private: Boolean(targetMsg.is_private),
           sender_type: 'USER',
@@ -1266,8 +1297,9 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
 
   const handleSelectConversation = (conv: any) => {
     if (isOperador && conv.inbox_id && allowedInboxIds.length > 0) {
-      if (!allowedInboxIds.includes(conv.inbox_id)) {
-        alert("Acesso negado: Você não tem permissão para visualizar conversas desta caixa de entrada.");
+      const assignedToMe = isConversationAssignedToIdentifiers(conv, operatorIdentifiers);
+      if (!assignedToMe && !allowedInboxIds.includes(conv.inbox_id)) {
+        toast.error("Acesso negado: Você não tem permissão para visualizar conversas desta caixa de entrada.");
         return;
       }
     }
@@ -1510,6 +1542,8 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
             onConversationsChange={(updated) => setConversations(updated)}
             onOpenConversation={handleOpenFromKanban}
             inboxes={inboxes}
+            allowedInboxIds={allowedInboxIds}
+            operatorIdentifiers={operatorIdentifiers}
             teams={teams}
             availableLabels={availableLabels}
             onRefresh={fetchConversations}

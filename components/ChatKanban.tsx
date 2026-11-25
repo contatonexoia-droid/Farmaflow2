@@ -119,6 +119,8 @@ export interface ChatKanbanProps {
   onConversationsChange?: (updatedConversations: any[]) => void;
   onOpenConversation: (conversation: any) => void;
   inboxes?: any[];
+  allowedInboxIds?: string[];
+  operatorIdentifiers?: string[];
   teams?: any[];
   availableLabels?: any[];
   onRefresh?: () => void;
@@ -130,6 +132,135 @@ export interface ChatKanbanProps {
   onSelectedTeamIdChange?: (val: string) => void;
   selectedTagId?: string;
   onSelectedTagIdChange?: (val: string) => void;
+}
+
+export function normalizeChatDeptName(val?: unknown): string {
+  return String(val || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+export function isOperatorRole(role?: string | null): boolean {
+  return ['operador', 'operator', 'atendente', 'balconista'].includes(
+    String(role || '').toLowerCase().trim()
+  );
+}
+
+export function isConversationAssignedToIdentifiers(conv: any, identifiers: string[]): boolean {
+  if (!conv || !identifiers || identifiers.length === 0) return false;
+  const normalizedIds = new Set(
+    identifiers.map((id) => String(id || '').trim().toLowerCase()).filter(Boolean)
+  );
+  if (normalizedIds.size === 0) return false;
+
+  const assignedCandidates: string[] = [];
+  if (conv.assigned_user_id) assignedCandidates.push(String(conv.assigned_user_id).trim().toLowerCase());
+  if (conv.assigned_to) assignedCandidates.push(String(conv.assigned_to).trim().toLowerCase());
+  if (typeof conv.bot_handoff_reason === 'string' && conv.bot_handoff_reason.startsWith('ASSIGNED:')) {
+    const extracted = conv.bot_handoff_reason.slice('ASSIGNED:'.length).trim().toLowerCase();
+    if (extracted) assignedCandidates.push(extracted);
+  }
+  return assignedCandidates.some((val) => normalizedIds.has(val) || val === 'my-user-id');
+}
+
+export interface ConversationFilterCriteria {
+  isOperador: boolean;
+  allowedInboxIds?: string[];
+  inboxes?: any[];
+  selectedInboxId: string;
+  selectedTeamId: string;
+  selectedTagId: string;
+  searchQuery: string;
+  operatorIdentifiers?: string[];
+}
+
+export function matchesChatVisibilityFilters(conv: any, criteria: ConversationFilterCriteria): boolean {
+  if (!conv) return false;
+  const {
+    isOperador,
+    allowedInboxIds = [],
+    inboxes = [],
+    selectedInboxId,
+    selectedTeamId,
+    selectedTagId,
+    searchQuery,
+    operatorIdentifiers = [],
+  } = criteria;
+
+  const allowedIdSet = new Set<string>([
+    ...allowedInboxIds.filter(Boolean),
+    ...inboxes.map((i: any) => i?.id).filter(Boolean),
+  ]);
+  const allowedNameSet = new Set<string>(
+    inboxes.map((i: any) => normalizeChatDeptName(i?.name)).filter(Boolean)
+  );
+  const assignedToMe = isConversationAssignedToIdentifiers(conv, operatorIdentifiers);
+
+  // 1. Permissão de Operador (exatamente a mesma regra em Chat em Lista e Painel Kanban)
+  if (isOperador) {
+    const matchesAllowedInbox = Boolean(conv.inbox_id && allowedIdSet.has(conv.inbox_id));
+    const matchesAllowedDept = Boolean(
+      conv.department && allowedNameSet.has(normalizeChatDeptName(conv.department))
+    );
+    const hasNoInboxAndNoDept = !conv.inbox_id && !conv.department;
+
+    if (allowedIdSet.size > 0) {
+      if (!assignedToMe && !matchesAllowedInbox && !matchesAllowedDept && !hasNoInboxAndNoDept) {
+        return false;
+      }
+    } else if (!assignedToMe) {
+      return false;
+    }
+  }
+
+  // 2. Filtro por Caixa de Entrada / Departamento selecionado
+  if (selectedInboxId && selectedInboxId !== 'all' && selectedInboxId !== 'none') {
+    const selectedInboxObj = inboxes.find((i: any) => i?.id === selectedInboxId);
+    const matchesDirectInbox = conv.inbox_id === selectedInboxId;
+    const matchesSelectedDeptName = Boolean(
+      selectedInboxObj?.name &&
+        conv.department &&
+        normalizeChatDeptName(conv.department) === normalizeChatDeptName(selectedInboxObj.name)
+    );
+    const matchesLegacySingleInbox = Boolean(
+      !conv.inbox_id && (assignedToMe || (isOperador && inboxes.length === 1))
+    );
+
+    if (!matchesDirectInbox && !matchesSelectedDeptName && !matchesLegacySingleInbox) {
+      return false;
+    }
+  }
+
+  // 3. Filtro por Time
+  if (selectedTeamId && selectedTeamId !== 'all' && conv.team_id !== selectedTeamId) {
+    return false;
+  }
+
+  // 4. Filtro por Etiqueta / Tag
+  if (selectedTagId && selectedTagId !== 'all') {
+    const hasTag =
+      Array.isArray(conv.labels) &&
+      conv.labels.some((l: any) => l?.id === selectedTagId || l?.name === selectedTagId);
+    if (!hasTag) return false;
+  }
+
+  // 5. Filtro por Busca Textual (Nome, Telefone ou Última Mensagem)
+  if (searchQuery && searchQuery.trim()) {
+    const q = searchQuery.toLowerCase().trim();
+    const contactName = String(conv.contact?.name || '').toLowerCase();
+    const contactPhone = String(conv.contact?.phone_number || '').replace(/\D/g, '');
+    const qDigits = q.replace(/\D/g, '');
+    const lastMsg = String(conv.last_message_content || '').toLowerCase();
+
+    const matchName = contactName.includes(q);
+    const matchPhone = Boolean(qDigits && contactPhone.includes(qDigits));
+    const matchMsg = lastMsg.includes(q);
+    if (!matchName && !matchPhone && !matchMsg) return false;
+  }
+
+  return true;
 }
 
 /**
@@ -226,6 +357,10 @@ export function normalizeKanbanStage(stageOrStatus: string | undefined | null, c
     return 'finalizado';
   }
 
+  // Fallback seguro: garante que conversas humanas/atribuídas caiam em 'em_atendimento' e demais em 'novos_triagem'
+  if (conv && (conv.is_human_controlled === true || Boolean(conv.assigned_user_id) || Boolean(conv.assigned_to))) {
+    return 'em_atendimento';
+  }
   return 'novos_triagem';
 }
 
@@ -275,6 +410,8 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
   onConversationsChange,
   onOpenConversation,
   inboxes = [],
+  allowedInboxIds = [],
+  operatorIdentifiers = [],
   teams = [],
   availableLabels = [],
   onRefresh,
@@ -288,7 +425,7 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
   onSelectedTagIdChange,
 }) => {
   const [internalSearchQuery, setInternalSearchQuery] = useState('');
-  const isOperador = (userRole || '').toLowerCase() === 'operador';
+  const isOperador = isOperatorRole(userRole);
   const [internalSelectedInboxId, setInternalSelectedInboxId] = useState(() => (inboxes.length === 1 ? inboxes[0].id : 'all'));
   const [internalSelectedTeamId, setInternalSelectedTeamId] = useState('all');
   const [internalSelectedTagId, setInternalSelectedTagId] = useState('all');
@@ -320,13 +457,24 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
     });
   }, [conversations, lockedConversations, optimisticState]);
 
+  const effectiveOperatorIdentifiers = useMemo(() => {
+    const ids = new Set<string>(operatorIdentifiers.filter(Boolean));
+    if (currentUser?.id) ids.add(String(currentUser.id));
+    if (currentUser?.tenant_user_id) ids.add(String(currentUser.tenant_user_id));
+    if (currentUser?.supabase_user_id) ids.add(String(currentUser.supabase_user_id));
+    if (currentUser?.email) ids.add(String(currentUser.email));
+    return Array.from(ids);
+  }, [operatorIdentifiers, currentUser]);
+
   useEffect(() => {
     if (inboxes.length === 1) {
-      setSelectedInboxId(inboxes[0].id);
-    } else if (isOperador && inboxes.length > 1 && selectedInboxId === 'all') {
+      if (selectedInboxId !== inboxes[0].id) {
+        setSelectedInboxId(inboxes[0].id);
+      }
+    } else if (isOperador && inboxes.length > 1 && (selectedInboxId === 'all' || selectedInboxId === 'none' || !inboxes.some(i => i.id === selectedInboxId))) {
       setSelectedInboxId(inboxes[0].id);
     }
-  }, [inboxes, isOperador]);
+  }, [inboxes, isOperador, selectedInboxId]);
 
   // Configuração avançada dos sensores para DnD-Kit (Suporte perfeito para Desktop Mouse e Mobile Touch)
   const mouseSensor = useSensor(MouseSensor, {
@@ -348,39 +496,31 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
 
   const sensors = useSensors(mouseSensor, touchSensor, keyboardSensor);
 
-  // Filtro geral de conversas
+  // Filtro geral de conversas — compartilha exatamente a mesma lógica do Chat em Lista
   const filteredConversations = useMemo(() => {
-    // Lista de IDs de caixas permitidas que vieram pelas props do componente
-    const allowedInboxIdsSet = new Set(inboxes.map(i => i.id));
-
-    return effectiveConversations.filter(conv => {
-      // Se for operador, só pode visualizar conversas pertencentes às caixas permitidas
-      if (isOperador) {
-        if (!conv.inbox_id || !allowedInboxIdsSet.has(conv.inbox_id)) {
-          return false;
-        }
-      }
-
-      // Filtro por Caixa de Entrada selecionada
-      if (selectedInboxId !== 'all' && conv.inbox_id !== selectedInboxId) return false;
-      // Filtro por Time
-      if (selectedTeamId !== 'all' && conv.team_id !== selectedTeamId) return false;
-      // Filtro por Tag / Label
-      if (selectedTagId !== 'all') {
-        const hasTag = conv.labels && conv.labels.some((l: any) => l.id === selectedTagId);
-        if (!hasTag) return false;
-      }
-      // Filtro por busca textual
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
-        const contactName = (conv.contact?.name || '').toLowerCase();
-        const contactPhone = (conv.contact?.phone_number || '');
-        const lastMsg = (conv.last_message_content || '').toLowerCase();
-        return contactName.includes(q) || contactPhone.includes(q) || lastMsg.includes(q);
-      }
-      return true;
-    });
-  }, [effectiveConversations, inboxes, isOperador, selectedInboxId, selectedTeamId, selectedTagId, searchQuery]);
+    return effectiveConversations.filter(conv =>
+      matchesChatVisibilityFilters(conv, {
+        isOperador,
+        allowedInboxIds,
+        inboxes,
+        selectedInboxId,
+        selectedTeamId,
+        selectedTagId,
+        searchQuery,
+        operatorIdentifiers: effectiveOperatorIdentifiers,
+      })
+    );
+  }, [
+    effectiveConversations,
+    inboxes,
+    allowedInboxIds,
+    isOperador,
+    selectedInboxId,
+    selectedTeamId,
+    selectedTagId,
+    searchQuery,
+    effectiveOperatorIdentifiers,
+  ]);
 
   // Agrupamento de conversas pelas 6 colunas do Kanban com filtro tolerante a aliases
   const columnConversations = useMemo(() => {

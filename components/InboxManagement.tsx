@@ -809,7 +809,18 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                       const linkedInst = whatsappInstances.find(
                         i => i.id === inbox.whatsapp_instance_id || i.instance_name === inbox.whatsapp_instance_id
                       );
-                      const isExclusiveInst = Boolean(
+                      const effInstId = linkedInst?.id || primaryConnectedInstance?.id || inbox.whatsapp_instance_id || '';
+                      const sharedCount = effInstId
+                        ? inboxes.filter(other => {
+                            if ((other.channel_type || 'whatsapp') !== 'whatsapp') return false;
+                            const otherDirect = whatsappInstances.find(
+                              i => i.id === other.whatsapp_instance_id || i.instance_name === other.whatsapp_instance_id
+                            );
+                            const otherEffId = otherDirect?.id || primaryConnectedInstance?.id || other.whatsapp_instance_id || '';
+                            return Boolean(otherEffId) && otherEffId === effInstId;
+                          }).length
+                        : 0;
+                      const isExclusiveInst = sharedCount <= 1 && Boolean(
                         linkedInst &&
                         primaryConnectedInstance &&
                         linkedInst.id !== primaryConnectedInstance.id &&
@@ -860,7 +871,19 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                         );
                         const instance = directInstance || primaryConnectedInstance;
                         const isConnected = instance?.status === 'CONNECTED';
-                        const isExclusive = Boolean(
+                        const effectiveInstanceId = instance?.id || inbox.whatsapp_instance_id || '';
+                        const sharedInstanceCount = effectiveInstanceId
+                          ? inboxes.filter(other => {
+                              if ((other.channel_type || 'whatsapp') !== 'whatsapp') return false;
+                              const otherDirect = whatsappInstances.find(
+                                i => i.id === other.whatsapp_instance_id || i.instance_name === other.whatsapp_instance_id
+                              );
+                              const otherEffId = otherDirect?.id || primaryConnectedInstance?.id || other.whatsapp_instance_id || '';
+                              return Boolean(otherEffId) && otherEffId === effectiveInstanceId;
+                            }).length
+                          : 0;
+                        const isSharedInstance = sharedInstanceCount > 1;
+                        const isExclusive = !isSharedInstance && Boolean(
                           directInstance &&
                           String(directInstance.instance_name || '').startsWith('inbox_')
                         );

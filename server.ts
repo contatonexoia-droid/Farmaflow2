@@ -2967,17 +2967,35 @@ app.post("/api/v1/teams/:id/members/toggle", async (req, res) => {
 // =========================================
 
 // Helper robusto para resolver IDs autorizados de operadores em department_access e inbox_members
-async function resolveOperatorAllowedInboxIds(
+function normalizeDepartmentText(val?: unknown): string {
+  return String(val || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+interface OperatorAccessContext {
+  isOperator: boolean;
+  allowedInboxIds: string[];
+  allowedTeamIds: string[];
+  allowedDepartmentNames: string[];
+  operatorIdentifiers: string[];
+  operatorTenantIds: string[];
+}
+
+async function resolveOperatorAccessContext(
   storeId: string,
   userId?: string,
   userRole?: string,
   authHeader?: string,
   headerUserId?: string,
   headerUserRole?: string
-): Promise<{ isOperator: boolean; allowedInboxIds: string[] }> {
+): Promise<OperatorAccessContext> {
   const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const candidateUserIds = new Set<string>();
   const candidateEmails = new Set<string>();
+  const operatorTenantIds = new Set<string>();
   let hasSyntheticAdminSession = false;
 
   const addCandidate = (val?: string | null) => {
@@ -2999,15 +3017,33 @@ async function resolveOperatorAllowedInboxIds(
   addCandidate(headerUserId);
 
   let detectedRole = (userRole || headerUserRole || "").toLowerCase().trim();
-  const isExplicitAdminRole = ["admin", "super_admin", "superadmin", "owner", "proprietario", "gerente", "manager", "matriz", "admin_matriz", "network_admin"].includes(detectedRole);
+  const isExplicitAdminRole = [
+    "admin",
+    "super_admin",
+    "superadmin",
+    "owner",
+    "proprietario",
+    "gerente",
+    "manager",
+    "matriz",
+    "admin_matriz",
+    "network_admin"
+  ].includes(detectedRole);
 
   // Para sessões sintéticas de administrador (admin_*), resolve acesso diretamente sem consultar tenant_users.id
   if (hasSyntheticAdminSession && (isExplicitAdminRole || !["operador", "operator", "atendente", "balconista"].includes(detectedRole))) {
-    return { isOperator: false, allowedInboxIds: [] };
+    return {
+      isOperator: false,
+      allowedInboxIds: [],
+      allowedTeamIds: [],
+      allowedDepartmentNames: [],
+      operatorIdentifiers: [],
+      operatorTenantIds: []
+    };
   }
 
   // 1. Tentar resolver a partir do token Bearer se fornecido
-  const cleanAuthToken = authHeader ? String(authHeader).replace(/^Bearer\s+/i, '').trim() : '';
+  const cleanAuthToken = authHeader ? String(authHeader).replace(/^Bearer\s+/i, "").trim() : "";
   if (cleanAuthToken && cleanAuthToken !== "undefined" && cleanAuthToken !== "null") {
     try {
       const { data: { user: authUser } } = await supabaseAdmin.auth.getUser(cleanAuthToken);
@@ -3020,6 +3056,10 @@ async function resolveOperatorAllowedInboxIds(
       }
     } catch (_) {}
   }
+
+  const candidateStoreIds = storeId && storeId !== "default"
+    ? await resolveStoreCandidateIds(storeId)
+    : [];
 
   // 2. Buscar correspondência em tenant_users (NUNCA filtrar tenant_users.id com strings não-UUID)
   try {
@@ -3048,18 +3088,18 @@ async function resolveOperatorAllowedInboxIds(
           supabaseAdmin
             .from("tenant_users")
             .select("id, supabase_user_id, role, tenant_id, email")
-            .or(`id.in.(${validUuids.join(',')}),supabase_user_id.in.(${validUuids.join(',')})`)
+            .or(`id.in.(${validUuids.join(",")}),supabase_user_id.in.(${validUuids.join(",")})`)
         )
       );
     }
 
-    if (storeId && storeId !== "default" && rawEmails.length > 0) {
+    if (candidateStoreIds.length > 0 && rawEmails.length > 0) {
       tuQueries.push(
         Promise.resolve(
           supabaseAdmin
             .from("tenant_users")
             .select("id, supabase_user_id, role, tenant_id, email")
-            .eq("tenant_id", storeId)
+            .in("tenant_id", candidateStoreIds)
         )
       );
     }
@@ -3072,10 +3112,11 @@ async function resolveOperatorAllowedInboxIds(
           const matchId = tu.id && rawIds.includes(String(tu.id));
           const matchSubId = tu.supabase_user_id && rawIds.includes(String(tu.supabase_user_id));
 
-          if (matchEmail || matchId || matchSubId || (rawEmails.length === 0 && rawIds.length === 0)) {
+          if (matchEmail || matchId || matchSubId) {
             if (tu.id) addCandidate(tu.id);
             if (tu.supabase_user_id) addCandidate(tu.supabase_user_id);
             if (tu.email) addCandidate(tu.email);
+            if (tu.tenant_id) operatorTenantIds.add(String(tu.tenant_id).trim());
             if (!detectedRole && tu.role) {
               detectedRole = String(tu.role).toLowerCase().trim();
             }
@@ -3087,13 +3128,23 @@ async function resolveOperatorAllowedInboxIds(
     console.warn("[OperatorAccess] Error resolving tenant_users:", e);
   }
 
+  const allSearchIdentifiers = Array.from(new Set([...candidateUserIds, ...candidateEmails]));
   const isOperator = ["operador", "operator", "atendente", "balconista"].includes(detectedRole);
+
   if (!isOperator) {
-    return { isOperator: false, allowedInboxIds: [] };
+    return {
+      isOperator: false,
+      allowedInboxIds: [],
+      allowedTeamIds: [],
+      allowedDepartmentNames: [],
+      operatorIdentifiers: allSearchIdentifiers,
+      operatorTenantIds: Array.from(operatorTenantIds)
+    };
   }
 
-  const allSearchIdentifiers = Array.from(new Set([...candidateUserIds, ...candidateEmails]));
   const allowedIdsSet = new Set<string>();
+  const allowedTeamIdsSet = new Set<string>();
+  const allowedDeptNamesSet = new Set<string>();
 
   if (allSearchIdentifiers.length > 0) {
     // 3. Buscar em department_access
@@ -3104,7 +3155,15 @@ async function resolveOperatorAllowedInboxIds(
         .in("user_id", allSearchIdentifiers);
       if (!deptErr && deptRows) {
         deptRows.forEach((r: any) => {
-          if (r.department_id) allowedIdsSet.add(r.department_id);
+          if (r.department_id) {
+            const deptVal = String(r.department_id).trim();
+            if (UUID_REGEX.test(deptVal)) {
+              allowedIdsSet.add(deptVal);
+            } else if (deptVal) {
+              allowedDeptNamesSet.add(normalizeDepartmentText(deptVal));
+            }
+          }
+          if (r.tenant_id) operatorTenantIds.add(String(r.tenant_id).trim());
         });
       }
     } catch (e) {
@@ -3119,30 +3178,295 @@ async function resolveOperatorAllowedInboxIds(
         .in("user_id", allSearchIdentifiers);
       if (!memErr && memberRows) {
         memberRows.forEach((r: any) => {
-          if (r.inbox_id) allowedIdsSet.add(r.inbox_id);
+          if (r.inbox_id) allowedIdsSet.add(String(r.inbox_id).trim());
         });
       }
     } catch (e) {
       console.warn("[OperatorAccess] Error querying inbox_members:", e);
     }
 
-    // 5. Buscar em inboxStore (memória / cache local de membros)
+    // 5. Buscar em chat_team_members (e fallback team_members caso exista)
+    try {
+      const { data: teamRows, error: teamErr } = await supabaseAdmin
+        .from("chat_team_members")
+        .select("team_id, user_id")
+        .in("user_id", allSearchIdentifiers);
+      if (!teamErr && teamRows) {
+        teamRows.forEach((r: any) => {
+          if (r.team_id) allowedTeamIdsSet.add(String(r.team_id).trim());
+        });
+      }
+    } catch (e) {
+      console.warn("[OperatorAccess] Error querying chat_team_members:", e);
+    }
+
+    try {
+      const { data: altTeamRows, error: altTeamErr } = await supabaseAdmin
+        .from("team_members")
+        .select("team_id, user_id")
+        .in("user_id", allSearchIdentifiers);
+      if (!altTeamErr && altTeamRows) {
+        altTeamRows.forEach((r: any) => {
+          if (r.team_id) allowedTeamIdsSet.add(String(r.team_id).trim());
+        });
+      }
+    } catch (_) {}
+
+    // 6. Buscar em inboxStore (memória / cache local de membros)
     try {
       const storeInboxes = await inboxStore.getInboxes(storeId);
       for (const ib of storeInboxes) {
         const members = await inboxStore.getMembers(ib.id);
-        if (members && members.some(m => allSearchIdentifiers.includes(m))) {
+        if (members && members.some((m) => allSearchIdentifiers.includes(m))) {
           allowedIdsSet.add(ib.id);
         }
       }
     } catch (e) {
       console.warn("[OperatorAccess] Error querying inboxStore members:", e);
     }
+
+    // 7. Expandir inboxes vinculados aos times do operador via inbox_teams
+    const teamIdsArr = Array.from(allowedTeamIdsSet).filter((id) => UUID_REGEX.test(id));
+    if (teamIdsArr.length > 0) {
+      try {
+        const { data: inboxTeamRows } = await supabaseAdmin
+          .from("inbox_teams")
+          .select("inbox_id, team_id")
+          .in("team_id", teamIdsArr);
+        if (Array.isArray(inboxTeamRows)) {
+          inboxTeamRows.forEach((row: any) => {
+            if (row.inbox_id) allowedIdsSet.add(String(row.inbox_id).trim());
+          });
+        }
+      } catch (_) {}
+
+      try {
+        const { data: teamMetaRows } = await supabaseAdmin
+          .from("chat_teams")
+          .select("id, name")
+          .in("id", teamIdsArr);
+        if (Array.isArray(teamMetaRows)) {
+          teamMetaRows.forEach((t: any) => {
+            if (t.name) allowedDeptNamesSet.add(normalizeDepartmentText(t.name));
+          });
+        }
+      } catch (_) {}
+    }
+
+    // 8. Resolver nomes de departamentos das caixas permitidas e sincronizar correspondência case-insensitive
+    const effectiveStoreCandidates = new Set<string>(candidateStoreIds);
+    for (const opTid of operatorTenantIds) {
+      const resolved = await resolveStoreCandidateIds(opTid);
+      resolved.forEach((id) => effectiveStoreCandidates.add(id));
+    }
+
+    try {
+      const storeIdsList = Array.from(effectiveStoreCandidates);
+      let storeInboxRows: any[] = [];
+      if (storeIdsList.length > 0) {
+        const { data } = await supabaseAdmin
+          .from("inboxes")
+          .select("id, name, store_id")
+          .in("store_id", storeIdsList);
+        if (Array.isArray(data)) storeInboxRows = data;
+      } else if (allowedIdsSet.size > 0) {
+        const validIds = Array.from(allowedIdsSet).filter((id) => UUID_REGEX.test(id));
+        if (validIds.length > 0) {
+          const { data } = await supabaseAdmin
+            .from("inboxes")
+            .select("id, name, store_id")
+            .in("id", validIds);
+          if (Array.isArray(data)) storeInboxRows = data;
+        }
+      }
+
+      for (const ib of storeInboxRows) {
+        const normName = normalizeDepartmentText(ib.name);
+        if (allowedIdsSet.has(ib.id) && normName) {
+          allowedDeptNamesSet.add(normName);
+        }
+      }
+      // Match case-insensitive entre department_access / time e o nome da caixa (ex.: "Vendas" === "vendas")
+      for (const ib of storeInboxRows) {
+        const normName = normalizeDepartmentText(ib.name);
+        if (normName && allowedDeptNamesSet.has(normName)) {
+          allowedIdsSet.add(ib.id);
+        }
+      }
+    } catch (_) {}
   }
 
   return {
     isOperator: true,
-    allowedInboxIds: Array.from(allowedIdsSet)
+    allowedInboxIds: Array.from(allowedIdsSet),
+    allowedTeamIds: Array.from(allowedTeamIdsSet),
+    allowedDepartmentNames: Array.from(allowedDeptNamesSet),
+    operatorIdentifiers: allSearchIdentifiers,
+    operatorTenantIds: Array.from(operatorTenantIds)
+  };
+}
+
+async function resolveOperatorAllowedInboxIds(
+  storeId: string,
+  userId?: string,
+  userRole?: string,
+  authHeader?: string,
+  headerUserId?: string,
+  headerUserRole?: string
+): Promise<{ isOperator: boolean; allowedInboxIds: string[] }> {
+  const ctx = await resolveOperatorAccessContext(
+    storeId,
+    userId,
+    userRole,
+    authHeader,
+    headerUserId,
+    headerUserRole
+  );
+  return {
+    isOperator: ctx.isOperator,
+    allowedInboxIds: ctx.allowedInboxIds
+  };
+}
+
+async function verifyOperatorConversationAccess(params: {
+  storeId: string;
+  conversationId: string;
+  userId?: string;
+  userRole?: string;
+  authHeader?: string;
+  headerUserId?: string;
+  headerUserRole?: string;
+  deniedErrorMessage?: string;
+}): Promise<{ allowed: boolean; status?: number; error?: string; conversation?: any; context?: OperatorAccessContext }> {
+  const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const deniedMsg = params.deniedErrorMessage || "Permissão negada para enviar mensagens nesta conversa.";
+  const ctx = await resolveOperatorAccessContext(
+    params.storeId,
+    params.userId,
+    params.userRole,
+    params.authHeader,
+    params.headerUserId,
+    params.headerUserRole
+  );
+
+  // Busca conversa no Supabase (com fallback para chatStore)
+  let convData: any = null;
+  try {
+    const { data } = await supabaseAdmin
+      .from("chat_conversations")
+      .select("*")
+      .eq("id", params.conversationId)
+      .maybeSingle();
+    convData = data || null;
+  } catch (_) {}
+
+  if (!convData) {
+    try {
+      convData = await chatStore.getConversationById(params.conversationId);
+    } catch (_) {}
+  }
+
+  if (!convData) {
+    return { allowed: true, conversation: null, context: ctx };
+  }
+
+  // Validação de isolamento de loja (resolvendo tenants.id e tenants.slug)
+  const convStoreRaw = convData.store_id || convData.tenant_id || "";
+  if (convStoreRaw && convStoreRaw !== "default") {
+    const convStoreCandidates = new Set(
+      (await resolveStoreCandidateIds(String(convStoreRaw))).map((s) => s.toLowerCase())
+    );
+    convStoreCandidates.add(String(convStoreRaw).trim().toLowerCase());
+
+    if (ctx.operatorTenantIds.length > 0) {
+      const opStoreCandidates = new Set<string>();
+      for (const tid of ctx.operatorTenantIds) {
+        const resolved = await resolveStoreCandidateIds(tid);
+        resolved.forEach((s) => opStoreCandidates.add(s.toLowerCase()));
+        opStoreCandidates.add(tid.trim().toLowerCase());
+      }
+      const sameStore = Array.from(opStoreCandidates).some((s) => convStoreCandidates.has(s));
+      if (!sameStore) {
+        return {
+          allowed: false,
+          status: 403,
+          error: "Acesso negado: esta conversa pertence a outra loja.",
+          conversation: convData,
+          context: ctx
+        };
+      }
+    }
+  }
+
+  if (!ctx.isOperator) {
+    return { allowed: true, conversation: convData, context: ctx };
+  }
+
+  // Condição 1: Conversa atribuída ao próprio operador
+  const opIdsLower = new Set(ctx.operatorIdentifiers.map((id) => String(id).trim().toLowerCase()));
+  const assignedValues: string[] = [];
+  if (convData.assigned_user_id) assignedValues.push(String(convData.assigned_user_id).trim().toLowerCase());
+  if (convData.assigned_to) assignedValues.push(String(convData.assigned_to).trim().toLowerCase());
+  if (typeof convData.bot_handoff_reason === "string" && convData.bot_handoff_reason.startsWith("ASSIGNED:")) {
+    const extracted = convData.bot_handoff_reason.slice("ASSIGNED:".length).trim().toLowerCase();
+    if (extracted) assignedValues.push(extracted);
+  }
+  if (assignedValues.some((val) => opIdsLower.has(val))) {
+    return { allowed: true, conversation: convData, context: ctx };
+  }
+
+  // Condição 2: Operador possui acesso à Caixa de Entrada atual da conversa
+  if (convData.inbox_id && ctx.allowedInboxIds.includes(String(convData.inbox_id).trim())) {
+    return { allowed: true, conversation: convData, context: ctx };
+  }
+
+  // Condição 3: Operador possui acesso ao Departamento / Setor / Time atual da conversa
+  if (convData.team_id && ctx.allowedTeamIds.includes(String(convData.team_id).trim())) {
+    return { allowed: true, conversation: convData, context: ctx };
+  }
+
+  const convDeptNorm = normalizeDepartmentText(convData.department);
+  if (convDeptNorm && ctx.allowedDepartmentNames.includes(convDeptNorm)) {
+    return { allowed: true, conversation: convData, context: ctx };
+  }
+
+  // Verifica ainda se a inbox da conversa possui nome compatível (case-insensitive) ou time vinculado ao operador
+  if (convData.inbox_id && UUID_REGEX.test(String(convData.inbox_id).trim())) {
+    try {
+      const { data: convInboxRow } = await supabaseAdmin
+        .from("inboxes")
+        .select("id, name")
+        .eq("id", String(convData.inbox_id).trim())
+        .maybeSingle();
+      if (convInboxRow?.name && ctx.allowedDepartmentNames.includes(normalizeDepartmentText(convInboxRow.name))) {
+        return { allowed: true, conversation: convData, context: ctx };
+      }
+    } catch (_) {}
+
+    if (ctx.allowedTeamIds.length > 0) {
+      try {
+        const { data: linkRows } = await supabaseAdmin
+          .from("inbox_teams")
+          .select("team_id")
+          .eq("inbox_id", String(convData.inbox_id).trim());
+        if (Array.isArray(linkRows) && linkRows.some((r: any) => ctx.allowedTeamIds.includes(String(r.team_id)))) {
+          return { allowed: true, conversation: convData, context: ctx };
+        }
+      } catch (_) {}
+    }
+  }
+
+  // Se a conversa não tem caixa nem departamento nem time definido e pertence à mesma loja do operador, permite acesso se operador tiver alguma caixa na loja
+  if (!convData.inbox_id && !convData.team_id && !convDeptNorm && ctx.allowedInboxIds.length > 0) {
+    return { allowed: true, conversation: convData, context: ctx };
+  }
+
+  return {
+    allowed: false,
+    status: 403,
+    error: deniedMsg,
+    conversation: convData,
+    context: ctx
   };
 }
 
@@ -17949,7 +18273,7 @@ app.get("/api/v1/chat/conversations", async (req, res) => {
     const userRole = (req.query.role as string) || (req.headers["x-user-role"] as string) || undefined;
     const authHeader = req.headers["authorization"] as string | undefined;
 
-    const { isOperator, allowedInboxIds } = await resolveOperatorAllowedInboxIds(
+    const opCtx = await resolveOperatorAccessContext(
       storeId,
       userId,
       userRole,
@@ -17958,24 +18282,47 @@ app.get("/api/v1/chat/conversations", async (req, res) => {
       req.headers["x-user-role"] as string
     );
 
-    if (isOperator) {
-      // Se for operador e não tiver nenhuma caixa permitida, retorna lista vazia imediatamente
-      if (allowedInboxIds.length === 0) {
+    if (opCtx.isOperator) {
+      const hasAnyScope =
+        opCtx.allowedInboxIds.length > 0 ||
+        opCtx.allowedTeamIds.length > 0 ||
+        opCtx.allowedDepartmentNames.length > 0 ||
+        opCtx.operatorIdentifiers.length > 0;
+
+      if (!hasAnyScope) {
         return res.json({ data: [] });
       }
 
       // Se filtrou por uma caixa específica, valida se o operador tem acesso
-      if (inboxId && inboxId !== "all") {
-        if (!allowedInboxIds.includes(inboxId)) {
+      if (inboxId && inboxId !== "all" && inboxId !== "none") {
+        if (opCtx.allowedInboxIds.length > 0 && !opCtx.allowedInboxIds.includes(inboxId)) {
           return res.json({ data: [] });
         }
       }
     }
 
+    let selectedInboxName: string | undefined = undefined;
+    if (inboxId && inboxId !== "all" && inboxId !== "none" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(inboxId.trim())) {
+      try {
+        const { data: ibRow } = await supabaseAdmin
+          .from("inboxes")
+          .select("name")
+          .eq("id", inboxId.trim())
+          .maybeSingle();
+        if (ibRow?.name) selectedInboxName = String(ibRow.name).trim();
+      } catch (_) {}
+    }
+
     const conversations = await chatStore.getConversations(
       storeId,
-      (inboxId && inboxId !== "all") ? inboxId : undefined,
-      isOperator ? allowedInboxIds : undefined
+      inboxId && inboxId !== "all" && inboxId !== "none" ? inboxId : undefined,
+      opCtx.isOperator ? opCtx.allowedInboxIds : undefined,
+      {
+        allowedTeamIds: opCtx.allowedTeamIds,
+        allowedDepartmentNames: opCtx.allowedDepartmentNames,
+        operatorIdentifiers: opCtx.operatorIdentifiers,
+        selectedInboxName
+      }
     );
 
     return res.json({ data: conversations });
@@ -17991,41 +18338,24 @@ app.get("/api/v1/chat/messages", async (req, res) => {
       return res.status(400).json({ error: "conversationId é obrigatório" });
     }
 
-    const userId = req.query.userId as string | undefined;
-    const userRole = req.query.role as string | undefined;
+    const storeId = (req.query.tenantId as string) || (req.query.storeId as string) || (req.headers["x-tenant-id"] as string) || "default";
+    const userId = (req.query.userId as string) || (req.headers["x-user-id"] as string) || undefined;
+    const userRole = (req.query.role as string) || (req.headers["x-user-role"] as string) || undefined;
+    const authHeader = req.headers["authorization"] as string | undefined;
 
-    const isOperator = userId && (userRole?.toLowerCase() === "operador" || userRole?.toLowerCase() === "operator");
-    if (isOperator) {
-      const { data: convData } = await supabaseAdmin
-        .from("chat_conversations")
-        .select("inbox_id, team_id")
-        .eq("id", conversationId)
-        .maybeSingle();
+    const accessCheck = await verifyOperatorConversationAccess({
+      storeId,
+      conversationId,
+      userId,
+      userRole,
+      authHeader,
+      headerUserId: req.headers["x-user-id"] as string,
+      headerUserRole: req.headers["x-user-role"] as string,
+      deniedErrorMessage: "Permissão negada para acessar mensagens desta conversa."
+    });
 
-      if (convData) {
-        if (convData.inbox_id) {
-          const { data: memberRows } = await supabaseAdmin
-            .from("inbox_members")
-            .select("inbox_id")
-            .eq("user_id", userId);
-          const allowedInboxIds = memberRows ? memberRows.map(r => r.inbox_id) : [];
-
-          if (!allowedInboxIds.includes(convData.inbox_id)) {
-            return res.status(403).json({ error: "Permissão negada para acessar mensagens desta conversa." });
-          }
-        }
-        if (convData.team_id) {
-          const { data: teamRows } = await supabaseAdmin
-            .from("chat_team_members")
-            .select("team_id")
-            .eq("user_id", userId);
-          const allowedTeamIds = teamRows ? teamRows.map(r => r.team_id) : [];
-
-          if (!allowedTeamIds.includes(convData.team_id)) {
-            return res.status(403).json({ error: "Permissão negada para acessar mensagens desta conversa por restrição de time." });
-          }
-        }
-      }
+    if (!accessCheck.allowed) {
+      return res.status(accessCheck.status || 403).json({ error: accessCheck.error });
     }
 
     const messages = await chatStore.getMessages(conversationId);
@@ -18050,7 +18380,7 @@ app.post("/api/v1/chat/send", requireChatEnabled, async (req, res) => {
       userId,
       role
     } = req.body;
-    const storeId = (req.headers["x-tenant-id"] as string) || "default";
+    const storeId = (req.headers["x-tenant-id"] as string) || (req.body.storeId as string) || (req.body.tenantId as string) || "default";
     const resolvedMediaUrl = media_url || mediaUrl || undefined;
     const resolvedMediaType = media_type || type || undefined;
 
@@ -18058,25 +18388,22 @@ app.post("/api/v1/chat/send", requireChatEnabled, async (req, res) => {
       return res.status(400).json({ success: false, error: "conversation_id e conteúdo são obrigatórios." });
     }
 
-    const isOperator = userId && (role?.toLowerCase() === "operador" || role?.toLowerCase() === "operator");
-    if (isOperator) {
-      const { data: convData } = await supabaseAdmin
-        .from("chat_conversations")
-        .select("inbox_id")
-        .eq("id", conversation_id)
-        .maybeSingle();
+    const accessCheck = await verifyOperatorConversationAccess({
+      storeId,
+      conversationId: conversation_id,
+      userId: userId || (req.headers["x-user-id"] as string) || undefined,
+      userRole: role || (req.headers["x-user-role"] as string) || undefined,
+      authHeader: req.headers["authorization"] as string | undefined,
+      headerUserId: req.headers["x-user-id"] as string | undefined,
+      headerUserRole: req.headers["x-user-role"] as string | undefined,
+      deniedErrorMessage: "Permissão negada para enviar mensagens nesta conversa."
+    });
 
-      if (convData && convData.inbox_id) {
-        const { data: memberRows } = await supabaseAdmin
-          .from("inbox_members")
-          .select("inbox_id")
-          .eq("user_id", userId);
-        const allowedInboxIds = memberRows ? memberRows.map(r => r.inbox_id) : [];
-
-        if (!allowedInboxIds.includes(convData.inbox_id)) {
-          return res.status(403).json({ success: false, error: "Permissão negada para enviar mensagens nesta conversa." });
-        }
-      }
+    if (!accessCheck.allowed) {
+      return res.status(accessCheck.status || 403).json({
+        success: false,
+        error: accessCheck.error || "Permissão negada para enviar mensagens nesta conversa."
+      });
     }
 
     // Resolução blindada da instância CONNECTED para mensagens enviadas ao cliente:
@@ -18891,9 +19218,12 @@ app.all("/api/v1/chat/conversations/stage", handleStageUpdate);
 
 const handleTransferConversation = async (req: express.Request, res: express.Response) => {
   try {
+    const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     const conversationId = req.params.id || req.body.conversationId || req.body.conversation_id;
     const storeId = (req.body.storeId as string) || (req.body.tenantId as string) || (req.headers["x-tenant-id"] as string) || "default";
-    const inboxId = req.body.inboxId || req.body.inbox_id || undefined;
+    let inboxId: string | undefined = req.body.inboxId || req.body.inbox_id || undefined;
+    let teamId: string | undefined = req.body.teamId || req.body.team_id || undefined;
+    let departmentName: string | undefined = req.body.department || req.body.sector || undefined;
     const userId = req.body.userId || req.body.assignedUserId || req.body.assigned_user_id || req.body.assigned_to || undefined;
     const fromUserId = req.body.fromUserId || (req.headers["x-user-id"] as string) || undefined;
     const reason = req.body.reason || req.body.notes || undefined;
@@ -18902,28 +19232,149 @@ const handleTransferConversation = async (req: express.Request, res: express.Res
       return res.status(400).json({ error: "conversationId é obrigatório para transferência." });
     }
 
-    if (!inboxId && !userId) {
-      return res.status(400).json({ error: "É necessário informar ao menos um departamento (inboxId) ou um atendente (userId) de destino." });
+    if (!inboxId && !userId && !departmentName && !teamId) {
+      return res.status(400).json({ error: "É necessário informar ao menos um departamento (inboxId/department), time ou atendente (userId) de destino." });
     }
 
-    // Validação de isolamento: Se inboxId for informado, valida se a caixa existe e pertence ao estabelecimento
-    if (inboxId) {
-      try {
-        const { data: inboxRow } = await supabaseAdmin
-          .from("inboxes")
-          .select("id, store_id, name")
-          .eq("id", inboxId)
-          .maybeSingle();
+    const candidateStoreIds = storeId && storeId !== "default"
+      ? await resolveStoreCandidateIds(storeId)
+      : [];
+    const candidateStoreSet = new Set(candidateStoreIds.map((s) => s.toLowerCase()));
+    if (storeId && storeId !== "default") {
+      candidateStoreSet.add(storeId.trim().toLowerCase());
+    }
 
-        if (inboxRow && inboxRow.store_id && storeId && storeId !== "default" && inboxRow.store_id !== storeId) {
-          return res.status(403).json({ error: "O departamento selecionado pertence a outro estabelecimento." });
+    // Validação de isolamento da conversa (resolvendo tenants.id e tenants.slug)
+    if (candidateStoreSet.size > 0 && UUID_REGEX.test(String(conversationId).trim())) {
+      try {
+        const { data: convRow } = await supabaseAdmin
+          .from("chat_conversations")
+          .select("id, store_id")
+          .eq("id", String(conversationId).trim())
+          .maybeSingle();
+        if (convRow?.store_id && convRow.store_id !== "default") {
+          const convStoreCandidates = await resolveStoreCandidateIds(String(convRow.store_id));
+          const sameStore =
+            candidateStoreSet.has(String(convRow.store_id).trim().toLowerCase()) ||
+            convStoreCandidates.some((s) => candidateStoreSet.has(s.toLowerCase()));
+          if (!sameStore) {
+            return res.status(403).json({ error: "Acesso negado: esta conversa pertence a outro estabelecimento." });
+          }
         }
       } catch (_) {}
     }
 
-    // Executa a transferência via Service Role (sem restrições indevidas de RLS para operadores)
+    // Carrega caixas de entrada da loja para sincronizar inbox_id <-> department <-> team_id
+    let storeInboxes: any[] = [];
+    if (candidateStoreIds.length > 0) {
+      try {
+        const { data: ibRows } = await supabaseAdmin
+          .from("inboxes")
+          .select("id, store_id, name")
+          .in("store_id", candidateStoreIds);
+        if (Array.isArray(ibRows)) storeInboxes = ibRows;
+      } catch (_) {}
+    }
+
+    // Se department foi enviado (ex.: "vendas") sem inboxId, resolve o inbox_id real correspondente (case-insensitive)
+    if (!inboxId && departmentName && storeInboxes.length > 0) {
+      const targetNorm = normalizeDepartmentText(departmentName);
+      const matchedInbox = storeInboxes.find((ib) => normalizeDepartmentText(ib.name) === targetNorm);
+      if (matchedInbox?.id) {
+        inboxId = matchedInbox.id;
+        departmentName = matchedInbox.name;
+      }
+    }
+
+    // Se teamId foi enviado sem inboxId, tenta localizar caixa vinculada via inbox_teams ou nome do time
+    if (!inboxId && teamId && UUID_REGEX.test(teamId)) {
+      try {
+        const { data: linkRow } = await supabaseAdmin
+          .from("inbox_teams")
+          .select("inbox_id")
+          .eq("team_id", teamId.trim())
+          .limit(1)
+          .maybeSingle();
+        if (linkRow?.inbox_id) {
+          inboxId = linkRow.inbox_id;
+        } else {
+          const { data: teamRow } = await supabaseAdmin
+            .from("chat_teams")
+            .select("name")
+            .eq("id", teamId.trim())
+            .maybeSingle();
+          if (teamRow?.name) {
+            const matchedInbox = storeInboxes.find(
+              (ib) => normalizeDepartmentText(ib.name) === normalizeDepartmentText(teamRow.name)
+            );
+            if (matchedInbox?.id) {
+              inboxId = matchedInbox.id;
+              departmentName = matchedInbox.name;
+            } else if (!departmentName) {
+              departmentName = teamRow.name;
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    // Validação de isolamento (resolvendo tenants.id e tenants.slug): valida se a caixa pertence ao estabelecimento
+    if (inboxId && UUID_REGEX.test(inboxId.trim())) {
+      try {
+        const { data: inboxRow } = await supabaseAdmin
+          .from("inboxes")
+          .select("id, store_id, name")
+          .eq("id", inboxId.trim())
+          .maybeSingle();
+
+        if (inboxRow) {
+          if (inboxRow.store_id && candidateStoreSet.size > 0) {
+            const inboxStoreCandidates = await resolveStoreCandidateIds(String(inboxRow.store_id));
+            const belongsToStore =
+              candidateStoreSet.has(String(inboxRow.store_id).trim().toLowerCase()) ||
+              inboxStoreCandidates.some((s) => candidateStoreSet.has(s.toLowerCase()));
+            if (!belongsToStore) {
+              return res.status(403).json({ error: "O departamento selecionado pertence a outro estabelecimento." });
+            }
+          }
+          if (inboxRow.name && !departmentName) {
+            departmentName = String(inboxRow.name).trim();
+          }
+
+          // Sincroniza team_id correspondente ao departamento/caixa de destino quando existir vínculo
+          if (!teamId) {
+            try {
+              const { data: linkedTeam } = await supabaseAdmin
+                .from("inbox_teams")
+                .select("team_id")
+                .eq("inbox_id", inboxRow.id)
+                .limit(1)
+                .maybeSingle();
+              if (linkedTeam?.team_id) {
+                teamId = linkedTeam.team_id;
+              } else if (inboxRow.name && candidateStoreIds.length > 0) {
+                const { data: storeTeams } = await supabaseAdmin
+                  .from("chat_teams")
+                  .select("id, name")
+                  .in("store_id", candidateStoreIds);
+                if (Array.isArray(storeTeams)) {
+                  const matchedTeam = storeTeams.find(
+                    (t: any) => normalizeDepartmentText(t.name) === normalizeDepartmentText(inboxRow.name)
+                  );
+                  if (matchedTeam?.id) teamId = matchedTeam.id;
+                }
+              }
+            } catch (_) {}
+          }
+        }
+      } catch (_) {}
+    }
+
+    // Executa a transferência via Service Role (mantendo inbox_id, team_id, department e kanban_stage sincronizados)
     const result = await chatStore.transferConversation(conversationId, storeId, {
       inboxId,
+      teamId,
+      department: departmentName,
       userId,
       fromUserId,
       reason
@@ -18936,9 +19387,11 @@ const handleTransferConversation = async (req: express.Request, res: express.Res
       conversationId,
       storeId,
       inboxId: updated?.inbox_id || inboxId,
+      teamId: (updated as any)?.team_id || teamId,
+      department: (updated as any)?.department || departmentName,
       assignedUserId: updated?.assigned_user_id || userId,
       status: updated?.status,
-      kanban_stage: updated?.kanban_stage,
+      kanban_stage: updated?.kanban_stage || (userId ? "em_atendimento" : "novos_triagem"),
       is_human_controlled: updated?.is_human_controlled,
       is_bot_active: updated?.is_bot_active,
       updated_at: updated?.updated_at || new Date().toISOString()
@@ -18946,8 +19399,8 @@ const handleTransferConversation = async (req: express.Request, res: express.Res
 
     realtimeHub.broadcastToStore(storeId, "conversation_stage_changed", {
       conversationId,
-      stage: updated?.kanban_stage || "novos_triagem",
-      kanban_stage: updated?.kanban_stage || "novos_triagem",
+      stage: updated?.kanban_stage || (userId ? "em_atendimento" : "novos_triagem"),
+      kanban_stage: updated?.kanban_stage || (userId ? "em_atendimento" : "novos_triagem"),
       status: updated?.status,
       is_bot_active: updated?.is_bot_active,
       is_human_controlled: updated?.is_human_controlled,
