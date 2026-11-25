@@ -3147,97 +3147,70 @@ async function resolveOperatorAccessContext(
   const allowedDeptNamesSet = new Set<string>();
 
   if (allSearchIdentifiers.length > 0) {
-    // Separa UUIDs válidos de identificadores textuais (ex.: e-mails) para NUNCA causar erro Postgres 22P02
-    // em colunas user_id do tipo uuid (department_access, inbox_members, chat_team_members)
-    const validUuidIdentifiers = allSearchIdentifiers.filter((id) => UUID_REGEX.test(id));
-    const nonUuidIdentifiers = allSearchIdentifiers.filter((id) => !UUID_REGEX.test(id));
-
-    const collectDeptRows = (rows?: any[] | null) => {
-      if (!Array.isArray(rows)) return;
-      rows.forEach((r: any) => {
-        if (r.department_id) {
-          const deptVal = String(r.department_id).trim();
-          if (UUID_REGEX.test(deptVal)) {
-            allowedIdsSet.add(deptVal);
-          } else if (deptVal) {
-            allowedDeptNamesSet.add(normalizeDepartmentText(deptVal));
+    // 3. Buscar em department_access
+    try {
+      const { data: deptRows, error: deptErr } = await supabaseAdmin
+        .from("department_access")
+        .select("department_id, user_id, tenant_id")
+        .in("user_id", allSearchIdentifiers);
+      if (!deptErr && deptRows) {
+        deptRows.forEach((r: any) => {
+          if (r.department_id) {
+            const deptVal = String(r.department_id).trim();
+            if (UUID_REGEX.test(deptVal)) {
+              allowedIdsSet.add(deptVal);
+            } else if (deptVal) {
+              allowedDeptNamesSet.add(normalizeDepartmentText(deptVal));
+            }
           }
-        }
-        if (r.tenant_id) operatorTenantIds.add(String(r.tenant_id).trim());
-      });
-    };
-
-    // 3. Buscar em public.department_access (fonte primária de acesso às Caixas de Entrada)
-    if (validUuidIdentifiers.length > 0) {
-      try {
-        const { data: deptRows, error: deptErr } = await supabaseAdmin
-          .from("department_access")
-          .select("department_id, user_id, tenant_id")
-          .in("user_id", validUuidIdentifiers);
-        if (!deptErr && deptRows) {
-          collectDeptRows(deptRows);
-        }
-      } catch (e) {
-        console.warn("[OperatorAccess] Error querying department_access (UUID):", e);
+          if (r.tenant_id) operatorTenantIds.add(String(r.tenant_id).trim());
+        });
       }
-    }
-    if (nonUuidIdentifiers.length > 0) {
-      try {
-        const { data: deptRowsText, error: deptErrText } = await supabaseAdmin
-          .from("department_access")
-          .select("department_id, user_id, tenant_id")
-          .in("user_id", nonUuidIdentifiers);
-        if (!deptErrText && deptRowsText) {
-          collectDeptRows(deptRowsText);
-        }
-      } catch (_) {}
+    } catch (e) {
+      console.warn("[OperatorAccess] Error querying department_access:", e);
     }
 
-    // 4. Buscar em public.inbox_members (fallback de compatibilidade)
-    if (validUuidIdentifiers.length > 0) {
-      try {
-        const { data: memberRows, error: memErr } = await supabaseAdmin
-          .from("inbox_members")
-          .select("inbox_id, user_id")
-          .in("user_id", validUuidIdentifiers);
-        if (!memErr && memberRows) {
-          memberRows.forEach((r: any) => {
-            if (r.inbox_id) allowedIdsSet.add(String(r.inbox_id).trim());
-          });
-        }
-      } catch (e) {
-        console.warn("[OperatorAccess] Error querying inbox_members:", e);
+    // 4. Buscar em inbox_members
+    try {
+      const { data: memberRows, error: memErr } = await supabaseAdmin
+        .from("inbox_members")
+        .select("inbox_id, user_id")
+        .in("user_id", allSearchIdentifiers);
+      if (!memErr && memberRows) {
+        memberRows.forEach((r: any) => {
+          if (r.inbox_id) allowedIdsSet.add(String(r.inbox_id).trim());
+        });
       }
+    } catch (e) {
+      console.warn("[OperatorAccess] Error querying inbox_members:", e);
     }
 
     // 5. Buscar em chat_team_members (e fallback team_members caso exista)
-    if (validUuidIdentifiers.length > 0) {
-      try {
-        const { data: teamRows, error: teamErr } = await supabaseAdmin
-          .from("chat_team_members")
-          .select("team_id, user_id")
-          .in("user_id", validUuidIdentifiers);
-        if (!teamErr && teamRows) {
-          teamRows.forEach((r: any) => {
-            if (r.team_id) allowedTeamIdsSet.add(String(r.team_id).trim());
-          });
-        }
-      } catch (e) {
-        console.warn("[OperatorAccess] Error querying chat_team_members:", e);
+    try {
+      const { data: teamRows, error: teamErr } = await supabaseAdmin
+        .from("chat_team_members")
+        .select("team_id, user_id")
+        .in("user_id", allSearchIdentifiers);
+      if (!teamErr && teamRows) {
+        teamRows.forEach((r: any) => {
+          if (r.team_id) allowedTeamIdsSet.add(String(r.team_id).trim());
+        });
       }
-
-      try {
-        const { data: altTeamRows, error: altTeamErr } = await supabaseAdmin
-          .from("team_members")
-          .select("team_id, user_id")
-          .in("user_id", validUuidIdentifiers);
-        if (!altTeamErr && altTeamRows) {
-          altTeamRows.forEach((r: any) => {
-            if (r.team_id) allowedTeamIdsSet.add(String(r.team_id).trim());
-          });
-        }
-      } catch (_) {}
+    } catch (e) {
+      console.warn("[OperatorAccess] Error querying chat_team_members:", e);
     }
+
+    try {
+      const { data: altTeamRows, error: altTeamErr } = await supabaseAdmin
+        .from("team_members")
+        .select("team_id, user_id")
+        .in("user_id", allSearchIdentifiers);
+      if (!altTeamErr && altTeamRows) {
+        altTeamRows.forEach((r: any) => {
+          if (r.team_id) allowedTeamIdsSet.add(String(r.team_id).trim());
+        });
+      }
+    } catch (_) {}
 
     // 6. Buscar em inboxStore (memória / cache local de membros)
     try {
@@ -3443,42 +3416,8 @@ async function verifyOperatorConversationAccess(params: {
   }
 
   // Condição 2: Operador possui acesso à Caixa de Entrada atual da conversa
-  // (public.department_access como fonte primária + public.inbox_members como fallback)
-  if (convData.inbox_id) {
-    const cleanInboxId = String(convData.inbox_id).trim();
-    if (ctx.allowedInboxIds.includes(cleanInboxId)) {
-      return { allowed: true, conversation: convData, context: ctx };
-    }
-
-    // Checagem direta em public.department_access e public.inbox_members usando apenas UUIDs válidos
-    const validOpUuids = ctx.operatorIdentifiers.filter((id) => UUID_REGEX.test(String(id).trim()));
-    if (UUID_REGEX.test(cleanInboxId) && validOpUuids.length > 0) {
-      try {
-        const { data: directDeptRow } = await supabaseAdmin
-          .from("department_access")
-          .select("department_id")
-          .eq("department_id", cleanInboxId)
-          .in("user_id", validOpUuids)
-          .limit(1)
-          .maybeSingle();
-        if (directDeptRow?.department_id) {
-          return { allowed: true, conversation: convData, context: ctx };
-        }
-      } catch (_) {}
-
-      try {
-        const { data: directMemberRow } = await supabaseAdmin
-          .from("inbox_members")
-          .select("inbox_id")
-          .eq("inbox_id", cleanInboxId)
-          .in("user_id", validOpUuids)
-          .limit(1)
-          .maybeSingle();
-        if (directMemberRow?.inbox_id) {
-          return { allowed: true, conversation: convData, context: ctx };
-        }
-      } catch (_) {}
-    }
+  if (convData.inbox_id && ctx.allowedInboxIds.includes(String(convData.inbox_id).trim())) {
+    return { allowed: true, conversation: convData, context: ctx };
   }
 
   // Condição 3: Operador possui acesso ao Departamento / Setor / Time atual da conversa
@@ -3616,30 +3555,6 @@ app.put("/api/v1/inboxes/:id", async (req, res) => {
 app.delete("/api/v1/inboxes/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const storeId = (req.query.storeId as string) || (req.query.tenantId as string) || (req.headers["x-tenant-id"] as string) || "";
-    const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-    if (storeId && storeId !== "default" && UUID_REGEX.test(String(id).trim())) {
-      try {
-        const { data: inboxRow } = await supabaseAdmin
-          .from("inboxes")
-          .select("id, store_id")
-          .eq("id", String(id).trim())
-          .maybeSingle();
-        if (inboxRow?.store_id) {
-          const reqCandidates = new Set((await resolveStoreCandidateIds(storeId)).map((s) => s.toLowerCase()));
-          reqCandidates.add(storeId.trim().toLowerCase());
-          const inboxCandidates = await resolveStoreCandidateIds(String(inboxRow.store_id));
-          const sameStore =
-            reqCandidates.has(String(inboxRow.store_id).trim().toLowerCase()) ||
-            inboxCandidates.some((s) => reqCandidates.has(s.toLowerCase()));
-          if (!sameStore) {
-            return res.status(403).json({ error: "Permissão negada: esta caixa pertence a outro estabelecimento." });
-          }
-        }
-      } catch (_) {}
-    }
-
     await inboxStore.deleteInbox(id);
     return res.json({ success: true });
   } catch (err: any) {

@@ -387,11 +387,7 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
   const handleDeleteInbox = async (id: string) => {
     if (!window.confirm("Deseja realmente excluir esta caixa de entrada?")) return;
     try {
-      await fetch(`/api/v1/inboxes/${encodeURIComponent(id)}`, {
-        method: 'DELETE',
-        headers: tenantId ? { 'x-tenant-id': tenantId } : undefined
-      });
-      await supabase.from('department_access').delete().eq('department_id', id);
+      await fetch(`/api/v1/inboxes/${id}`, { method: 'DELETE' });
       await supabase.from('inboxes').delete().eq('id', id);
     } catch (e) {
       console.warn("[InboxManagement] Delete warning:", e);
@@ -399,8 +395,6 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
     setInboxes(prev => prev.filter(i => i.id !== id));
     const current = JSON.parse(localStorage.getItem(`inboxes_${tenantId}`) || '[]');
     localStorage.setItem(`inboxes_${tenantId}`, JSON.stringify(current.filter((i: any) => i.id !== id)));
-    localStorage.removeItem(`department_access_${id}`);
-    localStorage.removeItem(`inbox_members_${id}`);
   };
 
   const formatRole = (role?: string) => {
