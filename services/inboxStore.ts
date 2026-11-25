@@ -273,8 +273,25 @@ class InboxStore {
 
   public async deleteInbox(id: string): Promise<boolean> {
     if (isValidUuid(id)) {
+      const cleanId = id.trim();
+
+      // Remove acessos órfãos em public.department_access ao excluir a caixa
       try {
-        await supabaseAdmin.from("inboxes").delete().eq("id", id);
+        await supabaseAdmin.from("department_access").delete().eq("department_id", cleanId);
+      } catch (err) {
+        console.warn("[InboxStore] department_access cleanup failed:", err);
+      }
+
+      // Remove vínculos legados em inbox_members e inbox_teams
+      try {
+        await supabaseAdmin.from("inbox_members").delete().eq("inbox_id", cleanId);
+      } catch (_) {}
+      try {
+        await supabaseAdmin.from("inbox_teams").delete().eq("inbox_id", cleanId);
+      } catch (_) {}
+
+      try {
+        await supabaseAdmin.from("inboxes").delete().eq("id", cleanId);
       } catch (err) {
         console.warn("[InboxStore] Supabase delete failed:", err);
       }

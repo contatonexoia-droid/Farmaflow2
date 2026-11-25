@@ -466,6 +466,49 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
     return Array.from(ids);
   }, [operatorIdentifiers, currentUser]);
 
+  // Garantia adicional: consulta public.department_access diretamente caso o Kanban seja montado
+  // antes de receber allowedInboxIds populados do componente pai
+  const [directDeptAccessIds, setDirectDeptAccessIds] = useState<string[]>([]);
+  useEffect(() => {
+    if (!isOperador) {
+      setDirectDeptAccessIds([]);
+      return;
+    }
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const validUuids = effectiveOperatorIdentifiers.filter((id) => uuidRegex.test(id));
+    if (validUuids.length === 0) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data, error } = await supabase
+          .from('department_access')
+          .select('department_id')
+          .in('user_id', validUuids);
+        if (!cancelled && !error && Array.isArray(data)) {
+          const ids = Array.from(
+            new Set(data.map((r: any) => String(r.department_id || '').trim()).filter(Boolean))
+          );
+          setDirectDeptAccessIds(ids);
+        }
+      } catch (_) {}
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isOperador, effectiveOperatorIdentifiers]);
+
+  const effectiveAllowedInboxIds = useMemo(() => {
+    return Array.from(
+      new Set([
+        ...allowedInboxIds.filter(Boolean),
+        ...directDeptAccessIds.filter(Boolean),
+        ...inboxes.map((i: any) => i?.id).filter(Boolean),
+      ])
+    );
+  }, [allowedInboxIds, directDeptAccessIds, inboxes]);
+
   useEffect(() => {
     if (inboxes.length === 1) {
       if (selectedInboxId !== inboxes[0].id) {
@@ -496,12 +539,12 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
 
   const sensors = useSensors(mouseSensor, touchSensor, keyboardSensor);
 
-  // Filtro geral de conversas — compartilha exatamente a mesma lógica do Chat em Lista
+  // Filtro geral de conversas — compartilha exatamente a mesma lógica do Chat em Lista (department_access + assigned_user_id)
   const filteredConversations = useMemo(() => {
     return effectiveConversations.filter(conv =>
       matchesChatVisibilityFilters(conv, {
         isOperador,
-        allowedInboxIds,
+        allowedInboxIds: effectiveAllowedInboxIds,
         inboxes,
         selectedInboxId,
         selectedTeamId,
@@ -513,7 +556,7 @@ export const ChatKanban: React.FC<ChatKanbanProps> = ({
   }, [
     effectiveConversations,
     inboxes,
-    allowedInboxIds,
+    effectiveAllowedInboxIds,
     isOperador,
     selectedInboxId,
     selectedTeamId,
