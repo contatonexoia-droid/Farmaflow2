@@ -147,9 +147,10 @@ async function inspectInovaFarmaSchema(pool) {
             WHERE TABLE_SCHEMA = 'dbo'
               AND (
                 TABLE_NAME IN (
-                    'Produto', 'Produto_Loja', 'Produto_Filial', 'Produto_Empresa', 'Produto_Preco', 'Estoque', 'Estoque_Loja',
+                    'Produto', 'Produto_Estoque', 'Produto_Loja', 'Produto_Filial', 'Produto_Empresa', 'Produto_Preco', 'Estoque', 'Estoque_Loja',
                     'Promocao', 'Promocao_Produto', 'PromocaoProduto', 'Promocao_Item', 'PromocaoItem', 'Promocao_Itens',
                     'Promocao_Empresa', 'Promocao_Filial', 'Promocao_Loja',
+                    'Promocao_Dia', 'Promocao_DiaSemana',
                     'Campanha', 'Campanha_Produto', 'CampanhaProduto', 'TabelaPromocao', 'TabelaPromocao_Produto'
                 )
                 OR TABLE_NAME LIKE 'Promo%'
@@ -157,6 +158,26 @@ async function inspectInovaFarmaSchema(pool) {
               )
             ORDER BY TABLE_NAME, ORDINAL_POSITION;
         `);
+
+        // Detecta dinamicamente via INFORMATION_SCHEMA.TABLES qualquer tabela iniciada por Promocao_Dia (ex: Promocao_Dia, Promocao_DiaSemana)
+        let promoDiaTableNames = [];
+        try {
+            const diaTablesRes = await pool.request().query(`
+                SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+                SET NOCOUNT ON;
+                SELECT TABLE_NAME
+                FROM INFORMATION_SCHEMA.TABLES
+                WHERE TABLE_SCHEMA = 'dbo'
+                  AND TABLE_TYPE = 'BASE TABLE'
+                  AND TABLE_NAME LIKE 'Promocao_Dia%'
+                ORDER BY CASE
+                    WHEN TABLE_NAME = 'Promocao_Dia' THEN 0
+                    WHEN TABLE_NAME = 'Promocao_DiaSemana' THEN 1
+                    ELSE 2
+                END, TABLE_NAME;
+            `);
+            promoDiaTableNames = (diaTablesRes?.recordset || []).map(r => r.TABLE_NAME).filter(Boolean);
+        } catch (_) {}
 
         const tablesMap = new Map();
         for (const row of colsRes?.recordset || []) {
@@ -184,15 +205,17 @@ async function inspectInovaFarmaSchema(pool) {
             'ValorPromocao', 'VlPromocao', 'PrecoOferta', 'PrecoDesconto', 'PrecoEspecial'
         ]);
         const prodPromoStartCol = findMatchingColumn(produtoCols, [
-            'DataInicioPromocao', 'DataInicialPromocao', 'InicioPromocao', 'DtInicioPromocao', 'PromocaoDataInicial', 'PromocaoDataInicio'
+            'DataPromocaoInicio', 'DataInicioPromocao', 'DataInicialPromocao', 'InicioPromocao',
+            'DtInicioPromocao', 'PromocaoDataInicial', 'PromocaoDataInicio', 'DataOfertaInicio'
         ]);
         const prodPromoEndCol = findMatchingColumn(produtoCols, [
-            'DataFimPromocao', 'DataFinalPromocao', 'FimPromocao', 'DtFimPromocao', 'ValidadePromocao', 'PromocaoDataFinal', 'PromocaoDataFim'
+            'DataPromocaoFim', 'DataFimPromocao', 'DataFinalPromocao', 'FimPromocao',
+            'DtFimPromocao', 'ValidadePromocao', 'PromocaoDataFinal', 'PromocaoDataFim', 'DataOfertaFim'
         ]);
 
-        // Verifica se existe tabela de preço/estoque por filial (ex: Produto_Loja, Produto_Empresa, Produto_Filial, Estoque)
+        // Verifica tabela de preço/estoque por filial (priorizando dbo.Produto_Estoque confirmado no InovaFarma)
         let branchStockTable = null;
-        const candidateBranchTables = ['Produto_Loja', 'Produto_Empresa', 'Produto_Filial', 'Produto_Preco', 'Estoque_Loja', 'Estoque'];
+        const candidateBranchTables = ['Produto_Estoque', 'Produto_Loja', 'Produto_Empresa', 'Produto_Filial', 'Produto_Preco', 'Estoque_Loja', 'Estoque'];
         for (const bt of candidateBranchTables) {
             if (!tablesMap.has(bt)) continue;
             const bCols = tablesMap.get(bt);
@@ -211,11 +234,14 @@ async function inspectInovaFarmaSchema(pool) {
                     sellingPriceCol: bSellingCol,
                     promoPriceCol: bPromoCol,
                     promoStartCol: findMatchingColumn(bCols, [
-                        'DataInicioPromocao', 'DataInicialPromocao', 'InicioPromocao', 'DtInicioPromocao'
+                        'DataPromocaoInicio', 'DataInicioPromocao', 'DataInicialPromocao', 'InicioPromocao', 'DtInicioPromocao', 'DataOfertaInicio'
                     ]),
                     promoEndCol: findMatchingColumn(bCols, [
-                        'DataFimPromocao', 'DataFinalPromocao', 'FimPromocao', 'DtFimPromocao', 'ValidadePromocao'
-                    ])
+                        'DataPromocaoFim', 'DataFimPromocao', 'DataFinalPromocao', 'FimPromocao', 'DtFimPromocao', 'ValidadePromocao', 'DataOfertaFim'
+                    ]),
+                    offerStartCol: findMatchingColumn(bCols, ['DataOfertaInicio']),
+                    offerEndCol: findMatchingColumn(bCols, ['DataOfertaFim']),
+                    offerFlagCol: findMatchingColumn(bCols, ['Oferta', 'EmOferta', 'FlOferta'])
                 };
                 break;
             }
@@ -272,7 +298,7 @@ async function inspectInovaFarmaSchema(pool) {
                     'PrecoLiquido', 'PrecoDesconto', 'PrecoVenda', 'Preco', 'Valor'
                 ]),
                 discountPctCol: findMatchingColumn(cols, [
-                    'PercentualDesconto', 'PercDesconto', 'DescontoPercentual', 'AliquotaDesconto', 'Desconto'
+                    'Porcentagem', 'PercentualDesconto', 'PercDesconto', 'DescontoPercentual', 'AliquotaDesconto', 'Percentual', 'Desconto'
                 ]),
                 startDateCol: findMatchingColumn(cols, [
                     'DataInicial', 'DataInicio', 'DtInicial', 'DtInicio', 'Data_Inicial', 'Data_Inicio',
@@ -292,7 +318,7 @@ async function inspectInovaFarmaSchema(pool) {
                     'DataCancelamento', 'DataExclusao', 'DataEncerramento', 'DataInativacao', 'DataFinalizacao'
                 ]),
                 nameCol: findMatchingColumn(cols, [
-                    'Descricao', 'Nome', 'NomePromocao', 'DescricaoPromocao', 'NomeCampanha', 'DescricaoCampanha', 'Titulo', 'Campanha'
+                    'NomePromocao', 'Descricao', 'Nome', 'DescricaoPromocao', 'NomeCampanha', 'DescricaoCampanha', 'Titulo', 'Campanha'
                 ]),
                 weekdayCols,
                 hasIndividualWeekdayCols,
@@ -311,7 +337,7 @@ async function inspectInovaFarmaSchema(pool) {
             if (/^promo/i.test(tName) || /^campanha/i.test(tName)) {
                 if (/produto|item|itens/i.test(tName)) {
                     if (!itemCandidateNames.includes(tName)) itemCandidateNames.push(tName);
-                } else if (!/empresa|filial|loja/i.test(tName)) {
+                } else if (!/empresa|filial|loja|^promocao_dia/i.test(tName)) {
                     if (!headerCandidateNames.includes(tName)) headerCandidateNames.push(tName);
                 }
             }
@@ -359,6 +385,107 @@ async function inspectInovaFarmaSchema(pool) {
             }
         }
 
+        // 3. Detecta tabela de vínculo campanha x filial (dbo.Promocao_Empresa / Promocao_Filial / Promocao_Loja)
+        let campaignBranchTable = null;
+        for (const btName of ['Promocao_Empresa', 'Promocao_Filial', 'Promocao_Loja']) {
+            if (!tablesMap.has(btName)) continue;
+            const btCols = tablesMap.get(btName);
+            const btPromoIdCol = findMatchingColumn(btCols, ['CodigoPromocao', 'IdPromocao', 'CodPromocao', 'CodigoCampanha', 'IdCampanha']);
+            const btBranchCol = findMatchingColumn(btCols, ['CodigoEmpresa', 'CodigoFilial', 'CodigoLoja', 'IdEmpresa', 'IdFilial', 'IdLoja', 'Filial', 'Loja']);
+            if (btPromoIdCol && btBranchCol) {
+                let hasRows = false;
+                try {
+                    const rowCheck = await pool.request().query(`
+                        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+                        SET NOCOUNT ON;
+                        SELECT TOP 1 1 AS HasRow FROM dbo.[${btName}] WITH (NOLOCK);
+                    `);
+                    hasRows = Boolean(rowCheck?.recordset?.length);
+                } catch (_) {}
+                campaignBranchTable = {
+                    tableName: btName,
+                    promoIdCol: btPromoIdCol,
+                    branchCol: btBranchCol,
+                    hasRows
+                };
+                break;
+            }
+        }
+
+        // 4. Detecta tabela filha de dias da semana (dbo.Promocao_Dia / dbo.Promocao_DiaSemana) e inspeciona convenção de Dia
+        let campaignDayTable = null;
+        for (const dtName of promoDiaTableNames) {
+            const dtCols = tablesMap.get(dtName) || [];
+            const dtPromoIdCol = findMatchingColumn(dtCols, ['CodigoPromocao', 'IdPromocao', 'CodPromocao', 'CodigoCampanha', 'IdCampanha']) || 'CodigoPromocao';
+            const dtDayCol = findMatchingColumn(dtCols, ['Dia', 'DiaSemana', 'NumeroDia', 'NrDia', 'CodigoDia']) || 'Dia';
+            let distinctDays = [];
+            let convention = '1_sun_7_sat'; // Padrão SQL Server DATEPART(WEEKDAY): 1=Dom .. 7=Sáb
+
+            try {
+                const daysRes = await pool.request().query(`
+                    SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+                    SET NOCOUNT ON;
+                    SELECT DISTINCT CAST([${dtDayCol}] AS INT) AS DiaVal
+                    FROM dbo.[${dtName}] WITH (NOLOCK)
+                    WHERE [${dtDayCol}] IS NOT NULL
+                    ORDER BY DiaVal;
+                `);
+                distinctDays = (daysRes?.recordset || [])
+                    .map(r => Number(r.DiaVal))
+                    .filter(n => Number.isInteger(n));
+
+                if (distinctDays.some(d => d === 0)) {
+                    convention = '0_sun_6_sat';
+                } else if (campaignSource?.header?.nameCol && campaignSource.header.promoIdCol) {
+                    const h = campaignSource.header;
+                    const sampleRes = await pool.request().query(`
+                        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+                        SET NOCOUNT ON;
+                        SELECT TOP 100
+                            CAST(pd.[${dtDayCol}] AS INT) AS DiaVal,
+                            UPPER(CAST(ISNULL(pr.[${h.nameCol}], '') AS VARCHAR(200))) AS NomePromocao
+                        FROM dbo.[${dtName}] pd WITH (NOLOCK)
+                        INNER JOIN dbo.[${h.tableName}] pr WITH (NOLOCK)
+                            ON pr.[${h.promoIdCol}] = pd.[${dtPromoIdCol}]
+                        WHERE pd.[${dtDayCol}] IS NOT NULL;
+                    `);
+                    const dayNameChecks = [
+                        { regex: /DOMINGO|\bDOM\b/, sun1: 1, iso1: 7 },
+                        { regex: /SEGUNDA|\bSEG\b/, sun1: 2, iso1: 1 },
+                        { regex: /TERCA|TERÇA|\bTER\b/, sun1: 3, iso1: 2 },
+                        { regex: /QUARTA|\bQUA\b/, sun1: 4, iso1: 3 },
+                        { regex: /QUINTA|\bQUI\b/, sun1: 5, iso1: 4 },
+                        { regex: /SEXTOU|SEXTA|\bSEX\b/, sun1: 6, iso1: 5 },
+                        { regex: /SABADO|SÁBADO|\bSAB\b/, sun1: 7, iso1: 6 }
+                    ];
+                    let sun1Hits = 0;
+                    let iso1Hits = 0;
+                    for (const sr of sampleRes?.recordset || []) {
+                        const nm = String(sr.NomePromocao || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+                        const dVal = Number(sr.DiaVal);
+                        for (const chk of dayNameChecks) {
+                            if (chk.regex.test(nm)) {
+                                if (dVal === chk.sun1) sun1Hits++;
+                                if (dVal === chk.iso1) iso1Hits++;
+                            }
+                        }
+                    }
+                    if (iso1Hits > sun1Hits) {
+                        convention = '1_mon_7_sun';
+                    }
+                }
+            } catch (_) {}
+
+            campaignDayTable = {
+                tableName: dtName,
+                promoIdCol: dtPromoIdCol,
+                dayCol: dtDayCol,
+                distinctDays,
+                convention
+            };
+            break;
+        }
+
         return {
             isInovaFarma: true,
             discoveredTables: Array.from(tablesMap.keys()),
@@ -371,7 +498,9 @@ async function inspectInovaFarmaSchema(pool) {
                 promoEndCol: prodPromoEndCol
             },
             branchStockTable,
-            campaignSource
+            campaignSource,
+            campaignBranchTable,
+            campaignDayTable
         };
     } catch (err) {
         console.warn(`[InovaFarma Promo Inspector] Aviso ao inspecionar schema SQL: ${err.message}`);
@@ -433,10 +562,18 @@ function logInovaFarmaSchemaDetection(schemaMeta, ignorePromotionCampaigns = fal
         );
         console.log(
             `✅ Aba Promoção (Dias da Semana em dbo.${h.tableName}): ` +
-            (h.hasIndividualWeekdayCols
-                ? `Colunas individuais -> ${detectedDayCols}`
-                : (h.combinedWeekdayCol ? `Coluna combinada -> [${h.combinedWeekdayCol}]` : 'Nenhuma coluna de dia da semana detectada'))
+            (schemaMeta.campaignDayTable
+                ? `Tabela filha dbo.${schemaMeta.campaignDayTable.tableName} ([${schemaMeta.campaignDayTable.dayCol}], convenção=${schemaMeta.campaignDayTable.convention}, valores=${JSON.stringify(schemaMeta.campaignDayTable.distinctDays)})`
+                : (h.hasIndividualWeekdayCols
+                    ? `Colunas individuais -> ${detectedDayCols}`
+                    : (h.combinedWeekdayCol ? `Coluna combinada -> [${h.combinedWeekdayCol}]` : 'Nenhuma coluna/tabela de dia da semana detectada')))
         );
+        if (schemaMeta.campaignBranchTable) {
+            const cb = schemaMeta.campaignBranchTable;
+            console.log(
+                `✅ Aba Promoção (Filiais): dbo.${cb.tableName} | Promo: [${cb.promoIdCol}] | Filial: [${cb.branchCol}] | Em uso: ${cb.hasRows ? 'SIM' : 'NÃO (tabela vazia)'}`
+            );
+        }
         console.log(
             `✅ Aba Promoção (Itens): dbo.${i.tableName} | Join: [${i.joinCol}] | FK Produto: [${i.prodIdCol}] | ` +
             `Preço Campanha: [${i.promoPriceCol || h.promoPriceCol || 'N/A'}] | Desconto %: [${i.discountPctCol || h.discountPctCol || 'N/A'}]`
@@ -453,9 +590,11 @@ function logInovaFarmaSchemaDetection(schemaMeta, ignorePromotionCampaigns = fal
         );
         console.log(
             `✅ Aba Promoção (Dias da Semana em dbo.${h.tableName}): ` +
-            (h.hasIndividualWeekdayCols
-                ? `Colunas individuais -> ${detectedDayCols}`
-                : (h.combinedWeekdayCol ? `Coluna combinada -> [${h.combinedWeekdayCol}]` : 'Nenhuma coluna de dia da semana detectada'))
+            (schemaMeta.campaignDayTable
+                ? `Tabela filha dbo.${schemaMeta.campaignDayTable.tableName} ([${schemaMeta.campaignDayTable.dayCol}], convenção=${schemaMeta.campaignDayTable.convention})`
+                : (h.hasIndividualWeekdayCols
+                    ? `Colunas individuais -> ${detectedDayCols}`
+                    : (h.combinedWeekdayCol ? `Coluna combinada -> [${h.combinedWeekdayCol}]` : 'Nenhuma coluna/tabela de dia da semana detectada')))
         );
     }
 
@@ -463,7 +602,7 @@ function logInovaFarmaSchemaDetection(schemaMeta, ignorePromotionCampaigns = fal
         `🛡️  Modo de Resolução de Promoções: ${
             ignorePromotionCampaigns
                 ? 'IGNORAR CAMPANHAS DA ABA PROMOÇÃO (usando apenas PREÇO PROM. da aba Estoque)'
-                : 'VALIDAÇÃO ESTRITA (Data + Dia da Semana c/ proteção NULL: se >=1 dia marcado, NULL nos demais = 0/inativo)'
+                : 'VALIDAÇÃO ESTRITA (Data + Dia da Semana c/ menor preço entre Campanha hoje e Produto_Estoque)'
         }`
     );
     console.log('---------------------------------------------------\n');
@@ -609,14 +748,14 @@ function buildStrictInovaFarmaPriceQuery(schemaMeta, options = {}) {
         finalSellingExpr = `CASE WHEN ISNULL(CAST(b.[${b.sellingPriceCol}] AS DECIMAL(18, 2)), 0) > 0 THEN CAST(b.[${b.sellingPriceCol}] AS DECIMAL(18, 2)) ELSE ${prodSellingExpr} END`;
     }
 
-    // 2. Expressão para PrecoPromocaoEstoque (PREÇO PROM. da aba ESTOQUE)
+    // 2. Expressão para PrecoPromocaoEstoque (PREÇO PROM. da aba ESTOQUE / Produto_Estoque)
     let prodPromoRawExpr = p.promoPriceCol ? `ISNULL(CAST(p.[${p.promoPriceCol}] AS DECIMAL(18, 2)), 0)` : '0';
     const prodDateChecks = [];
     if (p.promoStartCol) {
         prodDateChecks.push(`(p.[${p.promoStartCol}] IS NULL OR YEAR(p.[${p.promoStartCol}]) <= 1900 OR @HojeData >= CAST(p.[${p.promoStartCol}] AS DATE))`);
     }
     if (p.promoEndCol) {
-        prodDateChecks.push(`(p.[${p.promoEndCol}] IS NULL OR (YEAR(p.[${p.promoEndCol}]) > 1900 AND @HojeData <= CAST(p.[${p.promoEndCol}] AS DATE)))`);
+        prodDateChecks.push(`(p.[${p.promoEndCol}] IS NULL OR YEAR(p.[${p.promoEndCol}]) <= 1900 OR @HojeData <= CAST(p.[${p.promoEndCol}] AS DATE))`);
     }
     if (prodDateChecks.length > 0) {
         prodPromoRawExpr = `CASE WHEN ${prodDateChecks.join(' AND ')} THEN ${prodPromoRawExpr} ELSE 0 END`;
@@ -630,7 +769,21 @@ function buildStrictInovaFarmaPriceQuery(schemaMeta, options = {}) {
             branchDateChecks.push(`(b.[${b.promoStartCol}] IS NULL OR YEAR(b.[${b.promoStartCol}]) <= 1900 OR @HojeData >= CAST(b.[${b.promoStartCol}] AS DATE))`);
         }
         if (b.promoEndCol) {
-            branchDateChecks.push(`(b.[${b.promoEndCol}] IS NULL OR (YEAR(b.[${b.promoEndCol}]) > 1900 AND @HojeData <= CAST(b.[${b.promoEndCol}] AS DATE)))`);
+            branchDateChecks.push(`(b.[${b.promoEndCol}] IS NULL OR YEAR(b.[${b.promoEndCol}]) <= 1900 OR @HojeData <= CAST(b.[${b.promoEndCol}] AS DATE))`);
+        }
+        if (
+            b.offerStartCol &&
+            b.offerEndCol &&
+            b.offerStartCol !== b.promoStartCol &&
+            b.offerEndCol !== b.promoEndCol &&
+            b.offerFlagCol
+        ) {
+            branchDateChecks.push(
+                `(ISNULL(CAST(b.[${b.offerFlagCol}] AS INT), 0) = 0 OR (` +
+                `(b.[${b.offerStartCol}] IS NULL OR YEAR(b.[${b.offerStartCol}]) <= 1900 OR @HojeData >= CAST(b.[${b.offerStartCol}] AS DATE))` +
+                ` AND (b.[${b.offerEndCol}] IS NULL OR YEAR(b.[${b.offerEndCol}]) <= 1900 OR @HojeData <= CAST(b.[${b.offerEndCol}] AS DATE))` +
+                `))`
+            );
         }
         if (branchDateChecks.length > 0) {
             branchPromoRaw = `CASE WHEN ${branchDateChecks.join(' AND ')} THEN ${branchPromoRaw} ELSE 0 END`;
@@ -638,8 +791,41 @@ function buildStrictInovaFarmaPriceQuery(schemaMeta, options = {}) {
         finalStockPromoExpr = `CASE WHEN (${branchPromoRaw}) > 0 THEN (${branchPromoRaw}) ELSE (${prodPromoRawExpr}) END`;
     }
 
-    // 3. Subquery OUTER APPLY para Campanhas da aba PROMOÇÃO válidas hoje (Data + Dia da Semana)
+    // 3. Subquery OUTER APPLY para Campanhas da aba PROMOÇÃO válidas hoje (Data + Filial Promocao_Empresa + Dia da Semana Promocao_Dia*)
     let campaignOuterApplySql = `OUTER APPLY (SELECT CAST(NULL AS DECIMAL(18, 2)) AS PrecoCampanhaHoje) camp`;
+
+    const buildExtraCampaignTableConds = (headerAlias, headerMeta) => {
+        const extra = [];
+        const cb = schemaMeta.campaignBranchTable;
+        if (hasBranch && cb && cb.hasRows && headerMeta?.promoIdCol) {
+            extra.push(`EXISTS (
+                SELECT 1
+                FROM dbo.[${cb.tableName}] pe WITH (NOLOCK)
+                WHERE pe.[${cb.promoIdCol}] = ${headerAlias}.[${headerMeta.promoIdCol}]
+                  AND LTRIM(RTRIM(CAST(pe.[${cb.branchCol}] AS VARCHAR(20)))) = @branchCode
+            )`);
+        }
+
+        const cd = schemaMeta.campaignDayTable;
+        if (cd && headerMeta?.promoIdCol) {
+            // Se a campanha NÃO tiver registros em Promocao_Dia*, vale todos os dias da semana;
+            // se tiver registros, só vale quando o dia atual (@HojeDiaTabela) constar na tabela.
+            extra.push(`(
+                NOT EXISTS (
+                    SELECT 1
+                    FROM dbo.[${cd.tableName}] pdAll WITH (NOLOCK)
+                    WHERE pdAll.[${cd.promoIdCol}] = ${headerAlias}.[${headerMeta.promoIdCol}]
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM dbo.[${cd.tableName}] pdToday WITH (NOLOCK)
+                    WHERE pdToday.[${cd.promoIdCol}] = ${headerAlias}.[${headerMeta.promoIdCol}]
+                      AND CAST(pdToday.[${cd.dayCol}] AS INT) = @HojeDiaTabela
+                )
+            )`);
+        }
+        return extra;
+    };
 
     const cs = schemaMeta.campaignSource;
     if (cs) {
@@ -649,7 +835,8 @@ function buildStrictInovaFarmaPriceQuery(schemaMeta, options = {}) {
             const whereConds = [
                 `pi.[${i.prodIdCol}] = p.[${p.prodIdCol}]`,
                 ...buildCampaignWhereConditions('pr', h, hasBranch),
-                ...buildCampaignWhereConditions('pi', i, hasBranch)
+                ...buildCampaignWhereConditions('pi', i, hasBranch),
+                ...buildExtraCampaignTableConds('pr', h)
             ];
 
             let priceValExpr = '0';
@@ -679,7 +866,8 @@ function buildStrictInovaFarmaPriceQuery(schemaMeta, options = {}) {
             const h = cs.header;
             const whereConds = [
                 `pr.[${h.prodIdCol}] = p.[${p.prodIdCol}]`,
-                ...buildCampaignWhereConditions('pr', h, hasBranch)
+                ...buildCampaignWhereConditions('pr', h, hasBranch),
+                ...buildExtraCampaignTableConds('pr', h)
             ];
 
             let priceValExpr = h.promoPriceCol
@@ -701,10 +889,25 @@ function buildStrictInovaFarmaPriceQuery(schemaMeta, options = {}) {
     }
 
     const branchJoinSql = b
-        ? `LEFT JOIN dbo.[${b.tableName}] b WITH (NOLOCK) ON b.[${b.prodIdCol}] = p.[${p.prodIdCol}]${
-              hasBranch ? ` AND LTRIM(RTRIM(CAST(b.[${b.branchCol}] AS VARCHAR(20)))) = @branchCode` : ''
-          }`
+        ? (hasBranch
+            ? `LEFT JOIN dbo.[${b.tableName}] b WITH (NOLOCK) ON b.[${b.prodIdCol}] = p.[${p.prodIdCol}] AND LTRIM(RTRIM(CAST(b.[${b.branchCol}] AS VARCHAR(20)))) = @branchCode`
+            : `OUTER APPLY (SELECT TOP 1 * FROM dbo.[${b.tableName}] b0 WITH (NOLOCK) WHERE b0.[${b.prodIdCol}] = p.[${p.prodIdCol}] ORDER BY b0.[${b.branchCol}] ASC) b`)
         : '';
+
+    // Convenção da tabela Promocao_Dia*:
+    // - '0_sun_6_sat': 0=Dom .. 6=Sáb
+    // - '1_mon_7_sun': 1=Seg .. 7=Dom (ISO)
+    // - '1_sun_7_sat' (padrão SQL DATEPART): 1=Dom .. 7=Sáb
+    const dayConvention = schemaMeta.campaignDayTable?.convention || '1_sun_7_sat';
+    let diaTabelaExpr = '(((DATEPART(WEEKDAY, GETDATE()) + @@DATEFIRST - 1) % 7) + 1)';
+    if (dayConvention === '0_sun_6_sat') {
+        diaTabelaExpr = '((DATEPART(WEEKDAY, GETDATE()) + @@DATEFIRST - 1) % 7)';
+    } else if (dayConvention === '1_mon_7_sun') {
+        diaTabelaExpr = '(((DATEPART(WEEKDAY, GETDATE()) + @@DATEFIRST - 2) % 7) + 1)';
+    }
+
+    const campValidExpr = `camp.PrecoCampanhaHoje IS NOT NULL AND camp.PrecoCampanhaHoje > 0 AND camp.PrecoCampanhaHoje < (${finalSellingExpr})`;
+    const stockValidExpr = `(${finalStockPromoExpr}) > 0 AND (${finalStockPromoExpr}) < (${finalSellingExpr})`;
 
     return `
         SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -713,31 +916,39 @@ function buildStrictInovaFarmaPriceQuery(schemaMeta, options = {}) {
         DECLARE @HojeData DATE = CAST(GETDATE() AS DATE);
         -- Cálculo independente de DATEFIRST: 0=Seg, 1=Ter, 2=Qua, 3=Qui, 4=Sex, 5=Sab, 6=Dom
         DECLARE @HojeDiaSemana INT = ((DATEPART(WEEKDAY, GETDATE()) + @@DATEFIRST - 2) % 7);
+        -- Dia na convenção da tabela Promocao_Dia* (${dayConvention})
+        DECLARE @HojeDiaTabela INT = ${diaTabelaExpr};
 
         SELECT
             p.[${p.prodIdCol}] AS CodigoProduto,
             CAST(${finalSellingExpr} AS DECIMAL(18, 2)) AS PrecoVendaEstoque,
             CASE
-                WHEN (${finalStockPromoExpr}) > 0 AND (${finalStockPromoExpr}) < (${finalSellingExpr})
+                WHEN ${stockValidExpr}
                     THEN CAST(${finalStockPromoExpr} AS DECIMAL(18, 2))
                 ELSE NULL
             END AS PrecoPromocaoEstoque,
             CASE
                 WHEN @IgnorePromotionCampaigns = 1 THEN NULL
-                WHEN camp.PrecoCampanhaHoje IS NOT NULL AND camp.PrecoCampanhaHoje > 0 AND camp.PrecoCampanhaHoje < (${finalSellingExpr})
+                WHEN ${campValidExpr}
                     THEN CAST(camp.PrecoCampanhaHoje AS DECIMAL(18, 2))
                 ELSE NULL
             END AS PrecoCampanhaValidaHoje,
             CASE
                 WHEN @IgnorePromotionCampaigns = 1 THEN
                     CASE
-                        WHEN (${finalStockPromoExpr}) > 0 AND (${finalStockPromoExpr}) < (${finalSellingExpr})
+                        WHEN ${stockValidExpr}
                             THEN CAST(${finalStockPromoExpr} AS DECIMAL(18, 2))
                         ELSE NULL
                     END
-                WHEN camp.PrecoCampanhaHoje IS NOT NULL AND camp.PrecoCampanhaHoje > 0 AND camp.PrecoCampanhaHoje < (${finalSellingExpr})
+                WHEN (${campValidExpr}) AND (${stockValidExpr}) THEN
+                    CASE
+                        WHEN camp.PrecoCampanhaHoje <= (${finalStockPromoExpr})
+                            THEN CAST(camp.PrecoCampanhaHoje AS DECIMAL(18, 2))
+                        ELSE CAST(${finalStockPromoExpr} AS DECIMAL(18, 2))
+                    END
+                WHEN ${campValidExpr}
                     THEN CAST(camp.PrecoCampanhaHoje AS DECIMAL(18, 2))
-                WHEN (${finalStockPromoExpr}) > 0 AND (${finalStockPromoExpr}) < (${finalSellingExpr})
+                WHEN ${stockValidExpr}
                     THEN CAST(${finalStockPromoExpr} AS DECIMAL(18, 2))
                 ELSE NULL
             END AS PrecoPromocionalFinal
@@ -818,11 +1029,14 @@ async function applyInovaFarmaStrictPromotionRules(pool, rawRecords, options = {
 
         if (!options.connectorInstance?._hasLoggedPromoRuleSummary) {
             const cs = schemaMeta.campaignSource;
-            const weekdayInfo = cs
-                ? (cs.header?.hasIndividualWeekdayCols
-                    ? `Flags Seg..Dom (${Object.values(cs.header.weekdayCols).filter(Boolean).join(', ')})`
-                    : (cs.header?.combinedWeekdayCol ? `Coluna ${cs.header.combinedWeekdayCol}` : 'Filtro nominal + datas'))
-                : 'Apenas Preço Prom. da aba Estoque';
+            const cd = schemaMeta.campaignDayTable;
+            const weekdayInfo = cd
+                ? `Tabela dbo.${cd.tableName} (${cd.dayCol}, ${cd.convention})`
+                : (cs
+                    ? (cs.header?.hasIndividualWeekdayCols
+                        ? `Flags Seg..Dom (${Object.values(cs.header.weekdayCols).filter(Boolean).join(', ')})`
+                        : (cs.header?.combinedWeekdayCol ? `Coluna ${cs.header.combinedWeekdayCol}` : 'Filtro nominal + datas'))
+                    : 'Apenas Preço Prom. da aba Estoque');
             console.log(
                 `[InovaFarma Promo Filter] Regra estrita ativa (Ignorar Campanhas=${ignorePromotionCampaigns ? 'SIM' : 'NÃO'} | ` +
                 `Controle Dias da Semana: ${weekdayInfo} | ${priceByCodigoMap.size} produtos verificados via READ UNCOMMITTED).`
