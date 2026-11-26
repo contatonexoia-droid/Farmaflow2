@@ -168,11 +168,11 @@ async function inspectInovaFarmaSchema(pool) {
                 SELECT TABLE_NAME
                 FROM INFORMATION_SCHEMA.TABLES
                 WHERE TABLE_SCHEMA = 'dbo'
-                  AND TABLE_TYPE = 'BASE TABLE'
+                  AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
                   AND TABLE_NAME LIKE 'Promocao_Dia%'
                 ORDER BY CASE
-                    WHEN TABLE_NAME = 'Promocao_Dia' THEN 0
-                    WHEN TABLE_NAME = 'Promocao_DiaSemana' THEN 1
+                    WHEN TABLE_NAME = 'Promocao_DiaSemana' THEN 0
+                    WHEN TABLE_NAME = 'Promocao_Dia' THEN 1
                     ELSE 2
                 END, TABLE_NAME;
             `);
@@ -412,14 +412,15 @@ async function inspectInovaFarmaSchema(pool) {
             }
         }
 
-        // 4. Detecta tabela filha de dias da semana (dbo.Promocao_Dia / dbo.Promocao_DiaSemana) e inspeciona convenção de Dia
+        // 4. Detecta tabela filha de dias da semana (dbo.Promocao_DiaSemana / dbo.Promocao_Dia) e inspeciona convenção de Dia
         let campaignDayTable = null;
+        const candidateDayTables = [];
         for (const dtName of promoDiaTableNames) {
             const dtCols = tablesMap.get(dtName) || [];
             const dtPromoIdCol = findMatchingColumn(dtCols, ['CodigoPromocao', 'IdPromocao', 'CodPromocao', 'CodigoCampanha', 'IdCampanha']) || 'CodigoPromocao';
             const dtDayCol = findMatchingColumn(dtCols, ['Dia', 'DiaSemana', 'NumeroDia', 'NrDia', 'CodigoDia']) || 'Dia';
             let distinctDays = [];
-            let convention = '1_sun_7_sat'; // Padrão SQL Server DATEPART(WEEKDAY): 1=Dom .. 7=Sáb
+            let convention = '1_sun_7_sat'; // Padrão SET DATEFIRST 7 / DATEPART(WEEKDAY): 1=Dom .. 7=Sáb
 
             try {
                 const daysRes = await pool.request().query(`
@@ -476,14 +477,17 @@ async function inspectInovaFarmaSchema(pool) {
                 }
             } catch (_) {}
 
-            campaignDayTable = {
+            candidateDayTables.push({
                 tableName: dtName,
                 promoIdCol: dtPromoIdCol,
                 dayCol: dtDayCol,
                 distinctDays,
                 convention
-            };
-            break;
+            });
+        }
+
+        if (candidateDayTables.length > 0) {
+            campaignDayTable = candidateDayTables.find(t => t.distinctDays.length > 0) || candidateDayTables[0];
         }
 
         return {
@@ -631,7 +635,7 @@ function buildCampaignWhereConditions(alias, meta, hasBranchParam = false) {
 
     // 1. Filial / Loja (se existir coluna de empresa/filial na tabela de promoção)
     if (hasBranchParam && meta.branchCol) {
-        conds.push(`(${alias}.[${meta.branchCol}] IS NULL OR ${alias}.[${meta.branchCol}] = 0 OR CAST(${alias}.[${meta.branchCol}] AS VARCHAR(20)) = @branchCode)`);
+        conds.push(`(${alias}.[${meta.branchCol}] IS NULL OR LTRIM(RTRIM(CAST(${alias}.[${meta.branchCol}] AS VARCHAR(20)))) IN ('', '0') OR LTRIM(RTRIM(CAST(${alias}.[${meta.branchCol}] AS VARCHAR(20)))) = @branchCode)`);
     }
 
     // 2. Flags negativas (Eliminado, Cancelado, Inativo, Excluido, Encerrado)
@@ -809,18 +813,18 @@ function buildStrictInovaFarmaPriceQuery(schemaMeta, options = {}) {
         const cd = schemaMeta.campaignDayTable;
         if (cd && headerMeta?.promoIdCol) {
             // Se a campanha NÃO tiver registros em Promocao_Dia*, vale todos os dias da semana;
-            // se tiver registros, só vale quando o dia atual (@HojeDiaTabela) constar na tabela.
+            // se tiver registros, só vale quando o dia atual (@diaSemanaAtual) constar na tabela.
             extra.push(`(
                 NOT EXISTS (
                     SELECT 1
-                    FROM dbo.[${cd.tableName}] pdAll WITH (NOLOCK)
-                    WHERE pdAll.[${cd.promoIdCol}] = ${headerAlias}.[${headerMeta.promoIdCol}]
+                    FROM dbo.[${cd.tableName}] d WITH (NOLOCK)
+                    WHERE d.[${cd.promoIdCol}] = ${headerAlias}.[${headerMeta.promoIdCol}]
                 )
                 OR EXISTS (
                     SELECT 1
-                    FROM dbo.[${cd.tableName}] pdToday WITH (NOLOCK)
-                    WHERE pdToday.[${cd.promoIdCol}] = ${headerAlias}.[${headerMeta.promoIdCol}]
-                      AND CAST(pdToday.[${cd.dayCol}] AS INT) = @HojeDiaTabela
+                    FROM dbo.[${cd.tableName}] d WITH (NOLOCK)
+                    WHERE d.[${cd.promoIdCol}] = ${headerAlias}.[${headerMeta.promoIdCol}]
+                      AND CAST(d.[${cd.dayCol}] AS INT) = @diaSemanaAtual
                 )
             )`);
         }
@@ -854,13 +858,17 @@ function buildStrictInovaFarmaPriceQuery(schemaMeta, options = {}) {
 
             whereConds.push(`(${priceValExpr}) > 0`);
 
+            // Usa SELECT TOP 1 ... ORDER BY PrecoCampanhaHoje ASC (sem MIN/MAX correlacionado)
+            // para evitar erro SQL Server "Multiple columns are specified in an aggregated expression containing an outer reference".
             campaignOuterApplySql = `
             OUTER APPLY (
-                SELECT MIN(CAST(${priceValExpr} AS DECIMAL(18, 2))) AS PrecoCampanhaHoje
+                SELECT TOP 1
+                    CAST(${priceValExpr} AS DECIMAL(18, 2)) AS PrecoCampanhaHoje
                 FROM dbo.[${i.tableName}] pi WITH (NOLOCK)
                 INNER JOIN dbo.[${h.tableName}] pr WITH (NOLOCK)
                     ON pr.[${h.promoIdCol}] = pi.[${i.joinCol}]
                 WHERE ${whereConds.join('\n                  AND ')}
+                ORDER BY PrecoCampanhaHoje ASC
             ) camp`;
         } else if (cs.mode === 'single_table' && cs.header) {
             const h = cs.header;
@@ -881,9 +889,11 @@ function buildStrictInovaFarmaPriceQuery(schemaMeta, options = {}) {
 
             campaignOuterApplySql = `
             OUTER APPLY (
-                SELECT MIN(CAST(${priceValExpr} AS DECIMAL(18, 2))) AS PrecoCampanhaHoje
+                SELECT TOP 1
+                    CAST(${priceValExpr} AS DECIMAL(18, 2)) AS PrecoCampanhaHoje
                 FROM dbo.[${h.tableName}] pr WITH (NOLOCK)
                 WHERE ${whereConds.join('\n                  AND ')}
+                ORDER BY PrecoCampanhaHoje ASC
             ) camp`;
         }
     }
@@ -894,16 +904,17 @@ function buildStrictInovaFarmaPriceQuery(schemaMeta, options = {}) {
             : `OUTER APPLY (SELECT TOP 1 * FROM dbo.[${b.tableName}] b0 WITH (NOLOCK) WHERE b0.[${b.prodIdCol}] = p.[${p.prodIdCol}] ORDER BY b0.[${b.branchCol}] ASC) b`)
         : '';
 
-    // Convenção da tabela Promocao_Dia*:
+    // Com SET DATEFIRST 7: DATEPART(WEEKDAY, GETDATE()) retorna sempre 1=Domingo .. 7=Sábado.
+    // Convenções suportadas da tabela Promocao_Dia*:
+    // - '1_sun_7_sat' (padrão dbo.Promocao_DiaSemana.Dia): 1=Dom .. 7=Sáb
     // - '0_sun_6_sat': 0=Dom .. 6=Sáb
-    // - '1_mon_7_sun': 1=Seg .. 7=Dom (ISO)
-    // - '1_sun_7_sat' (padrão SQL DATEPART): 1=Dom .. 7=Sáb
+    // - '1_mon_7_sun' (ISO): 1=Seg .. 7=Dom
     const dayConvention = schemaMeta.campaignDayTable?.convention || '1_sun_7_sat';
-    let diaTabelaExpr = '(((DATEPART(WEEKDAY, GETDATE()) + @@DATEFIRST - 1) % 7) + 1)';
+    let diaTabelaExpr = 'DATEPART(WEEKDAY, GETDATE())';
     if (dayConvention === '0_sun_6_sat') {
-        diaTabelaExpr = '((DATEPART(WEEKDAY, GETDATE()) + @@DATEFIRST - 1) % 7)';
+        diaTabelaExpr = '(DATEPART(WEEKDAY, GETDATE()) - 1)';
     } else if (dayConvention === '1_mon_7_sun') {
-        diaTabelaExpr = '(((DATEPART(WEEKDAY, GETDATE()) + @@DATEFIRST - 2) % 7) + 1)';
+        diaTabelaExpr = '(((DATEPART(WEEKDAY, GETDATE()) + 5) % 7) + 1)';
     }
 
     const campValidExpr = `camp.PrecoCampanhaHoje IS NOT NULL AND camp.PrecoCampanhaHoje > 0 AND camp.PrecoCampanhaHoje < (${finalSellingExpr})`;
@@ -912,12 +923,13 @@ function buildStrictInovaFarmaPriceQuery(schemaMeta, options = {}) {
     return `
         SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
         SET NOCOUNT ON;
+        SET DATEFIRST 7;
 
         DECLARE @HojeData DATE = CAST(GETDATE() AS DATE);
-        -- Cálculo independente de DATEFIRST: 0=Seg, 1=Ter, 2=Qua, 3=Qui, 4=Sex, 5=Sab, 6=Dom
-        DECLARE @HojeDiaSemana INT = ((DATEPART(WEEKDAY, GETDATE()) + @@DATEFIRST - 2) % 7);
+        -- Com DATEFIRST 7 (1=Dom..7=Sáb): ((WEEKDAY + 5) % 7) => 0=Seg, 1=Ter, 2=Qua, 3=Qui, 4=Sex, 5=Sab, 6=Dom
+        DECLARE @HojeDiaSemana INT = ((DATEPART(WEEKDAY, GETDATE()) + 5) % 7);
         -- Dia na convenção da tabela Promocao_Dia* (${dayConvention})
-        DECLARE @HojeDiaTabela INT = ${diaTabelaExpr};
+        DECLARE @diaSemanaAtual INT = ${diaTabelaExpr};
 
         SELECT
             p.[${p.prodIdCol}] AS CodigoProduto,
