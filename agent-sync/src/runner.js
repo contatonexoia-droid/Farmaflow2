@@ -118,6 +118,57 @@ function resolveCliIgnorePromoFlag() {
     return undefined;
 }
 
+function normalizeBranchCodeValue(val) {
+    if (val === undefined || val === null) return null;
+    const cleaned = String(val).trim();
+    return cleaned.length > 0 ? cleaned : null;
+}
+
+function resolveCliBranchCode() {
+    const args = process.argv.slice(2).map(a => String(a || '').trim());
+    for (const arg of args) {
+        const match = arg.match(/^--(?:branch-code|branch|filial|codigo-filial)=(.+)$/i);
+        if (match) {
+            return normalizeBranchCodeValue(match[1]);
+        }
+    }
+    return null;
+}
+
+function resolveConfiguredBranchCode(localConfig = {}, cloudConfig = {}) {
+    const cliBranch = resolveCliBranchCode();
+    if (cliBranch) return cliBranch;
+
+    const envBranch = normalizeBranchCodeValue(
+        process.env.BRANCH_CODE ||
+        process.env.ERP_BRANCH_CODE ||
+        process.env.CODIGO_FILIAL
+    );
+    if (envBranch) return envBranch;
+
+    const localBranch = normalizeBranchCodeValue(
+        localConfig?.branchCode ??
+        localConfig?.branch_code ??
+        localConfig?.codigoFilial ??
+        localConfig?.codigo_filial ??
+        localConfig?.dbConfig?.branchCode ??
+        localConfig?.dbConfig?.branch_code ??
+        localConfig?.dbConfig?.codigoFilial ??
+        localConfig?.dbConfig?.codigo_filial
+    );
+    if (localBranch) return localBranch;
+
+    const cloudBranch = normalizeBranchCodeValue(
+        cloudConfig?.branchCode ??
+        cloudConfig?.branch_code ??
+        cloudConfig?.dbConfig?.branchCode ??
+        cloudConfig?.dbConfig?.branch_code
+    );
+    if (cloudBranch) return cloudBranch;
+
+    return null;
+}
+
 function resolveMaxSyncDate(records) {
     let maxTimestamp = 0;
     for (const r of records) {
@@ -149,6 +200,7 @@ async function startAgent(expectedErpType, ConnectorClass) {
     const cliIgnorePromo = resolveCliIgnorePromoFlag();
 
     if (!config || !config.activated) {
+        const existingConfig = config || {};
         console.log('⚠️ Agente não configurado.');
         const token = await askForToken();
 
@@ -177,21 +229,32 @@ async function startAgent(expectedErpType, ConnectorClass) {
                     ? cliIgnorePromo
                     : await askIgnorePromotionCampaigns(remoteIgnorePromo);
 
+            const resolvedBranchCode = resolveConfiguredBranchCode(existingConfig, apiConfig);
+            const mergedDbConfig = {
+                ...(apiConfig.dbConfig || {}),
+                ...(existingConfig.dbConfig && typeof existingConfig.dbConfig === 'object' ? existingConfig.dbConfig : {}),
+                ignorePromotionCampaigns,
+                enablePdvPreSale: false
+            };
+            if (resolvedBranchCode) {
+                mergedDbConfig.branchCode = resolvedBranchCode;
+            } else {
+                delete mergedDbConfig.branchCode;
+            }
+
             config = {
+                ...existingConfig,
                 activated: true,
                 erpType: apiConfig.erpType,
                 readOnlyMode: true,
                 enablePdvPreSale: false,
-                syncIntervalMinutes: 5,
-                dbConfig: {
-                    ...(apiConfig.dbConfig || {}),
-                    ignorePromotionCampaigns,
-                    enablePdvPreSale: false
-                },
+                syncIntervalMinutes: existingConfig.syncIntervalMinutes || 5,
+                branchCode: resolvedBranchCode,
+                dbConfig: mergedDbConfig,
                 ignorePromotionCampaigns,
                 apiKey: apiConfig.apiKey,
-                apiUrl: 'https://farmaflow.online/api/v1',
-                lastSyncDate: '1970-01-01T00:00:00.000Z'
+                apiUrl: existingConfig.apiUrl || 'https://farmaflow.online/api/v1',
+                lastSyncDate: existingConfig.lastSyncDate || '1970-01-01T00:00:00.000Z'
             };
             saveConfig(config);
             console.log('✅ Token validado e configurações salvas com sucesso!\n');
@@ -205,6 +268,19 @@ async function startAgent(expectedErpType, ConnectorClass) {
             config.dbConfig.ignorePromotionCampaigns = cliIgnorePromo;
         }
         saveConfig(config);
+    }
+
+    const effectiveBranchCode = resolveConfiguredBranchCode(config, {});
+    if (config.dbConfig && typeof config.dbConfig === 'object') {
+        if (effectiveBranchCode) {
+            if (config.branchCode !== effectiveBranchCode || config.dbConfig.branchCode !== effectiveBranchCode) {
+                config.branchCode = effectiveBranchCode;
+                config.dbConfig.branchCode = effectiveBranchCode;
+                saveConfig(config);
+            }
+        } else if ('branchCode' in config.dbConfig && !config.dbConfig.branchCode) {
+            delete config.dbConfig.branchCode;
+        }
     }
 
     const effectiveIgnorePromo = Boolean(
@@ -228,6 +304,11 @@ async function startAgent(expectedErpType, ConnectorClass) {
     let isSyncRunning = false;
 
     console.log(
+        `🏢 Filial configurada (branchCode): ${
+            effectiveBranchCode ? effectiveBranchCode : 'NÃO DEFINIDA (sem filtro fixo por filial)'
+        }`
+    );
+    console.log(
         `🏷️  Ignorar campanhas da aba Promoção (usar apenas Preço Prom. do produto): ${
             effectiveIgnorePromo ? 'SIM (Ativado)' : 'NÃO (Valida campanhas por Data + Dia da Semana)'
         }`
@@ -244,6 +325,7 @@ async function startAgent(expectedErpType, ConnectorClass) {
     );
 
     const connector = new ConnectorClass(config.dbConfig);
+    connector.branchCode = effectiveBranchCode;
     connector.ignorePromotionCampaigns = effectiveIgnorePromo;
     connector.enablePdvPreSale = enablePdvPreSale;
     const processedOrderIds = new Map();
@@ -252,6 +334,7 @@ async function startAgent(expectedErpType, ConnectorClass) {
     async function heartbeatLoop() {
         try {
             const hbData = await sendHeartbeat(config.apiKey);
+            let configChanged = false;
             if (hbData && typeof hbData.ignore_promotion_campaigns === 'boolean') {
                 const cloudFlag = hbData.ignore_promotion_campaigns;
                 if (Boolean(connector.ignorePromotionCampaigns) !== cloudFlag) {
@@ -265,10 +348,27 @@ async function startAgent(expectedErpType, ConnectorClass) {
                     if (config.dbConfig && typeof config.dbConfig === 'object') {
                         config.dbConfig.ignorePromotionCampaigns = cloudFlag;
                     }
-                    saveConfig(config);
-                    syncCache.lastFullSyncAt = 0;
-                    saveSyncCache(syncCache);
+                    configChanged = true;
                 }
+            }
+
+            // Só adota branch_code remoto se ainda não houver um branchCode definido localmente no farmaflow_config.json / CLI / env
+            const localPinnedBranch = resolveConfiguredBranchCode(config, {});
+            const remoteBranch = normalizeBranchCodeValue(hbData?.branch_code ?? hbData?.branchCode);
+            if (!localPinnedBranch && remoteBranch && connector.branchCode !== remoteBranch) {
+                console.log(`\n🏢 [Configuração Remota] Filial (branchCode) recebida da nuvem: ${remoteBranch}`);
+                connector.branchCode = remoteBranch;
+                config.branchCode = remoteBranch;
+                if (config.dbConfig && typeof config.dbConfig === 'object') {
+                    config.dbConfig.branchCode = remoteBranch;
+                }
+                configChanged = true;
+            }
+
+            if (configChanged) {
+                saveConfig(config);
+                syncCache.lastFullSyncAt = 0;
+                saveSyncCache(syncCache);
             }
         } catch (hbError) {
             console.log(`⚠️ Alerta: Não foi possível atualizar o status (heartbeat) com o servidor: ${hbError.message}`);

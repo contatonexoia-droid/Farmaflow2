@@ -52,7 +52,10 @@ class InovaFarmaConnector {
             }
         };
         this.viewName = dbConfig.viewName || 'VW_INTEGRACAO_FARMAFLOW';
-        this.branchCode = dbConfig.branchCode || null;
+        const rawBranch = dbConfig.branchCode ?? dbConfig.branch_code ?? dbConfig.codigoFilial ?? dbConfig.codigo_filial;
+        this.branchCode = (rawBranch !== undefined && rawBranch !== null && String(rawBranch).trim() !== '')
+            ? String(rawBranch).trim()
+            : null;
         this.ignorePromotionCampaigns = resolveIgnorePromotionCampaignsFlag(dbConfig);
         this.enablePdvPreSale =
             String(process.env.ENABLE_PDV_PRESALE ?? dbConfig.enablePdvPreSale ?? 'false')

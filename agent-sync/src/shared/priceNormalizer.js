@@ -464,27 +464,57 @@ function normalizeAndSanitizeSiagoldRecord(raw) {
         /(pmc|original|tabela|maximo|consumidor)/i
     );
 
-    const rawLiquidOrPromoPrice = pickFirstPositivePrice(raw, [
-        'Preco_Liquido',
-        'preco_liquido',
-        'PRECO_LIQUIDO',
-        'Vl_Liquido',
-        'vl_liquido',
-        'Vlr_Liquido',
-        'vlr_liquido',
+    const explicitPromoKeys = [
         'preco_promocional',
         'Preco_Promocional',
         'PRECO_PROMOCIONAL',
+        'promotional_price',
+        'promotionalPrice',
+        'PrecoPromocao',
+        'preco_promocao',
+        'PRECO_PROMOCAO',
         'Vl_Promocao',
         'vl_promocao',
+        'VL_PROMOCAO',
         'Vlr_Promocao',
         'vlr_promocao',
-        'PrecoPromocao',
+        'VLR_PROMOCAO',
         'preco_oferta',
-        'promotional_price',
+        'Preco_Oferta',
+        'PRECO_OFERTA',
+        'preco_por',
+        'Preco_Por',
+        'valor_promocional',
+        'Valor_Promocional',
+        'promo_price',
+        'preco_promo',
+        'promocional'
+    ];
+
+    const liquidPriceKeys = [
+        'Preco_Liquido',
+        'preco_liquido',
+        'PRECO_LIQUIDO',
+        'PrecoLiquido',
+        'precoLiquido',
+        'PRECOLIQUIDO',
+        'Vl_Liquido',
+        'vl_liquido',
+        'VL_LIQUIDO',
+        'Vlr_Liquido',
+        'vlr_liquido',
+        'VLR_LIQUIDO',
         'Pr_Liquido',
-        'pr_liquido'
-    ]);
+        'pr_liquido',
+        'PR_LIQUIDO'
+    ];
+
+    // Quando inovafarmaPromoResolver já validou/zerou a promoção (_promoRuleValidated === true),
+    // NUNCA permite que Preco_Liquido vindo da View reintroduza uma promoção expirada/de outro dia.
+    // Mesmo sem a flag, campos explícitos de promoção têm prioridade sobre Preco_Liquido.
+    const rawLiquidOrPromoPrice = raw._promoRuleValidated === true
+        ? pickFirstPositivePrice(raw, explicitPromoKeys)
+        : pickFirstPositivePrice(raw, [...explicitPromoKeys, ...liquidPriceKeys]);
 
     // Ignorar/filtrar apenas registros onde TODOS os campos de preço sejam <= 0
     if (rawSellingPrice <= 0 && rawOriginalPrice <= 0 && rawLiquidOrPromoPrice <= 0) {
@@ -553,6 +583,7 @@ function normalizeAndSanitizeSiagoldRecord(raw) {
         Preco_Liquido: normalizedPromo !== null ? normalizedPromo : normalizedPrice,
         _priceFallbackApplied: usedOriginalFallback
     };
+    delete result._promoRuleValidated;
 
     if (extractedBarcode) {
         result.barcode = extractedBarcode;

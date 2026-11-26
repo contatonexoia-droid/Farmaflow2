@@ -702,7 +702,7 @@ function buildStrictInovaFarmaPriceQuery(schemaMeta, options = {}) {
 
     const branchJoinSql = b
         ? `LEFT JOIN dbo.[${b.tableName}] b WITH (NOLOCK) ON b.[${b.prodIdCol}] = p.[${p.prodIdCol}]${
-              hasBranch ? ` AND CAST(b.[${b.branchCol}] AS VARCHAR(20)) = @branchCode` : ''
+              hasBranch ? ` AND LTRIM(RTRIM(CAST(b.[${b.branchCol}] AS VARCHAR(20)))) = @branchCode` : ''
           }`
         : '';
 
@@ -870,10 +870,11 @@ async function applyInovaFarmaStrictPromotionRules(pool, rawRecords, options = {
                 'PrecoPromocao', 'preco_promocao', 'PRECO_PROMOCAO',
                 'promotional_price', 'promotionalPrice',
                 'vl_promocao', 'Vl_Promocao', 'VL_PROMOCAO',
-                'Vlr_Promocao', 'vlr_promocao',
+                'Vlr_Promocao', 'vlr_promocao', 'VLR_PROMOCAO',
                 'preco_oferta', 'Preco_Oferta', 'PRECO_OFERTA',
                 'preco_por', 'Preco_Por', 'PRECO_POR',
-                'valor_promocional', 'Valor_Promocional'
+                'valor_promocional', 'Valor_Promocional', 'VALOR_PROMOCIONAL',
+                'promo_price', 'preco_promo', 'promocional'
             ];
             for (const field of promoFieldsToSync) {
                 if (field in row || field === 'preco_promocional' || field === 'promotional_price' || field === 'PrecoPromocao') {
@@ -882,11 +883,21 @@ async function applyInovaFarmaStrictPromotionRules(pool, rawRecords, options = {
             }
 
             const liquidPrice = validPromo !== null ? validPromo : (precoVendaEstoque > 0 ? precoVendaEstoque : row.Preco_Liquido);
-            for (const liqField of ['Preco_Liquido', 'preco_liquido', 'PRECO_LIQUIDO', 'Vl_Liquido', 'vl_liquido', 'Pr_Liquido', 'pr_liquido']) {
+            const liquidFieldsToSync = [
+                'Preco_Liquido', 'preco_liquido', 'PRECO_LIQUIDO',
+                'PrecoLiquido', 'precoLiquido', 'PRECOLIQUIDO',
+                'Vl_Liquido', 'vl_liquido', 'VL_LIQUIDO',
+                'Vlr_Liquido', 'vlr_liquido', 'VLR_LIQUIDO',
+                'Pr_Liquido', 'pr_liquido', 'PR_LIQUIDO'
+            ];
+            for (const liqField of liquidFieldsToSync) {
                 if (liqField in row || liqField === 'Preco_Liquido') {
                     row[liqField] = liquidPrice;
                 }
             }
+
+            // Sinaliza ao priceNormalizer que a promoção já foi validada/zerada estritamente pelo resolvedor
+            row._promoRuleValidated = true;
         }
 
         return rawRecords;

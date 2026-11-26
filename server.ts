@@ -11011,6 +11011,50 @@ async function touchAgentHeartbeat(tenantId: string, machineId?: string | null, 
   }
 }
 
+const normalizeAgentBranchCode = (val: any): string | null => {
+  if (val === undefined || val === null) return null;
+  const cleaned = String(val).trim();
+  return cleaned.length > 0 ? cleaned : null;
+};
+
+const resolveTenantAgentSettings = async (
+  tenantId: string,
+  tenantObj?: any,
+  tokenObj?: any,
+  reqBody?: any,
+): Promise<{ branchCode: string | null; viewName: string | null }> => {
+  let integrationRow: { branch_code?: string | null; view_name?: string | null } | null = null;
+  try {
+    const { data } = await supabaseAdmin
+      .from('agent_integrations')
+      .select('branch_code, view_name')
+      .eq('tenant_id', tenantId)
+      .limit(1);
+    if (Array.isArray(data) && data.length > 0) {
+      integrationRow = data[0];
+    }
+  } catch (_) {}
+
+  const branchCode =
+    normalizeAgentBranchCode(reqBody?.branchCode ?? reqBody?.branch_code) ||
+    normalizeAgentBranchCode(tokenObj?.branch_code ?? tokenObj?.branchCode) ||
+    normalizeAgentBranchCode(integrationRow?.branch_code) ||
+    normalizeAgentBranchCode(tenantObj?.branch_code ?? tenantObj?.branchCode ?? tenantObj?.erp_branch) ||
+    normalizeAgentBranchCode(
+      tenantObj?.delivery_settings?.branch_code ??
+      tenantObj?.delivery_settings?.branchCode ??
+      tenantObj?.delivery_settings?.codigo_filial ??
+      tenantObj?.delivery_settings?.erp_branch_code,
+    ) ||
+    null;
+
+  const viewName =
+    (integrationRow?.view_name && String(integrationRow.view_name).trim()) ||
+    null;
+
+  return { branchCode, viewName };
+};
+
 const validateTokenHandler = async (req: express.Request, res: express.Response) => {
   console.log(`\n[DESKTOP AGENT] Recebida requisição de validação em /api/v1/integration/validate-token`);
   try {
@@ -11041,9 +11085,9 @@ const validateTokenHandler = async (req: express.Request, res: express.Response)
 
     const { data: tenant } = await supabaseAdmin
       .from('tenants')
-      .select('id, name, slug, erp_type, integration_token, delivery_settings')
+      .select('*')
       .eq('id', tokenData.tenant_id)
-      .single();
+      .maybeSingle();
       
     void touchAgentHeartbeat(tokenData.tenant_id, mId, token, true);
 
@@ -11052,7 +11096,13 @@ const validateTokenHandler = async (req: express.Request, res: express.Response)
       (tenant as any)?.ignore_promotion_campaigns === true ||
       tenant?.delivery_settings?.ignore_promotion_campaigns === true
     );
-    console.log(`[DESKTOP AGENT] Token validado com sucesso para tenant: ${tokenData.tenant_id} (${tenant?.name || 'Farmácia'}, ERP: ${erpType})`);
+    const { branchCode: resolvedBranchCode, viewName: configuredViewName } = await resolveTenantAgentSettings(
+      tokenData.tenant_id,
+      tenant,
+      tokenData,
+      req.body,
+    );
+    console.log(`[DESKTOP AGENT] Token validado com sucesso para tenant: ${tokenData.tenant_id} (${tenant?.name || 'Farmácia'}, ERP: ${erpType}, branchCode: ${resolvedBranchCode || 'NÃO DEFINIDA'})`);
 
     let defaultDatabase = "SIAGOLD";
     let defaultPort = 1433;
@@ -11071,10 +11121,12 @@ const validateTokenHandler = async (req: express.Request, res: express.Response)
       defaultUser = "postgres";
     }
 
-    const defaultViewName = erpType === "siagold" ? "vw_FarmaFlow_Itens" : "VW_INTEGRACAO_FARMAFLOW";
+    const defaultViewName = configuredViewName || (erpType === "siagold" ? "vw_FarmaFlow_Itens" : "VW_INTEGRACAO_FARMAFLOW");
 
     res.json({
       erpType: erpType,
+      branchCode: resolvedBranchCode,
+      branch_code: resolvedBranchCode,
       ignorePromotionCampaigns,
       ignore_promotion_campaigns: ignorePromotionCampaigns,
       dbConfig: {
@@ -11083,7 +11135,7 @@ const validateTokenHandler = async (req: express.Request, res: express.Response)
         server: defaultServer,
         port: defaultPort,
         database: defaultDatabase,
-        branchCode: "1",
+        ...(resolvedBranchCode ? { branchCode: resolvedBranchCode } : {}),
         viewName: defaultViewName,
         fallbackViewName: "VW_INTEGRACAO_FARMAFLOW",
         ignorePromotionCampaigns
@@ -11124,12 +11176,15 @@ const handleHeartbeat = async (req: express.Request, res: express.Response) => {
         tenant?.ignore_promotion_campaigns === true ||
         tenant?.delivery_settings?.ignore_promotion_campaigns === true
       );
+      const { branchCode: resolvedBranchCode } = await resolveTenantAgentSettings(tenantId, tenant);
       return res.json({ 
         success: true, 
         ok: true,
         tenant_id: tenantId, 
         tenant_name: tenant?.name || null,
         machine_id: machineId || null,
+        branch_code: resolvedBranchCode,
+        branchCode: resolvedBranchCode,
         ignore_promotion_campaigns: ignorePromotionCampaigns,
         ignorePromotionCampaigns,
         last_seen: now 
@@ -12603,6 +12658,8 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
       const existingProductsPayload: any[] = [];
       const unchangedExistingRowsForCache: any[] = [];
       let chunkIgnoredNewZeroStock = 0;
+      let chunkUnchangedEqualityCount = 0;
+      let chunkIgnoredByErpPricesCount = 0;
 
       chunk.forEach(rawItem => {
          const { _isExplicitlyInactive, ...item } = rawItem;
@@ -12737,6 +12794,11 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
 
             if (isSameCoreFields && isSamePromoRule) {
               unchangedExistingRowsForCache.push(mergedRow);
+              if (targetIgnoreErpPrices && !isProductUnchangedInDelta({ ...item, _isExplicitlyInactive }, buildCachedProductDeltaEntry(existing, false), false)) {
+                chunkIgnoredByErpPricesCount++;
+              } else {
+                chunkUnchangedEqualityCount++;
+              }
             } else {
               existingProductsPayload.push(mergedRow);
             }
@@ -12777,7 +12839,19 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
         console.log(`[Integration] Tenant ${targetTenantId}: ${chunkIgnoredNewZeroStock} produto(s) novo(s) ignorado(s) no lote por estarem com estoque <= 0 ou inativos.`);
       }
 
+      let chunkInsertedCount = 0;
+      let chunkUpdatedCount = 0;
+      let chunkItemFallbackCount = 0;
+      let chunkFailedItemsCount = 0;
+
+      const stripIdField = (rows: any[]) =>
+        rows.map((r) => {
+          const { id: _id, ...rest } = r;
+          return rest;
+        });
+
       if (newProductsPayload.length > 0) {
+         let persistedNewRows: any[] = [];
          const dedupedNewByCode = deduplicateByConflictField(newProductsPayload, 'internal_code');
          const { error } = await supabaseAdmin
            .from('products')
@@ -12785,7 +12859,9 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
               onConflict: 'tenant_id,internal_code', 
               ignoreDuplicates: false 
            });
-         if (error) {
+         if (!error) {
+            persistedNewRows = dedupedNewByCode;
+         } else {
             const dedupedNewByBarcode = deduplicateByConflictField(newProductsPayload, 'barcode');
             const { error: fallbackErr } = await supabaseAdmin
               .from('products')
@@ -12793,15 +12869,70 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
                  onConflict: 'tenant_id,barcode', 
                  ignoreDuplicates: false 
               });
-            if (fallbackErr) {
-              console.error("[Integration] New Products Insert Error:", fallbackErr);
-              throw new Error(`Database insert error: ${fallbackErr.message}`);
+            if (!fallbackErr) {
+              persistedNewRows = dedupedNewByBarcode;
+            } else {
+              chunkItemFallbackCount++;
+              console.warn(
+                `[Integration Fallback] Tenant ${targetTenantId}: lote de ${newProductsPayload.length} novo(s) falhou (${fallbackErr.message}). Executando fallback item a item...`
+              );
+              for (const row of newProductsPayload) {
+                const { id: _id, ...rowWithoutId } = row;
+                const { error: itemCodeErr } = await supabaseAdmin
+                  .from('products')
+                  .upsert(rowWithoutId, { onConflict: 'tenant_id,internal_code', ignoreDuplicates: false });
+                if (!itemCodeErr) {
+                  persistedNewRows.push(row);
+                  continue;
+                }
+                const { error: itemBcErr } = await supabaseAdmin
+                  .from('products')
+                  .upsert(rowWithoutId, { onConflict: 'tenant_id,barcode', ignoreDuplicates: false });
+                if (!itemBcErr) {
+                  persistedNewRows.push(row);
+                  continue;
+                }
+                let recovered = false;
+                try {
+                  const orParts: string[] = [];
+                  if (row.internal_code) orParts.push(`internal_code.eq.${row.internal_code}`);
+                  if (row.barcode) orParts.push(`barcode.eq.${row.barcode}`);
+                  if (orParts.length > 0) {
+                    const { data: matchRows } = await supabaseAdmin
+                      .from('products')
+                      .select('id')
+                      .eq('tenant_id', targetTenantId)
+                      .or(orParts.join(','))
+                      .limit(1);
+                    if (matchRows && matchRows.length > 0) {
+                      const { error: updMatchErr } = await supabaseAdmin
+                        .from('products')
+                        .update(rowWithoutId)
+                        .eq('id', matchRows[0].id);
+                      if (!updMatchErr) {
+                        persistedNewRows.push({ ...row, id: matchRows[0].id });
+                        recovered = true;
+                      }
+                    }
+                  }
+                } catch (_) {}
+                if (!recovered) {
+                  chunkFailedItemsCount++;
+                  console.warn(
+                    `[Integration Item Fallback Error] Tenant ${targetTenantId} | novo internal_code=${row.internal_code} barcode=${row.barcode}: ${itemBcErr.message}`
+                  );
+                }
+              }
             }
          }
-         updateTenantDeltaCacheWithRows(targetTenantId, newProductsPayload, targetIgnoreErpPrices);
+         chunkInsertedCount = persistedNewRows.length;
+         if (persistedNewRows.length > 0) {
+           updateTenantDeltaCacheWithRows(targetTenantId, persistedNewRows, targetIgnoreErpPrices);
+         }
       }
 
       if (existingProductsPayload.length > 0) {
+         let persistedExistingRows: any[] = [];
          const dedupedExistingById = deduplicateByConflictField(existingProductsPayload, 'id');
          const { error: idUpsertErr } = await supabaseAdmin
            .from('products')
@@ -12809,33 +12940,84 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
               onConflict: 'id',
               ignoreDuplicates: false
            });
-         if (idUpsertErr) {
+         if (!idUpsertErr) {
+            persistedExistingRows = dedupedExistingById;
+         } else {
             const dedupedExistingByBarcode = deduplicateByConflictField(existingProductsPayload, 'barcode');
             const { error: bcFallbackErr } = await supabaseAdmin
               .from('products')
-              .upsert(dedupedExistingByBarcode, { 
+              .upsert(stripIdField(dedupedExistingByBarcode), { 
                  onConflict: 'tenant_id,barcode', 
                  ignoreDuplicates: false 
               });
-            if (bcFallbackErr) {
+            if (!bcFallbackErr) {
+               persistedExistingRows = dedupedExistingByBarcode;
+            } else {
                const dedupedExistingByCode = deduplicateByConflictField(existingProductsPayload, 'internal_code');
                const { error: codeFallbackErr } = await supabaseAdmin
                  .from('products')
-                 .upsert(dedupedExistingByCode, { 
+                 .upsert(stripIdField(dedupedExistingByCode), { 
                     onConflict: 'tenant_id,internal_code', 
                     ignoreDuplicates: false 
                  });
-               if (codeFallbackErr) {
-                 console.error("[Integration] Existing Products Update Error:", codeFallbackErr);
-                 throw new Error(`Database update error: ${codeFallbackErr.message}`);
+               if (!codeFallbackErr) {
+                 persistedExistingRows = dedupedExistingByCode;
+               } else {
+                 chunkItemFallbackCount++;
+                 console.warn(
+                   `[Integration Fallback] Tenant ${targetTenantId}: lote de ${existingProductsPayload.length} atualização(ões) falhou (${codeFallbackErr.message}). Executando fallback item a item...`
+                 );
+                 for (const row of existingProductsPayload) {
+                   const { id: existingRowId, ...rowWithoutId } = row;
+                   if (existingRowId) {
+                     const { error: singleIdErr } = await supabaseAdmin
+                       .from('products')
+                       .update(rowWithoutId)
+                       .eq('id', existingRowId);
+                     if (!singleIdErr) {
+                       persistedExistingRows.push(row);
+                       continue;
+                     }
+                   }
+                   const { error: singleCodeErr } = await supabaseAdmin
+                     .from('products')
+                     .upsert(rowWithoutId, { onConflict: 'tenant_id,internal_code', ignoreDuplicates: false });
+                   if (!singleCodeErr) {
+                     persistedExistingRows.push(row);
+                     continue;
+                   }
+                   const { error: singleBcErr } = await supabaseAdmin
+                     .from('products')
+                     .upsert(rowWithoutId, { onConflict: 'tenant_id,barcode', ignoreDuplicates: false });
+                   if (!singleBcErr) {
+                     persistedExistingRows.push(row);
+                     continue;
+                   }
+                   chunkFailedItemsCount++;
+                   console.warn(
+                     `[Integration Item Fallback Error] Tenant ${targetTenantId} | update internal_code=${row.internal_code} barcode=${row.barcode}: ${singleBcErr.message}`
+                   );
+                 }
                }
             }
          }
-         updateTenantDeltaCacheWithRows(targetTenantId, existingProductsPayload, targetIgnoreErpPrices);
+         chunkUpdatedCount = persistedExistingRows.length;
+         if (persistedExistingRows.length > 0) {
+           updateTenantDeltaCacheWithRows(targetTenantId, persistedExistingRows, targetIgnoreErpPrices);
+         }
       }
 
       // Libera o event loop entre lotes para não bloquear /api/v1/integration/heartbeat
       await new Promise((resolve) => setImmediate(resolve));
+      return {
+        insertedCount: chunkInsertedCount,
+        updatedCount: chunkUpdatedCount,
+        unchangedCount: chunkUnchangedEqualityCount,
+        ignoredByErpPricesCount: chunkIgnoredByErpPricesCount,
+        skippedZeroStockCount: chunkIgnoredNewZeroStock,
+        itemFallbackCount: chunkItemFallbackCount,
+        failedItemsCount: chunkFailedItemsCount,
+      };
     };
 
     const filterDeltaChangedProducts = async (
@@ -12846,6 +13028,7 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
       const tenantHashMap = await getOrLoadTenantDeltaCache(targetTenantId, targetIgnoreErpPrices);
       const changedProducts: any[] = [];
       let unchangedCount = 0;
+      let ignoredByErpPricesCount = 0;
       let skippedNewZeroStockInDelta = 0;
 
       for (let idx = 0; idx < normalizedItems.length; idx++) {
@@ -12867,11 +13050,15 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
         } else if (!isProductUnchangedInDelta(item, cachedEntry, targetIgnoreErpPrices)) {
           changedProducts.push(item);
         } else {
-          unchangedCount++;
+          if (targetIgnoreErpPrices && !isProductUnchangedInDelta(item, cachedEntry, false)) {
+            ignoredByErpPricesCount++;
+          } else {
+            unchangedCount++;
+          }
         }
       }
 
-      return { changedProducts, unchangedCount, skippedNewZeroStockInDelta };
+      return { changedProducts, unchangedCount, ignoredByErpPricesCount, skippedNewZeroStockInDelta };
     };
 
     const CHUNK_SIZE = 200;
@@ -12914,39 +13101,75 @@ const handleProductIntegration = async (req: express.Request, res: express.Respo
               const job = tenantPendingNormalizedBatch.get(targetTenantId)!;
               tenantPendingNormalizedBatch.delete(targetTenantId);
 
-              const { changedProducts, unchangedCount, skippedNewZeroStockInDelta } =
+              const { changedProducts, unchangedCount, ignoredByErpPricesCount, skippedNewZeroStockInDelta } =
                 await filterDeltaChangedProducts(job.products, targetTenantId, job.ignoreErpPrices);
 
               if (changedProducts.length === 0) {
                 console.log(
-                  `[Delta Sync BG] Tenant ${targetTenantId}: 0 alterações aplicáveis em ${job.totalReceived} produtos ` +
-                  `(${unchangedCount} inalterados, ${skippedNewZeroStockInDelta} novos sem estoque ignorados).`
+                  `[Delta Sync BG] Tenant ${targetTenantId}: 0 atualizados de ${job.totalReceived} recebidos ` +
+                  `(${unchangedCount} ignorados por igualdade, ${ignoredByErpPricesCount} ignorados por ignore_erp_prices=${job.ignoreErpPrices}, ${skippedNewZeroStockInDelta} novos sem estoque ignorados).`
                 );
                 continue;
               }
 
               console.log(
-                `[Delta Sync BG] Tenant ${targetTenantId}: processando ${changedProducts.length} produto(s) alterado(s)/novo(s) em background ` +
-                `(${unchangedCount} inalterados, ${skippedNewZeroStockInDelta} sem estoque ignorados)...`
+                `[Delta Sync BG] Tenant ${targetTenantId}: processando ${changedProducts.length} produto(s) candidato(s) em background ` +
+                `(${unchangedCount} ignorados por igualdade, ${ignoredByErpPricesCount} ignorados por ignore_erp_prices=${job.ignoreErpPrices}, ${skippedNewZeroStockInDelta} sem estoque ignorados)...`
               );
 
-              let bgProcessed = 0;
+              let bgInserted = 0;
+              let bgUpdated = 0;
+              let bgChunkUnchanged = 0;
+              let bgChunkIgnoredErpPrices = 0;
+              let bgChunkZeroStock = 0;
+              let bgItemFallbacks = 0;
+              let bgFailedItems = 0;
+
               for (let i = 0; i < changedProducts.length; i += CHUNK_SIZE) {
                 const bgChunk = changedProducts.slice(i, i + CHUNK_SIZE);
-                await processProductChunk(bgChunk, targetTenantId, job.ignoreErpPrices);
-                bgProcessed += bgChunk.length;
+                try {
+                  const chunkStats = await processProductChunk(bgChunk, targetTenantId, job.ignoreErpPrices);
+                  bgInserted += chunkStats.insertedCount;
+                  bgUpdated += chunkStats.updatedCount;
+                  bgChunkUnchanged += chunkStats.unchangedCount;
+                  bgChunkIgnoredErpPrices += chunkStats.ignoredByErpPricesCount;
+                  bgChunkZeroStock += chunkStats.skippedZeroStockCount;
+                  bgItemFallbacks += chunkStats.itemFallbackCount;
+                  bgFailedItems += chunkStats.failedItemsCount;
+                } catch (chunkErr: any) {
+                  bgFailedItems += bgChunk.length;
+                  console.error(
+                    `[Delta Sync BG] Tenant ${targetTenantId}: falha inesperada no chunk ${Math.floor(i / CHUNK_SIZE) + 1} (${chunkErr?.message || chunkErr}). Continuando próximos lotes...`
+                  );
+                }
               }
 
+              const bgPersistedTotal = bgInserted + bgUpdated;
+              const totalEqualitySkipped = unchangedCount + bgChunkUnchanged;
+              const totalErpPricesSkipped = ignoredByErpPricesCount + bgChunkIgnoredErpPrices;
+              const totalZeroStockSkipped = skippedNewZeroStockInDelta + bgChunkZeroStock;
+
               void logIntegration(targetTenantId, "/api/v1/integration", {
-                message: `Sincronização Delta em background concluída com sucesso (${bgProcessed} alterados/novos de ${job.totalReceived} recebidos)`,
+                message: `Sincronização Delta em background concluída (${bgPersistedTotal} atualizados [${bgInserted} novos, ${bgUpdated} editados], ${totalEqualitySkipped} ignorados por igualdade, ${totalErpPricesSkipped} ignorados por ignore_erp_prices)`,
                 productsBatchSize: job.totalReceived,
-                processedCount: bgProcessed,
-                unchangedCount,
-                isSuccess: true,
+                processedCount: bgPersistedTotal,
+                insertedCount: bgInserted,
+                updatedCount: bgUpdated,
+                unchangedCount: totalEqualitySkipped,
+                ignoredByErpPricesCount: totalErpPricesSkipped,
+                ignoredZeroStockCount: totalZeroStockSkipped,
+                itemFallbackCount: bgItemFallbacks,
+                failedItemsCount: bgFailedItems,
+                isSuccess: bgFailedItems === 0,
                 backgroundCompleted: true,
               }, "SUCCESS").catch(() => {});
 
-              console.log(`[Integration] Background delta sync finalizado com sucesso para tenant ${targetTenantId}: ${bgProcessed} produtos atualizados.`);
+              console.log(
+                `[Delta Sync BG] Tenant ${targetTenantId}: concluído — ${bgPersistedTotal} atualizados (${bgInserted} novos, ${bgUpdated} existentes) de ${job.totalReceived} recebidos | ` +
+                `${totalEqualitySkipped} ignorados por igualdade | ${totalErpPricesSkipped} ignorados por ignore_erp_prices | ${totalZeroStockSkipped} sem estoque ignorados` +
+                `${bgItemFallbacks > 0 ? ` | ${bgItemFallbacks} lote(s) com fallback item a item` : ""}` +
+                `${bgFailedItems > 0 ? ` | ${bgFailedItems} falha(s) isolada(s)` : ""}.`
+              );
             }
           } catch (bgErr: any) {
             console.error(`[Integration] Erro no processamento em background para tenant ${targetTenantId}:`, bgErr?.message || bgErr);
