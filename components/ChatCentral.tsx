@@ -30,9 +30,9 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   const [selectedInboxId, setSelectedInboxId] = useState('all');
   const [inboxes, setInboxes] = useState<any[]>([]);
   const [allowedInboxIds, setAllowedInboxIds] = useState<string[]>([]);
-  const messagesEndRef = useRef<any>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const prevMessagesConvIdRef = useRef<string | null>(null);
+  const scrolledInitialConvIdRef = useRef<string | null>(null);
   const prevMessagesCountRef = useRef<number>(0);
 
   const [isConnectModalOpen, setIsConnectModalOpen] = useState(false);
@@ -40,6 +40,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [activeView, setActiveView] = useState<'LIST' | 'CHAT' | 'SIDEBAR'>('LIST');
   const [chatDisplayMode, setChatDisplayMode] = useState<'SPLIT' | 'KANBAN'>('KANBAN');
+  const [isLoadingMessages, setIsLoadingMessages] = useState(false);
 
   // Refs to prevent stale closures in setInterval / Realtime callbacks and stop auto-reopening closed chats
   const selectedChatIdRef = useRef<string | null>(null);
@@ -49,6 +50,29 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   // Preserva mensagens locais com falha ou em envio entre atualizações de polling
   const pendingLocalMessagesRef = useRef<Record<string, any[]>>({});
 
+  // Cache em memória por conversa/contato + controle anti-race-condition
+  const messagesCacheRef = useRef<Map<string, any[]>>(new Map());
+  const customerContextCacheRef = useRef<Map<string, { orders: any[]; continuousUse: any; expandedOrderIds: string[] }>>(new Map());
+  const messagesReqIdRef = useRef<number>(0);
+  const contextReqIdRef = useRef<number>(0);
+  const messagesAbortRef = useRef<AbortController | null>(null);
+  const contextAbortRef = useRef<AbortController | null>(null);
+  const lastTransitionedConvIdRef = useRef<string | null>(null);
+
+  const getContactCacheKey = (conv: any): string => {
+    if (!conv) return '';
+    const rawPhone = String(conv.contact?.phone_number || '').replace(/\D/g, '');
+    if (rawPhone) return `phone_${rawPhone}`;
+    if (conv.contact?.id) return `contact_${conv.contact.id}`;
+    return `conv_${conv.id}`;
+  };
+
+  useEffect(() => {
+    messagesCacheRef.current.clear();
+    customerContextCacheRef.current.clear();
+    lastTransitionedConvIdRef.current = null;
+  }, [tenantId]);
+
   useEffect(() => {
     selectedChatIdRef.current = selectedConversation?.id || null;
   }, [selectedConversation?.id]);
@@ -57,11 +81,79 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
     activeViewRef.current = activeView;
   }, [activeView]);
 
+  // Customer Context Data
+  const [customerOrders, setCustomerOrders] = useState<any[]>([]);
+  const [continuousUseData, setContinuousUseData] = useState<any>(null);
+  const [isFetchingContext, setIsFetchingContext] = useState(false);
+  const [expandedOrderIds, setExpandedOrderIds] = useState<string[]>([]);
+
+  const prepareConversationTransition = (conv: any) => {
+    if (!conv?.id) return;
+    lastTransitionedConvIdRef.current = conv.id;
+    scrolledInitialConvIdRef.current = null;
+    prevMessagesCountRef.current = 0;
+
+    setOtherUserViewing(null);
+    setActiveReactionPickerMsgId(null);
+    setIsLabelPopoverOpen(false);
+    setIsMenuOpen(false);
+    setIsCannedDropdownOpen(false);
+
+    // Cancela requisições em andamento do contato anterior para evitar race condition
+    if (messagesAbortRef.current) {
+      try { messagesAbortRef.current.abort(); } catch (_) {}
+      messagesAbortRef.current = null;
+    }
+    if (contextAbortRef.current) {
+      try { contextAbortRef.current.abort(); } catch (_) {}
+      contextAbortRef.current = null;
+    }
+
+    const cachedMsgs = messagesCacheRef.current.get(conv.id);
+    if (cachedMsgs) {
+      setMessages(mergeWithPendingLocalMessages(conv.id, cachedMsgs));
+      setIsLoadingMessages(false);
+    } else {
+      setMessages([]);
+      setIsLoadingMessages(true);
+    }
+
+    const ctxKey = getContactCacheKey(conv);
+    const cachedCtx = ctxKey ? customerContextCacheRef.current.get(ctxKey) : undefined;
+    if (cachedCtx) {
+      setCustomerOrders(cachedCtx.orders);
+      setContinuousUseData(cachedCtx.continuousUse);
+      setExpandedOrderIds(cachedCtx.expandedOrderIds);
+      setIsFetchingContext(false);
+    } else {
+      setCustomerOrders([]);
+      setContinuousUseData(null);
+      setExpandedOrderIds([]);
+      setIsFetchingContext(Boolean(conv.contact?.phone_number));
+    }
+  };
+
   const handleBackToList = () => {
     userClosedChatRef.current = true;
     selectedChatIdRef.current = null;
+    lastTransitionedConvIdRef.current = null;
+    scrolledInitialConvIdRef.current = null;
+    prevMessagesCountRef.current = 0;
+    if (messagesAbortRef.current) {
+      try { messagesAbortRef.current.abort(); } catch (_) {}
+      messagesAbortRef.current = null;
+    }
+    if (contextAbortRef.current) {
+      try { contextAbortRef.current.abort(); } catch (_) {}
+      contextAbortRef.current = null;
+    }
     setSelectedConversation(null);
     setMessages([]);
+    setIsLoadingMessages(false);
+    setCustomerOrders([]);
+    setContinuousUseData(null);
+    setExpandedOrderIds([]);
+    setIsFetchingContext(false);
     setActiveView('LIST');
     setIsMenuOpen(false);
     setIsLabelPopoverOpen(false);
@@ -70,16 +162,11 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   const handleOpenFromKanban = (conv: any) => {
     userClosedChatRef.current = false;
     selectedChatIdRef.current = conv?.id || null;
+    prepareConversationTransition(conv);
     setSelectedConversation(conv);
     setChatDisplayMode('SPLIT');
     setActiveView('CHAT');
   };
-
-  // Customer Context Data
-  const [customerOrders, setCustomerOrders] = useState<any[]>([]);
-  const [continuousUseData, setContinuousUseData] = useState<any>(null);
-  const [isFetchingContext, setIsFetchingContext] = useState(false);
-  const [expandedOrderIds, setExpandedOrderIds] = useState<string[]>([]);
 
   const toggleOrderAccordion = (orderId: string) => {
     setExpandedOrderIds(prev => 
@@ -296,7 +383,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   }, [effectiveUserId, rawUserId, localUser, currentUser]);
 
   const fetchConversationsRef = useRef<() => void>(() => {});
-  const fetchMessagesRef = useRef<(convId: string) => void>(() => {});
+  const fetchMessagesRef = useRef<(convId: string, opts?: { background?: boolean }) => void>(() => {});
 
   // Anti-collision state
   const [otherUserViewing, setOtherUserViewing] = useState<string | null>(null);
@@ -381,6 +468,18 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
               reactions: parsedReactions
             };
 
+            const cachedList = messagesCacheRef.current.get(row.conversation_id);
+            if (cachedList) {
+              const existingIdx = cachedList.findIndex((m) => m.id === row.id || (row.remote_id && m.remote_id === row.remote_id));
+              if (existingIdx >= 0) {
+                const nextCached = [...cachedList];
+                nextCached[existingIdx] = { ...nextCached[existingIdx], ...formattedMsg };
+                messagesCacheRef.current.set(row.conversation_id, nextCached);
+              } else if (payload.eventType === 'INSERT') {
+                messagesCacheRef.current.set(row.conversation_id, [...cachedList, formattedMsg]);
+              }
+            }
+
             const currentOpenId = selectedChatIdRef.current;
             if (
               !userClosedChatRef.current &&
@@ -421,7 +520,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       fetchConversationsRef.current();
       const currentOpenId = selectedChatIdRef.current;
       if (currentOpenId && !userClosedChatRef.current) {
-        fetchMessagesRef.current(currentOpenId);
+        fetchMessagesRef.current(currentOpenId, { background: true });
       }
     }, 5000);
 
@@ -591,36 +690,65 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   useEffect(() => {
     const convId = selectedConversation?.id;
     if (convId && !userClosedChatRef.current) {
-      fetchMessages(convId);
-      setOtherUserViewing(null);
+      if (lastTransitionedConvIdRef.current !== convId) {
+        prepareConversationTransition(selectedConversation);
+      }
+      const hasCachedMsgs = messagesCacheRef.current.has(convId);
+      fetchMessages(convId, { background: hasCachedMsgs });
       if (convId === '2') {
         setTimeout(() => {
-          setOtherUserViewing('Ana Silva');
+          if (selectedChatIdRef.current === '2') {
+            setOtherUserViewing('Ana Silva');
+          }
         }, 3000);
       }
     }
   }, [selectedConversation?.id]);
 
-  // Auto-scroll inteligente: rola para o final apenas ao abrir outra conversa ou quando chegam novas mensagens
+  // Auto-scroll interno exclusivo do container de mensagens (sem nunca rolar a página inteira via scrollIntoView)
   useEffect(() => {
     const convId = selectedConversation?.id || null;
-    if (!convId) {
-      prevMessagesConvIdRef.current = null;
+    if (!convId || userClosedChatRef.current) {
+      scrolledInitialConvIdRef.current = null;
       prevMessagesCountRef.current = 0;
       return;
     }
-    const isNewConv = prevMessagesConvIdRef.current !== convId;
+
+    const isInitialScrollPending = scrolledInitialConvIdRef.current !== convId;
     const hasNewMessages = messages.length > prevMessagesCountRef.current;
 
-    if (isNewConv || hasNewMessages) {
-      setTimeout(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: isNewConv ? 'auto' : 'smooth' });
-      }, 50);
+    // Se acabou de trocar para um contato sem cache e ainda está carregando, aguarda o lote chegar
+    if (isInitialScrollPending && isLoadingMessages && messages.length === 0) {
+      return;
     }
 
-    prevMessagesConvIdRef.current = convId;
+    if (isInitialScrollPending) {
+      requestAnimationFrame(() => {
+        const container = messagesContainerRef.current;
+        if (container && selectedChatIdRef.current === convId) {
+          container.scrollTop = container.scrollHeight;
+        }
+      });
+      scrolledInitialConvIdRef.current = convId;
+      prevMessagesCountRef.current = messages.length;
+      return;
+    }
+
+    if (hasNewMessages) {
+      requestAnimationFrame(() => {
+        const container = messagesContainerRef.current;
+        if (container && selectedChatIdRef.current === convId) {
+          if (typeof container.scrollTo === 'function') {
+            container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+          } else {
+            container.scrollTop = container.scrollHeight;
+          }
+        }
+      });
+    }
+
     prevMessagesCountRef.current = messages.length;
-  }, [messages.length, selectedConversation?.id]);
+  }, [messages.length, selectedConversation?.id, isLoadingMessages]);
 
   useEffect(() => {
     if (isOperador && inboxes.length > 0) {
@@ -894,7 +1022,22 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
     pendingLocalMessagesRef.current[conversationId] = current.filter(m => m.id !== tempId);
   };
 
-  const fetchMessages = async (conversationId: string) => {
+  const fetchMessages = async (conversationId: string, opts: { background?: boolean } = {}) => {
+    const reqId = ++messagesReqIdRef.current;
+    const isStale = () =>
+      userClosedChatRef.current ||
+      selectedChatIdRef.current !== conversationId ||
+      messagesReqIdRef.current !== reqId;
+
+    let controller: AbortController | null = null;
+    if (!opts.background && typeof AbortController !== 'undefined') {
+      if (messagesAbortRef.current) {
+        try { messagesAbortRef.current.abort(); } catch (_) {}
+      }
+      controller = new AbortController();
+      messagesAbortRef.current = controller;
+    }
+
     try {
       const currentTenantId = tenantId || localUser?.tenant_id || currentUser?.tenant_id || localStorage.getItem('ff_tenant_id') || localStorage.getItem('farmaflow_current_tenant_id') || '';
       const headers: Record<string, string> = {};
@@ -910,10 +1053,17 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       } catch (_) {}
 
       const queryParams = userId ? `&userId=${encodeURIComponent(userId)}&role=${encodeURIComponent(cleanRole)}&tenantId=${encodeURIComponent(currentTenantId || tenantId || 'default')}` : '';
-      const res = await fetch(`/api/v1/chat/messages?conversationId=${encodeURIComponent(conversationId)}${queryParams}`, { headers });
+      const res = await fetch(`/api/v1/chat/messages?conversationId=${encodeURIComponent(conversationId)}${queryParams}`, {
+        headers,
+        ...(controller ? { signal: controller.signal } : {})
+      });
+      if (isStale()) return;
+
       if (res.ok) {
         const json = await res.json();
+        if (isStale()) return;
         if (json.data) {
+          messagesCacheRef.current.set(conversationId, json.data);
           setMessages(mergeWithPendingLocalMessages(conversationId, json.data));
           return;
         }
@@ -924,6 +1074,8 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
         .select('*')
         .eq('conversation_id', conversationId)
         .order('created_at', { ascending: true });
+
+      if (isStale()) return;
 
       if (!error && data) {
         if (isOperador && allowedInboxIds.length > 0) {
@@ -952,10 +1104,17 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
             reactions: parsedReactions
           };
         });
+        if (isStale()) return;
+        messagesCacheRef.current.set(conversationId, formatted);
         setMessages(mergeWithPendingLocalMessages(conversationId, formatted));
       }
-    } catch (e) {
+    } catch (e: any) {
+      if (e?.name === 'AbortError') return;
       console.warn("Error fetching messages", e);
+    } finally {
+      if (!isStale()) {
+        setIsLoadingMessages(false);
+      }
     }
   };
 
@@ -1024,13 +1183,24 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
             }
           : { ...json.data, localStatus: 'sent' };
 
-        setMessages(prev => {
-          const alreadyExists = prev.some(m => m.id === confirmedMsg.id);
-          if (alreadyExists) {
-            return prev.filter(m => m.id !== targetMsg.id);
-          }
-          return prev.map(m => (m.id === targetMsg.id ? confirmedMsg : m));
-        });
+        const cachedMsgs = messagesCacheRef.current.get(convId);
+        if (cachedMsgs) {
+          const alreadyCached = cachedMsgs.some(m => m.id === confirmedMsg.id);
+          messagesCacheRef.current.set(
+            convId,
+            alreadyCached ? cachedMsgs : [...cachedMsgs, confirmedMsg]
+          );
+        }
+
+        if (selectedChatIdRef.current === convId && !userClosedChatRef.current) {
+          setMessages(prev => {
+            const alreadyExists = prev.some(m => m.id === confirmedMsg.id);
+            if (alreadyExists) {
+              return prev.filter(m => m.id !== targetMsg.id);
+            }
+            return prev.map(m => (m.id === targetMsg.id ? confirmedMsg : m));
+          });
+        }
 
         setSelectedConversation((prev: any) =>
           prev && prev.id === convId
@@ -1148,43 +1318,99 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
     reader.readAsDataURL(file);
   };
 
-  const fetchCustomerContext = async () => {
-    if (!selectedConversation || !selectedConversation.contact) {
+  const fetchCustomerContext = async (targetConv: any = selectedConversation, opts: { background?: boolean } = {}) => {
+    if (!targetConv || !targetConv.id) {
       setCustomerOrders([]);
       setContinuousUseData(null);
+      setExpandedOrderIds([]);
+      setIsFetchingContext(false);
       return;
     }
 
-    setIsFetchingContext(true);
-    try {
-      let phone = selectedConversation.contact.phone_number;
-      if (!phone) {
+    const targetConvId = targetConv.id;
+    const cacheKey = getContactCacheKey(targetConv);
+    const reqId = ++contextReqIdRef.current;
+    const isStale = () =>
+      userClosedChatRef.current ||
+      selectedChatIdRef.current !== targetConvId ||
+      contextReqIdRef.current !== reqId;
+
+    if (!targetConv.contact?.phone_number) {
+      if (cacheKey) {
+        customerContextCacheRef.current.set(cacheKey, {
+          orders: [],
+          continuousUse: null,
+          expandedOrderIds: []
+        });
+      }
+      if (!isStale()) {
+        setCustomerOrders([]);
+        setContinuousUseData(null);
+        setExpandedOrderIds([]);
         setIsFetchingContext(false);
+      }
+      return;
+    }
+
+    let controller: AbortController | null = null;
+    if (!opts.background && typeof AbortController !== 'undefined') {
+      if (contextAbortRef.current) {
+        try { contextAbortRef.current.abort(); } catch (_) {}
+      }
+      controller = new AbortController();
+      contextAbortRef.current = controller;
+      setIsFetchingContext(true);
+    }
+
+    try {
+      const phone = String(targetConv.contact.phone_number).replace(/\D/g, "");
+      if (!phone) {
+        if (!isStale()) {
+          setCustomerOrders([]);
+          setContinuousUseData(null);
+          setExpandedOrderIds([]);
+          setIsFetchingContext(false);
+        }
         return;
       }
-      
-      phone = String(phone).replace(/\D/g, ""); // clean non-digits
 
       // 1. Tenta a API dedicada de contexto enriquecido com itens e produtos
       try {
-        const res = await fetch(`/api/v1/chat/patient-context?storeId=${encodeURIComponent(tenantId)}&phone=${encodeURIComponent(phone)}`);
+        const res = await fetch(`/api/v1/chat/patient-context?storeId=${encodeURIComponent(tenantId)}&phone=${encodeURIComponent(phone)}`, {
+          ...(controller ? { signal: controller.signal } : {})
+        });
+        if (isStale()) return;
         if (res.ok) {
           const json = await res.json();
+          if (isStale()) return;
           if (json.success) {
-            setContinuousUseData(json.continuousUse || null);
             const fetchedOrders = json.orders || [];
-            setCustomerOrders(fetchedOrders);
-            if (fetchedOrders.length > 0) {
-              setExpandedOrderIds([String(fetchedOrders[0].id || '0')]);
+            const fetchedContinuous = json.continuousUse || null;
+            const initialExpanded = fetchedOrders.length > 0 ? [String(fetchedOrders[0].id || '0')] : [];
+            if (cacheKey) {
+              customerContextCacheRef.current.set(cacheKey, {
+                orders: fetchedOrders,
+                continuousUse: fetchedContinuous,
+                expandedOrderIds: initialExpanded
+              });
+            }
+            if (!isStale()) {
+              setContinuousUseData(fetchedContinuous);
+              setCustomerOrders(fetchedOrders);
+              setExpandedOrderIds(initialExpanded);
             }
             return;
           }
         }
-      } catch (apiErr) {
+      } catch (apiErr: any) {
+        if (apiErr?.name === 'AbortError') return;
         console.warn("API de contexto do paciente falhou, usando fallback direto:", apiErr);
       }
 
+      if (isStale()) return;
+
       // 2. Fallback: Consulta direta Supabase
+      let nextContinuousUse: any = null;
       const { data: contactsData, error: contactsErr } = await supabase
         .from('contacts')
         .select('*')
@@ -1192,15 +1418,13 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
         .like('phone', `%${phone}%`)
         .maybeSingle();
 
+      if (isStale()) return;
+
       if (!contactsErr && contactsData && contactsData.custom_attributes) {
         const attrs = contactsData.custom_attributes;
         if (attrs.uso_continuo) {
-          setContinuousUseData(attrs);
-        } else {
-          setContinuousUseData(null);
+          nextContinuousUse = attrs;
         }
-      } else {
-        setContinuousUseData(null);
       }
 
       // Fetch orders
@@ -1211,29 +1435,47 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
         .order('created_at', { ascending: false })
         .limit(100);
 
+      if (isStale()) return;
+
+      let matchedOrders: any[] = [];
       if (!ordersErr && ordersData) {
-        const matchedOrders = ordersData.filter((o: any) => {
+        matchedOrders = ordersData.filter((o: any) => {
           if (!o.customer || !o.customer.phone) return false;
           const oPhone = String(o.customer.phone).replace(/\D/g, "");
           return oPhone === phone || oPhone.includes(phone) || phone.includes(oPhone);
-        }).slice(0, 5); // top 5
-        setCustomerOrders(matchedOrders);
-        if (matchedOrders.length > 0) {
-          setExpandedOrderIds([String(matchedOrders[0].id || '0')]);
-        }
-      } else {
-        setCustomerOrders([]);
+        }).slice(0, 5);
       }
-    } catch (err) {
+      const initialExpanded = matchedOrders.length > 0 ? [String(matchedOrders[0].id || '0')] : [];
+
+      if (cacheKey) {
+        customerContextCacheRef.current.set(cacheKey, {
+          orders: matchedOrders,
+          continuousUse: nextContinuousUse,
+          expandedOrderIds: initialExpanded
+        });
+      }
+
+      if (!isStale()) {
+        setContinuousUseData(nextContinuousUse);
+        setCustomerOrders(matchedOrders);
+        setExpandedOrderIds(initialExpanded);
+      }
+    } catch (err: any) {
+      if (err?.name === 'AbortError') return;
       console.log("Failed to fetch customer context:", err);
     } finally {
-      setIsFetchingContext(false);
+      if (!isStale()) {
+        setIsFetchingContext(false);
+      }
     }
   };
 
   useEffect(() => {
-    fetchCustomerContext();
-  }, [selectedConversation?.contact?.phone_number]);
+    if (!selectedConversation?.id || userClosedChatRef.current) return;
+    const ctxKey = getContactCacheKey(selectedConversation);
+    const hasCachedCtx = Boolean(ctxKey && customerContextCacheRef.current.has(ctxKey));
+    fetchCustomerContext(selectedConversation, { background: hasCachedCtx });
+  }, [selectedConversation?.id, selectedConversation?.contact?.phone_number]);
 
   const handleAssumeConversation = async () => {
     if (!selectedConversation) return;
@@ -1304,7 +1546,12 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       }
     }
     userClosedChatRef.current = false;
+    if (selectedConversation?.id === conv.id) {
+      setActiveView('CHAT');
+      return;
+    }
     selectedChatIdRef.current = conv.id;
+    prepareConversationTransition(conv);
     setSelectedConversation(conv);
     setActiveView('CHAT');
   };
@@ -1455,8 +1702,16 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
 
     userClosedChatRef.current = true;
     selectedChatIdRef.current = null;
+    lastTransitionedConvIdRef.current = null;
+    scrolledInitialConvIdRef.current = null;
+    prevMessagesCountRef.current = 0;
     setSelectedConversation(null);
     setMessages([]);
+    setIsLoadingMessages(false);
+    setCustomerOrders([]);
+    setContinuousUseData(null);
+    setExpandedOrderIds([]);
+    setIsFetchingContext(false);
     setConversations(prev => prev.map(c => c.id === convId ? { ...c, ...patch } : c));
     setActiveView('LIST');
 
@@ -1491,7 +1746,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   };
 
   return (
-    <div className="flex flex-col h-screen bg-white md:rounded-2xl md:shadow-xl overflow-hidden border-0 md:border md:border-gray-100 md:m-4 relative">
+    <div className="flex flex-col flex-1 min-h-0 h-full max-h-[calc(100vh-80px)] bg-white md:rounded-2xl md:shadow-xl overflow-hidden border-0 md:border md:border-gray-100 relative">
       {/* GLOBAL TOP BAR: Mode switcher (Kanban vs Split Chat) */}
       <div className="bg-white border-b border-gray-200 px-4 py-2.5 flex items-center justify-between z-30 flex-shrink-0">
         <div className="flex items-center gap-3">
@@ -1533,7 +1788,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       </div>
 
       {chatDisplayMode === 'KANBAN' ? (
-        <div className="flex-1 overflow-hidden">
+        <div className="flex-1 min-h-0 overflow-hidden">
           <ChatKanban
             tenantId={tenantId}
             currentUser={localUser}
@@ -1558,10 +1813,10 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
           />
         </div>
       ) : (
-        <div className="flex flex-1 overflow-hidden relative">
+        <div className="flex flex-1 min-h-0 overflow-hidden relative">
           {/* COLUMN 1: Lista de Conversas */}
-          <div className={`${activeView === 'LIST' ? 'flex' : 'hidden'} md:flex w-full md:w-1/3 lg:w-1/4 border-r border-gray-200 bg-gray-50 flex-col absolute inset-0 md:relative z-20`}>
-            <div className="p-4 border-b border-gray-200 bg-white">
+          <div className={`${activeView === 'LIST' ? 'flex' : 'hidden'} md:flex w-full md:w-1/3 lg:w-1/4 h-full min-h-0 border-r border-gray-200 bg-gray-50 flex-col absolute inset-0 md:relative z-20`}>
+            <div className="p-4 border-b border-gray-200 bg-white flex-shrink-0">
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
                   <MessageSquare className="w-5 h-5 text-emerald-600" /> Conversas
@@ -1687,7 +1942,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-2 space-y-1">
+        <div className="flex-1 min-h-0 overflow-y-auto p-2 space-y-1">
           {displayedConversations.length === 0 && (
             <div className="flex flex-col items-center justify-center h-full text-gray-400 p-6 text-center space-y-3">
               <MessageSquare size={48} className="text-gray-300" />
@@ -1781,11 +2036,11 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       </div>
 
       {/* COLUMN 2: Janela de Chat Principal */}
-      <div className={`${activeView === 'CHAT' ? 'flex' : 'hidden'} md:flex w-full md:w-1/2 lg:w-2/4 flex-col bg-[#f0f2f5] absolute inset-0 md:relative z-10`}>
+      <div className={`${activeView === 'CHAT' ? 'flex' : 'hidden'} md:flex w-full md:w-1/2 lg:w-2/4 h-full min-h-0 flex-col bg-[#f0f2f5] absolute inset-0 md:relative z-10`}>
         {selectedConversation ? (
           <>
             {/* Header */}
-            <div className="min-h-16 py-2 px-3 md:px-4 bg-white border-b border-gray-200 flex items-center justify-between gap-2 shadow-sm z-20 relative">
+            <div className="min-h-16 py-2 px-3 md:px-4 bg-white border-b border-gray-200 flex items-center justify-between gap-2 shadow-sm z-20 relative flex-shrink-0">
               <div className="flex items-center gap-2 md:gap-3 min-w-0 flex-1">
                 <button 
                   type="button"
@@ -1990,14 +2245,39 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
 
             {/* Anti-collision Banner */}
             {otherUserViewing && (
-              <div className="bg-orange-50 border-b border-orange-100 px-4 py-2 flex items-center gap-2 text-orange-700 text-xs font-bold shadow-sm z-10 animate-in slide-in-from-top-2">
+              <div className="bg-orange-50 border-b border-orange-100 px-4 py-2 flex items-center gap-2 text-orange-700 text-xs font-bold shadow-sm z-10 flex-shrink-0 animate-in slide-in-from-top-2">
                 <AlertCircle className="w-4 h-4 animate-pulse" />
                 ⚠️ {otherUserViewing} está visualizando/digitando nesta conversa
               </div>
             )}
 
             {/* Messages */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+            <div ref={messagesContainerRef} className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
+              {isLoadingMessages && messages.length === 0 ? (
+                <div className="flex flex-col justify-end h-full space-y-4 py-2 animate-pulse">
+                  <div className="flex justify-start">
+                    <div className="w-56 h-12 bg-white/80 rounded-2xl rounded-tl-none shadow-2xs" />
+                  </div>
+                  <div className="flex justify-end">
+                    <div className="w-64 h-14 bg-emerald-100/70 rounded-2xl rounded-tr-none shadow-2xs" />
+                  </div>
+                  <div className="flex justify-start">
+                    <div className="w-44 h-10 bg-white/80 rounded-2xl rounded-tl-none shadow-2xs" />
+                  </div>
+                  <div className="flex justify-end">
+                    <div className="w-52 h-12 bg-emerald-100/70 rounded-2xl rounded-tr-none shadow-2xs" />
+                  </div>
+                  <div className="flex items-center justify-center gap-2 pt-2 text-xs text-gray-400 font-medium">
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-emerald-500" />
+                    <span>Carregando histórico da conversa...</span>
+                  </div>
+                </div>
+              ) : messages.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-full text-gray-400 text-center py-8">
+                  <MessageSquare className="w-10 h-10 mb-2 opacity-25" />
+                  <p className="text-xs font-medium">Nenhuma mensagem registrada nesta conversa ainda.</p>
+                </div>
+              ) : null}
               {messages.map((msg, index) => {
                 const rawUrl = msg.mediaUrl || msg.media_url || msg.url || msg.file_url;
                 const isInternalWhatsApp = typeof rawUrl === 'string' && (rawUrl.includes('whatsapp.net') || rawUrl.includes('whatsapp.com'));
@@ -2228,12 +2508,11 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                   </div>
                 );
               })}
-              <div ref={messagesEndRef} />
             </div>
 
             {/* Input Area */}
             {selectedConversation.assigned_user_id ? (
-              <div className="p-3 md:p-4 bg-gray-50 border-t border-gray-200 pb-safe">
+              <div className="p-3 md:p-4 bg-gray-50 border-t border-gray-200 pb-safe flex-shrink-0">
                                 <div className="flex items-center justify-between gap-2 mb-2">
                   <div className="flex items-center gap-2">
                     <button 
@@ -2325,7 +2604,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                 </div>
               </div>
             ) : (
-              <div className="p-6 bg-gray-50 border-t border-gray-200 text-center flex flex-col items-center justify-center pb-safe">
+              <div className="p-6 bg-gray-50 border-t border-gray-200 text-center flex flex-col items-center justify-center pb-safe flex-shrink-0">
                 <p className="text-sm font-bold text-gray-600 mb-3">Esta conversa está na fila de atendimento.</p>
                 <button 
                   onClick={handleAssumeConversation}
@@ -2345,10 +2624,10 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
       </div>
 
       {/* COLUMN 3: Sidebar Contexto Farmacêutico */}
-      <div className={`${activeView === 'SIDEBAR' ? 'flex' : 'hidden'} md:flex w-full md:w-1/6 lg:w-1/4 bg-white border-l border-gray-200 flex-col absolute inset-0 md:relative z-30`}>
+      <div className={`${activeView === 'SIDEBAR' ? 'flex' : 'hidden'} md:flex w-full md:w-1/6 lg:w-1/4 h-full min-h-0 bg-white border-l border-gray-200 flex-col absolute inset-0 md:relative z-30`}>
         
         {/* Mobile Header for Sidebar */}
-        <div className="md:hidden h-16 px-4 border-b border-gray-200 flex items-center bg-gray-50">
+        <div className="md:hidden h-16 px-4 border-b border-gray-200 flex items-center bg-gray-50 flex-shrink-0">
           <button 
             onClick={() => setActiveView('CHAT')}
             className="p-2 -ml-2 text-gray-500 hover:bg-gray-200 rounded-full mr-2"
@@ -2358,7 +2637,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
           <h2 className="font-bold text-gray-800">Contexto do Paciente</h2>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-4">
+        <div className="flex-1 min-h-0 overflow-y-auto p-4">
           {selectedConversation ? (
             <div className="space-y-6">
               <div className="text-center">
@@ -2409,17 +2688,27 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <h3 className="font-black text-xs uppercase tracking-widest text-gray-400 flex items-center gap-2">
-                    <ShoppingBag className="w-4 h-4 text-emerald-600" /> Últimos Pedidos ({customerOrders.length})
+                    <ShoppingBag className="w-4 h-4 text-emerald-600" /> Últimos Pedidos ({isFetchingContext ? '...' : customerOrders.length})
                   </h3>
-                  {customerOrders.length > 0 && (
+                  {!isFetchingContext && customerOrders.length > 0 && (
                     <span className="text-[10px] text-gray-400 font-medium">Toque para ver itens</span>
                   )}
                 </div>
 
-                {isFetchingContext ? (
-                  <div className="flex flex-col items-center justify-center py-6 gap-2 bg-gray-50 rounded-xl border border-gray-100">
-                    <RefreshCw className="w-5 h-5 text-emerald-500 animate-spin" />
-                    <p className="text-xs text-gray-400">Carregando pedidos e receitas...</p>
+                {isFetchingContext && customerOrders.length === 0 ? (
+                  <div className="space-y-2.5">
+                    <div className="p-3 bg-gray-50 rounded-xl border border-gray-100 animate-pulse space-y-2">
+                      <div className="h-3.5 w-28 bg-gray-200 rounded" />
+                      <div className="h-3 w-40 bg-gray-200/80 rounded" />
+                    </div>
+                    <div className="p-3 bg-gray-50 rounded-xl border border-gray-100 animate-pulse space-y-2">
+                      <div className="h-3.5 w-24 bg-gray-200 rounded" />
+                      <div className="h-3 w-36 bg-gray-200/80 rounded" />
+                    </div>
+                    <div className="flex items-center justify-center gap-2 py-2">
+                      <RefreshCw className="w-4 h-4 text-emerald-500 animate-spin" />
+                      <p className="text-xs text-gray-400">Carregando pedidos e receitas...</p>
+                    </div>
                   </div>
                 ) : customerOrders.length > 0 ? (
                   <div className="space-y-2.5">

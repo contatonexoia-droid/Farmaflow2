@@ -3906,9 +3906,13 @@ const App: React.FC = () => {
     session.type === "SUPER_ADMIN" ||
     !session.role;
   const isDeliverer = session.role === "entregador";
+  const isChatWorkspace =
+    view === ViewMode.ADMIN_PHARMACY &&
+    adminTab === "chat" &&
+    Boolean(currentTenant?.isChatEnabled);
 
   return (
-    <div className="min-h-screen bg-[#fcfdfe]">
+    <div className={isChatWorkspace ? "h-[100dvh] overflow-hidden flex flex-col bg-[#fcfdfe]" : "min-h-screen bg-[#fcfdfe]"}>
       <Toaster position="top-right" richColors />
       {view !== ViewMode.LOGIN && view !== ViewMode.CATALOG && (
         <Navbar
@@ -4204,7 +4208,19 @@ const App: React.FC = () => {
       )}
 
       <main
-        className={`w-full ${view === ViewMode.CATALOG ? "max-w-full px-0 py-0" : view === ViewMode.ADMIN_PHARMACY ? "max-w-[1920px] px-4 sm:px-6 lg:px-8 py-10" : "max-w-7xl px-4 sm:px-6 lg:px-8 py-10"} mx-auto ${view === ViewMode.ADMIN_PHARMACY ? "flex flex-col md:flex-row gap-4 md:gap-8 overflow-x-hidden relative transition-all duration-300 ease-in-out" : ""}`}
+        className={`w-full ${
+          view === ViewMode.CATALOG
+            ? "max-w-full px-0 py-0"
+            : view === ViewMode.ADMIN_PHARMACY
+            ? isChatWorkspace
+              ? "max-w-[1920px] px-2 sm:px-4 lg:px-6 py-2 md:py-3 flex-1 min-h-0 overflow-hidden"
+              : "max-w-[1920px] px-4 sm:px-6 lg:px-8 py-10"
+            : "max-w-7xl px-4 sm:px-6 lg:px-8 py-10"
+        } mx-auto ${
+          view === ViewMode.ADMIN_PHARMACY
+            ? `flex flex-col md:flex-row gap-4 md:gap-8 relative transition-all duration-300 ease-in-out ${isChatWorkspace ? "overflow-hidden" : "overflow-x-hidden"}`
+            : ""
+        }`}
       >
         <Suspense fallback={<LoadingFallback />}>
           {view === ViewMode.LOGIN && <Login onLogin={handleLogin} />}
@@ -4283,7 +4299,9 @@ const App: React.FC = () => {
             <>
               {/* DESKTOP SIDEBAR WITH COLLAPSIBLE TOGGLE & TOOLTIPS */}
               <aside 
-                className={`hidden md:flex flex-col bg-white rounded-[1.5rem] border border-gray-100 p-3 h-fit sticky top-8 transition-all duration-300 ease-in-out shrink-0 select-none shadow-xs ${
+                className={`hidden md:flex flex-col bg-white rounded-[1.5rem] border border-gray-100 p-3 ${
+                  isChatWorkspace ? "max-h-full overflow-y-auto self-start" : "h-fit sticky top-8"
+                } transition-all duration-300 ease-in-out shrink-0 select-none shadow-xs ${
                   isSidebarCollapsed ? "w-20" : "w-72 lg:w-80"
                 }`}
               >
@@ -4815,10 +4833,10 @@ const App: React.FC = () => {
               </aside>
 
               {/* MAIN CONTENT AREA (Dynamically expands when sidebar is collapsed) */}
-              <div className="flex-1 min-w-0 transition-all duration-300 ease-in-out">
+              <div className={`flex-1 min-w-0 transition-all duration-300 ease-in-out ${isChatWorkspace ? "h-full min-h-0 flex flex-col overflow-hidden" : ""}`}>
                 {/* Floating expand button for convenient quick access if desired */}
                 {isSidebarCollapsed && (
-                  <div className="hidden md:flex items-center mb-3">
+                  <div className="hidden md:flex items-center mb-3 shrink-0">
                     <button
                       onClick={() => {
                         setIsSidebarCollapsed(false);
