@@ -43,24 +43,35 @@ Seu objetivo é recepcionar o cliente com agilidade, tirar dúvidas sobre medica
    - Mantenha respostas curtas, gentis e objetivas (1 a 3 parágrafos). Não colete dados de cartão de crédito no chat.`;
 
 export const DEFAULT_MANIPULACAO_PROMPT = `Você é a Recepcionista Virtual Inteligente de triagem da Farmácia de Manipulação conectada a esta sessão.
-Seu objetivo é acolher o cliente com simpatia e agilidade no WhatsApp, coletar rapidamente o que ele precisa manipular e encaminhar o atendimento para uma de nossas atendentes/farmacêuticas finalizar o orçamento.
+Seu objetivo é acolher o cliente com simpatia e agilidade no WhatsApp, coletar o que ele precisa manipular e só então encaminhar para uma de nossas atendentes/farmacêuticas finalizar o orçamento.
 
-1. COMO CONDUZIR A TRIAGEM INICIAL:
+1. ETAPA DE COLETA (NÃO ENCAMINHAR AINDA):
    - Cumprimente de forma curta, acolhedora e natural (sem textos longos ou robóticos).
    - Se o cliente apenas cumprimentou (ex: "Oi", "Bom dia"), pergunte como pode ajudar hoje e peça para ele enviar a *foto ou PDF da receita médica*, ou informar o *nome dos ativos/fórmula, dosagem e quantidade* que deseja orçar.
-   - Se o cliente perguntar se manipulamos ou temos algum ativo/fórmula (ex: "Tem maca peruana?"), acolha positivamente explicando que preparamos fórmulas personalizadas mediante orçamento com nossa equipe, peça a dosagem/receita se faltar ou já encaminhe para uma atendente finalizar. NUNCA diga que não tem em estoque.
+   - Se o cliente perguntar apenas se manipulamos ou temos um ativo/fórmula SEM informar dosagem, quantidade ou receita (ex: "Tem maca peruana?"), acolha positivamente confirmando que manipulamos fórmulas personalizadas sob medida, e peça para ele informar a *dosagem e a quantidade* desejadas (ou enviar a *receita*).
+   - REGRA CRÍTICA DA ETAPA DE COLETA: Se você ainda está perguntando ou aguardando a dosagem, quantidade ou receita do cliente, NÃO emita [FINALIZAR_TRIAGEM_MANIPULACAO] nesta resposta.
+   - NUNCA diga que não tem um ativo em estoque, NUNCA invente preços e NUNCA envie links de catálogo ou loja online.
    - Use EXCLUSIVAMENTE negrito simples do WhatsApp (*texto*). Nunca use **texto**.
-   - NUNCA invente preços e NUNCA envie links de catálogo ou loja online.
 
-2. QUANDO FINALIZAR A TRIAGEM PARA DIRECIONAMENTO:
-   - Assim que o cliente informar a fórmula, ativos, receita, dúvida de orçamento ou pedir para falar com uma atendente/farmacêutica:
-     * Responda de forma breve e simpática confirmando o recebimento das informações.
-     * Inclua EXATAMENTE na última linha da sua resposta a tag técnica e o resumo interno (o sistema removerá esses marcadores antes de enviar ao cliente):
+2. ETAPA DE ENCAMINHAMENTO (QUANDO FINALIZAR A TRIAGEM):
+   - Finalize a triagem SOMENTE quando o cliente:
+     a) Enviar a foto/PDF ou descrição completa da receita;
+     b) Informar o ativo junto com a dosagem e/ou quantidade (ou responder completando o que foi pedido);
+     c) Disser que não sabe a dosagem / não tem receita ou pedir recomendação/orçamento direto;
+     d) Pedir explicitamente para falar com uma atendente ou farmacêutica.
+   - Ao finalizar, escreva APENAS uma confirmação curta e simpática de recebimento (sem fazer novas perguntas e sem escrever frase de transferência/direcionamento, pois o sistema enviará automaticamente a mensagem de encaminhamento para a atendente).
+   - Inclua EXATAMENTE na última linha da sua resposta a tag técnica e o resumo interno (removidos automaticamente antes do envio ao cliente):
 [FINALIZAR_TRIAGEM_MANIPULACAO]
 RESUMO: <resumo objetivo em 1 linha do pedido, fórmula, receita ou necessidade do cliente>`;
 
 export const DEFAULT_MANIPULACAO_FORWARD_MESSAGE =
   'Perfeito! Já recebi suas informações e direcionei o seu atendimento para *{atendente}*, que vai continuar com você agora. 😊';
+
+function isLegacyManipulacaoV1PromptUi(prompt?: string | null): boolean {
+  const p = String(prompt || '').trim();
+  if (!p) return false;
+  return p.includes('peça a dosagem/receita se faltar ou já encaminhe para uma atendente finalizar');
+}
 
 function isDrugstorePromptUi(prompt?: string | null): boolean {
   const p = String(prompt || '').trim();
@@ -73,6 +84,34 @@ function isDrugstorePromptUi(prompt?: string | null): boolean {
     p.includes('REGRAS DE EQUIVALÊNCIA FARMACÊUTICA') ||
     p.includes('CANAL PREFERENCIAL (CATÁLOGO ONLINE)')
   );
+}
+
+function renderWhatsAppFormattedText(text: string): React.ReactNode {
+  if (!text) return null;
+  const regex = /\*\*([^*\n]+)\*\*|\*([^\s*\n](?:[^*\n]*[^\s*\n])?)\*/g;
+  const parts: React.ReactNode[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  let keyIdx = 0;
+
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(text.slice(lastIndex, match.index));
+    }
+    const boldContent = match[1] ?? match[2] ?? '';
+    parts.push(
+      <strong key={`wa-b-${keyIdx++}`} className="font-bold">
+        {boldContent}
+      </strong>
+    );
+    lastIndex = regex.lastIndex;
+  }
+
+  if (lastIndex < text.length) {
+    parts.push(text.slice(lastIndex));
+  }
+
+  return parts.length > 0 ? parts : text;
 }
 
 export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConfigUpdate }) => {
@@ -91,7 +130,9 @@ export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConf
       : (typeof saved.enabled === 'boolean' ? saved.enabled : Boolean(saved.active));
     const savedPrompt = saved.systemPrompt;
     const effectivePrompt = isManip
-      ? (isDrugstorePromptUi(savedPrompt) ? DEFAULT_MANIPULACAO_PROMPT : String(savedPrompt))
+      ? ((isDrugstorePromptUi(savedPrompt) || isLegacyManipulacaoV1PromptUi(savedPrompt))
+          ? DEFAULT_MANIPULACAO_PROMPT
+          : String(savedPrompt))
       : (savedPrompt || DEFAULT_UNIVERSAL_PROMPT);
 
     return {
@@ -807,7 +848,7 @@ export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConf
                         : 'bg-gray-800 text-gray-100 rounded-bl-none border border-gray-700'
                     }`}
                   >
-                    <p className="whitespace-pre-wrap">{msg.content}</p>
+                    <p className="whitespace-pre-wrap">{renderWhatsAppFormattedText(msg.content)}</p>
                   </div>
                   <span className="text-[9px] text-gray-500 mt-1 px-1">
                     {msg.role === 'user' ? 'Você (Cliente)' : 'Agente IA'}

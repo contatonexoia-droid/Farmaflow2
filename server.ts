@@ -27,7 +27,7 @@ import { contactMergeManager } from "./services/contactMergeManager.js";
 import { inboxStore } from "./services/inboxStore.js";
 import { chatStore } from "./services/chatStore.js";
 import { teamStore } from "./services/teamStore.js";
-import { aiAgentService, DEFAULT_AI_AGENT_PROMPT, DEFAULT_MANIPULACAO_PROMPT, DEFAULT_MANIPULACAO_FORWARD_MESSAGE, isDrugstoreDefaultPrompt, isolateUrlsInText, extractUrlAndCleanText, ensureStoreUrlCacheBuster, formatToWhatsAppMarkdown, cleanSearchInterjections, PHARMA_EXPANSIONS, extractProductSize, productMatchesSize } from "./services/aiAgentService.js";
+import { aiAgentService, DEFAULT_AI_AGENT_PROMPT, DEFAULT_MANIPULACAO_PROMPT, DEFAULT_MANIPULACAO_FORWARD_MESSAGE, isDrugstoreDefaultPrompt, isLegacyManipulacaoV1Prompt, isolateUrlsInText, extractUrlAndCleanText, ensureStoreUrlCacheBuster, formatToWhatsAppMarkdown, cleanSearchInterjections, PHARMA_EXPANSIONS, extractProductSize, productMatchesSize } from "./services/aiAgentService.js";
 import {
   getManipulacaoTenant,
   resolveTenantStoreType,
@@ -6416,7 +6416,7 @@ app.post("/api/v1/tenants/admin", async (req, res) => {
       };
     } else if (resolvedStoreType === "manipulacao") {
       const curCfg = { ...enrichedPayload.ai_agent_config };
-      if (isDrugstoreDefaultPrompt(curCfg.systemPrompt)) {
+      if (isDrugstoreDefaultPrompt(curCfg.systemPrompt) || isLegacyManipulacaoV1Prompt(curCfg.systemPrompt)) {
         curCfg.systemPrompt = DEFAULT_MANIPULACAO_PROMPT;
       }
       curCfg.strictStoreLinkEnforcement = false;

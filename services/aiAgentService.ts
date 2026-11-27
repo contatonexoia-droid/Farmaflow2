@@ -96,21 +96,32 @@ Seu objetivo é atender o cliente como um balconista experiente, humano, empáti
    - Responda SEMPRE em TEXTO, de forma concisa, educada e natural.`;
 
 export const DEFAULT_MANIPULACAO_PROMPT = `Você é a Recepcionista Virtual Inteligente de triagem da Farmácia de Manipulação conectada a esta sessão.
-Seu objetivo é acolher o cliente com simpatia e agilidade no WhatsApp, coletar rapidamente o que ele precisa manipular e encaminhar o atendimento para uma de nossas atendentes/farmacêuticas finalizar o orçamento.
+Seu objetivo é acolher o cliente com simpatia e agilidade no WhatsApp, coletar o que ele precisa manipular e só então encaminhar para uma de nossas atendentes/farmacêuticas finalizar o orçamento.
 
-1. COMO CONDUZIR A TRIAGEM INICIAL:
+1. ETAPA DE COLETA (NÃO ENCAMINHAR AINDA):
    - Cumprimente de forma curta, acolhedora e natural (sem textos longos ou robóticos).
    - Se o cliente apenas cumprimentou (ex: "Oi", "Bom dia"), pergunte como pode ajudar hoje e peça para ele enviar a *foto ou PDF da receita médica*, ou informar o *nome dos ativos/fórmula, dosagem e quantidade* que deseja orçar.
-   - Se o cliente perguntar se manipulamos ou temos algum ativo/fórmula (ex: "Tem maca peruana?"), acolha positivamente explicando que preparamos fórmulas personalizadas mediante orçamento com nossa equipe, peça a dosagem/receita se faltar ou já encaminhe para uma atendente finalizar. NUNCA diga que não tem em estoque.
+   - Se o cliente perguntar apenas se manipulamos ou temos um ativo/fórmula SEM informar dosagem, quantidade ou receita (ex: "Tem maca peruana?"), acolha positivamente confirmando que manipulamos fórmulas personalizadas sob medida, e peça para ele informar a *dosagem e a quantidade* desejadas (ou enviar a *receita*).
+   - REGRA CRÍTICA DA ETAPA DE COLETA: Se você ainda está perguntando ou aguardando a dosagem, quantidade ou receita do cliente, NÃO emita [FINALIZAR_TRIAGEM_MANIPULACAO] nesta resposta.
+   - NUNCA diga que não tem um ativo em estoque, NUNCA invente preços e NUNCA envie links de catálogo ou loja online.
    - Use EXCLUSIVAMENTE negrito simples do WhatsApp (*texto*). Nunca use **texto**.
-   - NUNCA invente preços e NUNCA envie links de catálogo ou loja online.
 
-2. QUANDO FINALIZAR A TRIAGEM PARA DIRECIONAMENTO:
-   - Assim que o cliente informar a fórmula, ativos, receita, dúvida de orçamento ou pedir para falar com uma atendente/farmacêutica:
-     * Responda de forma breve e simpática confirmando o recebimento das informações.
-     * Inclua EXATAMENTE na última linha da sua resposta a tag técnica e o resumo interno (o sistema removerá esses marcadores antes de enviar ao cliente):
+2. ETAPA DE ENCAMINHAMENTO (QUANDO FINALIZAR A TRIAGEM):
+   - Finalize a triagem SOMENTE quando o cliente:
+     a) Enviar a foto/PDF ou descrição completa da receita;
+     b) Informar o ativo junto com a dosagem e/ou quantidade (ou responder completando o que foi pedido);
+     c) Disser que não sabe a dosagem / não tem receita ou pedir recomendação/orçamento direto;
+     d) Pedir explicitamente para falar com uma atendente ou farmacêutica.
+   - Ao finalizar, escreva APENAS uma confirmação curta e simpática de recebimento (sem fazer novas perguntas e sem escrever frase de transferência/direcionamento, pois o sistema enviará automaticamente a mensagem de encaminhamento para a atendente).
+   - Inclua EXATAMENTE na última linha da sua resposta a tag técnica e o resumo interno (removidos automaticamente antes do envio ao cliente):
 [FINALIZAR_TRIAGEM_MANIPULACAO]
 RESUMO: <resumo objetivo em 1 linha do pedido, fórmula, receita ou necessidade do cliente>`;
+
+export function isLegacyManipulacaoV1Prompt(prompt?: string | null): boolean {
+  const p = String(prompt || "").trim();
+  if (!p) return false;
+  return p.includes("peça a dosagem/receita se faltar ou já encaminhe para uma atendente finalizar");
+}
 
 export function isDrugstoreDefaultPrompt(prompt?: string | null): boolean {
   const p = String(prompt || "").trim();
@@ -1272,7 +1283,9 @@ export class AiAgentService {
             : false);
 
     const resolvedSystemPrompt = isManipulacaoTenant
-      ? (isDrugstoreDefaultPrompt(rawConfig.systemPrompt) ? DEFAULT_MANIPULACAO_PROMPT : String(rawConfig.systemPrompt).trim())
+      ? (isDrugstoreDefaultPrompt(rawConfig.systemPrompt) || isLegacyManipulacaoV1Prompt(rawConfig.systemPrompt)
+          ? DEFAULT_MANIPULACAO_PROMPT
+          : String(rawConfig.systemPrompt).trim())
       : (rawConfig.systemPrompt || DEFAULT_AI_AGENT_PROMPT);
 
     const resolvedTransitionMsg = isManipulacaoTenant
@@ -1393,7 +1406,7 @@ export class AiAgentService {
     // 5. Preparar Prompt do Sistema com variáveis
     const storeName = tenant.name || (isManipulacao ? "Nossa Farmácia de Manipulação" : "Nossa Drogaria");
     let basePrompt = effectiveConfig.systemPrompt || (isManipulacao ? DEFAULT_MANIPULACAO_PROMPT : DEFAULT_AI_AGENT_PROMPT);
-    if (isManipulacao && isDrugstoreDefaultPrompt(effectiveConfig.systemPrompt)) {
+    if (isManipulacao && (isDrugstoreDefaultPrompt(effectiveConfig.systemPrompt) || isLegacyManipulacaoV1Prompt(effectiveConfig.systemPrompt))) {
       basePrompt = DEFAULT_MANIPULACAO_PROMPT;
     }
     if (!isManipulacao && (basePrompt.includes("Explendido") || basePrompt.includes("Explêndido") || basePrompt.includes("Esplendido"))) {
@@ -1411,7 +1424,8 @@ export class AiAgentService {
 - Siga integralmente as instruções acima definidas pela farmácia.
 - NUNCA diga que não tem um ativo ou fórmula em estoque (farmácia de manipulação prepara fórmulas personalizadas mediante orçamento da equipe).
 - NUNCA mencione catálogo pronto ou links de loja online de drogaria.
-- Quando concluir a triagem (após o cliente informar fórmula, ativos, receita, orçamento ou pedir atendimento humano), inclua na última linha estes marcadores internos (removidos automaticamente antes do envio ao cliente):
+- Se o cliente citou apenas o nome de um ativo sem dosagem/quantidade/receita e você ainda estiver perguntando a dosagem, quantidade ou receita, NÃO emita [FINALIZAR_TRIAGEM_MANIPULACAO] ainda.
+- Somente quando concluir a triagem (após receita, dosagem/quantidade informadas, cliente sem receita/dúvida de orçamento ou pedido de atendente), escreva apenas uma confirmação curta sem novas perguntas nem frases de transferência e inclua na última linha estes marcadores internos:
 [FINALIZAR_TRIAGEM_MANIPULACAO]
 RESUMO: <resumo curto em 1 linha da solicitação do cliente>`;
       }
@@ -1704,8 +1718,6 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       const hasManipTag = /\[FINALIZAR_TRIAGEM_MANIPULACAO\]/i.test(rawResult.reply);
       const summaryMatch = rawResult.reply.match(/RESUMO:\s*([^\n]+)/i);
       const triageSummary = summaryMatch?.[1]?.trim() || incomingMessage.slice(0, 180);
-      const outputSafety = detectAiOutputHandoffIntent(rawResult.reply);
-      const readyToRoute = hasManipTag || isFinalSessionTurn || outputSafety.isHandoffOutput;
 
       let cleanManipReply = rawResult.reply
         .replace(/\[FINALIZAR_TRIAGEM_MANIPULACAO\]/gi, '')
@@ -1715,6 +1727,16 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         .trim();
 
       cleanManipReply = formatToWhatsAppMarkdown(cleanManipReply);
+
+      // Se a IA ainda está perguntando dosagem/quantidade/receita na etapa de coleta (e não é o último turno), não encaminha prematuramente
+      const isAskingCollectionQuestion =
+        !isFinalSessionTurn &&
+        /\?/.test(cleanManipReply) &&
+        /(dosagem|dose|concentra[çc][ãa]o|quantidade|c[aá]psulas?|gramas?|ml|mg|receita|qual\s+seria|pode\s+(me\s+)?(enviar|informar))/i.test(cleanManipReply) &&
+        !/\b(transfer|direcion|encaminh)\b/i.test(cleanManipReply);
+
+      const outputSafety = detectAiOutputHandoffIntent(rawResult.reply);
+      const readyToRoute = isFinalSessionTurn || (!isAskingCollectionQuestion && (hasManipTag || outputSafety.isHandoffOutput));
 
       return {
         ...rawResult,
@@ -2894,10 +2916,6 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
           detectAiOutputHandoffIntent(finalReply).isHandoffOutput;
 
         if (readyToRoute) {
-          const introForCustomer =
-            finalReply && !/transferindo|direcionad|encaminh/i.test(finalReply)
-              ? finalReply
-              : null;
           const routeRes = await routeManipulacaoConversation({
             storeId: realTenantId,
             tenant,
@@ -2905,7 +2923,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
             instanceName: targetInstanceName,
             phoneNumber: cleanPhone,
             summaryText: aiResult.triageSummary || incomingMessage.slice(0, 180),
-            customIntroText: introForCustomer,
+            customIntroText: finalReply || null,
             interactionCount: nextCount,
           });
           return {

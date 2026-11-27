@@ -323,6 +323,37 @@ async function saveInternalTriageNote(params: {
   }
 }
 
+function isRedundantIntroText(introText: string | null | undefined, noticeMsg: string): boolean {
+  const cleaned = String(introText || "").trim();
+  if (!cleaned) return true;
+  // Evita colar ou duplicar texto caso a IA já tenha escrito frase de transferência, confirmação genérica ou aguardo
+  if (
+    /\b(transfer|direcion|encaminh|passando|passei|chamei|chamando)\b/i.test(cleaned) ||
+    /(receb(i|emos)\s+(suas?\s+informa[çc][õo]es|sua\s+solicita[çc][ãa]o|seu\s+pedido)|atendente|farmac[eê]utic|s[oó]\s+um\s+instante|aguarde\s+um|em\s+instantes|continuar\s+(com\s+voc[êe]|seu\s+atendimento))/i.test(cleaned)
+  ) {
+    return true;
+  }
+  const normalizedIntro = cleaned.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, "").trim();
+  const normalizedNotice = String(noticeMsg || "").toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, "").trim();
+  if (!normalizedIntro || normalizedIntro.length < 12) return true;
+  if (normalizedNotice.includes(normalizedIntro)) return true;
+  return false;
+}
+
+function resolveCleanIntroAndNotice(
+  customIntroText: string | null | undefined,
+  noticeMsg: string
+): { introMessage: string | null; forwardMessage: string; combinedReplyText: string } {
+  const trimmedNotice = String(noticeMsg || "").trim();
+  const trimmedIntro = String(customIntroText || "").trim();
+  const introMessage = isRedundantIntroText(trimmedIntro, trimmedNotice) ? null : trimmedIntro;
+  return {
+    introMessage,
+    forwardMessage: trimmedNotice,
+    combinedReplyText: introMessage ? `${introMessage}\n\n${trimmedNotice}` : trimmedNotice,
+  };
+}
+
 async function assignConversationToTargetInbox(params: {
   storeId: string;
   conversationId: string;
@@ -330,6 +361,7 @@ async function assignConversationToTargetInbox(params: {
   instanceName: string;
   phoneNumber: string | null;
   summaryText: string;
+  introMessage?: string | null;
   customerMessage: string;
   handoffReason?: string;
   interactionCount?: number;
@@ -341,6 +373,7 @@ async function assignConversationToTargetInbox(params: {
     instanceName,
     phoneNumber,
     summaryText,
+    introMessage,
     customerMessage,
     handoffReason = "MANIPULACAO_AI_ROUTED",
     interactionCount,
@@ -397,6 +430,17 @@ async function assignConversationToTargetInbox(params: {
     conversationId,
     noteText: internalNote,
   });
+
+  if (introMessage) {
+    await sendWhatsAppNoticeAndRecord({
+      storeId,
+      conversationId,
+      instanceName,
+      phoneNumber,
+      text: introMessage,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 350));
+  }
 
   await sendWhatsAppNoticeAndRecord({
     storeId,
@@ -494,13 +538,15 @@ export async function routeManipulacaoConversation(params: {
   const { eligibleInboxes, freeInboxes, busyInboxes } = await findBestRoutingCandidates(storeId);
   const routingMode = getManipulacaoRoutingMode(tenant);
   const nowIso = new Date().toISOString();
-  const intro = customIntroText ? `${customIntroText.trim()}\n\n` : "";
 
   // Prioridade 1: Caixa elegível com 0 atendimentos ativos (livre)
   if (freeInboxes.length > 0) {
     const targetInbox = freeInboxes[0];
     const forwardMsg = formatManipulacaoForwardMessage(tenant, targetInbox.name);
-    const customerMessage = `${intro}${forwardMsg}`.trim();
+    const { introMessage, forwardMessage, combinedReplyText } = resolveCleanIntroAndNotice(
+      customIntroText,
+      forwardMsg
+    );
 
     await assignConversationToTargetInbox({
       storeId,
@@ -509,7 +555,8 @@ export async function routeManipulacaoConversation(params: {
       instanceName,
       phoneNumber,
       summaryText,
-      customerMessage,
+      introMessage,
+      customerMessage: forwardMessage,
       handoffReason: "MANIPULACAO_AI_ROUTED",
       interactionCount,
     });
@@ -524,7 +571,7 @@ export async function routeManipulacaoConversation(params: {
       queued: false,
       targetInboxId: targetInbox.id,
       targetInboxName: targetInbox.name,
-      replyText: customerMessage,
+      replyText: combinedReplyText,
       reason: "MANIPULACAO_AI_ROUTED_FREE",
     };
   }
@@ -532,8 +579,12 @@ export async function routeManipulacaoConversation(params: {
   // Prioridade 2: Todas as caixas elegíveis estão ocupadas (> 0 atendimentos)
   if (busyInboxes.length > 0) {
     if (routingMode === "wait_for_free") {
-      const waitMessage =
-        `${intro}Recebemos sua solicitação! 😊 No momento nossas atendentes estão finalizando outros atendimentos, mas você já está na fila prioritária e assim que uma ficar livre ela assumirá por aqui!`.trim();
+      const baseWaitMessage =
+        "Recebemos sua solicitação! 😊 No momento nossas atendentes estão finalizando outros atendimentos, mas você já está na fila prioritária e assim que uma ficar livre ela assumirá por aqui!";
+      const { introMessage, forwardMessage: waitMessage, combinedReplyText } = resolveCleanIntroAndNotice(
+        customIntroText,
+        baseWaitMessage
+      );
 
       const queueUpdates: Record<string, any> = {
         assigned_user_id: null,
@@ -568,6 +619,17 @@ export async function routeManipulacaoConversation(params: {
         conversationId,
         noteText: `⏳ *Resumo da Triagem (Aguardando Atendente Livre)*\n${summaryText}`,
       });
+
+      if (introMessage) {
+        await sendWhatsAppNoticeAndRecord({
+          storeId,
+          conversationId,
+          instanceName,
+          phoneNumber,
+          text: introMessage,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 350));
+      }
 
       await sendWhatsAppNoticeAndRecord({
         storeId,
@@ -608,7 +670,7 @@ export async function routeManipulacaoConversation(params: {
         queued: true,
         targetInboxId: null,
         targetInboxName: null,
-        replyText: waitMessage,
+        replyText: combinedReplyText,
         reason: "MANIPULACAO_WAIT_FREE",
       };
     }
@@ -616,7 +678,10 @@ export async function routeManipulacaoConversation(params: {
     // Modo padrão: 'least_busy' -> envia para a caixa com menor quantidade de atendimentos
     const leastBusyTarget = busyInboxes[0].inbox;
     const forwardMsg = formatManipulacaoForwardMessage(tenant, leastBusyTarget.name);
-    const customerMessage = `${intro}${forwardMsg}`.trim();
+    const { introMessage, forwardMessage, combinedReplyText } = resolveCleanIntroAndNotice(
+      customIntroText,
+      forwardMsg
+    );
 
     await assignConversationToTargetInbox({
       storeId,
@@ -625,7 +690,8 @@ export async function routeManipulacaoConversation(params: {
       instanceName,
       phoneNumber,
       summaryText,
-      customerMessage,
+      introMessage,
+      customerMessage: forwardMessage,
       handoffReason: "MANIPULACAO_AI_ROUTED_LEAST_BUSY",
       interactionCount,
     });
@@ -640,14 +706,18 @@ export async function routeManipulacaoConversation(params: {
       queued: false,
       targetInboxId: leastBusyTarget.id,
       targetInboxName: leastBusyTarget.name,
-      replyText: customerMessage,
+      replyText: combinedReplyText,
       reason: "MANIPULACAO_AI_ROUTED_LEAST_BUSY",
     };
   }
 
   // Fallback seguro caso nenhuma caixa tenha sido marcada com ai_routing_enabled = true
-  const fallbackMessage =
-    `${intro}Recebi suas informações! Já encaminhei o seu atendimento para nossa equipe de manipulação dar continuidade por aqui. Só um instante! 😊`.trim();
+  const baseFallbackMessage =
+    "Recebi suas informações! Já encaminhei o seu atendimento para nossa equipe de manipulação dar continuidade por aqui. Só um instante! 😊";
+  const { introMessage, forwardMessage: fallbackMessage, combinedReplyText } = resolveCleanIntroAndNotice(
+    customIntroText,
+    baseFallbackMessage
+  );
 
   const fallbackUpdates: Record<string, any> = {
     is_bot_active: false,
@@ -678,6 +748,17 @@ export async function routeManipulacaoConversation(params: {
     noteText: `🤖 *Resumo da Triagem (Nenhuma caixa habilitada na roleta da IA)*\n${summaryText}`,
   });
 
+  if (introMessage) {
+    await sendWhatsAppNoticeAndRecord({
+      storeId,
+      conversationId,
+      instanceName,
+      phoneNumber,
+      text: introMessage,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 350));
+  }
+
   await sendWhatsAppNoticeAndRecord({
     storeId,
     conversationId,
@@ -703,7 +784,7 @@ export async function routeManipulacaoConversation(params: {
     handled: true,
     routed: false,
     queued: false,
-    replyText: fallbackMessage,
+    replyText: combinedReplyText,
     reason: "MANIPULACAO_NO_ELIGIBLE_INBOX",
   };
 }

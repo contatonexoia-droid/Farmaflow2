@@ -36,6 +36,37 @@ const normalizeMsgTextForDedup = (val: any): string =>
     .trim()
     .replace(/\s+/g, ' ');
 
+const renderWhatsAppFormattedText = (text: any): React.ReactNode => {
+  if (text === null || text === undefined) return '';
+  const str = String(text);
+  if (!str.includes('*')) return str;
+
+  const regex = /\*\*([^*\n]+)\*\*|\*([^\s*\n](?:[^*\n]*[^\s*\n])?)\*/g;
+  const parts: React.ReactNode[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  let keyIdx = 0;
+
+  while ((match = regex.exec(str)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(str.slice(lastIndex, match.index));
+    }
+    const boldContent = match[1] ?? match[2] ?? '';
+    parts.push(
+      <strong key={`wa-b-${keyIdx++}`} className="font-bold">
+        {boldContent}
+      </strong>
+    );
+    lastIndex = regex.lastIndex;
+  }
+
+  if (lastIndex < str.length) {
+    parts.push(str.slice(lastIndex));
+  }
+
+  return parts.length > 0 ? parts : str;
+};
+
 const deduplicateChatMessages = (list: any[]): any[] => {
   if (!Array.isArray(list) || list.length === 0) return [];
 
@@ -2479,7 +2510,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                               <span>{msg.content || '[Imagem]'}</span>
                             </div>
                             {msg.content && msg.content !== '[Imagem]' && (
-                              <p className="text-sm mt-1.5 whitespace-pre-wrap">{msg.content}</p>
+                              <p className="text-sm mt-1.5 whitespace-pre-wrap">{renderWhatsAppFormattedText(msg.content)}</p>
                             )}
                           </div>
                         ) : (
@@ -2512,11 +2543,11 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                           <div className="my-1">
                             <video controls src={mediaUrl} className="max-w-xs max-h-72 rounded-lg my-1 shadow-sm" />
                             {msg.content && msg.content !== '[Vídeo]' && (
-                              <p className="text-sm mt-1.5 whitespace-pre-wrap">{msg.content}</p>
+                              <p className="text-sm mt-1.5 whitespace-pre-wrap">{renderWhatsAppFormattedText(msg.content)}</p>
                             )}
                           </div>
                         ) : (
-                          <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                          <p className="text-sm whitespace-pre-wrap">{renderWhatsAppFormattedText(msg.content)}</p>
                         )
                       ) : isDocument ? (
                         mediaUrl ? (
@@ -2528,10 +2559,10 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                             </a>
                           </div>
                         ) : (
-                          <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                          <p className="text-sm whitespace-pre-wrap">{renderWhatsAppFormattedText(msg.content)}</p>
                         )
                       ) : (
-                        <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                        <p className="text-sm whitespace-pre-wrap">{renderWhatsAppFormattedText(msg.content)}</p>
                       )}
 
                       <div className="flex items-center justify-end gap-2 mt-1">
