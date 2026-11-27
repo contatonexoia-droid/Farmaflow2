@@ -16630,10 +16630,13 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
         const rawAck = upd.status || upd.update?.status || upd.ack;
         if (ackKeyId && rawAck !== undefined && rawAck !== null) {
           try {
-            await supabaseAdmin
+            const { error: ackErr } = await supabaseAdmin
               .from("chat_messages")
               .update({ message_ack: String(rawAck) })
               .eq("remote_id", ackKeyId);
+            if (ackErr && ackErr.code !== "42703" && ackErr.code !== "PGRST204") {
+              console.warn("[WEBHOOK - ACK] Aviso ao atualizar message_ack:", ackErr.message);
+            }
           } catch (_) {}
         }
       }
@@ -16902,7 +16905,9 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
           // 1. SEMPRE salva primeiro a mensagem no banco de dados e cria/atualiza o contato e a conversa na caixa de entrada
           const result = await chatStore.processWhatsAppMessage(storeId, msg, instanceName);
 
-          if (result && result.conversation) {
+          if (result && (result as any).persistError) {
+            console.error(`[WEBHOOK] ❌ Mensagem não persistida em chat_messages para conversa ${result.conversation?.id || 'N/A'}. Abortando broadcast para não mascarar erro.`);
+          } else if (result && result.conversation) {
             const conversation = result.conversation;
             const wasReopened = Boolean((conversation as any)._was_reopened);
             const isWeblojaOrder = Boolean((conversation as any)._is_webloja_order);

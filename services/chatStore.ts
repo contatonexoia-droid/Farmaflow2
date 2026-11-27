@@ -109,6 +109,71 @@ function clearInFlightOutboundSend(conversationId: string, tempUuid: string): vo
   }
 }
 
+const OPTIONAL_CHAT_MESSAGE_COLUMNS = ["remote_id", "sender_id", "message_ack", "reaction", "reactions"] as const;
+const detectedMissingChatMessageCols = new Set<string>();
+const recentRemoteKeyToMsgId = new Map<string, { msgId: string; ts: number }>();
+
+function rememberRemoteKeyMapping(conversationId: string, remoteId?: string | null, msgId?: string | null): void {
+  const cleanRemote = typeof remoteId === "string" ? remoteId.trim() : "";
+  const cleanMsg = typeof msgId === "string" ? msgId.trim() : "";
+  if (!conversationId || !cleanRemote || !cleanMsg) return;
+  const nowMs = Date.now();
+  recentRemoteKeyToMsgId.set(`${conversationId}::${cleanRemote}`, { msgId: cleanMsg, ts: nowMs });
+  if (recentRemoteKeyToMsgId.size > 4000) {
+    for (const [k, v] of recentRemoteKeyToMsgId.entries()) {
+      if (nowMs - v.ts > 3600000) recentRemoteKeyToMsgId.delete(k);
+    }
+  }
+}
+
+function lookupRemoteKeyMapping(conversationId: string, remoteId?: string | null): string | null {
+  const cleanRemote = typeof remoteId === "string" ? remoteId.trim() : "";
+  if (!conversationId || !cleanRemote) return null;
+  const entry = recentRemoteKeyToMsgId.get(`${conversationId}::${cleanRemote}`);
+  if (!entry) return null;
+  if (Date.now() - entry.ts > 3600000) {
+    recentRemoteKeyToMsgId.delete(`${conversationId}::${cleanRemote}`);
+    return null;
+  }
+  return entry.msgId;
+}
+
+function isMessageIdMappedInMemory(conversationId: string, msgId?: string | null): boolean {
+  if (!conversationId || !msgId) return false;
+  const prefix = `${conversationId}::`;
+  for (const [k, v] of recentRemoteKeyToMsgId.entries()) {
+    if (k.startsWith(prefix) && v.msgId === msgId) return true;
+  }
+  return false;
+}
+
+function extractMissingColumnFromPgError(error: any): string | null {
+  if (!error) return null;
+  const code = String(error.code || "").toUpperCase();
+  const msg = String(error.message || "") + " " + String(error.details || "") + " " + String(error.hint || "");
+  const isMissingColErr =
+    code === "42703" ||
+    code === "PGRST204" ||
+    /schema cache/i.test(msg) ||
+    /does not exist/i.test(msg) ||
+    /Could not find the/i.test(msg);
+  if (!isMissingColErr) return null;
+
+  const singleQuoteMatch = msg.match(/Could not find the '([^']+)' column/i);
+  if (singleQuoteMatch?.[1]) return singleQuoteMatch[1];
+
+  const doubleQuoteMatch = msg.match(/column "([^"]+)" (?:of relation "[^"]+" )?does not exist/i);
+  if (doubleQuoteMatch?.[1]) return doubleQuoteMatch[1];
+
+  const dotMatch = msg.match(/column [a-zA-Z0-9_]+\.([a-zA-Z0-9_]+) does not exist/i);
+  if (dotMatch?.[1]) return dotMatch[1];
+
+  for (const col of OPTIONAL_CHAT_MESSAGE_COLUMNS) {
+    if (msg.includes(col)) return col;
+  }
+  return "__UNKNOWN_OPTIONAL__";
+}
+
 const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || "https://nalshjhoiecxooejpiaw.supabase.co";
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_Y2lAqlvDUhdjSNtv80GkJA_SiOgynYy";
 const supabaseAdmin = createClient(supabaseUrl, supabaseKey);
@@ -795,43 +860,24 @@ class ChatStore {
         .from("chat_messages")
         .select("*")
         .eq("conversation_id", conversationId)
-        .order("created_at", { ascending: true });
+        .order("created_at", { ascending: false })
+        .limit(200);
 
-      if (!error && data) {
-        return data.map((row: any) => {
-          const mediaUrl = row.media_url || row.mediaUrl;
-          const mediaType = row.media_type || row.mediaType || row.type || (mediaUrl ? (mediaUrl.startsWith("data:audio") || /\.(ogg|oga|opus|mp3|wav|m4a)/i.test(mediaUrl) ? "audio" : "image") : "text");
-          let parsedReactions = row.reactions;
-          if (typeof parsedReactions === "string") {
-            try {
-              parsedReactions = JSON.parse(parsedReactions);
-            } catch (_) {
-              parsedReactions = [];
-            }
-          }
-          if (!Array.isArray(parsedReactions)) {
-            parsedReactions = row.reaction ? [{ emoji: row.reaction, created_at: row.created_at }] : [];
-          }
-          return {
-            ...row,
-            reaction: row.reaction || (parsedReactions.length > 0 ? parsedReactions[parsedReactions.length - 1].emoji : null),
-            reactions: parsedReactions,
-            remote_id: row.remote_id || null,
-            media_url: mediaUrl,
-            mediaUrl: mediaUrl,
-            media_type: mediaType,
-            mediaType: mediaType,
-            type: mediaType
-          };
-        });
+      if (error) {
+        console.error("[ChatStore] Erro ao consultar chat_messages no Supabase:", error.code, error.message);
+      } else if (data) {
+        const chronological = [...data].reverse();
+        return chronological.map((row: any) => this.formatDbMessageRow(row));
       }
-    } catch (err) {
-      console.warn("[ChatStore] Supabase messages query fallback:", err);
+    } catch (err: any) {
+      console.error("[ChatStore] Exceção ao consultar chat_messages no Supabase:", err?.message || err);
     }
 
     // Memory Fallback
     const localMsgs = this.messages.filter(m => m.conversation_id === conversationId);
-    return [...localMsgs].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+    return [...localMsgs]
+      .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+      .slice(-200);
   }
 
   private formatDbMessageRow(row: any): ChatMessage {
@@ -869,6 +915,101 @@ class ChatStore {
     };
   }
 
+  private async safeInsertChatMessage(
+    rawPayload: Record<string, any>
+  ): Promise<{ inserted: boolean; duplicate: boolean; error?: any }> {
+    const attemptPayload = sanitizeChatMessagePayload(rawPayload);
+    for (const missing of detectedMissingChatMessageCols) {
+      delete attemptPayload[missing];
+    }
+
+    for (let attempt = 0; attempt <= OPTIONAL_CHAT_MESSAGE_COLUMNS.length + 1; attempt++) {
+      const { error } = await supabaseAdmin.from("chat_messages").insert([attemptPayload]);
+      if (!error) {
+        return { inserted: true, duplicate: false };
+      }
+
+      if (error.code === "23505" || String(error.message || "").toLowerCase().includes("duplicate")) {
+        return { inserted: false, duplicate: true };
+      }
+
+      const missingCol = extractMissingColumnFromPgError(error);
+      if (missingCol) {
+        if (missingCol !== "__UNKNOWN_OPTIONAL__" && missingCol in attemptPayload) {
+          detectedMissingChatMessageCols.add(missingCol);
+          console.warn(
+            `[ChatStore] Coluna '${missingCol}' ausente em chat_messages (${error.code || "schema"}). Inserindo com fallback automático.`
+          );
+          delete attemptPayload[missingCol];
+          continue;
+        }
+
+        let strippedAny = false;
+        for (const optCol of OPTIONAL_CHAT_MESSAGE_COLUMNS) {
+          if (optCol in attemptPayload) {
+            detectedMissingChatMessageCols.add(optCol);
+            delete attemptPayload[optCol];
+            strippedAny = true;
+          }
+        }
+        if (strippedAny) {
+          console.warn(
+            `[ChatStore] Colunas opcionais ausentes em chat_messages (${error.code || "schema"}). Inserindo apenas com colunas principais.`
+          );
+          continue;
+        }
+      }
+
+      console.error("[ChatStore] ❌ ERRO CRÍTICO ao inserir mensagem em chat_messages:", {
+        code: error.code,
+        message: error.message,
+        details: error.details,
+        hint: error.hint,
+        payloadKeys: Object.keys(attemptPayload),
+      });
+      return { inserted: false, duplicate: false, error };
+    }
+
+    return { inserted: false, duplicate: false, error: new Error("Limite de tentativas de fallback atingido ao inserir em chat_messages") };
+  }
+
+  private async safeUpdateChatMessage(messageId: string, rawPayload: Record<string, any>): Promise<boolean> {
+    if (!messageId) return false;
+    const attemptPayload = sanitizeChatMessagePayload(rawPayload);
+    for (const missing of detectedMissingChatMessageCols) {
+      delete attemptPayload[missing];
+    }
+    if (Object.keys(attemptPayload).length === 0) return true;
+
+    for (let attempt = 0; attempt <= OPTIONAL_CHAT_MESSAGE_COLUMNS.length + 1; attempt++) {
+      if (Object.keys(attemptPayload).length === 0) return true;
+      const { error } = await supabaseAdmin.from("chat_messages").update(attemptPayload).eq("id", messageId);
+      if (!error) return true;
+
+      const missingCol = extractMissingColumnFromPgError(error);
+      if (missingCol) {
+        if (missingCol !== "__UNKNOWN_OPTIONAL__" && missingCol in attemptPayload) {
+          detectedMissingChatMessageCols.add(missingCol);
+          delete attemptPayload[missingCol];
+          continue;
+        }
+        let strippedAny = false;
+        for (const optCol of OPTIONAL_CHAT_MESSAGE_COLUMNS) {
+          if (optCol in attemptPayload) {
+            detectedMissingChatMessageCols.add(optCol);
+            delete attemptPayload[optCol];
+            strippedAny = true;
+          }
+        }
+        if (strippedAny) continue;
+      }
+
+      console.error("[ChatStore] Erro ao atualizar chat_messages:", error.code, error.message);
+      return false;
+    }
+    return false;
+  }
+
   private async findExistingMessageByRemoteId(
     conversationId: string,
     remoteId?: string | null,
@@ -879,9 +1020,22 @@ class ChatStore {
     if (!cleanRemoteId && !cleanDetId) return null;
 
     try {
+      const memMappedId = cleanRemoteId ? lookupRemoteKeyMapping(conversationId, cleanRemoteId) : null;
+      if (memMappedId && isValidUuid(memMappedId)) {
+        const { data: mappedRow } = await supabaseAdmin
+          .from("chat_messages")
+          .select("*")
+          .eq("id", memMappedId)
+          .maybeSingle();
+        if (mappedRow) return mappedRow;
+      }
+
+      const canQueryRemoteCol = !detectedMissingChatMessageCols.has("remote_id");
       const orParts: string[] = [];
       if (cleanRemoteId) {
-        orParts.push(`remote_id.eq.${cleanRemoteId}`);
+        if (canQueryRemoteCol) {
+          orParts.push(`remote_id.eq.${cleanRemoteId}`);
+        }
         if (isValidUuid(cleanRemoteId)) {
           orParts.push(`id.eq.${cleanRemoteId}`);
         }
@@ -890,10 +1044,8 @@ class ChatStore {
         orParts.push(`id.eq.${cleanDetId}`);
       }
 
-      if (orParts.length === 0) return null;
-
-      if (conversationId) {
-        const { data: scopedMatch } = await supabaseAdmin
+      if (orParts.length > 0 && conversationId) {
+        const { data: scopedMatch, error: scopedErr } = await supabaseAdmin
           .from("chat_messages")
           .select("*")
           .eq("conversation_id", conversationId)
@@ -902,11 +1054,24 @@ class ChatStore {
           .limit(1)
           .maybeSingle();
 
-        if (scopedMatch) return scopedMatch;
+        if (scopedErr && extractMissingColumnFromPgError(scopedErr)) {
+          detectedMissingChatMessageCols.add("remote_id");
+          if (cleanDetId) {
+            const { data: idOnlyMatch } = await supabaseAdmin
+              .from("chat_messages")
+              .select("*")
+              .eq("conversation_id", conversationId)
+              .eq("id", cleanDetId)
+              .maybeSingle();
+            if (idOnlyMatch) return idOnlyMatch;
+          }
+        } else if (scopedMatch) {
+          return scopedMatch;
+        }
       }
 
-      if (cleanRemoteId) {
-        const { data: globalMatch } = await supabaseAdmin
+      if (cleanRemoteId && !detectedMissingChatMessageCols.has("remote_id")) {
+        const { data: globalMatch, error: globalErr } = await supabaseAdmin
           .from("chat_messages")
           .select("*")
           .eq("remote_id", cleanRemoteId)
@@ -914,7 +1079,11 @@ class ChatStore {
           .limit(1)
           .maybeSingle();
 
-        if (globalMatch) return globalMatch;
+        if (globalErr && extractMissingColumnFromPgError(globalErr)) {
+          detectedMissingChatMessageCols.add("remote_id");
+        } else if (globalMatch) {
+          return globalMatch;
+        }
       }
     } catch (err: any) {
       console.warn("[ChatStore] Aviso ao verificar remote_id existente:", err?.message || err);
@@ -930,7 +1099,7 @@ class ChatStore {
     if (!conversationId) return null;
     try {
       const fifteenSecondsAgo = new Date(Date.now() - 15000).toISOString();
-      const { data: recentRows } = await supabaseAdmin
+      const { data: recentRows, error } = await supabaseAdmin
         .from("chat_messages")
         .select("*")
         .eq("conversation_id", conversationId)
@@ -939,11 +1108,17 @@ class ChatStore {
         .order("created_at", { ascending: false })
         .limit(15);
 
+      if (error) {
+        console.warn("[ChatStore] Aviso na consulta de mensagem recente para deduplicação:", error.message);
+        return null;
+      }
       if (!recentRows || recentRows.length === 0) return null;
 
       const normTarget = normalizeMessageContentForDedup(content);
       for (const row of recentRows) {
-        const hasExternalId = Boolean(row.remote_id && String(row.remote_id).trim().length > 0);
+        const hasExternalId =
+          Boolean(row.remote_id && String(row.remote_id).trim().length > 0) ||
+          isMessageIdMappedInMemory(conversationId, row.id);
         if (hasExternalId) continue;
 
         const normRow = normalizeMessageContentForDedup(row.content);
@@ -1120,16 +1295,18 @@ class ChatStore {
                   const existingWithKey = await this.findExistingMessageByRemoteId(conversationId, asyncKeyId);
                   if (existingWithKey && existingWithKey.id !== tempUuid) {
                     // Se o webhook chegou antes e já gravou com esse remote_id, remove a linha provisória sem remote_id se existir
-                    await supabaseAdmin
-                      .from("chat_messages")
-                      .delete()
-                      .eq("id", tempUuid)
-                      .is("remote_id", null);
+                    if (!detectedMissingChatMessageCols.has("remote_id")) {
+                      await supabaseAdmin
+                        .from("chat_messages")
+                        .delete()
+                        .eq("id", tempUuid)
+                        .is("remote_id", null);
+                    } else {
+                      await supabaseAdmin.from("chat_messages").delete().eq("id", tempUuid);
+                    }
                   } else {
-                    await supabaseAdmin
-                      .from("chat_messages")
-                      .update({ remote_id: asyncKeyId, message_ack: "SENT" })
-                      .eq("id", tempUuid);
+                    rememberRemoteKeyMapping(conversationId, asyncKeyId, tempUuid);
+                    await this.safeUpdateChatMessage(tempUuid, { remote_id: asyncKeyId, message_ack: "SENT" });
                   }
                 } catch (_) {}
               })
@@ -1165,6 +1342,7 @@ class ChatStore {
       if (existingRow) {
         wasDeduplicated = true;
         msgUuid = existingRow.id;
+        rememberRemoteKeyMapping(conversationId, resolvedRemoteId, existingRow.id);
         console.log(`[ChatStore] 🛡️ Deduplicação ativa no addMessage: registro já gravado pelo webhook (id=${existingRow.id}, remote_id=${resolvedRemoteId}). Atualizando metadados.`);
         const patchUpdates: Record<string, any> = {};
         if (resolvedRemoteId && !existingRow.remote_id) patchUpdates.remote_id = resolvedRemoteId;
@@ -1172,13 +1350,8 @@ class ChatStore {
         if (resolvedSenderId && !existingRow.sender_id) patchUpdates.sender_id = resolvedSenderId;
         if (senderType && existingRow.sender_type !== senderType) patchUpdates.sender_type = senderType;
         if (Object.keys(patchUpdates).length > 0) {
-          try {
-            await supabaseAdmin
-              .from("chat_messages")
-              .update(sanitizeChatMessagePayload(patchUpdates))
-              .eq("id", existingRow.id);
-            existingRow = { ...existingRow, ...patchUpdates };
-          } catch (_) {}
+          await this.safeUpdateChatMessage(existingRow.id, patchUpdates);
+          existingRow = { ...existingRow, ...patchUpdates };
         }
       }
 
@@ -1205,37 +1378,43 @@ class ChatStore {
         registerBotSentMessage(msgUuid, conversationId);
       }
 
-      // Try Supabase insert only if not already persisted
-      try {
-        if (!existingRow) {
-          const insertPayload = sanitizeChatMessagePayload({
-            id: msgUuid,
-            conversation_id: conversationId,
-            sender_type: senderType,
-            sender_id: resolvedSenderId,
-            content,
-            is_private: isPrivate,
-            media_url: actualMediaUrl,
-            media_type: resolvedType,
-            remote_id: resolvedRemoteId,
-            message_ack: resolvedRemoteId ? "SENT" : undefined,
-            created_at: now
-          });
+      // Persiste em chat_messages ANTES de atualizar chat_conversations (nunca mascara falha de gravação)
+      if (!existingRow) {
+        const insertPayload = {
+          id: msgUuid,
+          conversation_id: conversationId,
+          sender_type: senderType,
+          sender_id: resolvedSenderId,
+          content,
+          is_private: isPrivate,
+          media_url: actualMediaUrl,
+          media_type: resolvedType,
+          remote_id: resolvedRemoteId,
+          message_ack: resolvedRemoteId ? "SENT" : undefined,
+          created_at: now
+        };
 
-          const { error } = await supabaseAdmin.from("chat_messages").insert([insertPayload]);
-
-          if (error) {
-            if (error.code === "23505" || String(error.message || "").toLowerCase().includes("duplicate")) {
-              const dupRow = await this.findExistingMessageByRemoteId(conversationId, resolvedRemoteId, msgUuid);
-              if (dupRow) {
-                wasDeduplicated = true;
-                Object.assign(newMsg, this.formatDbMessageRow(dupRow));
-              }
-            } else {
-              console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao inserir mensagem no addMessage', error.message, error);
-            }
+        const insertRes = await this.safeInsertChatMessage(insertPayload);
+        if (insertRes.duplicate) {
+          const dupRow = await this.findExistingMessageByRemoteId(conversationId, resolvedRemoteId, msgUuid);
+          if (dupRow) {
+            wasDeduplicated = true;
+            Object.assign(newMsg, this.formatDbMessageRow(dupRow));
           }
+        } else if (!insertRes.inserted) {
+          const dbErr: any = new Error(
+            `Falha ao salvar mensagem no banco de dados (chat_messages): ${insertRes.error?.message || "Erro desconhecido"}`
+          );
+          dbErr.statusCode = 500;
+          throw dbErr;
         }
+
+        if (resolvedRemoteId) {
+          rememberRemoteKeyMapping(conversationId, resolvedRemoteId, newMsg.id);
+        }
+      }
+
+      try {
 
         const convUpdates: any = {
           last_message_at: now,
@@ -1721,14 +1900,20 @@ class ChatStore {
         isBotEcho = true;
       } else {
         try {
-          const { data: existingBotMsg } = await supabaseAdmin
+          const botLookupOr =
+            !detectedMissingChatMessageCols.has("remote_id") && rawMsgKey
+              ? `id.eq.${msgId},remote_id.eq.${rawMsgKey}`
+              : `id.eq.${msgId}`;
+          const { data: existingBotMsg, error: botLookupErr } = await supabaseAdmin
             .from("chat_messages")
             .select("id, sender_type")
-            .or(`id.eq.${msgId},remote_id.eq.${rawMsgKey}`)
+            .or(botLookupOr)
             .eq("conversation_id", convId)
             .maybeSingle();
 
-          if (existingBotMsg && (existingBotMsg.sender_type === "BOT" || existingBotMsg.sender_type === "SYSTEM")) {
+          if (botLookupErr && extractMissingColumnFromPgError(botLookupErr)) {
+            detectedMissingChatMessageCols.add("remote_id");
+          } else if (existingBotMsg && (existingBotMsg.sender_type === "BOT" || existingBotMsg.sender_type === "SYSTEM")) {
             isBotEcho = true;
           }
         } catch (_) {}
@@ -1862,86 +2047,9 @@ class ChatStore {
     (conv as any)._is_webloja_order = isWeblojaOrder;
     (conv as any)._order_id = orderCheck.orderId;
 
-    // 3. Atualização ou criação da conversa (chat_conversations)
-    try {
-      if (convInfo) {
-        // CONVERSA EXISTENTE: Atualiza estritamente os metadados da última mensagem recebida.
-        const convUpdateData: any = {
-          last_message_at: now,
-          last_message_content: text,
-          unread_count: newUnreadCount,
-          updated_at: now
-        };
-
-        if (resolvedInboxId && !convInfo.inbox_id) {
-          convUpdateData.inbox_id = resolvedInboxId;
-        }
-
-        // Se for pedido da webloja, move imediatamente para "saiu_entrega" (Em Separação / Delivery) e desliga a IA
-        if (isWeblojaOrder) {
-          convUpdateData.kanban_stage = "saiu_entrega";
-          convUpdateData.stage = "saiu_entrega";
-          convUpdateData.status = "em_separacao";
-          convUpdateData.is_bot_active = false;
-          convUpdateData.is_human_controlled = true;
-          convUpdateData.bot_handoff_reason = "WEBLOJA_ORDER_RECEIVED";
-          convUpdateData.bot_handoff_at = now;
-        } else if (wasReopened) {
-          // Se a conversa estava finalizada e recebeu mensagem comum do cliente, reabre para "novos_triagem"
-          convUpdateData.kanban_stage = "novos_triagem";
-          convUpdateData.stage = "novos_triagem";
-          convUpdateData.status = "OPEN";
-          convUpdateData.is_bot_active = true;
-          convUpdateData.is_human_controlled = false;
-          convUpdateData.assigned_user_id = null;
-          convUpdateData.bot_handoff_reason = null;
-          convUpdateData.bot_interaction_count = 0;
-        } else if (isNewSessionAfterInactivity) {
-          convUpdateData.kanban_stage = "ia_atendendo";
-          convUpdateData.stage = "ia_atendendo";
-          convUpdateData.status = "bot";
-          convUpdateData.is_bot_active = true;
-          convUpdateData.is_human_controlled = false;
-          convUpdateData.assigned_user_id = null;
-          convUpdateData.bot_handoff_reason = null;
-          convUpdateData.bot_interaction_count = 0;
-        } else if (fromMe && isBotEcho) {
-          // BLINDAGEM ANTI-ECO: Se a conversa já foi transferida para atendimento humano, NUNCA reativar o bot por eco!
-          if (alreadyInHumanMode) {
-            convUpdateData.is_bot_active = false;
-            convUpdateData.is_human_controlled = true;
-            convUpdateData.status = convInfo.status === "human" || convInfo.status === "human_takeover" ? convInfo.status : "human";
-            convUpdateData.kanban_stage = "em_atendimento";
-            convUpdateData.stage = "em_atendimento";
-          } else {
-            convUpdateData.is_bot_active = true;
-            convUpdateData.is_human_controlled = false;
-            convUpdateData.status = "bot";
-            convUpdateData.kanban_stage = "ia_atendendo";
-            convUpdateData.stage = "ia_atendendo";
-          }
-        } else if (fromMe && !isBotEcho && convInfo.is_human_controlled === true) {
-          // Apenas transborda para humano se for mensagem manual confirmada de operador (não eco de bot) em conversa já sob controle humano
-          convUpdateData.is_human_controlled = true;
-          convUpdateData.is_bot_active = false;
-          convUpdateData.status = "human";
-          convUpdateData.kanban_stage = "em_atendimento";
-          convUpdateData.stage = "em_atendimento";
-          convUpdateData.bot_handoff_reason = "HUMAN_OPERATOR_MESSAGE";
-          convUpdateData.bot_handoff_at = now;
-        }
-
-        const sanitizedUpdate = sanitizeChatConversationPayload(convUpdateData);
-        const { error } = await supabaseAdmin
-          .from("chat_conversations")
-          .update(sanitizedUpdate)
-          .eq("id", convId);
-
-        if (error) {
-          console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao atualizar conversa existente (chat_conversations)', error.message, error);
-        }
-      } else {
-        // CONVERSA NOVA (Primeiro Contato): Cria o registro inicial
+    // 3A. Garante que conversa nova exista antes de gravar chat_messages (FK obrigatória)
+    if (!convInfo) {
+      try {
         const convInsertData: any = {
           id: convId,
           store_id: storeId,
@@ -1963,16 +2071,16 @@ class ChatStore {
         };
 
         const sanitizedInsert = sanitizeChatConversationPayload(convInsertData);
-        const { error } = await supabaseAdmin
+        const { error: convInsertErr } = await supabaseAdmin
           .from("chat_conversations")
           .insert([sanitizedInsert]);
 
-        if (error) {
-          console.error('[ERRO CRITICO NO BACKGROUND]: Erro na criação da nova conversa (chat_conversations)', error.message, error);
+        if (convInsertErr) {
+          console.error('[ERRO CRITICO NO BACKGROUND]: Erro na criação da nova conversa (chat_conversations)', convInsertErr.message, convInsertErr);
         }
+      } catch (error: any) {
+        console.error('[ERRO CRITICO NO BACKGROUND]: Exceção na criação da nova conversa (chat_conversations)', error.message, error.stack);
       }
-    } catch (error: any) {
-      console.error('[ERRO CRITICO NO BACKGROUND]: Exceção na busca ou criação da conversa (chat_conversations)', error.message, error.stack);
     }
 
     // 4. Deduplicação e Inserção da mensagem (chat_messages)
@@ -1989,23 +2097,16 @@ class ChatStore {
       const recentUnlinked = await this.findRecentUnlinkedOutboundMessage(convId, text, extractedMediaType);
       if (recentUnlinked) {
         const keyToLink = explicitMsgKey || rawMsgKey;
-        try {
-          const updateFields: Record<string, any> = {
-            remote_id: keyToLink,
-            message_ack: "SENT"
-          };
-          if (extractedMediaUrl && !recentUnlinked.media_url) {
-            updateFields.media_url = extractedMediaUrl;
-          }
-          await supabaseAdmin
-            .from("chat_messages")
-            .update(sanitizeChatMessagePayload(updateFields))
-            .eq("id", recentUnlinked.id);
-          existingMessageRow = { ...recentUnlinked, ...updateFields };
-        } catch (linkErr: any) {
-          console.warn("[ChatStore] Aviso ao vincular remote_id na mensagem recente:", linkErr?.message || linkErr);
-          existingMessageRow = { ...recentUnlinked, remote_id: keyToLink };
+        rememberRemoteKeyMapping(convId, keyToLink, recentUnlinked.id);
+        const updateFields: Record<string, any> = {
+          remote_id: keyToLink,
+          message_ack: "SENT"
+        };
+        if (extractedMediaUrl && !recentUnlinked.media_url) {
+          updateFields.media_url = extractedMediaUrl;
         }
+        await this.safeUpdateChatMessage(recentUnlinked.id, updateFields);
+        existingMessageRow = { ...recentUnlinked, ...updateFields };
         console.log(`[ChatStore] 🛡️ Race-condition evitada: webhook fromMe vinculado à mensagem recente (${recentUnlinked.id}) com remote_id=${keyToLink}`);
       } else {
         // Verifica também se addMessage está em voo neste exato milissegundo aguardando a Evolution API
@@ -2017,23 +2118,97 @@ class ChatStore {
           } else if (!inFlight.claimedRemoteId) {
             inFlight.claimedRemoteId = keyToClaim;
             inFlight.persistedMsgId = msgId;
+            rememberRemoteKeyMapping(convId, keyToClaim, msgId);
             console.log(`[ChatStore] 🛡️ Webhook chegou antes do retorno HTTP do addMessage: reivindicando envio em voo (id=${msgId}, remote_id=${keyToClaim}).`);
           }
         }
       }
     }
 
+    const applyConversationUpdateIfExisting = async () => {
+      if (!convInfo) return;
+      try {
+        const convUpdateData: any = {
+          last_message_at: now,
+          last_message_content: text,
+          unread_count: newUnreadCount,
+          updated_at: now
+        };
+
+        if (resolvedInboxId && !convInfo.inbox_id) {
+          convUpdateData.inbox_id = resolvedInboxId;
+        }
+
+        if (isWeblojaOrder) {
+          convUpdateData.kanban_stage = "saiu_entrega";
+          convUpdateData.stage = "saiu_entrega";
+          convUpdateData.status = "em_separacao";
+          convUpdateData.is_bot_active = false;
+          convUpdateData.is_human_controlled = true;
+          convUpdateData.bot_handoff_reason = "WEBLOJA_ORDER_RECEIVED";
+          convUpdateData.bot_handoff_at = now;
+        } else if (wasReopened) {
+          convUpdateData.kanban_stage = "novos_triagem";
+          convUpdateData.stage = "novos_triagem";
+          convUpdateData.status = "OPEN";
+          convUpdateData.is_bot_active = true;
+          convUpdateData.is_human_controlled = false;
+          convUpdateData.assigned_user_id = null;
+          convUpdateData.bot_handoff_reason = null;
+          convUpdateData.bot_interaction_count = 0;
+        } else if (isNewSessionAfterInactivity) {
+          convUpdateData.kanban_stage = "ia_atendendo";
+          convUpdateData.stage = "ia_atendendo";
+          convUpdateData.status = "bot";
+          convUpdateData.is_bot_active = true;
+          convUpdateData.is_human_controlled = false;
+          convUpdateData.assigned_user_id = null;
+          convUpdateData.bot_handoff_reason = null;
+          convUpdateData.bot_interaction_count = 0;
+        } else if (fromMe && isBotEcho) {
+          if (alreadyInHumanMode) {
+            convUpdateData.is_bot_active = false;
+            convUpdateData.is_human_controlled = true;
+            convUpdateData.status = convInfo.status === "human" || convInfo.status === "human_takeover" ? convInfo.status : "human";
+            convUpdateData.kanban_stage = "em_atendimento";
+            convUpdateData.stage = "em_atendimento";
+          } else {
+            convUpdateData.is_bot_active = true;
+            convUpdateData.is_human_controlled = false;
+            convUpdateData.status = "bot";
+            convUpdateData.kanban_stage = "ia_atendendo";
+            convUpdateData.stage = "ia_atendendo";
+          }
+        } else if (fromMe && !isBotEcho && convInfo.is_human_controlled === true) {
+          convUpdateData.is_human_controlled = true;
+          convUpdateData.is_bot_active = false;
+          convUpdateData.status = "human";
+          convUpdateData.kanban_stage = "em_atendimento";
+          convUpdateData.stage = "em_atendimento";
+          convUpdateData.bot_handoff_reason = "HUMAN_OPERATOR_MESSAGE";
+          convUpdateData.bot_handoff_at = now;
+        }
+
+        const sanitizedUpdate = sanitizeChatConversationPayload(convUpdateData);
+        const { error } = await supabaseAdmin
+          .from("chat_conversations")
+          .update(sanitizedUpdate)
+          .eq("id", convId);
+
+        if (error) {
+          console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao atualizar conversa existente (chat_conversations)', error.message, error);
+        }
+      } catch (error: any) {
+        console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao atualizar conversa existente (chat_conversations)', error.message, error.stack);
+      }
+    };
+
     if (existingMessageRow) {
       const formattedExisting = this.formatDbMessageRow(existingMessageRow);
-      // Atualiza mídia/ACK se o registro salvo anteriormente não tinha mídia ou remote_id
+      rememberRemoteKeyMapping(convId, explicitMsgKey || rawMsgKey, existingMessageRow.id);
       if (explicitMsgKey && !existingMessageRow.remote_id) {
-        try {
-          await supabaseAdmin
-            .from("chat_messages")
-            .update({ remote_id: explicitMsgKey, message_ack: "SENT" })
-            .eq("id", existingMessageRow.id);
-          formattedExisting.remote_id = explicitMsgKey;
-        } catch (_) {}
+        await this.safeUpdateChatMessage(existingMessageRow.id, { remote_id: explicitMsgKey, message_ack: "SENT" });
+        formattedExisting.remote_id = explicitMsgKey;
       }
 
       const memIdx = this.messages.findIndex(
@@ -2095,47 +2270,54 @@ class ChatStore {
     };
 
     let insertedAsDuplicate = false;
+    let messagePersisted = false;
     if (!isBotEcho) {
-      try {
-        const msgInsertData = sanitizeChatMessagePayload({
-          id: msgId,
-          conversation_id: convId,
-          sender_type: senderType,
-          content: text,
-          media_url: extractedMediaUrl || null,
-          media_type: extractedMediaType || "text",
-          remote_id: explicitMsgKey || rawMsgKey,
-          message_ack: fromMe ? "SENT" : undefined,
-          is_private: false,
-          created_at: now
-        });
+      const msgInsertData = {
+        id: msgId,
+        conversation_id: convId,
+        sender_type: senderType,
+        content: text,
+        media_url: extractedMediaUrl || null,
+        media_type: extractedMediaType || "text",
+        remote_id: explicitMsgKey || rawMsgKey,
+        message_ack: fromMe ? "SENT" : undefined,
+        is_private: false,
+        created_at: now
+      };
 
-        const { error } = await supabaseAdmin.from("chat_messages").insert([msgInsertData]);
-
-        if (error) {
-          if (error.code === "23505" || String(error.message || "").toLowerCase().includes("duplicate")) {
-            insertedAsDuplicate = true;
-            const dupRow = await this.findExistingMessageByRemoteId(convId, explicitMsgKey || rawMsgKey, msgId);
-            if (dupRow) {
-              Object.assign(newMsg, this.formatDbMessageRow(dupRow));
-            }
-          } else {
-            console.warn('[ChatStore] Aviso na inserção com sanitizeChatMessagePayload (tentando fallback mínimo sem campos opcionais):', error.message);
-            const fallbackPayload = { ...msgInsertData };
-            delete fallbackPayload.reaction;
-            delete fallbackPayload.reactions;
-            delete fallbackPayload.message_ack;
-            const { error: fbErr } = await supabaseAdmin.from("chat_messages").insert([fallbackPayload]);
-            if (fbErr && (fbErr.code === "23505" || String(fbErr.message || "").toLowerCase().includes("duplicate"))) {
-              insertedAsDuplicate = true;
-            }
-          }
+      const insertRes = await this.safeInsertChatMessage(msgInsertData);
+      if (insertRes.duplicate) {
+        insertedAsDuplicate = true;
+        messagePersisted = true;
+        const dupRow = await this.findExistingMessageByRemoteId(convId, explicitMsgKey || rawMsgKey, msgId);
+        if (dupRow) {
+          Object.assign(newMsg, this.formatDbMessageRow(dupRow));
         }
-      } catch (error: any) {
-        console.error('[ERRO CRITICO NO BACKGROUND]: Exceção na inserção da mensagem (chat_messages)', error.message, error.stack);
+      } else if (insertRes.inserted) {
+        messagePersisted = true;
+        rememberRemoteKeyMapping(convId, explicitMsgKey || rawMsgKey, newMsg.id);
+      } else {
+        console.error(
+          `[ChatStore] ❌ ERRO CRÍTICO NO WEBHOOK: Mensagem NÃO foi persistida em chat_messages (conv=${convId}, sender=${senderType}). chat_conversations não será atualizada para evitar divergência.`,
+          insertRes.error
+        );
       }
     } else {
       insertedAsDuplicate = true;
+      messagePersisted = true;
+    }
+
+    if (messagePersisted) {
+      await applyConversationUpdateIfExisting();
+
+      const memMsgIdx = this.messages.findIndex(
+        (m) => m.id === newMsg.id || (newMsg.remote_id && m.remote_id === newMsg.remote_id)
+      );
+      if (memMsgIdx >= 0) {
+        this.messages[memMsgIdx] = { ...this.messages[memMsgIdx], ...newMsg };
+      } else {
+        this.messages.push(newMsg);
+      }
     }
 
     // Atualiza cache em memória local apenas para fallback / dev (sem duplicar)
@@ -2148,16 +2330,12 @@ class ChatStore {
       this.conversations.push(conv);
     }
 
-    const memMsgIdx = this.messages.findIndex(
-      (m) => m.id === newMsg.id || (newMsg.remote_id && m.remote_id === newMsg.remote_id)
-    );
-    if (memMsgIdx >= 0) {
-      this.messages[memMsgIdx] = { ...this.messages[memMsgIdx], ...newMsg };
-    } else {
-      this.messages.push(newMsg);
-    }
-
-    return { conversation: conv, message: newMsg, deduplicated: insertedAsDuplicate };
+    return {
+      conversation: conv,
+      message: newMsg,
+      deduplicated: insertedAsDuplicate,
+      ...(messagePersisted ? {} : { persistError: "MESSAGE_NOT_PERSISTED" })
+    };
   }
 
   /**

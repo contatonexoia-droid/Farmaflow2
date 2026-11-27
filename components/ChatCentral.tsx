@@ -19,10 +19,11 @@ const FILTER_TABS = [
 ];
 
 const getExternalMsgId = (msg: any): string | null => {
-  const raw = msg?.remote_id || msg?.whatsapp_message_id || msg?.external_id || null;
-  if (!raw) return null;
+  const raw = msg?.remote_id ?? msg?.whatsapp_message_id ?? msg?.external_id ?? null;
+  if (raw === null || raw === undefined) return null;
   const trimmed = String(raw).trim();
-  return trimmed.length > 0 ? trimmed : null;
+  if (!trimmed || trimmed === 'null' || trimmed === 'undefined') return null;
+  return trimmed;
 };
 
 const isTempClientMessage = (msg: any): boolean => {
@@ -44,13 +45,13 @@ const deduplicateChatMessages = (list: any[]): any[] => {
 
   for (const item of list) {
     if (!item) continue;
-    const idKey = item.id ? String(item.id) : '';
+    const idKey = item.id ? String(item.id).trim() : '';
     const extId = getExternalMsgId(item);
 
     let matchIdx = -1;
     if (idKey && idxById.has(idKey)) {
       matchIdx = idxById.get(idKey)!;
-    } else if (extId && idxByRemoteId.has(extId)) {
+    } else if (extId !== null && idxByRemoteId.has(extId)) {
       matchIdx = idxByRemoteId.get(extId)!;
     }
 
@@ -68,47 +69,16 @@ const deduplicateChatMessages = (list: any[]): any[] => {
       result[matchIdx] = merged;
       if (merged.id) idxById.set(String(merged.id), matchIdx);
       const mergedExt = getExternalMsgId(merged);
-      if (mergedExt) idxByRemoteId.set(mergedExt, matchIdx);
+      if (mergedExt !== null) idxByRemoteId.set(mergedExt, matchIdx);
     } else {
       const nextIdx = result.length;
       result.push(item);
       if (idKey) idxById.set(idKey, nextIdx);
-      if (extId) idxByRemoteId.set(extId, nextIdx);
+      if (extId !== null) idxByRemoteId.set(extId, nextIdx);
     }
   }
 
-  const confirmedOutbound = result.filter(
-    (m) => !isTempClientMessage(m) && (m.sender_type === 'USER' || m.sender_type === 'BOT')
-  );
-  if (confirmedOutbound.length === 0) return result;
-
-  const consumedConfirmedIds = new Set<string>();
-  return result.filter((m) => {
-    if (!isTempClientMessage(m) || m.localStatus === 'failed') return true;
-    const tempTs = new Date(m.created_at || 0).getTime();
-    const tempText = normalizeMsgTextForDedup(m.content);
-    const tempMediaType = String(m.media_type || m.type || 'text').toLowerCase();
-
-    const matchedConfirmed = confirmedOutbound.find((c) => {
-      const cId = String(c.id || '');
-      if (!cId || consumedConfirmedIds.has(cId)) return false;
-      const cTs = new Date(c.created_at || 0).getTime();
-      if (tempTs > 0 && cTs > 0 && cTs < tempTs - 2000) return false;
-      if (tempTs > 0 && cTs > 0 && cTs - tempTs > 30000) return false;
-
-      const cText = normalizeMsgTextForDedup(c.content);
-      const cMediaType = String(c.media_type || c.type || 'text').toLowerCase();
-      const textMatches = tempText.length > 0 && cText === tempText;
-      const mediaMatches = tempMediaType !== 'text' && cMediaType === tempMediaType;
-      return textMatches || mediaMatches;
-    });
-
-    if (matchedConfirmed) {
-      consumedConfirmedIds.add(String(matchedConfirmed.id));
-      return false;
-    }
-    return true;
-  });
+  return result;
 };
 
 export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }: any) => {
@@ -556,25 +526,69 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
             if (!Array.isArray(parsedReactions)) {
               parsedReactions = row.reaction ? [{ emoji: row.reaction, created_at: row.created_at }] : [];
             }
+            const mediaUrl = row.media_url || row.mediaUrl;
+            const mediaType = row.media_type || row.mediaType || row.type || (mediaUrl ? 'image' : 'text');
             const formattedMsg = {
               ...row,
+              media_url: mediaUrl,
+              mediaUrl: mediaUrl,
+              media_type: mediaType,
+              mediaType: mediaType,
+              type: mediaType,
+              remote_id: getExternalMsgId(row),
               reaction: row.reaction || (parsedReactions.length > 0 ? parsedReactions[parsedReactions.length - 1].emoji : null),
               reactions: parsedReactions
             };
 
-            const cachedList = messagesCacheRef.current.get(row.conversation_id);
-            if (cachedList) {
-              const rowExtId = getExternalMsgId(formattedMsg);
-              const existingIdx = cachedList.findIndex(
-                (m) => m.id === row.id || (rowExtId && getExternalMsgId(m) === rowExtId)
+            const rowExtId = getExternalMsgId(formattedMsg);
+
+            // Se o registro confirmado chegou pelo Realtime enquanto a mensagem otimista ainda está em envio, substitui o temp_* correspondente
+            let matchedPendingTempId: string | null = null;
+            if (payload.eventType === 'INSERT' && row.sender_type === 'USER') {
+              const pendingLocals = pendingLocalMessagesRef.current[row.conversation_id] || [];
+              const rowNormText = normalizeMsgTextForDedup(formattedMsg.content);
+              const rowMedia = String(formattedMsg.media_type || 'text').toLowerCase();
+              const matchedTemp = pendingLocals.find((t) => {
+                if (!t || t.localStatus !== 'sending') return false;
+                const tText = normalizeMsgTextForDedup(t.content);
+                const tMedia = String(t.media_type || t.type || 'text').toLowerCase();
+                return (rowNormText.length > 0 && tText === rowNormText) || (rowMedia !== 'text' && tMedia === rowMedia);
+              });
+              if (matchedTemp) {
+                matchedPendingTempId = matchedTemp.id;
+                removePendingLocalMessage(row.conversation_id, matchedTemp.id);
+              }
+            }
+
+            const applyMessageToList = (list: any[]): any[] => {
+              const existingIdx = list.findIndex(
+                (m) => m.id === row.id || (rowExtId !== null && getExternalMsgId(m) === rowExtId)
               );
               if (existingIdx >= 0) {
-                const nextCached = [...cachedList];
-                nextCached[existingIdx] = { ...nextCached[existingIdx], ...formattedMsg };
-                messagesCacheRef.current.set(row.conversation_id, deduplicateChatMessages(nextCached));
-              } else if (payload.eventType === 'INSERT') {
-                messagesCacheRef.current.set(row.conversation_id, deduplicateChatMessages([...cachedList, formattedMsg]));
+                const nextList = [...list];
+                nextList[existingIdx] = { ...nextList[existingIdx], ...formattedMsg };
+                if (matchedPendingTempId) {
+                  return deduplicateChatMessages(nextList.filter((m) => m.id !== matchedPendingTempId));
+                }
+                return deduplicateChatMessages(nextList);
               }
+              if (payload.eventType === 'INSERT') {
+                if (matchedPendingTempId) {
+                  const hasTempInList = list.some((m) => m.id === matchedPendingTempId);
+                  if (hasTempInList) {
+                    return deduplicateChatMessages(
+                      list.map((m) => (m.id === matchedPendingTempId ? { ...formattedMsg, localStatus: 'sent' } : m))
+                    );
+                  }
+                }
+                return deduplicateChatMessages([...list, formattedMsg]);
+              }
+              return list;
+            };
+
+            const cachedList = messagesCacheRef.current.get(row.conversation_id);
+            if (cachedList) {
+              messagesCacheRef.current.set(row.conversation_id, applyMessageToList(cachedList));
             }
 
             const currentOpenId = selectedChatIdRef.current;
@@ -584,22 +598,11 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
               row.conversation_id === currentOpenId
             ) {
               setMessages((prev) => {
-                const rowExtId = getExternalMsgId(formattedMsg);
-                const existingIdx = prev.findIndex(
-                  (m) => m.id === row.id || (rowExtId && getExternalMsgId(m) === rowExtId)
-                );
-                if (existingIdx >= 0) {
-                  const next = [...prev];
-                  next[existingIdx] = {
-                    ...next[existingIdx],
-                    ...formattedMsg
-                  };
-                  return deduplicateChatMessages(next);
+                const nextMessages = applyMessageToList(prev);
+                if (messagesCacheRef.current.has(currentOpenId)) {
+                  messagesCacheRef.current.set(currentOpenId, nextMessages);
                 }
-                if (payload.eventType === 'INSERT') {
-                  return deduplicateChatMessages([...prev, formattedMsg]);
-                }
-                return prev;
+                return nextMessages;
               });
             }
             fetchConversationsRef.current();
@@ -1105,10 +1108,16 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
     const cleanServer = deduplicateChatMessages(serverMessages);
     const locals = pendingLocalMessagesRef.current[conversationId] || [];
     if (locals.length === 0) return cleanServer;
-    const merged = deduplicateChatMessages([...cleanServer, ...locals]);
-    const survivingLocalIds = new Set(merged.filter(m => isTempClientMessage(m)).map(m => m.id));
-    pendingLocalMessagesRef.current[conversationId] = locals.filter(m => survivingLocalIds.has(m.id));
-    return merged;
+    const serverIds = new Set(cleanServer.map(m => m.id).filter(Boolean));
+    const serverRemoteIds = new Set(cleanServer.map(m => getExternalMsgId(m)).filter((v): v is string => v !== null));
+    const survivingLocals = locals.filter((m) => {
+      if (m.id && serverIds.has(m.id)) return false;
+      const ext = getExternalMsgId(m);
+      if (ext !== null && serverRemoteIds.has(ext)) return false;
+      return true;
+    });
+    pendingLocalMessagesRef.current[conversationId] = survivingLocals;
+    return deduplicateChatMessages([...cleanServer, ...survivingLocals]);
   };
 
   const upsertPendingLocalMessage = (conversationId: string, msg: any) => {
@@ -1176,11 +1185,14 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
         .from('chat_messages')
         .select('*')
         .eq('conversation_id', conversationId)
-        .order('created_at', { ascending: true });
+        .order('created_at', { ascending: false })
+        .limit(200);
 
       if (isStale()) return;
 
-      if (!error && data) {
+      if (error) {
+        console.error('[ChatCentral] Erro ao consultar chat_messages no Supabase:', error.message, error);
+      } else if (data) {
         if (isOperador && allowedInboxIds.length > 0) {
           const conv = conversations.find(c => c.id === conversationId);
           const assignedToMe = conv ? isConversationAssignedToIdentifiers(conv, operatorIdentifiers) : false;
@@ -1189,7 +1201,8 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
             return;
           }
         }
-        const formatted = deduplicateChatMessages(data.map((row: any) => {
+        const chronological = [...data].reverse();
+        const formatted = deduplicateChatMessages(chronological.map((row: any) => {
           let parsedReactions = row.reactions;
           if (typeof parsedReactions === 'string') {
             try {
@@ -1274,7 +1287,8 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
         json = null;
       }
 
-      if (res.ok && json?.data) {
+      const hasValidSavedId = Boolean(json?.data?.id && !String(json.data.id).startsWith('temp_'));
+      if (res.ok && hasValidSavedId) {
         removePendingLocalMessage(convId, targetMsg.id);
         const confirmedMsg = isMedia
           ? {
