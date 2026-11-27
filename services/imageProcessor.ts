@@ -1,6 +1,5 @@
 import { supabase } from './supabase.js';
 import { Product } from '../types';
-import { GoogleGenAI } from '@google/genai';
 import { retryRequest } from './storage.js';
 
 const USER_AGENTS = [

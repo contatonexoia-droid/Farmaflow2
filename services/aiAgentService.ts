@@ -1917,8 +1917,9 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
           registerBotSentMessage(String(id).trim(), conversationId, cleanPhone);
         }
 
-        // Registra Balão 1 na tabela de mensagens e no chatStore
-        const { message: msg1 } = await chatStore.addMessage(
+        // Registra Balão 1 na tabela de mensagens e no chatStore (com remoteId para deduplicação)
+        const b1RemoteId = b1Candidates[0] ? String(b1Candidates[0]).trim() : null;
+        const { message: msg1, deduplicated: msg1Dedup } = await chatStore.addMessage(
           realTenantId,
           conversationId,
           "BOT",
@@ -1927,18 +1928,22 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
           undefined,
           undefined,
           targetInstanceName,
-          true
+          true,
+          undefined,
+          { remoteId: b1RemoteId }
         );
 
-        realtimeHub.broadcastToStore(realTenantId, "chat_message", {
-          conversationId,
-          message: {
-            ...msg1,
-            sender: "bot",
-            sender_type: "BOT",
-            is_from_bot: true
-          }
-        });
+        if (!msg1Dedup) {
+          realtimeHub.broadcastToStore(realTenantId, "chat_message", {
+            conversationId,
+            message: {
+              ...msg1,
+              sender: "bot",
+              sender_type: "BOT",
+              is_from_bot: true
+            }
+          });
+        }
 
         // Delay de 1200ms para ordenação visual no WhatsApp
         await new Promise(resolve => setTimeout(resolve, 1200));
@@ -1977,8 +1982,9 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
             registerBotSentMessage(String(id).trim(), conversationId, cleanPhone);
           }
 
-          // Registra Balão 2 na tabela de mensagens e no chatStore
-          const { message: msg2 } = await chatStore.addMessage(
+          // Registra Balão 2 na tabela de mensagens e no chatStore (com remoteId para deduplicação)
+          const b2RemoteId = b2Candidates[0] ? String(b2Candidates[0]).trim() : null;
+          const { message: msg2, deduplicated: msg2Dedup } = await chatStore.addMessage(
             realTenantId,
             conversationId,
             "BOT",
@@ -1987,18 +1993,22 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
             undefined,
             undefined,
             targetInstanceName,
-            true
+            true,
+            undefined,
+            { remoteId: b2RemoteId }
           );
 
-          realtimeHub.broadcastToStore(realTenantId, "chat_message", {
-            conversationId,
-            message: {
-              ...msg2,
-              sender: "bot",
-              sender_type: "BOT",
-              is_from_bot: true
-            }
-          });
+          if (!msg2Dedup) {
+            realtimeHub.broadcastToStore(realTenantId, "chat_message", {
+              conversationId,
+              message: {
+                ...msg2,
+                sender: "bot",
+                sender_type: "BOT",
+                is_from_bot: true
+              }
+            });
+          }
         }
       } else {
         // TRAVA ANTI-FLOOD ATIVA: O link já foi enviado nos últimos 10 minutos e o cliente não pediu o link.
@@ -2045,7 +2055,8 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
           registerBotSentMessage(String(id).trim(), conversationId, cleanPhone);
         }
 
-        const { message: singleMsg } = await chatStore.addMessage(
+        const sRemoteId = sCandidates[0] ? String(sCandidates[0]).trim() : null;
+        const { message: singleMsg, deduplicated: singleDedup } = await chatStore.addMessage(
           realTenantId,
           conversationId,
           "BOT",
@@ -2054,18 +2065,22 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
           undefined,
           undefined,
           targetInstanceName,
-          true
+          true,
+          undefined,
+          { remoteId: sRemoteId }
         );
 
-        realtimeHub.broadcastToStore(realTenantId, "chat_message", {
-          conversationId,
-          message: {
-            ...singleMsg,
-            sender: "bot",
-            sender_type: "BOT",
-            is_from_bot: true
-          }
-        });
+        if (!singleDedup) {
+          realtimeHub.broadcastToStore(realTenantId, "chat_message", {
+            conversationId,
+            message: {
+              ...singleMsg,
+              sender: "bot",
+              sender_type: "BOT",
+              is_from_bot: true
+            }
+          });
+        }
       }
     } else {
       // Disparo único (mensagem pura ou URL única)
@@ -2119,8 +2134,9 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         registerBotSentMessage(String(id).trim(), conversationId, cleanPhone);
       }
 
-      // Registra a resposta única
-      const { message: singleMsg } = await chatStore.addMessage(
+      // Registra a resposta única (com remoteId para deduplicação)
+      const sRemoteId = sCandidates[0] ? String(sCandidates[0]).trim() : null;
+      const { message: singleMsg, deduplicated: singleDedup } = await chatStore.addMessage(
         realTenantId,
         conversationId,
         "BOT",
@@ -2129,18 +2145,22 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         undefined,
         undefined,
         targetInstanceName,
-        true
+        true,
+        undefined,
+        { remoteId: sRemoteId }
       );
 
-      realtimeHub.broadcastToStore(realTenantId, "chat_message", {
-        conversationId,
-        message: {
-          ...singleMsg,
-          sender: "bot",
-          sender_type: "BOT",
-          is_from_bot: true
-        }
-      });
+      if (!singleDedup) {
+        realtimeHub.broadcastToStore(realTenantId, "chat_message", {
+          conversationId,
+          message: {
+            ...singleMsg,
+            sender: "bot",
+            sender_type: "BOT",
+            is_from_bot: true
+          }
+        });
+      }
     }
 
     console.log(`[AiAgentService] ✅ Mensagem(ns) entregue(s) com sucesso ao WhatsApp de ${cleanPhone}. Atualizando estado da conversa.`);

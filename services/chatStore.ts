@@ -26,6 +26,89 @@ function stringToUuid(str: string): string {
   return `${hash.substring(0, 8)}-${hash.substring(8, 12)}-4${hash.substring(13, 16)}-${(parseInt(hash.substring(16, 18), 16) & 0x3f | 0x80).toString(16)}${hash.substring(18, 20)}-${hash.substring(20, 32)}`;
 }
 
+export function extractEvolutionMessageKeyId(evoRes: any): string | null {
+  const candidates = [
+    evoRes?.data?.key?.id,
+    evoRes?.data?.message?.key?.id,
+    evoRes?.data?.messages?.[0]?.key?.id,
+    evoRes?.data?.id,
+    evoRes?.data?.messageId,
+    evoRes?.key?.id,
+    evoRes?.id,
+  ];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.trim().length > 0) {
+      return c.trim();
+    }
+  }
+  return null;
+}
+
+export function normalizeMessageContentForDedup(text?: string | null): string {
+  return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+interface InFlightOutboundEntry {
+  tempUuid: string;
+  conversationId: string;
+  content: string;
+  mediaType: string;
+  createdAtMs: number;
+  claimedRemoteId?: string;
+  persistedMsgId?: string;
+}
+
+const inFlightOutboundSends = new Map<string, InFlightOutboundEntry[]>();
+
+function registerInFlightOutboundSend(entry: InFlightOutboundEntry): void {
+  const nowMs = Date.now();
+  const list = (inFlightOutboundSends.get(entry.conversationId) || []).filter(
+    (item) => nowMs - item.createdAtMs < 30000
+  );
+  list.push(entry);
+  inFlightOutboundSends.set(entry.conversationId, list);
+}
+
+function findMatchingInFlightOutboundSend(
+  conversationId: string,
+  content: string,
+  mediaType: string
+): InFlightOutboundEntry | null {
+  const nowMs = Date.now();
+  const list = (inFlightOutboundSends.get(conversationId) || []).filter(
+    (item) => nowMs - item.createdAtMs < 15000
+  );
+  if (list.length === 0) {
+    inFlightOutboundSends.delete(conversationId);
+    return null;
+  }
+  inFlightOutboundSends.set(conversationId, list);
+
+  const normIncoming = normalizeMessageContentForDedup(content);
+  for (let i = list.length - 1; i >= 0; i--) {
+    const item = list[i];
+    const normItem = normalizeMessageContentForDedup(item.content);
+    const sameText = normIncoming.length > 0 && normItem === normIncoming;
+    const sameMedia = mediaType !== "text" && item.mediaType === mediaType;
+    if (sameText || sameMedia) {
+      return item;
+    }
+  }
+  return null;
+}
+
+function clearInFlightOutboundSend(conversationId: string, tempUuid: string): void {
+  const nowMs = Date.now();
+  const list = (inFlightOutboundSends.get(conversationId) || []).filter(
+    (item) => item.tempUuid !== tempUuid && nowMs - item.createdAtMs < 30000
+  );
+  if (list.length > 0) {
+    inFlightOutboundSends.set(conversationId, list);
+  } else {
+    inFlightOutboundSends.delete(conversationId);
+  }
+}
+
 const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || "https://nalshjhoiecxooejpiaw.supabase.co";
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_Y2lAqlvDUhdjSNtv80GkJA_SiOgynYy";
 const supabaseAdmin = createClient(supabaseUrl, supabaseKey);
@@ -751,6 +834,133 @@ class ChatStore {
     return [...localMsgs].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
   }
 
+  private formatDbMessageRow(row: any): ChatMessage {
+    const mediaUrl = row.media_url || row.mediaUrl;
+    const mediaType =
+      row.media_type ||
+      row.mediaType ||
+      row.type ||
+      (mediaUrl
+        ? mediaUrl.startsWith("data:audio") || /\.(ogg|oga|opus|mp3|wav|m4a)/i.test(mediaUrl)
+          ? "audio"
+          : "image"
+        : "text");
+    let parsedReactions = row.reactions;
+    if (typeof parsedReactions === "string") {
+      try {
+        parsedReactions = JSON.parse(parsedReactions);
+      } catch (_) {
+        parsedReactions = [];
+      }
+    }
+    if (!Array.isArray(parsedReactions)) {
+      parsedReactions = row.reaction ? [{ emoji: row.reaction, created_at: row.created_at }] : [];
+    }
+    return {
+      ...row,
+      reaction: row.reaction || (parsedReactions.length > 0 ? parsedReactions[parsedReactions.length - 1].emoji : null),
+      reactions: parsedReactions,
+      remote_id: row.remote_id || null,
+      media_url: mediaUrl,
+      mediaUrl: mediaUrl,
+      media_type: mediaType,
+      mediaType: mediaType,
+      type: mediaType,
+    };
+  }
+
+  private async findExistingMessageByRemoteId(
+    conversationId: string,
+    remoteId?: string | null,
+    deterministicId?: string | null
+  ): Promise<any | null> {
+    const cleanRemoteId = typeof remoteId === "string" ? remoteId.trim() : "";
+    const cleanDetId = typeof deterministicId === "string" && isValidUuid(deterministicId) ? deterministicId.trim() : "";
+    if (!cleanRemoteId && !cleanDetId) return null;
+
+    try {
+      const orParts: string[] = [];
+      if (cleanRemoteId) {
+        orParts.push(`remote_id.eq.${cleanRemoteId}`);
+        if (isValidUuid(cleanRemoteId)) {
+          orParts.push(`id.eq.${cleanRemoteId}`);
+        }
+      }
+      if (cleanDetId) {
+        orParts.push(`id.eq.${cleanDetId}`);
+      }
+
+      if (orParts.length === 0) return null;
+
+      if (conversationId) {
+        const { data: scopedMatch } = await supabaseAdmin
+          .from("chat_messages")
+          .select("*")
+          .eq("conversation_id", conversationId)
+          .or(orParts.join(","))
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (scopedMatch) return scopedMatch;
+      }
+
+      if (cleanRemoteId) {
+        const { data: globalMatch } = await supabaseAdmin
+          .from("chat_messages")
+          .select("*")
+          .eq("remote_id", cleanRemoteId)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (globalMatch) return globalMatch;
+      }
+    } catch (err: any) {
+      console.warn("[ChatStore] Aviso ao verificar remote_id existente:", err?.message || err);
+    }
+    return null;
+  }
+
+  private async findRecentUnlinkedOutboundMessage(
+    conversationId: string,
+    content: string,
+    mediaType: string
+  ): Promise<any | null> {
+    if (!conversationId) return null;
+    try {
+      const fifteenSecondsAgo = new Date(Date.now() - 15000).toISOString();
+      const { data: recentRows } = await supabaseAdmin
+        .from("chat_messages")
+        .select("*")
+        .eq("conversation_id", conversationId)
+        .in("sender_type", ["USER", "BOT"])
+        .gte("created_at", fifteenSecondsAgo)
+        .order("created_at", { ascending: false })
+        .limit(15);
+
+      if (!recentRows || recentRows.length === 0) return null;
+
+      const normTarget = normalizeMessageContentForDedup(content);
+      for (const row of recentRows) {
+        const hasExternalId = Boolean(row.remote_id && String(row.remote_id).trim().length > 0);
+        if (hasExternalId) continue;
+
+        const normRow = normalizeMessageContentForDedup(row.content);
+        const sameText = normTarget.length > 0 && normRow === normTarget;
+        const rowMediaType = String(row.media_type || "text").toLowerCase();
+        const sameMedia = mediaType !== "text" && rowMediaType === mediaType.toLowerCase();
+
+        if (sameText || sameMedia) {
+          return row;
+        }
+      }
+    } catch (err: any) {
+      console.warn("[ChatStore] Aviso ao verificar mensagem recente sem remote_id:", err?.message || err);
+    }
+    return null;
+  }
+
   public async addMessage(
     storeId: string,
     conversationId: string,
@@ -762,10 +972,10 @@ class ChatStore {
     explicitInstanceName?: string,
     skipWhatsAppDispatch = false,
     assignedUserId?: string,
-    options?: { strictDelivery?: boolean }
-  ): Promise<{ message: ChatMessage; conversation: ChatConversation }> {
+    options?: { strictDelivery?: boolean; remoteId?: string | null; senderId?: string | null }
+  ): Promise<{ message: ChatMessage; conversation: ChatConversation; deduplicated?: boolean }> {
     const now = new Date().toISOString();
-    const msgUuid = crypto.randomUUID();
+    const tempUuid = crypto.randomUUID();
 
     let actualMediaUrl: string | undefined = undefined;
     let actualInstanceName: string | undefined = explicitInstanceName;
@@ -785,232 +995,358 @@ class ChatStore {
     }
 
     const resolvedType = mediaType || (actualMediaUrl ? (actualMediaUrl.startsWith("data:audio") || /\.(ogg|oga|opus|mp3|wav|m4a)/i.test(actualMediaUrl) ? "audio" : "image") : "text");
+    let resolvedRemoteId: string | null = options?.remoteId ? String(options.remoteId).trim() : null;
+    const resolvedSenderId = options?.senderId || (isValidUuid(assignedUserId) ? assignedUserId : null);
 
-    const newMsg: ChatMessage = {
-      id: msgUuid,
-      conversation_id: conversationId,
-      sender_type: senderType,
+    if (senderType === "BOT" && resolvedRemoteId) {
+      registerBotSentMessage(resolvedRemoteId, conversationId);
+    }
+
+    const inFlightEntry: InFlightOutboundEntry = {
+      tempUuid,
+      conversationId,
       content,
-      is_private: isPrivate,
-      media_url: actualMediaUrl,
-      media_type: resolvedType,
-      mediaUrl: actualMediaUrl,
       mediaType: resolvedType,
-      type: resolvedType,
-      created_at: now
+      createdAtMs: Date.now(),
     };
 
-    if (senderType === "BOT") {
-      registerBotSentMessage(msgUuid, conversationId);
+    if ((senderType === "USER" || senderType === "BOT") && !isPrivate) {
+      registerInFlightOutboundSend(inFlightEntry);
     }
 
     // Evolution API Dispatch (for USER/BOT messages, if not private and not already dispatched)
     const strictDelivery = Boolean(options?.strictDelivery);
-    if ((senderType === "USER" || senderType === "BOT") && !isPrivate && !skipWhatsAppDispatch) {
-      let phoneToSend: string | null = null;
-      let convInboxId: string | null = null;
-      let convStoreId: string = storeId;
+    try {
+      if ((senderType === "USER" || senderType === "BOT") && !isPrivate && !skipWhatsAppDispatch) {
+        let phoneToSend: string | null = null;
+        let convInboxId: string | null = null;
+        let convStoreId: string = storeId;
 
-      try {
-        const { data: convData } = await supabaseAdmin
-          .from("chat_conversations")
-          .select("contact_id, inbox_id, store_id")
-          .eq("id", conversationId)
-          .maybeSingle();
-
-        if (convData?.inbox_id) convInboxId = convData.inbox_id;
-        if (convData?.store_id) convStoreId = convData.store_id;
-
-        if (convData?.contact_id) {
-          const { data: contactData } = await supabaseAdmin
-            .from("chat_contacts")
-            .select("phone_number")
-            .eq("id", convData.contact_id)
+        try {
+          const { data: convData } = await supabaseAdmin
+            .from("chat_conversations")
+            .select("contact_id, inbox_id, store_id")
+            .eq("id", conversationId)
             .maybeSingle();
-          if (contactData?.phone_number) phoneToSend = contactData.phone_number;
+
+          if (convData?.inbox_id) convInboxId = convData.inbox_id;
+          if (convData?.store_id) convStoreId = convData.store_id;
+
+          if (convData?.contact_id) {
+            const { data: contactData } = await supabaseAdmin
+              .from("chat_contacts")
+              .select("phone_number")
+              .eq("id", convData.contact_id)
+              .maybeSingle();
+            if (contactData?.phone_number) phoneToSend = contactData.phone_number;
+          }
+        } catch (_) {}
+
+        if (!phoneToSend) {
+          const match = conversationId.match(/_(\d{10,15})_/);
+          if (match) phoneToSend = match[1];
         }
-      } catch (_) {}
 
-      if (!phoneToSend) {
-        const match = conversationId.match(/_(\d{10,15})_/);
-        if (match) phoneToSend = match[1];
-      }
-
-      // Resolução blindada: 1) inbox.whatsapp_instance_id (CONNECTED); 2) fallback store_id (CONNECTED); 3) NUNCA inventar inbox_<uuid>
-      const resolvedConnected = await evolutionApiService.resolveConnectedInstanceForSending({
-        storeId: convStoreId || storeId,
-        conversationId,
-        inboxId: convInboxId,
-        explicitInstanceName: actualInstanceName,
-      });
-
-      const targetInstance = resolvedConnected?.instance_name || null;
-
-      if (!targetInstance) {
-        const noInstErr = "Nenhuma instância do WhatsApp conectada encontrada para esta loja/caixa de entrada. Conecte o WhatsApp via QR Code antes de enviar mensagens.";
-        console.warn("[ChatStore] [AVISO EVOLUTION] Instância CONNECTED não localizada:", {
+        // Resolução blindada: 1) inbox.whatsapp_instance_id (CONNECTED); 2) fallback store_id (CONNECTED); 3) NUNCA inventar inbox_<uuid>
+        const resolvedConnected = await evolutionApiService.resolveConnectedInstanceForSending({
           storeId: convStoreId || storeId,
           conversationId,
-          convInboxId,
+          inboxId: convInboxId,
+          explicitInstanceName: actualInstanceName,
         });
-        if (strictDelivery) {
-          const err: any = new Error(noInstErr);
-          err.statusCode = 422;
-          throw err;
-        }
-      } else if (!phoneToSend) {
-        const noPhoneErr = "Número de WhatsApp do contato não localizado nesta conversa.";
-        console.warn("[ChatStore] [AVISO EVOLUTION] Telefone do contato não localizado:", { conversationId });
-        if (strictDelivery) {
-          const err: any = new Error(noPhoneErr);
-          err.statusCode = 422;
-          throw err;
-        }
-      } else {
-        const dispatchPromise =
-          actualMediaUrl && (resolvedType === "image" || resolvedType === "audio" || resolvedType === "video" || resolvedType === "document")
-            ? evolutionApiService.sendMediaMessage(
-                targetInstance,
-                phoneToSend,
-                actualMediaUrl,
-                resolvedType as any,
-                content && !content.startsWith("[") ? content : ""
-              )
-            : evolutionApiService.sendTextMessage(targetInstance, phoneToSend, content, {
-                delay: 1000,
-                linkPreview: true
-              });
 
-        if (strictDelivery) {
-          const evoRes = await dispatchPromise;
-          if (!evoRes || !evoRes.success) {
-            const detail = evoRes?.error || `HTTP ${evoRes?.status || 502}`;
-            console.error(`[ChatStore] [ERRO EVOLUTION] Falha ao enviar para "${targetInstance}":`, detail);
-            const err: any = new Error(`Falha ao enviar mensagem pelo WhatsApp (${targetInstance}): ${detail}`);
-            err.statusCode = evoRes?.status === 404 || evoRes?.status === 400 ? 422 : 502;
+        const targetInstance = resolvedConnected?.instance_name || null;
+
+        if (!targetInstance) {
+          const noInstErr = "Nenhuma instância do WhatsApp conectada encontrada para esta loja/caixa de entrada. Conecte o WhatsApp via QR Code antes de enviar mensagens.";
+          console.warn("[ChatStore] [AVISO EVOLUTION] Instância CONNECTED não localizada:", {
+            storeId: convStoreId || storeId,
+            conversationId,
+            convInboxId,
+          });
+          if (strictDelivery) {
+            const err: any = new Error(noInstErr);
+            err.statusCode = 422;
+            throw err;
+          }
+        } else if (!phoneToSend) {
+          const noPhoneErr = "Número de WhatsApp do contato não localizado nesta conversa.";
+          console.warn("[ChatStore] [AVISO EVOLUTION] Telefone do contato não localizado:", { conversationId });
+          if (strictDelivery) {
+            const err: any = new Error(noPhoneErr);
+            err.statusCode = 422;
             throw err;
           }
         } else {
-          dispatchPromise.catch(err => {
-            console.error(`[ChatStore] [ERRO EVOLUTION] Falha assíncrona ao despachar para WhatsApp:`, err.message || err);
+          const dispatchPromise =
+            actualMediaUrl && (resolvedType === "image" || resolvedType === "audio" || resolvedType === "video" || resolvedType === "document")
+              ? evolutionApiService.sendMediaMessage(
+                  targetInstance,
+                  phoneToSend,
+                  actualMediaUrl,
+                  resolvedType as any,
+                  content && !content.startsWith("[") ? content : ""
+                )
+              : evolutionApiService.sendTextMessage(targetInstance, phoneToSend, content, {
+                  delay: 1000,
+                  linkPreview: true
+                });
+
+          if (strictDelivery) {
+            const evoRes = await dispatchPromise;
+            if (!evoRes || !evoRes.success) {
+              const detail = evoRes?.error || `HTTP ${evoRes?.status || 502}`;
+              console.error(`[ChatStore] [ERRO EVOLUTION] Falha ao enviar para "${targetInstance}":`, detail);
+              const err: any = new Error(`Falha ao enviar mensagem pelo WhatsApp (${targetInstance}): ${detail}`);
+              err.statusCode = evoRes?.status === 404 || evoRes?.status === 400 ? 422 : 502;
+              throw err;
+            }
+            const extractedKeyId = extractEvolutionMessageKeyId(evoRes);
+            if (extractedKeyId) {
+              resolvedRemoteId = extractedKeyId;
+              if (senderType === "BOT") {
+                registerBotSentMessage(extractedKeyId, conversationId, phoneToSend);
+              }
+            }
+          } else {
+            dispatchPromise
+              .then(async (evoRes) => {
+                const asyncKeyId = evoRes?.success ? extractEvolutionMessageKeyId(evoRes) : null;
+                if (!asyncKeyId) return;
+                if (senderType === "BOT") {
+                  registerBotSentMessage(asyncKeyId, conversationId, phoneToSend || undefined);
+                }
+                try {
+                  const existingWithKey = await this.findExistingMessageByRemoteId(conversationId, asyncKeyId);
+                  if (existingWithKey && existingWithKey.id !== tempUuid) {
+                    // Se o webhook chegou antes e já gravou com esse remote_id, remove a linha provisória sem remote_id se existir
+                    await supabaseAdmin
+                      .from("chat_messages")
+                      .delete()
+                      .eq("id", tempUuid)
+                      .is("remote_id", null);
+                  } else {
+                    await supabaseAdmin
+                      .from("chat_messages")
+                      .update({ remote_id: asyncKeyId, message_ack: "SENT" })
+                      .eq("id", tempUuid);
+                  }
+                } catch (_) {}
+              })
+              .catch(err => {
+                console.error(`[ChatStore] [ERRO EVOLUTION] Falha assíncrona ao despachar para WhatsApp:`, err.message || err);
+              });
+          }
+        }
+      }
+
+      if (!resolvedRemoteId && inFlightEntry.claimedRemoteId) {
+        resolvedRemoteId = inFlightEntry.claimedRemoteId;
+      }
+
+      const deterministicId = resolvedRemoteId
+        ? isValidUuid(resolvedRemoteId)
+          ? resolvedRemoteId
+          : stringToUuid(`msg_${resolvedRemoteId}_${conversationId}`)
+        : tempUuid;
+
+      let msgUuid = inFlightEntry.persistedMsgId || deterministicId;
+      let existingRow: any = null;
+      let wasDeduplicated = false;
+
+      if (resolvedRemoteId || inFlightEntry.persistedMsgId) {
+        existingRow = await this.findExistingMessageByRemoteId(
+          conversationId,
+          resolvedRemoteId,
+          inFlightEntry.persistedMsgId || deterministicId
+        );
+      }
+
+      if (existingRow) {
+        wasDeduplicated = true;
+        msgUuid = existingRow.id;
+        console.log(`[ChatStore] 🛡️ Deduplicação ativa no addMessage: registro já gravado pelo webhook (id=${existingRow.id}, remote_id=${resolvedRemoteId}). Atualizando metadados.`);
+        const patchUpdates: Record<string, any> = {};
+        if (resolvedRemoteId && !existingRow.remote_id) patchUpdates.remote_id = resolvedRemoteId;
+        if (actualMediaUrl && !existingRow.media_url) patchUpdates.media_url = actualMediaUrl;
+        if (resolvedSenderId && !existingRow.sender_id) patchUpdates.sender_id = resolvedSenderId;
+        if (senderType && existingRow.sender_type !== senderType) patchUpdates.sender_type = senderType;
+        if (Object.keys(patchUpdates).length > 0) {
+          try {
+            await supabaseAdmin
+              .from("chat_messages")
+              .update(sanitizeChatMessagePayload(patchUpdates))
+              .eq("id", existingRow.id);
+            existingRow = { ...existingRow, ...patchUpdates };
+          } catch (_) {}
+        }
+      }
+
+      const newMsg: ChatMessage = existingRow
+        ? this.formatDbMessageRow(existingRow)
+        : {
+            id: msgUuid,
+            conversation_id: conversationId,
+            sender_type: senderType,
+            sender_id: resolvedSenderId,
+            content,
+            is_private: isPrivate,
+            media_url: actualMediaUrl,
+            media_type: resolvedType,
+            mediaUrl: actualMediaUrl,
+            mediaType: resolvedType,
+            type: resolvedType,
+            remote_id: resolvedRemoteId,
+            message_ack: resolvedRemoteId ? "SENT" : undefined,
+            created_at: now
+          };
+
+      if (senderType === "BOT") {
+        registerBotSentMessage(msgUuid, conversationId);
+      }
+
+      // Try Supabase insert only if not already persisted
+      try {
+        if (!existingRow) {
+          const insertPayload = sanitizeChatMessagePayload({
+            id: msgUuid,
+            conversation_id: conversationId,
+            sender_type: senderType,
+            sender_id: resolvedSenderId,
+            content,
+            is_private: isPrivate,
+            media_url: actualMediaUrl,
+            media_type: resolvedType,
+            remote_id: resolvedRemoteId,
+            message_ack: resolvedRemoteId ? "SENT" : undefined,
+            created_at: now
           });
+
+          const { error } = await supabaseAdmin.from("chat_messages").insert([insertPayload]);
+
+          if (error) {
+            if (error.code === "23505" || String(error.message || "").toLowerCase().includes("duplicate")) {
+              const dupRow = await this.findExistingMessageByRemoteId(conversationId, resolvedRemoteId, msgUuid);
+              if (dupRow) {
+                wasDeduplicated = true;
+                Object.assign(newMsg, this.formatDbMessageRow(dupRow));
+              }
+            } else {
+              console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao inserir mensagem no addMessage', error.message, error);
+            }
+          }
         }
-      }
-    }
 
-    // Try Supabase insert
-    try {
-      const { error } = await supabaseAdmin.from("chat_messages").insert([{
-        id: msgUuid,
-        conversation_id: conversationId,
-        sender_type: senderType,
-        content,
-        is_private: isPrivate,
-        media_url: actualMediaUrl,
-        media_type: resolvedType,
-        created_at: now
-      }]);
+        const convUpdates: any = {
+          last_message_at: now,
+          last_message_content: content,
+          updated_at: now
+        };
 
-      if (error) {
-        console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao inserir mensagem no addMessage', error.message, error);
-      }
-
-      const convUpdates: any = {
-        last_message_at: now,
-        last_message_content: content,
-        updated_at: now
-      };
-
-      // Se um operador humano enviou mensagem manual externa, assumir controle da conversa atomicamente
-      if (senderType === "USER" && !isPrivate) {
-        convUpdates.is_human_controlled = true;
-        convUpdates.is_bot_active = false;
-        convUpdates.status = "human_takeover";
-        convUpdates.kanban_stage = "em_atendimento";
-        convUpdates.stage = "em_atendimento";
-        convUpdates.unread_count = 0;
-        convUpdates.bot_handoff_reason = assignedUserId ? `ASSIGNED:${assignedUserId}` : "HUMAN_OPERATOR_MESSAGE";
-        convUpdates.bot_handoff_at = now;
-        if (assignedUserId) {
-          convUpdates.assigned_user_id = assignedUserId;
+        // Se um operador humano enviou mensagem manual externa, assumir controle da conversa atomicamente
+        if (senderType === "USER" && !isPrivate) {
+          convUpdates.is_human_controlled = true;
+          convUpdates.is_bot_active = false;
+          convUpdates.status = "human_takeover";
+          convUpdates.kanban_stage = "em_atendimento";
+          convUpdates.stage = "em_atendimento";
+          convUpdates.unread_count = 0;
+          convUpdates.bot_handoff_reason = assignedUserId ? `ASSIGNED:${assignedUserId}` : "HUMAN_OPERATOR_MESSAGE";
+          convUpdates.bot_handoff_at = now;
+          if (assignedUserId) {
+            convUpdates.assigned_user_id = assignedUserId;
+          }
         }
-      }
 
-      const sanitizedConvUpdates = sanitizeChatConversationPayload(convUpdates);
-      const { error: convErr } = await supabaseAdmin.from("chat_conversations").update(sanitizedConvUpdates).eq("id", conversationId);
+        const sanitizedConvUpdates = sanitizeChatConversationPayload(convUpdates);
+        const { error: convErr } = await supabaseAdmin.from("chat_conversations").update(sanitizedConvUpdates).eq("id", conversationId);
 
-      if (convErr) {
-        // Fallback without assigned_user_id if foreign key constraint / UUID error occurred
-        if (sanitizedConvUpdates.assigned_user_id) {
-          const retryPayload = { ...sanitizedConvUpdates };
-          delete retryPayload.assigned_user_id;
-          await supabaseAdmin.from("chat_conversations").update(retryPayload).eq("id", conversationId);
-        } else {
-          console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao atualizar conversa no addMessage', convErr.message, convErr);
+        if (convErr) {
+          // Fallback without assigned_user_id if foreign key constraint / UUID error occurred
+          if (sanitizedConvUpdates.assigned_user_id) {
+            const retryPayload = { ...sanitizedConvUpdates };
+            delete retryPayload.assigned_user_id;
+            await supabaseAdmin.from("chat_conversations").update(retryPayload).eq("id", conversationId);
+          } else {
+            console.error('[ERRO CRITICO NO BACKGROUND]: Erro ao atualizar conversa no addMessage', convErr.message, convErr);
+          }
         }
+      } catch (err: any) {
+        console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao adicionar mensagem', err.message, err.stack);
       }
-    } catch (err: any) {
-      console.error('[ERRO CRITICO NO BACKGROUND]: Exceção ao adicionar mensagem', err.message, err.stack);
-    }
 
-    // Local fallback update
-    this.messages.push(newMsg);
+      // Local fallback update (sem duplicar em memória)
+      const memIdx = this.messages.findIndex(
+        (m) => m.id === newMsg.id || (resolvedRemoteId && m.remote_id === resolvedRemoteId)
+      );
+      if (memIdx >= 0) {
+        this.messages[memIdx] = { ...this.messages[memIdx], ...newMsg };
+      } else {
+        this.messages.push(newMsg);
+      }
 
-    let convIndex = this.conversations.findIndex(c => c.id === conversationId);
-    if (convIndex < 0) {
-      const defaultContactId = stringToUuid(`contact_${Date.now()}_${storeId}`);
-      const defaultInboxId = stringToUuid(`inbox_default_${storeId}`);
-      const defaultContact: ChatContact = {
-        id: defaultContactId,
-        store_id: storeId,
-        name: "Contato WhatsApp",
-        phone_number: "WhatsApp",
-        created_at: now
-      };
-      const newConv: ChatConversation = {
-        id: conversationId,
-        store_id: storeId,
-        contact_id: defaultContact.id,
-        inbox_id: defaultInboxId,
-        assigned_user_id: (senderType === "USER" && !isPrivate && assignedUserId) ? assignedUserId : null,
-        status: senderType === "USER" && !isPrivate ? "human_takeover" : "OPEN",
-        is_human_controlled: senderType === "USER" && !isPrivate ? true : false,
-        is_bot_active: senderType === "USER" && !isPrivate ? false : true,
-        kanban_stage: senderType === "USER" && !isPrivate ? "em_atendimento" : "novos_triagem",
-        last_message_at: now,
-        last_message_content: content,
-        unread_count: 0,
-        contact: defaultContact,
-        created_at: now
-      };
-      this.contacts.push(defaultContact);
-      this.conversations.push(newConv);
-      convIndex = this.conversations.length - 1;
-    } else {
-      const prevConv = this.conversations[convIndex];
-      this.conversations[convIndex] = {
-        ...prevConv,
-        last_message_at: now,
-        last_message_content: content,
-        ...(senderType === "USER" && !isPrivate ? {
-          is_human_controlled: true,
-          is_bot_active: false,
-          status: "human_takeover",
-          kanban_stage: "em_atendimento",
-          stage: "em_atendimento",
+      let convIndex = this.conversations.findIndex(c => c.id === conversationId);
+      if (convIndex < 0) {
+        const defaultContactId = stringToUuid(`contact_${Date.now()}_${storeId}`);
+        const defaultInboxId = stringToUuid(`inbox_default_${storeId}`);
+        const defaultContact: ChatContact = {
+          id: defaultContactId,
+          store_id: storeId,
+          name: "Contato WhatsApp",
+          phone_number: "WhatsApp",
+          created_at: now
+        };
+        const newConv: ChatConversation = {
+          id: conversationId,
+          store_id: storeId,
+          contact_id: defaultContact.id,
+          inbox_id: defaultInboxId,
+          assigned_user_id: (senderType === "USER" && !isPrivate && assignedUserId) ? assignedUserId : null,
+          status: senderType === "USER" && !isPrivate ? "human_takeover" : "OPEN",
+          is_human_controlled: senderType === "USER" && !isPrivate ? true : false,
+          is_bot_active: senderType === "USER" && !isPrivate ? false : true,
+          kanban_stage: senderType === "USER" && !isPrivate ? "em_atendimento" : "novos_triagem",
+          last_message_at: now,
+          last_message_content: content,
           unread_count: 0,
-          assigned_user_id: assignedUserId || prevConv.assigned_user_id || null,
-          bot_handoff_reason: assignedUserId ? `ASSIGNED:${assignedUserId}` : "HUMAN_OPERATOR_MESSAGE",
-          bot_handoff_at: now
-        } : {})
-      };
-    }
+          contact: defaultContact,
+          created_at: now
+        };
+        this.contacts.push(defaultContact);
+        this.conversations.push(newConv);
+        convIndex = this.conversations.length - 1;
+      } else {
+        const prevConv = this.conversations[convIndex];
+        this.conversations[convIndex] = {
+          ...prevConv,
+          last_message_at: now,
+          last_message_content: content,
+          ...(senderType === "USER" && !isPrivate ? {
+            is_human_controlled: true,
+            is_bot_active: false,
+            status: "human_takeover",
+            kanban_stage: "em_atendimento",
+            stage: "em_atendimento",
+            unread_count: 0,
+            assigned_user_id: assignedUserId || prevConv.assigned_user_id || null,
+            bot_handoff_reason: assignedUserId ? `ASSIGNED:${assignedUserId}` : "HUMAN_OPERATOR_MESSAGE",
+            bot_handoff_at: now
+          } : {})
+        };
+      }
 
-    this.saveToFile();
-    return { message: newMsg, conversation: this.conversations[convIndex] };
+      this.saveToFile();
+      return { message: newMsg, conversation: this.conversations[convIndex], deduplicated: wasDeduplicated };
+    } finally {
+      clearInFlightOutboundSend(conversationId, tempUuid);
+    }
   }
 
-  public async processWhatsAppMessage(storeId: string, msg: any, instanceName?: string): Promise<{ conversation: ChatConversation; message: ChatMessage } | null> {
+  public async processWhatsAppMessage(
+    storeId: string,
+    msg: any,
+    instanceName?: string
+  ): Promise<{ conversation: ChatConversation; message: ChatMessage; deduplicated?: boolean } | null> {
     if (!msg) return null;
 
     const cleanStoreId = typeof storeId === 'string' ? storeId.trim().replace(/^store_/, '') : (storeId || 'default');
@@ -1197,7 +1533,12 @@ class ChatStore {
     // Deterministic valid UUIDs for Supabase PK/FK compliance
     const contactId = stringToUuid(`contact_${phone}_${cleanStoreId}`);
     const convId = stringToUuid(`conv_${phone}_${cleanStoreId}`);
-    const rawMsgKey = msg.key?.id || `${Date.now()}`;
+    const explicitMsgKey =
+      (typeof msg.key?.id === "string" && msg.key.id.trim()) ||
+      (typeof msg.message?.key?.id === "string" && msg.message.key.id.trim()) ||
+      (typeof msg.id === "string" && !msg.id.startsWith("msg_") ? msg.id.trim() : "") ||
+      null;
+    const rawMsgKey = explicitMsgKey || `${Date.now()}`;
     const msgId = /^[0-9a-f-]{36}$/i.test(rawMsgKey) ? rawMsgKey : stringToUuid(`msg_${rawMsgKey}_${convId}`);
 
     // 1. Busca ou criação do contato (chat_contacts)
@@ -1634,8 +1975,86 @@ class ChatStore {
       console.error('[ERRO CRITICO NO BACKGROUND]: Exceção na busca ou criação da conversa (chat_conversations)', error.message, error.stack);
     }
 
-    // 4. Inserção da mensagem (chat_messages)
+    // 4. Deduplicação e Inserção da mensagem (chat_messages)
     const senderType = fromMe ? (isBotEcho ? "BOT" : "USER") : "CUSTOMER";
+
+    // 4.1 Primeiro: deduplicação obrigatória por remote_id (data.key.id) ou id determinístico
+    let existingMessageRow: any = null;
+    if (explicitMsgKey) {
+      existingMessageRow = await this.findExistingMessageByRemoteId(convId, explicitMsgKey, msgId);
+    }
+
+    // 4.2 Segundo: proteção contra race condition para eventos fromMe (send.message / messages.upsert)
+    if (!existingMessageRow && fromMe) {
+      const recentUnlinked = await this.findRecentUnlinkedOutboundMessage(convId, text, extractedMediaType);
+      if (recentUnlinked) {
+        const keyToLink = explicitMsgKey || rawMsgKey;
+        try {
+          const updateFields: Record<string, any> = {
+            remote_id: keyToLink,
+            message_ack: "SENT"
+          };
+          if (extractedMediaUrl && !recentUnlinked.media_url) {
+            updateFields.media_url = extractedMediaUrl;
+          }
+          await supabaseAdmin
+            .from("chat_messages")
+            .update(sanitizeChatMessagePayload(updateFields))
+            .eq("id", recentUnlinked.id);
+          existingMessageRow = { ...recentUnlinked, ...updateFields };
+        } catch (linkErr: any) {
+          console.warn("[ChatStore] Aviso ao vincular remote_id na mensagem recente:", linkErr?.message || linkErr);
+          existingMessageRow = { ...recentUnlinked, remote_id: keyToLink };
+        }
+        console.log(`[ChatStore] 🛡️ Race-condition evitada: webhook fromMe vinculado à mensagem recente (${recentUnlinked.id}) com remote_id=${keyToLink}`);
+      } else {
+        // Verifica também se addMessage está em voo neste exato milissegundo aguardando a Evolution API
+        const inFlight = findMatchingInFlightOutboundSend(convId, text, extractedMediaType);
+        if (inFlight) {
+          const keyToClaim = explicitMsgKey || rawMsgKey;
+          if (inFlight.claimedRemoteId && inFlight.claimedRemoteId === keyToClaim && inFlight.persistedMsgId) {
+            existingMessageRow = await this.findExistingMessageByRemoteId(convId, keyToClaim, inFlight.persistedMsgId);
+          } else if (!inFlight.claimedRemoteId) {
+            inFlight.claimedRemoteId = keyToClaim;
+            inFlight.persistedMsgId = msgId;
+            console.log(`[ChatStore] 🛡️ Webhook chegou antes do retorno HTTP do addMessage: reivindicando envio em voo (id=${msgId}, remote_id=${keyToClaim}).`);
+          }
+        }
+      }
+    }
+
+    if (existingMessageRow) {
+      const formattedExisting = this.formatDbMessageRow(existingMessageRow);
+      // Atualiza mídia/ACK se o registro salvo anteriormente não tinha mídia ou remote_id
+      if (explicitMsgKey && !existingMessageRow.remote_id) {
+        try {
+          await supabaseAdmin
+            .from("chat_messages")
+            .update({ remote_id: explicitMsgKey, message_ack: "SENT" })
+            .eq("id", existingMessageRow.id);
+          formattedExisting.remote_id = explicitMsgKey;
+        } catch (_) {}
+      }
+
+      const memIdx = this.messages.findIndex(
+        (m) => m.id === formattedExisting.id || (formattedExisting.remote_id && m.remote_id === formattedExisting.remote_id)
+      );
+      if (memIdx >= 0) {
+        this.messages[memIdx] = { ...this.messages[memIdx], ...formattedExisting };
+      } else {
+        this.messages.push(formattedExisting);
+      }
+
+      const existingConvIdx = this.conversations.findIndex(c => c.id === convId);
+      if (existingConvIdx >= 0) {
+        this.conversations[existingConvIdx] = conv;
+      } else {
+        this.conversations.push(conv);
+      }
+
+      console.log(`[ChatStore] ✅ Mensagem deduplicada no webhook (id=${formattedExisting.id}, remote_id=${formattedExisting.remote_id || explicitMsgKey}). Nenhuma linha duplicada inserida.`);
+      return { conversation: conv, message: formattedExisting, deduplicated: true };
+    }
 
     // Se for mídia (imagem, áudio, vídeo, documento, figurinha) e não tiver uma Data URI válida ou URL pública consumível
     const hasValidDirectMedia = isValidDirectMedia(extractedMediaUrl);
@@ -1667,13 +2086,15 @@ class ChatStore {
       mediaUrl: extractedMediaUrl,
       mediaType: extractedMediaType,
       type: extractedMediaType,
-      remote_id: rawMsgKey,
+      remote_id: explicitMsgKey || rawMsgKey,
+      message_ack: fromMe ? "SENT" : undefined,
       reaction: null,
       reactions: [],
       is_private: false,
       created_at: now
     };
 
+    let insertedAsDuplicate = false;
     if (!isBotEcho) {
       try {
         const msgInsertData = sanitizeChatMessagePayload({
@@ -1683,38 +2104,60 @@ class ChatStore {
           content: text,
           media_url: extractedMediaUrl || null,
           media_type: extractedMediaType || "text",
-          remote_id: rawMsgKey,
+          remote_id: explicitMsgKey || rawMsgKey,
+          message_ack: fromMe ? "SENT" : undefined,
           is_private: false,
           created_at: now
         });
 
         const { error } = await supabaseAdmin.from("chat_messages").insert([msgInsertData]);
-        
+
         if (error) {
-          console.warn('[ChatStore] Aviso na inserção com sanitizeChatMessagePayload (tentando fallback mínimo sem campos opcionais):', error.message);
-          const fallbackPayload = { ...msgInsertData };
-          delete fallbackPayload.reaction;
-          delete fallbackPayload.reactions;
-          delete fallbackPayload.remote_id;
-          await supabaseAdmin.from("chat_messages").insert([fallbackPayload]);
+          if (error.code === "23505" || String(error.message || "").toLowerCase().includes("duplicate")) {
+            insertedAsDuplicate = true;
+            const dupRow = await this.findExistingMessageByRemoteId(convId, explicitMsgKey || rawMsgKey, msgId);
+            if (dupRow) {
+              Object.assign(newMsg, this.formatDbMessageRow(dupRow));
+            }
+          } else {
+            console.warn('[ChatStore] Aviso na inserção com sanitizeChatMessagePayload (tentando fallback mínimo sem campos opcionais):', error.message);
+            const fallbackPayload = { ...msgInsertData };
+            delete fallbackPayload.reaction;
+            delete fallbackPayload.reactions;
+            delete fallbackPayload.message_ack;
+            const { error: fbErr } = await supabaseAdmin.from("chat_messages").insert([fallbackPayload]);
+            if (fbErr && (fbErr.code === "23505" || String(fbErr.message || "").toLowerCase().includes("duplicate"))) {
+              insertedAsDuplicate = true;
+            }
+          }
         }
       } catch (error: any) {
         console.error('[ERRO CRITICO NO BACKGROUND]: Exceção na inserção da mensagem (chat_messages)', error.message, error.stack);
       }
+    } else {
+      insertedAsDuplicate = true;
     }
-    
-    // Atualiza cache em memória local apenas para fallback / dev
+
+    // Atualiza cache em memória local apenas para fallback / dev (sem duplicar)
     if (!this.contacts.find(c => c.id === contactId)) this.contacts.push(contact);
-    
+
     const existingConvIdx = this.conversations.findIndex(c => c.id === convId);
     if (existingConvIdx >= 0) {
       this.conversations[existingConvIdx] = conv;
     } else {
       this.conversations.push(conv);
     }
-    this.messages.push(newMsg);
 
-    return { conversation: conv, message: newMsg };
+    const memMsgIdx = this.messages.findIndex(
+      (m) => m.id === newMsg.id || (newMsg.remote_id && m.remote_id === newMsg.remote_id)
+    );
+    if (memMsgIdx >= 0) {
+      this.messages[memMsgIdx] = { ...this.messages[memMsgIdx], ...newMsg };
+    } else {
+      this.messages.push(newMsg);
+    }
+
+    return { conversation: conv, message: newMsg, deduplicated: insertedAsDuplicate };
   }
 
   /**

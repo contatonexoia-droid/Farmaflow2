@@ -28,6 +28,7 @@ import { inboxStore } from "./services/inboxStore.js";
 import { chatStore } from "./services/chatStore.js";
 import { teamStore } from "./services/teamStore.js";
 import { aiAgentService, DEFAULT_AI_AGENT_PROMPT, isolateUrlsInText, extractUrlAndCleanText, ensureStoreUrlCacheBuster, formatToWhatsAppMarkdown, cleanSearchInterjections, PHARMA_EXPANSIONS, extractProductSize, productMatchesSize } from "./services/aiAgentService.js";
+import { enrichProductWithAi, enrichProductsBatchWithAi, generateProductImageWithAi } from "./services/productAiService.js";
 import {
   evolutionApiService,
   safeUpdateWhatsappInstance,
@@ -16207,28 +16208,29 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
         registerBotSentMessage(String(id).trim(), conversation.id, cleanPhone);
       }
 
-      // Grava Balão 1 no banco e transmite no WebSocket
-      const welcomeMsgId1 = crypto.randomUUID();
-      const welcomeMsg1 = {
-        id: welcomeMsgId1,
-        conversation_id: conversation.id,
-        sender_type: "BOT",
-        content: welcomeGreeting,
-        is_private: false,
-        created_at: nowIso
-      };
+      // Grava Balão 1 no banco (com remote_id para deduplicação) e transmite no WebSocket
+      const b1RemoteId = b1Candidates[0] ? String(b1Candidates[0]).trim() : null;
+      const { message: welcomeMsg1, deduplicated: b1Dedup } = await chatStore.addMessage(
+        storeId,
+        conversation.id,
+        "BOT",
+        welcomeGreeting,
+        false,
+        undefined,
+        undefined,
+        targetInstanceName,
+        true,
+        undefined,
+        { remoteId: b1RemoteId }
+      );
 
-      try {
-        await supabaseAdmin.from("chat_messages").insert([welcomeMsg1]);
-      } catch (dbErr: any) {
-        console.warn("[WelcomeMessage] Erro ao persistir Balão 1 no banco:", dbErr.message);
+      if (!b1Dedup) {
+        realtimeHub.broadcastToStore(storeId, "chat_message", {
+          conversationId: conversation.id,
+          message: welcomeMsg1,
+          conversation
+        });
       }
-
-      realtimeHub.broadcastToStore(storeId, "chat_message", {
-        conversationId: conversation.id,
-        message: welcomeMsg1,
-        conversation
-      });
 
       // Delay de 1200ms para ordenação visual no WhatsApp
       await new Promise(resolve => setTimeout(resolve, 1200));
@@ -16261,18 +16263,22 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
         }
 
         const nowIso2 = new Date().toISOString();
-        const welcomeMsgId2 = crypto.randomUUID();
-        const welcomeMsg2 = {
-          id: welcomeMsgId2,
-          conversation_id: conversation.id,
-          sender_type: "BOT",
-          content: freshStoreUrl,
-          is_private: false,
-          created_at: nowIso2
-        };
+        const b2RemoteId = b2Candidates[0] ? String(b2Candidates[0]).trim() : null;
+        const { message: welcomeMsg2, deduplicated: b2Dedup } = await chatStore.addMessage(
+          storeId,
+          conversation.id,
+          "BOT",
+          freshStoreUrl,
+          false,
+          undefined,
+          undefined,
+          targetInstanceName,
+          true,
+          undefined,
+          { remoteId: b2RemoteId }
+        );
 
         try {
-          await supabaseAdmin.from("chat_messages").insert([welcomeMsg2]);
           await supabaseAdmin.from("chat_conversations").update({
             last_message_at: nowIso2,
             last_message_content: freshStoreUrl,
@@ -16294,14 +16300,16 @@ async function handleDailyWelcomeMessage(storeId: string, conversation: any, ins
           conversation.kanban_stage = "ia_atendendo";
           conversation.status = "bot";
         } catch (dbErr: any) {
-          console.warn("[WelcomeMessage] Erro ao persistir Balão 2 no banco:", dbErr.message);
+          console.warn("[WelcomeMessage] Erro ao atualizar conversa após Balão 2:", dbErr.message);
         }
 
-        realtimeHub.broadcastToStore(storeId, "chat_message", {
-          conversationId: conversation.id,
-          message: welcomeMsg2,
-          conversation
-        });
+        if (!b2Dedup) {
+          realtimeHub.broadcastToStore(storeId, "chat_message", {
+            conversationId: conversation.id,
+            message: welcomeMsg2,
+            conversation
+          });
+        }
 
         console.log(`[WelcomeMessage] ✅ Fluxo rigoroso de boas-vindas em 2 balões concluído com sucesso para ${cleanPhone} (Loja: "${tenant.name}", Instância: "${targetInstanceName}", Status: ENTREGUE)`);
         return true;
@@ -16520,6 +16528,7 @@ async function sendAudioFallbackIfAiExplicitlyEnabled(params: {
   }
 
   // 3. Disparo permitido apenas com aiEnabled === true e conversa ativa no bot
+  let capturedFailRemoteId: string | null = null;
   if (cleanPhone && instanceName) {
     const sendFailRes = await evolutionApiService.sendTextMessage(
       instanceName,
@@ -16533,38 +16542,33 @@ async function sendAudioFallbackIfAiExplicitlyEnabled(params: {
       sendFailRes?.data?.id ||
       sendFailRes?.data?.messageId ||
       (sendFailRes as any)?.key?.id;
+    capturedFailRemoteId = failId ? String(failId).trim() : null;
     registerBotSentMessage(failId, conversation?.id, cleanPhone);
   }
 
   if (persistInChat && conversation?.id) {
-    const failMsgId = crypto.randomUUID();
-    const nowIso = new Date().toISOString();
-    const failBotMsg = {
-      id: failMsgId,
-      conversation_id: conversation.id,
-      sender_type: "BOT",
-      content: messageText,
-      media_url: null,
-      media_type: null,
-      created_at: nowIso,
-    };
-
     try {
-      await supabaseAdmin.from("chat_messages").insert([failBotMsg]);
-      await supabaseAdmin
-        .from("chat_conversations")
-        .update({
-          last_message_content: messageText,
-          last_message_at: nowIso,
-          updated_at: nowIso,
-        })
-        .eq("id", conversation.id);
+      const { message: failBotMsg, deduplicated: failDedup } = await chatStore.addMessage(
+        tenantId,
+        conversation.id,
+        "BOT",
+        messageText,
+        false,
+        undefined,
+        undefined,
+        instanceName,
+        true,
+        undefined,
+        { remoteId: capturedFailRemoteId }
+      );
 
-      realtimeHub.broadcastToStore(tenantId, "chat_message", {
-        conversationId: conversation.id,
-        message: failBotMsg,
-        conversation,
-      });
+      if (!failDedup) {
+        realtimeHub.broadcastToStore(tenantId, "chat_message", {
+          conversationId: conversation.id,
+          message: failBotMsg,
+          conversation,
+        });
+      }
     } catch (dbFailErr: any) {
       console.warn(
         "[WEBHOOK - AUDIO] Erro ao registrar mensagem de erro amigável no banco:",
@@ -16597,17 +16601,53 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
     
     const eventName = String(event || "").toLowerCase();
     const eventNameUpper = String(event || "").toUpperCase();
-    
+
+    const isMessagesUpdateEvent =
+      eventNameUpper === "MESSAGES_UPDATE" ||
+      eventName === "messages.update" ||
+      eventName === "messages-update" ||
+      eventNameUpper === "MESSAGES_DELETE" ||
+      eventName === "messages.delete";
+
+    const isSendMessageEvent =
+      eventNameUpper === "SEND_MESSAGE" ||
+      eventName === "send.message" ||
+      eventName === "send-message";
+
     const isReactionEvent = (
-      eventName.includes("reaction") || 
+      eventName.includes("reaction") ||
       eventNameUpper.includes("REACTION") ||
       Boolean(data?.reaction) ||
       Boolean(data?.message?.reactionMessage) ||
       Boolean(data?.reactionMessage)
     );
 
+    if (isMessagesUpdateEvent) {
+      const updates = Array.isArray(data) ? data : [data];
+      for (const upd of updates) {
+        if (!upd) continue;
+        const ackKeyId = String(upd.keyId || upd.key?.id || upd.id || "").trim();
+        const rawAck = upd.status || upd.update?.status || upd.ack;
+        if (ackKeyId && rawAck !== undefined && rawAck !== null) {
+          try {
+            await supabaseAdmin
+              .from("chat_messages")
+              .update({ message_ack: String(rawAck) })
+              .eq("remote_id", ackKeyId);
+          } catch (_) {}
+        }
+      }
+      return res.status(200).json({ success: true, handled: "messages_update_ack" });
+    }
+
     let isMessageEvent = false;
-    if (eventNameUpper === "MESSAGES_UPSERT" || eventName === "messages.upsert" || eventName === "messages-upsert" || isReactionEvent) {
+    if (
+      eventNameUpper === "MESSAGES_UPSERT" ||
+      eventName === "messages.upsert" ||
+      eventName === "messages-upsert" ||
+      isSendMessageEvent ||
+      isReactionEvent
+    ) {
       isMessageEvent = true;
     } else if (data?.messages || (data?.message && data.message.key) || data?.key) {
       isMessageEvent = true;
@@ -16796,8 +16836,11 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
 
       for (const msg of messages) {
         if (!msg) continue;
-        
-        const fromMe = Boolean(msg.key?.fromMe ?? msg.fromMe ?? false);
+
+        if (isSendMessageEvent && msg.key?.fromMe === undefined && msg.fromMe === undefined) {
+          msg.key = { ...(msg.key || {}), fromMe: true };
+        }
+        const fromMe = Boolean(msg.key?.fromMe ?? msg.fromMe ?? isSendMessageEvent);
         const remoteJid = msg.key?.remoteJid || msg.remoteJid || msg.sender || msg.participant || "";
         if (!remoteJid || remoteJid.includes("@g.us") || remoteJid === "status@broadcast") continue; // Ignora mensagens de grupo e status
 
@@ -16864,13 +16907,21 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
             const wasReopened = Boolean((conversation as any)._was_reopened);
             const isWeblojaOrder = Boolean((conversation as any)._is_webloja_order);
 
-            // 2. Broadcast IMEDIATO via WebSockets/Realtime para que apareça na tela do operador humano
+            // 2. Broadcast IMEDIATO via WebSockets/Realtime (somente quando não for duplicata)
             try {
-              realtimeHub.broadcastToStore(storeId, "chat_message", {
-                conversationId: conversation.id,
-                message: result.message,
-                conversation: conversation
-              });
+              if (!result.deduplicated) {
+                realtimeHub.broadcastToStore(storeId, "chat_message", {
+                  conversationId: conversation.id,
+                  message: result.message,
+                  conversation: conversation
+                });
+              } else {
+                realtimeHub.broadcastToStore(storeId, "chat_message_updated", {
+                  conversationId: conversation.id,
+                  message: result.message,
+                  conversation: conversation
+                });
+              }
 
               // Se for pedido finalizado da Loja Online, emite evento de movimentação automática para "saiu_entrega" (Em Separação / Delivery)
               if (isWeblojaOrder) {
@@ -19140,7 +19191,7 @@ app.post("/api/v1/chat/send", requireChatEnabled, async (req, res) => {
 
     // Persistir mensagem e despachar via Evolution API com validação síncrona de entrega (strictDelivery)
     const senderUserId = userId || (req.headers["x-user-id"] as string) || undefined;
-    const { message, conversation } = await chatStore.addMessage(
+    const { message, conversation, deduplicated } = await chatStore.addMessage(
       storeId,
       conversation_id,
       sender_type || "USER",
@@ -19151,15 +19202,23 @@ app.post("/api/v1/chat/send", requireChatEnabled, async (req, res) => {
       resolvedInstance,
       false,
       senderUserId,
-      { strictDelivery: !is_private }
+      { strictDelivery: !is_private, senderId: senderUserId || null }
     );
 
-    // Transmitir via SSE
-    realtimeHub.broadcastToStore(storeId, "chat_message", {
-      conversationId: conversation_id,
-      message,
-      conversation
-    });
+    // Transmitir via SSE (evitando re-broadcast duplicado se webhook já registrou a mensagem)
+    if (!deduplicated) {
+      realtimeHub.broadcastToStore(storeId, "chat_message", {
+        conversationId: conversation_id,
+        message,
+        conversation
+      });
+    } else {
+      realtimeHub.broadcastToStore(storeId, "chat_message_updated", {
+        conversationId: conversation_id,
+        message,
+        conversation
+      });
+    }
 
     if (is_private) {
       console.log(`[Chat API] Nota interna salva para conversa ${conversation_id}.`);
@@ -19823,6 +19882,132 @@ app.post("/api/v1/ai/agent/chat", async (req, res) => {
     console.error("[AI Agent Chat Error]:", err);
     const status = err.statusCode || 500;
     return res.status(status).json({ error: err.message || "Erro ao processar mensagem com o Agente de IA." });
+  }
+});
+
+// Middleware de autenticação obrigatória para recursos administrativos de IA de catálogo
+const requireProductAiAuth = async (req: any, res: any, next: any) => {
+  try {
+    const authHeader = req.headers.authorization as string | undefined;
+    const token = authHeader && authHeader.startsWith("Bearer ")
+      ? authHeader.slice(7).trim()
+      : "";
+
+    if (!token || token === "undefined" || token === "null") {
+      return res.status(401).json({
+        error: "Sessão expirada ou não autenticada. Faça login novamente para usar os recursos de IA.",
+      });
+    }
+
+    const { data: { user }, error } = await supabaseAdmin.auth.getUser(token);
+    if (error || !user) {
+      return res.status(401).json({
+        error: "Sessão inválida ou expirada. Faça login novamente para usar os recursos de IA.",
+      });
+    }
+
+    let resolvedRole = String(user.user_metadata?.role || "").toLowerCase().trim();
+    if (!resolvedRole) {
+      try {
+        const { data: tuRow } = await supabaseAdmin
+          .from("tenant_users")
+          .select("role")
+          .or(`id.eq.${user.id},supabase_user_id.eq.${user.id}`)
+          .limit(1)
+          .maybeSingle();
+        if (tuRow?.role) {
+          resolvedRole = String(tuRow.role).toLowerCase().trim();
+        }
+      } catch (_) {}
+    }
+
+    const restrictedCatalogRoles = ["chat_only", "chat_agent", "atendente_chat"];
+    if (resolvedRole && restrictedCatalogRoles.includes(resolvedRole)) {
+      return res.status(403).json({
+        error: "Seu perfil não possui permissão para editar ou enriquecer produtos com IA.",
+      });
+    }
+
+    req.user = user;
+    return next();
+  } catch (err: any) {
+    console.warn("[requireProductAiAuth] Falha na verificação:", err?.message || err);
+    return res.status(401).json({
+      error: "Não foi possível validar sua sessão. Faça login novamente.",
+    });
+  }
+};
+
+// Enriquecimento individual de produto com IA (Server-Side)
+app.post(["/api/ai/enrich-product", "/api/v1/ai/enrich-product"], requireProductAiAuth, async (req: any, res) => {
+  try {
+    const {
+      name,
+      barcode,
+      manufacturer,
+      category,
+      presentation,
+      activePrinciple,
+    } = req.body || {};
+
+    if (!name || typeof name !== "string" || !name.trim()) {
+      return res.status(400).json({ error: "O campo 'name' do produto é obrigatório." });
+    }
+
+    const data = await enrichProductWithAi({
+      name,
+      barcode,
+      manufacturer,
+      category,
+      presentation,
+      activePrinciple,
+    });
+
+    return res.json({ success: true, data });
+  } catch (err: any) {
+    console.error("[API /api/ai/enrich-product Error]:", err?.message || err);
+    const status = Number(err?.statusCode) || 500;
+    return res.status(status).json({
+      error: err?.message || "Erro ao enriquecer produto com IA no servidor.",
+    });
+  }
+});
+
+// Enriquecimento em lote de produtos com IA (Server-Side)
+app.post(["/api/ai/enrich-products-batch", "/api/v1/ai/enrich-products-batch"], requireProductAiAuth, async (req: any, res) => {
+  try {
+    const { products } = req.body || {};
+    if (!Array.isArray(products) || products.length === 0) {
+      return res.status(400).json({ error: "Envie uma lista válida em 'products'." });
+    }
+
+    const items = await enrichProductsBatchWithAi(products);
+    return res.json({ success: true, items });
+  } catch (err: any) {
+    console.error("[API /api/ai/enrich-products-batch Error]:", err?.message || err);
+    const status = Number(err?.statusCode) || 500;
+    return res.status(status).json({
+      error: err?.message || "Erro ao enriquecer lote de produtos com IA no servidor.",
+    });
+  }
+});
+
+// Geração de imagem de produto com IA (Server-Side)
+app.post(["/api/ai/generate-product-image", "/api/v1/ai/generate-product-image"], requireProductAiAuth, async (req: any, res) => {
+  try {
+    const { name } = req.body || {};
+    if (!name || typeof name !== "string" || !name.trim()) {
+      return res.status(400).json({ error: "O campo 'name' do produto é obrigatório." });
+    }
+
+    const result = await generateProductImageWithAi(name);
+    return res.json({ success: true, image: result.image });
+  } catch (err: any) {
+    console.error("[API /api/ai/generate-product-image Error]:", err?.message || err);
+    const status = Number(err?.statusCode) || 500;
+    return res.status(status).json({
+      error: err?.message || "Erro ao gerar imagem do produto com IA no servidor.",
+    });
   }
 });
 

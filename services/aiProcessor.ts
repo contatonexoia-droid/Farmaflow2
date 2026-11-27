@@ -82,12 +82,17 @@ export const processAiEnrichmentQueue = async (
 
                 return {
                     name: p.name,
-                    missingFields
+                    missingFields,
+                    ...(p.barcode ? { barcode: p.barcode } : {}),
+                    ...(p.manufacturer ? { manufacturer: p.manufacturer } : {}),
+                    ...(p.category ? { category: p.category } : {}),
+                    ...(p.presentation ? { presentation: p.presentation } : {}),
                 };
             });
             
             try {
-                const enrichedDataList = await fetchProductDetailsBatch(productsToEnrich);
+                const batchTenantId = (toFetchFromAi[0] as any)?.tenant_id || (toFetchFromAi[0] as any)?.tenantId;
+                const enrichedDataList = await fetchProductDetailsBatch(productsToEnrich, batchTenantId);
                 
                 const updatedProducts = toFetchFromAi.map((product, index) => {
                     const enrichedData = enrichedDataList[index] || {};

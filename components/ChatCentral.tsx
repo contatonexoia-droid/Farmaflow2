@@ -18,6 +18,99 @@ const FILTER_TABS = [
   { id: 'finalizadas', label: 'Finalizadas' }
 ];
 
+const getExternalMsgId = (msg: any): string | null => {
+  const raw = msg?.remote_id || msg?.whatsapp_message_id || msg?.external_id || null;
+  if (!raw) return null;
+  const trimmed = String(raw).trim();
+  return trimmed.length > 0 ? trimmed : null;
+};
+
+const isTempClientMessage = (msg: any): boolean => {
+  const idStr = String(msg?.id || '');
+  return idStr.startsWith('temp_') || msg?.localStatus === 'sending';
+};
+
+const normalizeMsgTextForDedup = (val: any): string =>
+  String(val || '')
+    .trim()
+    .replace(/\s+/g, ' ');
+
+const deduplicateChatMessages = (list: any[]): any[] => {
+  if (!Array.isArray(list) || list.length === 0) return [];
+
+  const result: any[] = [];
+  const idxById = new Map<string, number>();
+  const idxByRemoteId = new Map<string, number>();
+
+  for (const item of list) {
+    if (!item) continue;
+    const idKey = item.id ? String(item.id) : '';
+    const extId = getExternalMsgId(item);
+
+    let matchIdx = -1;
+    if (idKey && idxById.has(idKey)) {
+      matchIdx = idxById.get(idKey)!;
+    } else if (extId && idxByRemoteId.has(extId)) {
+      matchIdx = idxByRemoteId.get(extId)!;
+    }
+
+    if (matchIdx >= 0) {
+      const existing = result[matchIdx];
+      const merged = {
+        ...existing,
+        ...item,
+        id: existing.id && !String(existing.id).startsWith('temp_') ? existing.id : item.id,
+        remote_id: getExternalMsgId(item) || getExternalMsgId(existing) || undefined,
+        mediaUrl: item.mediaUrl || item.media_url || existing.mediaUrl || existing.media_url,
+        media_url: item.media_url || item.mediaUrl || existing.media_url || existing.mediaUrl,
+        localStatus: item.localStatus || existing.localStatus,
+      };
+      result[matchIdx] = merged;
+      if (merged.id) idxById.set(String(merged.id), matchIdx);
+      const mergedExt = getExternalMsgId(merged);
+      if (mergedExt) idxByRemoteId.set(mergedExt, matchIdx);
+    } else {
+      const nextIdx = result.length;
+      result.push(item);
+      if (idKey) idxById.set(idKey, nextIdx);
+      if (extId) idxByRemoteId.set(extId, nextIdx);
+    }
+  }
+
+  const confirmedOutbound = result.filter(
+    (m) => !isTempClientMessage(m) && (m.sender_type === 'USER' || m.sender_type === 'BOT')
+  );
+  if (confirmedOutbound.length === 0) return result;
+
+  const consumedConfirmedIds = new Set<string>();
+  return result.filter((m) => {
+    if (!isTempClientMessage(m) || m.localStatus === 'failed') return true;
+    const tempTs = new Date(m.created_at || 0).getTime();
+    const tempText = normalizeMsgTextForDedup(m.content);
+    const tempMediaType = String(m.media_type || m.type || 'text').toLowerCase();
+
+    const matchedConfirmed = confirmedOutbound.find((c) => {
+      const cId = String(c.id || '');
+      if (!cId || consumedConfirmedIds.has(cId)) return false;
+      const cTs = new Date(c.created_at || 0).getTime();
+      if (tempTs > 0 && cTs > 0 && cTs < tempTs - 2000) return false;
+      if (tempTs > 0 && cTs > 0 && cTs - tempTs > 30000) return false;
+
+      const cText = normalizeMsgTextForDedup(c.content);
+      const cMediaType = String(c.media_type || c.type || 'text').toLowerCase();
+      const textMatches = tempText.length > 0 && cText === tempText;
+      const mediaMatches = tempMediaType !== 'text' && cMediaType === tempMediaType;
+      return textMatches || mediaMatches;
+    });
+
+    if (matchedConfirmed) {
+      consumedConfirmedIds.add(String(matchedConfirmed.id));
+      return false;
+    }
+    return true;
+  });
+};
+
 export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }: any) => {
   const [conversations, setConversations] = useState<any[]>([]);
   const [selectedConversation, setSelectedConversation] = useState<any>(null);
@@ -471,13 +564,16 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
 
             const cachedList = messagesCacheRef.current.get(row.conversation_id);
             if (cachedList) {
-              const existingIdx = cachedList.findIndex((m) => m.id === row.id || (row.remote_id && m.remote_id === row.remote_id));
+              const rowExtId = getExternalMsgId(formattedMsg);
+              const existingIdx = cachedList.findIndex(
+                (m) => m.id === row.id || (rowExtId && getExternalMsgId(m) === rowExtId)
+              );
               if (existingIdx >= 0) {
                 const nextCached = [...cachedList];
                 nextCached[existingIdx] = { ...nextCached[existingIdx], ...formattedMsg };
-                messagesCacheRef.current.set(row.conversation_id, nextCached);
+                messagesCacheRef.current.set(row.conversation_id, deduplicateChatMessages(nextCached));
               } else if (payload.eventType === 'INSERT') {
-                messagesCacheRef.current.set(row.conversation_id, [...cachedList, formattedMsg]);
+                messagesCacheRef.current.set(row.conversation_id, deduplicateChatMessages([...cachedList, formattedMsg]));
               }
             }
 
@@ -488,17 +584,20 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
               row.conversation_id === currentOpenId
             ) {
               setMessages((prev) => {
-                const existingIdx = prev.findIndex((m) => m.id === row.id || (row.remote_id && m.remote_id === row.remote_id));
+                const rowExtId = getExternalMsgId(formattedMsg);
+                const existingIdx = prev.findIndex(
+                  (m) => m.id === row.id || (rowExtId && getExternalMsgId(m) === rowExtId)
+                );
                 if (existingIdx >= 0) {
                   const next = [...prev];
                   next[existingIdx] = {
                     ...next[existingIdx],
                     ...formattedMsg
                   };
-                  return next;
+                  return deduplicateChatMessages(next);
                 }
                 if (payload.eventType === 'INSERT') {
-                  return [...prev, formattedMsg];
+                  return deduplicateChatMessages([...prev, formattedMsg]);
                 }
                 return prev;
               });
@@ -1003,11 +1102,13 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   };
 
   const mergeWithPendingLocalMessages = (conversationId: string, serverMessages: any[]) => {
+    const cleanServer = deduplicateChatMessages(serverMessages);
     const locals = pendingLocalMessagesRef.current[conversationId] || [];
-    if (locals.length === 0) return serverMessages;
-    const serverIds = new Set(serverMessages.map(m => m.id));
-    const remainingLocals = locals.filter(m => !serverIds.has(m.id));
-    return [...serverMessages, ...remainingLocals];
+    if (locals.length === 0) return cleanServer;
+    const merged = deduplicateChatMessages([...cleanServer, ...locals]);
+    const survivingLocalIds = new Set(merged.filter(m => isTempClientMessage(m)).map(m => m.id));
+    pendingLocalMessagesRef.current[conversationId] = locals.filter(m => survivingLocalIds.has(m.id));
+    return merged;
   };
 
   const upsertPendingLocalMessage = (conversationId: string, msg: any) => {
@@ -1064,8 +1165,9 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
         const json = await res.json();
         if (isStale()) return;
         if (json.data) {
-          messagesCacheRef.current.set(conversationId, json.data);
-          setMessages(mergeWithPendingLocalMessages(conversationId, json.data));
+          const dedupedServer = deduplicateChatMessages(json.data);
+          messagesCacheRef.current.set(conversationId, dedupedServer);
+          setMessages(mergeWithPendingLocalMessages(conversationId, dedupedServer));
           return;
         }
       }
@@ -1087,7 +1189,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
             return;
           }
         }
-        const formatted = data.map((row: any) => {
+        const formatted = deduplicateChatMessages(data.map((row: any) => {
           let parsedReactions = row.reactions;
           if (typeof parsedReactions === 'string') {
             try {
@@ -1104,7 +1206,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
             reaction: row.reaction || (parsedReactions.length > 0 ? parsedReactions[parsedReactions.length - 1].emoji : null),
             reactions: parsedReactions
           };
-        });
+        }));
         if (isStale()) return;
         messagesCacheRef.current.set(conversationId, formatted);
         setMessages(mergeWithPendingLocalMessages(conversationId, formatted));
@@ -1184,22 +1286,41 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
             }
           : { ...json.data, localStatus: 'sent' };
 
+        const confirmedExtId = getExternalMsgId(confirmedMsg);
         const cachedMsgs = messagesCacheRef.current.get(convId);
         if (cachedMsgs) {
-          const alreadyCached = cachedMsgs.some(m => m.id === confirmedMsg.id);
-          messagesCacheRef.current.set(
-            convId,
-            alreadyCached ? cachedMsgs : [...cachedMsgs, confirmedMsg]
-          );
+          const replaced = cachedMsgs.some(
+            m => m.id === targetMsg.id || m.id === confirmedMsg.id || (confirmedExtId && getExternalMsgId(m) === confirmedExtId)
+          )
+            ? cachedMsgs.map(m =>
+                m.id === targetMsg.id || m.id === confirmedMsg.id || (confirmedExtId && getExternalMsgId(m) === confirmedExtId)
+                  ? { ...m, ...confirmedMsg }
+                  : m
+              )
+            : [...cachedMsgs, confirmedMsg];
+          messagesCacheRef.current.set(convId, deduplicateChatMessages(replaced));
         }
 
         if (selectedChatIdRef.current === convId && !userClosedChatRef.current) {
           setMessages(prev => {
-            const alreadyExists = prev.some(m => m.id === confirmedMsg.id);
+            const alreadyExists = prev.some(
+              m => m.id === confirmedMsg.id || (confirmedExtId && getExternalMsgId(m) === confirmedExtId)
+            );
             if (alreadyExists) {
-              return prev.filter(m => m.id !== targetMsg.id);
+              const updated = prev
+                .filter(m => m.id !== targetMsg.id)
+                .map(m =>
+                  m.id === confirmedMsg.id || (confirmedExtId && getExternalMsgId(m) === confirmedExtId)
+                    ? { ...m, ...confirmedMsg }
+                    : m
+                );
+              return deduplicateChatMessages(updated);
             }
-            return prev.map(m => (m.id === targetMsg.id ? confirmedMsg : m));
+            const hasTemp = prev.some(m => m.id === targetMsg.id);
+            const nextList = hasTemp
+              ? prev.map(m => (m.id === targetMsg.id ? confirmedMsg : m))
+              : [...prev, confirmedMsg];
+            return deduplicateChatMessages(nextList);
           });
         }
 

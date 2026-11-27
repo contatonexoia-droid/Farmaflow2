@@ -796,6 +796,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
   const [auditReport, setAuditReport] = useState<AuditItem[] | null>(null);
   const [isGeneratingInfo, setIsGeneratingInfo] = useState(false);
   const [isGeneratingImage, setIsGeneratingImage] = useState(false);
+  const [aiFeedback, setAiFeedback] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
   const [isPhysicalSaleOpen, setIsPhysicalSaleOpen] = useState(false);
   const [physicalSaleSearch, setPhysicalSaleSearch] = useState('');
   const [physicalSaleQty, setPhysicalSaleQty] = useState(1);
@@ -843,6 +844,10 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
   useEffect(() => {
       productsRef.current = products;
   }, [products]);
+
+  useEffect(() => {
+      setAiFeedback(null);
+  }, [editingProduct?.id]);
 
   useEffect(() => {
     if ((!tenant.departments || tenant.departments.length === 0) && Object.keys(DEPARTMENT_MAPPING).length > 0) {
@@ -1481,24 +1486,65 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
   };
 
   const handleAiInfo = async () => {
-    if (!editingProduct?.name) return alert("Preencha o nome.");
+    if (!editingProduct?.name?.trim()) {
+      setAiFeedback({ type: 'error', message: 'Preencha o nome do produto antes de gerar os dados com IA.' });
+      return;
+    }
     setIsGeneratingInfo(true);
+    setAiFeedback({ type: 'info', message: 'Consultando IA para gerar descrição, categoria e dados técnicos...' });
     try {
-        const details = await fetchProductDetails(editingProduct.name);
+        const details = await fetchProductDetails({
+          name: editingProduct.name,
+          barcode: editingProduct.barcode,
+          manufacturer: editingProduct.manufacturer,
+          category: editingProduct.category,
+          presentation: editingProduct.presentation,
+          activePrinciple: editingProduct.activePrinciple,
+          tenantId: tenant.id,
+        });
         if (details.department) {
             setSelectedDeptForEdit(details.department);
         }
-        setEditingProduct(prev => ({ ...prev, ...details, isAiEnriched: true }));
-    } catch (e: any) { alert(e.message); } finally { setIsGeneratingInfo(false); }
+        setEditingProduct(prev => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            ...details,
+            manufacturer: details.manufacturer || prev.manufacturer,
+            presentation: details.presentation || prev.presentation,
+            activePrinciple: details.activePrinciple || prev.activePrinciple,
+            description: details.description || prev.description,
+            indications: details.indications || prev.indications,
+            usage: details.usage || prev.usage,
+            sideEffects: details.sideEffects || prev.sideEffects,
+            contraindications: details.contraindications || prev.contraindications,
+            isAiEnriched: true,
+          };
+        });
+        setAiFeedback({ type: 'success', message: 'Dados e descrição comercial gerados com sucesso pela IA!' });
+    } catch (e: any) {
+        setAiFeedback({ type: 'error', message: e?.message || 'Não foi possível gerar os dados com IA no momento.' });
+    } finally {
+        setIsGeneratingInfo(false);
+    }
   };
 
   const handleAiImage = async () => {
-    if (!editingProduct?.name) return alert("Preencha o nome.");
+    if (!editingProduct?.name?.trim()) {
+      setAiFeedback({ type: 'error', message: 'Preencha o nome do produto antes de gerar a imagem com IA.' });
+      return;
+    }
     setIsGeneratingImage(true);
+    setAiFeedback({ type: 'info', message: 'Gerando imagem comercial do produto com IA...' });
     try {
-        const image = await generateAiProductImage(editingProduct.name);
+        const image = await generateAiProductImage(editingProduct.name, tenant.id);
         setEditingProduct(prev => ({ ...prev, image }));
-    } catch (e: any) { alert(e.message); } finally { setIsGeneratingImage(false); }
+        setAiFeedback({ type: 'success', message: 'Imagem gerada com sucesso pela IA!' });
+    } catch (e: any) {
+        setAiFeedback({ type: 'error', message: e?.message || 'Não foi possível gerar a imagem com IA no momento.' });
+    } finally {
+        setIsGeneratingImage(false);
+    }
   };
 
   const handleSearchEanImageForEdit = async () => {
@@ -4598,7 +4644,22 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                         </div>
 
                         <div className="space-y-6">
-                            <div className="space-y-1"><InputLabel label="Nome do Produto *" /><div className="flex gap-2"><input type="text" className="flex-1 bg-gray-50 p-4 rounded-2xl font-bold border text-gray-900" value={editingProduct.name} onChange={e => setEditingProduct({...editingProduct, name: e.target.value})} /><button onClick={handleAiInfo} disabled={isGeneratingInfo || !editingProduct.name} className="px-4 bg-brand text-brand-contrast rounded-2xl shadow-lg">{isGeneratingInfo ? <Loader2 className="animate-spin" size={20}/> : <Sparkles size={20}/>}</button></div></div>
+                            <div className="space-y-2">
+                                <div className="space-y-1"><InputLabel label="Nome do Produto *" /><div className="flex gap-2"><input type="text" className="flex-1 bg-gray-50 p-4 rounded-2xl font-bold border text-gray-900" value={editingProduct.name} onChange={e => setEditingProduct({...editingProduct, name: e.target.value})} /><button type="button" onClick={handleAiInfo} disabled={isGeneratingInfo || !editingProduct.name} title="Gerar descrição e dados técnicos com IA" className="px-4 bg-brand text-brand-contrast rounded-2xl shadow-lg disabled:opacity-50">{isGeneratingInfo ? <Loader2 className="animate-spin" size={20}/> : <Sparkles size={20}/>}</button></div></div>
+                                {aiFeedback && (
+                                    <div className={`text-xs font-bold p-3 rounded-xl flex items-center gap-2 ${
+                                        aiFeedback.type === 'success' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' :
+                                        aiFeedback.type === 'error' ? 'bg-red-50 text-red-600 border border-red-200' :
+                                        'bg-indigo-50 text-indigo-700 border border-indigo-200'
+                                    }`}>
+                                        {aiFeedback.type === 'success' && <CheckCircle size={14} className="shrink-0" />}
+                                        {aiFeedback.type === 'error' && <AlertCircle size={14} className="shrink-0" />}
+                                        {aiFeedback.type === 'info' && <Loader2 size={14} className="animate-spin shrink-0" />}
+                                        <span className="flex-1 leading-snug">{aiFeedback.message}</span>
+                                        <button type="button" onClick={() => setAiFeedback(null)} className="text-gray-400 hover:text-gray-600"><X size={12}/></button>
+                                    </div>
+                                )}
+                            </div>
                             <div className="space-y-1"><InputLabel label="Apresentação" /><input type="text" className="w-full bg-gray-50 p-4 rounded-2xl font-bold border text-gray-900" value={editingProduct.presentation || ''} onChange={e => setEditingProduct({...editingProduct, presentation: e.target.value})} placeholder="30 cápsulas, 500mg, etc." /></div>
                             <div className="grid grid-cols-2 gap-4">
                                 <div className="space-y-1 relative">
