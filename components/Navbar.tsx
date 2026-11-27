@@ -168,8 +168,8 @@ export const Navbar: React.FC<NavbarProps> = ({
                 </button>
              )}
 
-             {/* Na visão de ADMIN, mostramos botão para ver a loja */}
-             {currentView === ViewMode.ADMIN_PHARMACY && (
+             {/* Na visão de ADMIN, mostramos botão para ver a loja (oculto para Atendente de Chat) */}
+             {currentView === ViewMode.ADMIN_PHARMACY && !['chat_agent', 'chat_only', 'atendente_chat', 'atendente de chat'].includes(String(session?.role || '').toLowerCase().trim()) && (
                  <button 
                     onClick={() => handleNavigate(ViewMode.CATALOG)}
                     className="hidden md:flex items-center gap-2 px-5 py-2.5 bg-brand/10 text-brand rounded-xl text-xs font-black uppercase tracking-wide hover:bg-brand/20 transition-colors"

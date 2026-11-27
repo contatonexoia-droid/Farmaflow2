@@ -143,9 +143,16 @@ export function normalizeChatDeptName(val?: unknown): string {
 }
 
 export function isOperatorRole(role?: string | null): boolean {
-  return ['operador', 'operator', 'atendente', 'balconista'].includes(
-    String(role || '').toLowerCase().trim()
-  );
+  return [
+    'operador',
+    'operator',
+    'atendente',
+    'balconista',
+    'chat_agent',
+    'chat_only',
+    'atendente_chat',
+    'atendente de chat'
+  ].includes(String(role || '').toLowerCase().trim());
 }
 
 export function isConversationAssignedToIdentifiers(conv: any, identifiers: string[]): boolean {

@@ -587,6 +587,17 @@ const SuggestionCard = ({
   );
 };
 
+const CHAT_ONLY_ROLES = [
+  "chat_agent",
+  "chat_only",
+  "atendente_chat",
+  "atendente de chat",
+];
+
+function isChatOnlyRole(role?: string | null): boolean {
+  return CHAT_ONLY_ROLES.includes(String(role || "").toLowerCase().trim());
+}
+
 const App: React.FC = () => {
   const [session, setSession] = useState<AuthSession>(() => {
     const saved = localStorage.getItem("ff_session");
@@ -660,8 +671,20 @@ const App: React.FC = () => {
     | "chat"
     | "inboxes"
   >(() => {
+    try {
+      const savedSessionRaw = localStorage.getItem("ff_session");
+      const savedSession = savedSessionRaw ? JSON.parse(savedSessionRaw) : null;
+      if (savedSession?.type === "PHARMACY_ADMIN" && isChatOnlyRole(savedSession?.role)) {
+        localStorage.setItem("ff_admin_tab", "chat");
+        return "chat";
+      }
+    } catch (_) {}
     return (localStorage.getItem("ff_admin_tab") as any) || "dashboard";
   });
+
+  const isChatOnlyUser = useMemo(() => {
+    return session?.type === "PHARMACY_ADMIN" && isChatOnlyRole(session?.role);
+  }, [session?.type, session?.role]);
 
   const [repeatOrderBanner, setRepeatOrderBanner] = useState<{
     addedCount: number;
@@ -699,6 +722,10 @@ const App: React.FC = () => {
       "operador", 
       "balconista", 
       "atendente", 
+      "chat_agent",
+      "chat_only",
+      "atendente_chat",
+      "atendente de chat",
       "farmaceutico", 
       "caixa", 
       "vendedor", 
@@ -1307,11 +1334,16 @@ const App: React.FC = () => {
       // Lógica de navegação de visualização
       const state = event.state;
       if (state && state.view) {
-        setView(state.view);
+        if (isChatOnlyUser && state.view !== ViewMode.LOGIN) {
+          setView(ViewMode.ADMIN_PHARMACY);
+          setAdminTab("chat");
+        } else {
+          setView(state.view);
+        }
       } else if (view === ViewMode.CART) {
-        setView(ViewMode.CATALOG);
+        setView(isChatOnlyUser ? ViewMode.ADMIN_PHARMACY : ViewMode.CATALOG);
       } else if (view === ViewMode.ADMIN_PHARMACY && adminTab !== "dashboard") {
-        setAdminTab("dashboard");
+        setAdminTab(isChatOnlyUser ? "chat" : "dashboard");
       }
     };
 
@@ -1404,15 +1436,29 @@ const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    if (isChatOnlyUser) {
+      if (adminTab !== "chat") {
+        setAdminTab("chat");
+      }
+      if (view !== ViewMode.LOGIN && view !== ViewMode.ADMIN_PHARMACY) {
+        setView(ViewMode.ADMIN_PHARMACY);
+      }
+      if (localStorage.getItem("ff_admin_tab") !== "chat") {
+        localStorage.setItem("ff_admin_tab", "chat");
+      }
+    }
+  }, [isChatOnlyUser, adminTab, view]);
+
+  useEffect(() => {
     localStorage.setItem("ff_session", JSON.stringify(session));
-    localStorage.setItem("ff_view", view);
-    localStorage.setItem("ff_admin_tab", adminTab);
+    localStorage.setItem("ff_view", isChatOnlyUser && view !== ViewMode.LOGIN ? ViewMode.ADMIN_PHARMACY : view);
+    localStorage.setItem("ff_admin_tab", isChatOnlyUser ? "chat" : adminTab);
     if (currentTenant) {
       localStorage.setItem("ff_tenant", JSON.stringify(currentTenant));
     } else {
       localStorage.removeItem("ff_tenant");
     }
-  }, [session, view, adminTab, currentTenant]);
+  }, [session, view, adminTab, currentTenant, isChatOnlyUser]);
 
   useEffect(() => {
     if (currentTenant) {
@@ -2795,8 +2841,10 @@ const App: React.FC = () => {
               setOrders(ords);
               setPromotions(promos);
               setCoupons(coups);
+              const targetTab = isChatOnlyRole(session.role) ? "chat" : adminTab;
+              if (isChatOnlyRole(session.role)) setAdminTab("chat");
               setView(ViewMode.ADMIN_PHARMACY);
-              window.history.replaceState({ view: ViewMode.ADMIN_PHARMACY, adminTab }, "");
+              window.history.replaceState({ view: ViewMode.ADMIN_PHARMACY, adminTab: targetTab }, "");
             }
             setIsLoading(false);
             return;
@@ -2848,9 +2896,11 @@ const App: React.FC = () => {
                   setCoupons(coups);
                 }
               }
+              const targetTab = isChatOnlyRole(session.role) ? "chat" : adminTab;
+              if (isChatOnlyRole(session.role)) setAdminTab("chat");
               setView(ViewMode.ADMIN_PHARMACY);
               window.history.replaceState(
-                { view: ViewMode.ADMIN_PHARMACY, adminTab },
+                { view: ViewMode.ADMIN_PHARMACY, adminTab: targetTab },
                 "",
               );
             }
@@ -2914,8 +2964,10 @@ const App: React.FC = () => {
                 setOrders(ords);
                 setPromotions(promos);
                 setCoupons(coups);
+                const targetTab = isChatOnlyRole(session.role) ? "chat" : adminTab;
+                if (isChatOnlyRole(session.role)) setAdminTab("chat");
                 setView(ViewMode.ADMIN_PHARMACY);
-                window.history.replaceState({ view: ViewMode.ADMIN_PHARMACY, adminTab }, "");
+                window.history.replaceState({ view: ViewMode.ADMIN_PHARMACY, adminTab: targetTab }, "");
               }
               setIsLoading(false);
               return;
@@ -3051,8 +3103,10 @@ const App: React.FC = () => {
               setPromotions(promos);
               setCoupons(coups);
             }
+            const targetTab = isChatOnlyRole(session.role) ? "chat" : adminTab;
+            if (isChatOnlyRole(session.role)) setAdminTab("chat");
             setView(ViewMode.ADMIN_PHARMACY);
-            window.history.replaceState({ view: ViewMode.ADMIN_PHARMACY, adminTab }, "");
+            window.history.replaceState({ view: ViewMode.ADMIN_PHARMACY, adminTab: targetTab }, "");
           }
           setIsLoading(false);
           return;
@@ -3148,9 +3202,11 @@ const App: React.FC = () => {
             setOrders(ords);
             setPromotions(promos);
             setCoupons(coups);
+            const targetTab = isChatOnlyRole(session.role) ? "chat" : adminTab;
+            if (isChatOnlyRole(session.role)) setAdminTab("chat");
             setView(ViewMode.ADMIN_PHARMACY);
             window.history.replaceState(
-              { view: ViewMode.ADMIN_PHARMACY, adminTab },
+              { view: ViewMode.ADMIN_PHARMACY, adminTab: targetTab },
               "",
             );
           }
@@ -3361,7 +3417,7 @@ const App: React.FC = () => {
     } else if (auth.type === "PHARMACY_ADMIN" && tenant) {
       const isMaster = Boolean(tenant.isNetworkMaster);
       const roleStr = (auth.role || "").toLowerCase().trim();
-      const isRestrictedRole = ["operador", "balconista", "atendente", "farmaceutico", "caixa", "vendedor", "entregador", "gerente"].includes(roleStr);
+      const isRestrictedRole = ["operador", "balconista", "atendente", "chat_agent", "chat_only", "atendente_chat", "atendente de chat", "farmaceutico", "caixa", "vendedor", "entregador", "gerente"].includes(roleStr);
       const isMatrizRole = roleStr === "matriz" || roleStr === "admin_matriz" || roleStr === "network_admin" || roleStr === "master" || roleStr === "super_admin";
       const isMasterUser = !isRestrictedRole && (isMatrizRole || (isMaster && (roleStr === "owner" || roleStr === "admin" || !roleStr)) || Boolean(auth.isMatrixUser));
       const masterTenantId = isMasterUser ? (isMaster ? tenant.id : (tenant.networkId || auth.masterTenantId)) : undefined;
@@ -3374,6 +3430,13 @@ const App: React.FC = () => {
       };
       setSession(enrichedAuth);
       localStorage.setItem("ff_session", JSON.stringify(enrichedAuth));
+
+      const isChatOnlyLogin = isChatOnlyRole(roleStr);
+      const targetTab = isChatOnlyLogin ? "chat" : adminTab;
+      if (isChatOnlyLogin) {
+        setAdminTab("chat");
+        localStorage.setItem("ff_admin_tab", "chat");
+      }
 
       setCurrentTenant(tenant);
       localStorage.setItem("ff_tenant", JSON.stringify(tenant));
@@ -3391,7 +3454,7 @@ const App: React.FC = () => {
         setCoupons(coups);
         setView(ViewMode.ADMIN_PHARMACY);
         window.history.pushState(
-          { view: ViewMode.ADMIN_PHARMACY, adminTab },
+          { view: ViewMode.ADMIN_PHARMACY, adminTab: targetTab },
           "",
         );
       } catch (error) {
@@ -3979,6 +4042,19 @@ const App: React.FC = () => {
 
             <nav className="flex-1 overflow-y-auto pr-1 space-y-1 pb-6">
               {view === ViewMode.ADMIN_PHARMACY ? (
+                isChatOnlyUser ? (
+                  <button
+                    onClick={() => {
+                      setAdminTab("chat");
+                      setIsSidebarOpen(false);
+                    }}
+                    className={`w-full flex items-center gap-3 px-6 py-4 rounded-2xl font-bold text-[15px] mb-2 ${adminTab === "chat" ? "bg-brand text-brand-contrast" : "text-gray-500 hover:bg-gray-50"}`}
+                  >
+                    <MessageSquare size={20} />
+                    Central de Chat
+                    {!currentTenant?.isChatEnabled && <Lock size={14} className="ml-auto opacity-50" />}
+                  </button>
+                ) : (
                 <>
                   {isFullAccess && (
                     <button
@@ -4191,6 +4267,7 @@ const App: React.FC = () => {
                     </button>
                   )}
                 </>
+                )
               ) : (
                 <div className="text-center font-black text-gray-400 uppercase text-[10px] tracking-widest">
                   Master Admin
@@ -4385,6 +4462,56 @@ const App: React.FC = () => {
 
                 {/* NAVIGATION ITEMS */}
                 <div className="space-y-1.5">
+                  {isChatOnlyUser ? (
+                    <>
+                      <button
+                        onClick={() => setAdminTab("chat")}
+                        title={isSidebarCollapsed ? "Central de Chat" : undefined}
+                        className={`group relative w-full flex items-center rounded-2xl font-bold text-[14px] transition-all ${
+                          isSidebarCollapsed 
+                            ? "justify-center p-3.5" 
+                            : "gap-3 px-4 py-3.5"
+                        } ${adminTab === "chat" ? "bg-brand text-brand-contrast shadow-sm" : "text-gray-600 hover:bg-gray-50 hover:text-gray-900"}`}
+                        style={
+                          adminTab === "chat"
+                            ? { backgroundColor: currentTenant.primaryColor }
+                            : {}
+                        }
+                      >
+                        <MessageSquare size={19} className="shrink-0" />
+                        {!isSidebarCollapsed && (
+                          <>
+                            <span className="truncate">Central de Chat</span>
+                            {!currentTenant?.isChatEnabled && <Lock size={14} className="ml-auto opacity-50 shrink-0" />}
+                          </>
+                        )}
+                        {isSidebarCollapsed && (
+                          <div className="fixed left-24 z-50 pointer-events-none hidden group-hover:flex items-center px-3 py-1.5 bg-gray-900 text-white text-xs font-bold rounded-xl shadow-lg whitespace-nowrap animate-in fade-in zoom-in-95 duration-150">
+                            Central de Chat {!currentTenant?.isChatEnabled && "(Bloqueado)"}
+                          </div>
+                        )}
+                      </button>
+
+                      <div className="my-2 border-t border-gray-100"></div>
+
+                      <button
+                        onClick={() => handleViewChange(ViewMode.LOGIN)}
+                        title={isSidebarCollapsed ? "Sair" : undefined}
+                        className={`group relative w-full flex items-center rounded-2xl font-bold text-[14px] text-red-500 hover:bg-red-50 transition-all ${
+                          isSidebarCollapsed ? "justify-center p-3.5" : "gap-3 px-4 py-3.5"
+                        }`}
+                      >
+                        <Ban size={19} className="shrink-0" />
+                        {!isSidebarCollapsed && <span className="truncate">Sair</span>}
+                        {isSidebarCollapsed && (
+                          <div className="fixed left-24 z-50 pointer-events-none hidden group-hover:flex items-center px-3 py-1.5 bg-gray-900 text-white text-xs font-bold rounded-xl shadow-lg whitespace-nowrap animate-in fade-in zoom-in-95 duration-150">
+                            Sair
+                          </div>
+                        )}
+                      </button>
+                    </>
+                  ) : (
+                  <>
                   {isFullAccess && (
                     <button
                       onClick={() => setAdminTab("dashboard")}
@@ -4829,6 +4956,8 @@ const App: React.FC = () => {
                       )}
                     </button>
                   )}
+                  </>
+                  )}
                 </div>
               </aside>
 
@@ -4849,7 +4978,7 @@ const App: React.FC = () => {
                     </button>
                   </div>
                 )}
-                {licenseDays >= 0 && licenseDays <= 2 && (
+                {!isChatOnlyUser && licenseDays >= 0 && licenseDays <= 2 && (
                   <div className="mb-8 p-6 bg-amber-50 border-2 border-amber-200 rounded-[2.5rem] flex items-center justify-between animate-in slide-in-from-top-4">
                     <div className="flex items-center gap-4">
                       <div className="w-12 h-12 bg-amber-100 text-amber-600 rounded-2xl flex items-center justify-center">
@@ -4869,7 +4998,7 @@ const App: React.FC = () => {
                     </div>
                   </div>
                 )}
-                {adminTab === "dashboard" && (
+                {!isChatOnlyUser && adminTab === "dashboard" && (
                   <AdminDashboard
                     orders={uniqueOrders}
                     tenantId={currentTenant.id}
@@ -4882,7 +5011,7 @@ const App: React.FC = () => {
                     promotions={promotions}
                   />
                 )}
-                {adminTab === "orders" && (
+                {!isChatOnlyUser && adminTab === "orders" && (
                   <AdminOrderManager
                     orders={uniqueOrders}
                     products={products}
@@ -4898,7 +5027,7 @@ const App: React.FC = () => {
                     isDelivererMode={isDeliverer}
                   />
                 )}
-                {adminTab === "prescriptions" && (
+                {!isChatOnlyUser && adminTab === "prescriptions" && (
                   <React.Suspense
                     fallback={
                       <div className="p-8 text-center text-gray-400">
@@ -4909,7 +5038,7 @@ const App: React.FC = () => {
                     <AdminPrescriptions tenantId={currentTenant.id} session={session} />
                   </React.Suspense>
                 )}
-                {adminTab === "products" && (
+                {!isChatOnlyUser && adminTab === "products" && (
                   <AdminProductManager
                     products={products}
                     tenant={currentTenant}
@@ -4923,7 +5052,7 @@ const App: React.FC = () => {
                     onNavigateToPriceTags={() => setAdminTab("price-tags")}
                   />
                 )}
-                {adminTab === "promotions" && (
+                {!isChatOnlyUser && adminTab === "promotions" && (
                   <React.Suspense
                     fallback={
                       <div className="p-8 text-center text-gray-400">
@@ -4939,7 +5068,7 @@ const App: React.FC = () => {
                     />
                   </React.Suspense>
                 )}
-                {adminTab === "coupons" && (
+                {!isChatOnlyUser && adminTab === "coupons" && (
                   <React.Suspense
                     fallback={
                       <div className="p-8 text-center text-gray-400">
@@ -4955,7 +5084,7 @@ const App: React.FC = () => {
                     />
                   </React.Suspense>
                 )}
-                {adminTab === "price-tags" && (
+                {!isChatOnlyUser && adminTab === "price-tags" && (
                   <React.Suspense
                     fallback={
                       <div className="p-8 text-center text-gray-400">
@@ -4970,7 +5099,7 @@ const App: React.FC = () => {
                     />
                   </React.Suspense>
                 )}
-                {adminTab === "stories" && (
+                {!isChatOnlyUser && adminTab === "stories" && (
                   <React.Suspense
                     fallback={
                       <div className="p-8 text-center text-gray-400">
@@ -4985,7 +5114,7 @@ const App: React.FC = () => {
                     />
                   </React.Suspense>
                 )}
-                {adminTab === "repurchase" && (
+                {!isChatOnlyUser && adminTab === "repurchase" && (
                   <React.Suspense
                     fallback={
                       <div className="p-8 text-center text-gray-400">
@@ -5001,13 +5130,13 @@ const App: React.FC = () => {
                     />
                   </React.Suspense>
                 )}
-                {adminTab === "history" && (
+                {!isChatOnlyUser && adminTab === "history" && (
                   <AdminImportHistory tenant={currentTenant} />
                 )}
-                {adminTab === "team" && (
+                {!isChatOnlyUser && adminTab === "team" && (
                   <TeamManagement tenantId={currentTenant.id} session={session} />
                 )}
-                {adminTab === "inboxes" && (
+                {!isChatOnlyUser && adminTab === "inboxes" && (
                   currentTenant?.isChatEnabled ? (
                     <React.Suspense fallback={<div className="flex h-full items-center justify-center p-8"><Loader2 className="w-8 h-8 text-emerald-600 animate-spin" /></div>}>
                       <InboxManagement tenantId={currentTenant.id} />
@@ -5024,10 +5153,10 @@ const App: React.FC = () => {
                     />
                   )
                 )}
-                {adminTab === "analytics" && (
+                {!isChatOnlyUser && adminTab === "analytics" && (
                   <AdminAnalytics tenant={currentTenant} />
                 )}
-                {adminTab === "settings" && (
+                {!isChatOnlyUser && adminTab === "settings" && (
                   <AdminSettings
                     config={currentTenant}
                     onConfigUpdate={handleUpdateConfig}
@@ -5037,7 +5166,7 @@ const App: React.FC = () => {
                     isMatrixUser={isMatrixAdmin}
                   />
                 )}
-                {adminTab === "desktop" && (
+                {!isChatOnlyUser && adminTab === "desktop" && (
                   <React.Suspense
                     fallback={
                       <div className="p-8 text-center text-gray-400">
@@ -5048,9 +5177,19 @@ const App: React.FC = () => {
                     <AdminDesktopApp tenant={currentTenant!} />
                   </React.Suspense>
                 )}
-                {adminTab === "chat" && (
+                {(adminTab === "chat" || isChatOnlyUser) && (
                   currentTenant?.isChatEnabled ? (
                     <ChatCentral currentUser={session?.user} userRole={session?.role} tenantId={currentTenant?.id} />
+                  ) : isChatOnlyUser ? (
+                    <div className="bg-white rounded-[2rem] border border-gray-100 p-10 text-center max-w-lg mx-auto mt-10 shadow-sm">
+                      <div className="w-14 h-14 bg-gray-100 text-gray-500 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                        <Lock size={26} />
+                      </div>
+                      <h3 className="text-lg font-black text-gray-900 mb-2">Central de Chat Desativada</h3>
+                      <p className="text-sm text-gray-500">
+                        A Central de Chat não está ativa para esta loja no momento. Solicite ao gerente ou administrador para habilitar o acesso.
+                      </p>
+                    </div>
                   ) : (
                     <UpsellCard
                       title="Central de Chat Multi-Atendentes"
@@ -5064,7 +5203,7 @@ const App: React.FC = () => {
                   )
                 )}
 
-                {adminTab === "manual" && <AdminManual />}
+                {!isChatOnlyUser && adminTab === "manual" && <AdminManual />}
               </div>
             </>
           )}

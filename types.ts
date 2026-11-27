@@ -412,7 +412,7 @@ export interface AuthSession {
   originalTenantId?: string;
   masterTenantId?: string;
   isMatrixUser?: boolean;
-  role?: "owner" | "admin" | "gerente" | "operador" | "entregador" | "matriz" | "MATRIZ" | string;
+  role?: "owner" | "admin" | "gerente" | "operador" | "chat_agent" | "entregador" | "matriz" | "MATRIZ" | string;
   user?: any;
   access_token?: string;
   refresh_token?: string;

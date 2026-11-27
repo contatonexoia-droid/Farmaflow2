@@ -345,7 +345,8 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
   }, []);
 
   const cleanRole = (localRole || userRole || '').toLowerCase().trim();
-  const isOperador = ['operador', 'operator', 'atendente', 'balconista'].includes(cleanRole);
+  const isChatOnly = ['chat_agent', 'chat_only', 'atendente_chat', 'atendente de chat'].includes(cleanRole);
+  const isOperador = isChatOnly || ['operador', 'operator', 'atendente', 'balconista'].includes(cleanRole);
   const rawUserId = localUser?.tenant_user_id || localUser?.id || currentUser?.tenant_user_id || currentUser?.id;
   const effectiveUserId = useMemo(() => {
     if (rawUserId) return String(rawUserId);
@@ -2878,15 +2879,17 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
         tenantId={tenantId}
       />
 
-      <WhatsAppConnectModal
-        isOpen={isConnectModalOpen}
-        onClose={() => {
-          setIsConnectModalOpen(false);
-          fetchConversations();
-          fetchInboxes();
-        }}
-        tenantId={tenantId}
-      />
+      {!isOperador && !isChatOnly && (
+        <WhatsAppConnectModal
+          isOpen={isConnectModalOpen}
+          onClose={() => {
+            setIsConnectModalOpen(false);
+            fetchConversations();
+            fetchInboxes();
+          }}
+          tenantId={tenantId}
+        />
+      )}
 
       {/* Modal de Pré-visualização de Imagem / Lightbox */}
       {selectedImagePreview && (

@@ -143,7 +143,11 @@ export const ChatTransferModal: React.FC<ChatTransferModalProps> = ({ isOpen, on
                 </div>
                 <div>
                   <span className="font-bold text-gray-700 text-sm block">{u.full_name || 'Usuário Sem Nome'}</span>
-                  <span className="text-[10px] uppercase font-black text-gray-500 block">{u.role}</span>
+                  <span className="text-[10px] uppercase font-black text-gray-500 block">
+                    {['chat_agent', 'chat_only', 'atendente_chat', 'atendente de chat'].includes(String(u.role || '').toLowerCase().trim())
+                      ? 'Atendente de Chat'
+                      : u.role}
+                  </span>
                 </div>
               </button>
             ))}

@@ -61,13 +61,34 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
             
             if (rawTenant) {
                validTenant = rawTenant;
-               // Obter role do funcionário se houver, ou assumir owner
-               const userRole = (authData.user.user_metadata?.role || "owner").toLowerCase();
+               // Obter role mais atualizada de tenant_users (fallback para user_metadata)
+               let resolvedRole = (authData.user.user_metadata?.role || "owner").toLowerCase().trim();
+               try {
+                 const { data: tuRow } = await supabase
+                   .from('tenant_users')
+                   .select('role, is_active')
+                   .eq('supabase_user_id', authUserId)
+                   .eq('tenant_id', validTenant.id)
+                   .maybeSingle();
+                 if (tuRow) {
+                   if (tuRow.is_active === false) {
+                     await supabase.auth.signOut();
+                     setError('Seu acesso está desativado. Contate o gerente da loja.');
+                     return;
+                   }
+                   if (tuRow.role) {
+                     resolvedRole = String(tuRow.role).toLowerCase().trim();
+                   }
+                 }
+               } catch (_) {}
+
+               const userRole = resolvedRole;
                
                const isMaster = Boolean(validTenant.is_network_master);
+               const isRestrictedMatrix = ['operador', 'balconista', 'atendente', 'chat_agent', 'chat_only', 'atendente_chat', 'atendente de chat', 'gerente', 'entregador'].includes(userRole);
                const isMatrizRole = userRole === "matriz" || userRole === "admin_matriz" || userRole === "network_admin";
-               const isMatrixUser = isMaster || isMatrizRole;
-               const masterTenantId = isMaster ? validTenant.id : (validTenant.network_id || undefined);
+               const isMatrixUser = !isRestrictedMatrix && (isMaster || isMatrizRole);
+               const masterTenantId = isMatrixUser ? (isMaster ? validTenant.id : (validTenant.network_id || undefined)) : undefined;
 
                // Se der ok, já repassa
                onLogin({ 

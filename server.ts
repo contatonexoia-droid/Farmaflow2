@@ -2677,7 +2677,8 @@ app.get("/api/v1/team/users", checkTenantAccess, async (req, res) => {
         email: u.email,
         role: u.role,
         store_id: u.tenant_id,
-        is_active: u.is_active !== undefined ? u.is_active : true
+        is_active: u.is_active !== undefined ? u.is_active : true,
+        created_at: u.created_at || null
     }));
 
     res.json({ data: enrichedData });
@@ -2687,7 +2688,95 @@ app.get("/api/v1/team/users", checkTenantAccess, async (req, res) => {
 });
 
 // Roles estritamente permitidas para cadastro e gestão por estabelecimentos (lojas)
-const STORE_ALLOWED_OPERATIONAL_ROLES = ["gerente", "operador", "balconista"];
+const CHAT_ONLY_ROLE_ALIASES = ["chat_agent", "chat_only", "atendente_chat", "atendente de chat"];
+const OPERATOR_LIKE_ROLES = ["operador", "operator", "atendente", "balconista", ...CHAT_ONLY_ROLE_ALIASES];
+const STORE_ALLOWED_OPERATIONAL_ROLES = ["gerente", "operador", "balconista", "chat_agent", "chat_only", "atendente_chat"];
+
+function normalizeStoreOperationalRole(role?: unknown): string {
+  const clean = String(role || "").trim().toLowerCase();
+  if (CHAT_ONLY_ROLE_ALIASES.includes(clean)) return "chat_agent";
+  return clean;
+}
+
+function isRestrictedChatOperatorRole(role?: unknown): boolean {
+  const clean = String(role || "").trim().toLowerCase();
+  return OPERATOR_LIKE_ROLES.includes(clean);
+}
+
+const requireNonRestrictedChatAdmin = async (req: any, res: any, next: any) => {
+  try {
+    const authHeader = req.headers["authorization"] as string | undefined;
+    const headerUserId = (req.headers["x-user-id"] as string | undefined)?.trim();
+    const headerUserRole = (req.headers["x-user-role"] as string | undefined)?.trim();
+    const queryUserId = (req.query?.userId as string | undefined)?.trim();
+    const queryUserRole = (req.query?.role as string | undefined)?.trim();
+    const bodyUserRole = (req.body?.userRole as string | undefined)?.trim();
+
+    let resolvedRole = "";
+    const candidateIds: string[] = [];
+    const candidateEmails: string[] = [];
+
+    const cleanAuthToken = authHeader ? String(authHeader).replace(/^Bearer\s+/i, "").trim() : "";
+    if (cleanAuthToken && cleanAuthToken !== "undefined" && cleanAuthToken !== "null") {
+      try {
+        const { data: { user: authUser } } = await supabaseAdmin.auth.getUser(cleanAuthToken);
+        if (authUser) {
+          if (authUser.id) candidateIds.push(authUser.id);
+          if (authUser.email) candidateEmails.push(authUser.email.toLowerCase().trim());
+          if (authUser.user_metadata?.role) {
+            resolvedRole = String(authUser.user_metadata.role).toLowerCase().trim();
+          }
+        }
+      } catch (_) {}
+    }
+
+    const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (headerUserId && uuidPattern.test(headerUserId)) candidateIds.push(headerUserId);
+    if (queryUserId && uuidPattern.test(queryUserId)) candidateIds.push(queryUserId);
+
+    if (candidateIds.length > 0 || candidateEmails.length > 0) {
+      try {
+        if (candidateIds.length > 0) {
+          const { data: tuById } = await supabaseAdmin
+            .from("tenant_users")
+            .select("role")
+            .or(`id.in.(${candidateIds.join(",")}),supabase_user_id.in.(${candidateIds.join(",")})`)
+            .limit(1)
+            .maybeSingle();
+          if (tuById?.role) {
+            resolvedRole = String(tuById.role).toLowerCase().trim();
+          }
+        }
+        if (!resolvedRole && candidateEmails.length > 0) {
+          const { data: tuByEmail } = await supabaseAdmin
+            .from("tenant_users")
+            .select("role")
+            .ilike("email", candidateEmails[0])
+            .limit(1)
+            .maybeSingle();
+          if (tuByEmail?.role) {
+            resolvedRole = String(tuByEmail.role).toLowerCase().trim();
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (!resolvedRole) {
+      resolvedRole = String(headerUserRole || queryUserRole || bodyUserRole || "").toLowerCase().trim();
+    }
+
+    if (isRestrictedChatOperatorRole(resolvedRole)) {
+      return res.status(403).json({
+        error: "Acesso negado: este perfil não tem permissão para gerenciar instâncias de WhatsApp, equipes ou caixas de entrada."
+      });
+    }
+
+    return next();
+  } catch (err) {
+    console.warn("[requireNonRestrictedChatAdmin] Erro ao validar permissão:", err);
+    return next();
+  }
+};
 
 app.post("/api/v1/team/users", checkTenantAccess, async (req, res) => {
   try {
@@ -2698,15 +2787,16 @@ app.post("/api/v1/team/users", checkTenantAccess, async (req, res) => {
     }
 
     const cleanEmail = email.trim().toLowerCase();
-    const cleanRole = role.trim().toLowerCase();
+    const rawCleanRole = String(role).trim().toLowerCase();
     const cleanStoreId = store_id || req.headers["x-tenant-id"] || req.query.tenantId;
 
     // Validação de Segurança RBAC: Lojas só podem cadastrar colaboradores com papéis operacionais
-    if (!STORE_ALLOWED_OPERATIONAL_ROLES.includes(cleanRole)) {
+    if (!STORE_ALLOWED_OPERATIONAL_ROLES.includes(rawCleanRole)) {
       return res.status(403).json({ 
-        error: "Permissão negada: As lojas podem cadastrar apenas colaboradores operacionais (Gerente ou Operador/Balconista). Cargos administrativos/matriz são de exclusividade do Super Admin." 
+        error: "Permissão negada: As lojas podem cadastrar apenas colaboradores operacionais (Gerente, Operador/Balconista ou Atendente de Chat). Cargos administrativos/matriz são de exclusividade do Super Admin." 
       });
     }
+    const cleanRole = normalizeStoreOperationalRole(rawCleanRole);
 
     let authUserId = "";
     
@@ -2794,12 +2884,13 @@ app.patch("/api/v1/team/users/:id", checkTenantAccess, async (req, res) => {
 
     let cleanRole: string | undefined = undefined;
     if (role !== undefined && role !== null) {
-      cleanRole = String(role).trim().toLowerCase();
-      if (!STORE_ALLOWED_OPERATIONAL_ROLES.includes(cleanRole)) {
+      const rawRole = String(role).trim().toLowerCase();
+      if (!STORE_ALLOWED_OPERATIONAL_ROLES.includes(rawRole)) {
         return res.status(403).json({ 
-          error: "Permissão negada: As lojas podem atribuir apenas cargos operacionais (Gerente ou Operador/Balconista)." 
+          error: "Permissão negada: As lojas podem atribuir apenas cargos operacionais (Gerente, Operador/Balconista ou Atendente de Chat)." 
         });
       }
+      cleanRole = normalizeStoreOperationalRole(rawRole);
     }
 
     const updatePayload: any = {};
@@ -2904,7 +2995,7 @@ app.get("/api/v1/teams", async (req, res) => {
   }
 });
 
-app.post("/api/v1/teams", async (req, res) => {
+app.post("/api/v1/teams", requireNonRestrictedChatAdmin, async (req, res) => {
   try {
     const { store_id, name, description } = req.body;
     const storeId = store_id || (req.headers["x-tenant-id"] as string) || "default";
@@ -2917,7 +3008,7 @@ app.post("/api/v1/teams", async (req, res) => {
   }
 });
 
-app.put("/api/v1/teams/:id", async (req, res) => {
+app.put("/api/v1/teams/:id", requireNonRestrictedChatAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { name, description } = req.body;
@@ -2930,7 +3021,7 @@ app.put("/api/v1/teams/:id", async (req, res) => {
   }
 });
 
-app.delete("/api/v1/teams/:id", async (req, res) => {
+app.delete("/api/v1/teams/:id", requireNonRestrictedChatAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     await teamStore.deleteTeam(id);
@@ -2950,7 +3041,7 @@ app.get("/api/v1/teams/:id/members", async (req, res) => {
   }
 });
 
-app.post("/api/v1/teams/:id/members/toggle", async (req, res) => {
+app.post("/api/v1/teams/:id/members/toggle", requireNonRestrictedChatAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { userId } = req.body;
@@ -3032,7 +3123,7 @@ async function resolveOperatorAccessContext(
   ].includes(detectedRole);
 
   // Para sessões sintéticas de administrador (admin_*), resolve acesso diretamente sem consultar tenant_users.id
-  if (hasSyntheticAdminSession && (isExplicitAdminRole || !["operador", "operator", "atendente", "balconista"].includes(detectedRole))) {
+  if (hasSyntheticAdminSession && (isExplicitAdminRole || !isRestrictedChatOperatorRole(detectedRole))) {
     return {
       isOperator: false,
       allowedInboxIds: [],
@@ -3043,6 +3134,8 @@ async function resolveOperatorAccessContext(
     };
   }
 
+  let authoritativeRole = "";
+
   // 1. Tentar resolver a partir do token Bearer se fornecido
   const cleanAuthToken = authHeader ? String(authHeader).replace(/^Bearer\s+/i, "").trim() : "";
   if (cleanAuthToken && cleanAuthToken !== "undefined" && cleanAuthToken !== "null") {
@@ -3051,8 +3144,8 @@ async function resolveOperatorAccessContext(
       if (authUser) {
         addCandidate(authUser.id);
         if (authUser.email) addCandidate(authUser.email);
-        if (!detectedRole && authUser.user_metadata?.role) {
-          detectedRole = String(authUser.user_metadata.role).toLowerCase().trim();
+        if (authUser.user_metadata?.role) {
+          authoritativeRole = String(authUser.user_metadata.role).toLowerCase().trim();
         }
       }
     } catch (_) {}
@@ -3118,8 +3211,8 @@ async function resolveOperatorAccessContext(
             if (tu.supabase_user_id) addCandidate(tu.supabase_user_id);
             if (tu.email) addCandidate(tu.email);
             if (tu.tenant_id) operatorTenantIds.add(String(tu.tenant_id).trim());
-            if (!detectedRole && tu.role) {
-              detectedRole = String(tu.role).toLowerCase().trim();
+            if (tu.role) {
+              authoritativeRole = String(tu.role).toLowerCase().trim();
             }
           }
         }
@@ -3129,8 +3222,12 @@ async function resolveOperatorAccessContext(
     console.warn("[OperatorAccess] Error resolving tenant_users:", e);
   }
 
+  if (authoritativeRole) {
+    detectedRole = authoritativeRole;
+  }
+
   const allSearchIdentifiers = Array.from(new Set([...candidateUserIds, ...candidateEmails]));
-  const isOperator = ["operador", "operator", "atendente", "balconista"].includes(detectedRole);
+  const isOperator = isRestrictedChatOperatorRole(detectedRole);
 
   if (!isOperator) {
     return {
@@ -3506,7 +3603,7 @@ app.get("/api/v1/inboxes", async (req, res) => {
   }
 });
 
-app.post("/api/v1/inboxes", async (req, res) => {
+app.post("/api/v1/inboxes", requireNonRestrictedChatAdmin, async (req, res) => {
   try {
     const { store_id, name, description, whatsapp_instance_id, channel_type, channel_mode, channelMode } = req.body;
     const storeId = store_id || (req.headers["x-tenant-id"] as string) || "default";
@@ -3529,7 +3626,7 @@ app.post("/api/v1/inboxes", async (req, res) => {
   }
 });
 
-app.put("/api/v1/inboxes/:id", async (req, res) => {
+app.put("/api/v1/inboxes/:id", requireNonRestrictedChatAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { store_id, name, description, whatsapp_instance_id, channel_type, channel_mode, channelMode } = req.body;
@@ -3553,7 +3650,7 @@ app.put("/api/v1/inboxes/:id", async (req, res) => {
   }
 });
 
-app.delete("/api/v1/inboxes/:id", async (req, res) => {
+app.delete("/api/v1/inboxes/:id", requireNonRestrictedChatAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     await inboxStore.deleteInbox(id);
@@ -3573,7 +3670,7 @@ app.get("/api/v1/inboxes/:id/members", async (req, res) => {
   }
 });
 
-app.post("/api/v1/inboxes/:id/members", async (req, res) => {
+app.post("/api/v1/inboxes/:id/members", requireNonRestrictedChatAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { userIds, tenantId } = req.body;
@@ -3586,7 +3683,7 @@ app.post("/api/v1/inboxes/:id/members", async (req, res) => {
   }
 });
 
-app.put("/api/v1/inboxes/:id/members", async (req, res) => {
+app.put("/api/v1/inboxes/:id/members", requireNonRestrictedChatAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { userIds, tenantId } = req.body;
@@ -3599,7 +3696,7 @@ app.put("/api/v1/inboxes/:id/members", async (req, res) => {
   }
 });
 
-app.post("/api/v1/inboxes/:id/members/toggle", async (req, res) => {
+app.post("/api/v1/inboxes/:id/members/toggle", requireNonRestrictedChatAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { userId } = req.body;
@@ -3622,7 +3719,7 @@ app.get("/api/v1/inboxes/:id/teams", async (req, res) => {
   }
 });
 
-app.post("/api/v1/inboxes/:id/teams", async (req, res) => {
+app.post("/api/v1/inboxes/:id/teams", requireNonRestrictedChatAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { teamIds } = req.body;
@@ -3658,13 +3755,14 @@ app.post("/api/v1/tenants/:tenantId/users", checkTenantAccess, async (req, res) 
       return res.status(400).json({ error: "Todos os campos (nome, e-mail, função e senha) são obrigatórios." });
     }
 
-    const cleanRole = String(role).trim().toLowerCase();
+    const rawCleanRole = String(role).trim().toLowerCase();
     // Validação de Segurança RBAC: Apenas funções operacionais permitidas para estabelecimentos
-    if (!STORE_ALLOWED_OPERATIONAL_ROLES.includes(cleanRole)) {
+    if (!STORE_ALLOWED_OPERATIONAL_ROLES.includes(rawCleanRole)) {
       return res.status(403).json({ 
-        error: "Permissão negada: As lojas podem cadastrar apenas colaboradores operacionais (Gerente ou Operador/Balconista). Cargos administrativos/matriz são de exclusividade do Super Admin." 
+        error: "Permissão negada: As lojas podem cadastrar apenas colaboradores operacionais (Gerente, Operador/Balconista ou Atendente de Chat). Cargos administrativos/matriz são de exclusividade do Super Admin." 
       });
     }
+    const cleanRole = normalizeStoreOperationalRole(rawCleanRole);
 
     const cleanEmail = email.toLowerCase().trim();
 
@@ -3723,7 +3821,7 @@ app.post("/api/v1/tenants/:tenantId/users", checkTenantAccess, async (req, res) 
         user_metadata: {
           tenant_id: tenantId,
           store_id: tenantId,
-          role: role.toLowerCase(),
+          role: cleanRole,
           full_name: name
         }
       });
@@ -3751,7 +3849,7 @@ app.post("/api/v1/tenants/:tenantId/users", checkTenantAccess, async (req, res) 
             data: {
               tenant_id: tenantId,
               store_id: tenantId,
-              role: role.toLowerCase(),
+              role: cleanRole,
               full_name: name
             }
           }
@@ -3782,7 +3880,7 @@ app.post("/api/v1/tenants/:tenantId/users", checkTenantAccess, async (req, res) 
         tenant_id: tenantId,
         name,
         email: cleanEmail,
-        role
+        role: cleanRole
       })
       .select()
       .single();
@@ -3807,12 +3905,13 @@ app.patch("/api/v1/tenants/:tenantId/users/:userId", checkTenantAccess, async (r
 
     let cleanRole: string | undefined = undefined;
     if (role !== undefined && role !== null) {
-      cleanRole = String(role).trim().toLowerCase();
-      if (!STORE_ALLOWED_OPERATIONAL_ROLES.includes(cleanRole)) {
+      const rawRole = String(role).trim().toLowerCase();
+      if (!STORE_ALLOWED_OPERATIONAL_ROLES.includes(rawRole)) {
         return res.status(403).json({ 
-          error: "Permissão negada: As lojas podem atribuir apenas cargos operacionais (Gerente ou Operador/Balconista)." 
+          error: "Permissão negada: As lojas podem atribuir apenas cargos operacionais (Gerente, Operador/Balconista ou Atendente de Chat)." 
         });
       }
+      cleanRole = normalizeStoreOperationalRole(rawRole);
     }
 
     const updatePayload: any = {};
@@ -14404,7 +14503,7 @@ async function resolveEvolutionConfig(
   };
 }
 
-app.post("/api/v1/chat/instance/test-evolution", requireChatEnabled, async (req, res) => {
+app.post("/api/v1/chat/instance/test-evolution", requireChatEnabled, requireNonRestrictedChatAdmin, async (req, res) => {
   try {
     const tenantId = (req as any).tenantId || req.body.tenantId || (req.headers["x-tenant-id"] as string);
     const evoConfig = await resolveEvolutionConfig(tenantId, req.body);
@@ -14497,7 +14596,7 @@ app.post("/api/v1/chat/instance/test-evolution", requireChatEnabled, async (req,
   }
 });
 
-app.post("/api/v1/chat/instance/save-config", requireChatEnabled, async (req, res) => {
+app.post("/api/v1/chat/instance/save-config", requireChatEnabled, requireNonRestrictedChatAdmin, async (req, res) => {
   try {
     const tenantId = (req as any).tenantId || req.body.tenantId || (req.headers["x-tenant-id"] as string);
     const inboxId = req.body.inboxId;
@@ -14671,7 +14770,7 @@ async function extractEvolutionQrCode(data: any): Promise<string | null> {
   return null;
 }
 
-app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) => {
+app.post("/api/v1/chat/instance/create", requireChatEnabled, requireNonRestrictedChatAdmin, async (req, res) => {
   try {
     const tenantId = (req as any).tenantId || req.body.tenantId || (req.headers["x-tenant-id"] as string);
     const inboxId = req.body.inboxId;
@@ -15000,7 +15099,7 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
   }
 });
 
-app.get("/api/v1/chat/instance/status", requireChatEnabled, async (req, res) => {
+app.get("/api/v1/chat/instance/status", requireChatEnabled, requireNonRestrictedChatAdmin, async (req, res) => {
     try {
         const tenantId = (req as any).tenantId || req.query.tenantId;
         const inboxId = req.query.inboxId as string;
@@ -15165,7 +15264,7 @@ app.get("/api/v1/chat/instance/status", requireChatEnabled, async (req, res) => 
     }
 });
 
-app.post(["/api/v1/chat/instance/recreate", "/api/v1/chat/instance/restart"], requireChatEnabled, async (req, res) => {
+app.post(["/api/v1/chat/instance/recreate", "/api/v1/chat/instance/restart"], requireChatEnabled, requireNonRestrictedChatAdmin, async (req, res) => {
   try {
     const tenantId = (req as any).tenantId || req.body.tenantId || (req.headers["x-tenant-id"] as string);
     const inboxId = req.body.inboxId;
@@ -15461,7 +15560,7 @@ app.post(["/api/v1/chat/instance/recreate", "/api/v1/chat/instance/restart"], re
   }
 });
 
-app.post("/api/v1/chat/instance/configure-webhook", requireChatEnabled, async (req, res) => {
+app.post("/api/v1/chat/instance/configure-webhook", requireChatEnabled, requireNonRestrictedChatAdmin, async (req, res) => {
   try {
     const tenantId = (req as any).tenantId || req.body.tenantId || (req.headers["x-tenant-id"] as string);
     if (!tenantId) {
@@ -15510,7 +15609,7 @@ app.post("/api/v1/chat/instance/configure-webhook", requireChatEnabled, async (r
   }
 });
 
-app.post("/api/v1/chat/instance/confirm", requireChatEnabled, async (req, res) => {
+app.post("/api/v1/chat/instance/confirm", requireChatEnabled, requireNonRestrictedChatAdmin, async (req, res) => {
   try {
     const tenantId = (req as any).tenantId || req.body.tenantId || (req.headers["x-tenant-id"] as string);
     const inboxId = req.body.inboxId;
@@ -15568,7 +15667,7 @@ app.post("/api/v1/chat/instance/confirm", requireChatEnabled, async (req, res) =
   }
 });
 
-app.post("/api/v1/chat/instance/disconnect", requireChatEnabled, async (req, res) => {
+app.post("/api/v1/chat/instance/disconnect", requireChatEnabled, requireNonRestrictedChatAdmin, async (req, res) => {
   try {
     const tenantId = (req as any).tenantId || req.body.tenantId || (req.headers["x-tenant-id"] as string);
     const inboxId = req.body.inboxId;
@@ -15617,7 +15716,7 @@ app.post("/api/v1/chat/instance/disconnect", requireChatEnabled, async (req, res
   }
 });
 
-app.get("/api/v1/whatsapp/instances", async (req, res) => {
+app.get("/api/v1/whatsapp/instances", requireNonRestrictedChatAdmin, async (req, res) => {
   try {
     const tenantId = (req.query.tenantId as string) || (req.headers["x-tenant-id"] as string) || "default";
     const cleanTenantId = tenantId.replace(/^store_/, '').replace(/^tenant_/, '');

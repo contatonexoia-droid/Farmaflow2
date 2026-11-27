@@ -502,11 +502,12 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
   };
 
   const formatRole = (role?: string) => {
-    const r = (role || '').toLowerCase();
+    const r = (role || '').toLowerCase().trim();
     if (r.includes('admin') || r.includes('matriz')) return 'Admin Matriz';
     if (r.includes('owner') || r.includes('propriet')) return 'Proprietário';
     if (r.includes('gerente')) return 'Gerente';
     if (r.includes('entreg')) return 'Entregador';
+    if (['chat_agent', 'chat_only', 'atendente_chat', 'atendente de chat'].includes(r)) return 'Atendente de Chat';
     return 'Operador / Balconista';
   };
 
@@ -1483,6 +1484,8 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                                   ? 'bg-purple-100 text-purple-800'
                                   : member.role.toLowerCase().includes('gerente')
                                   ? 'bg-emerald-100 text-emerald-800'
+                                  : ['chat_agent', 'chat_only', 'atendente_chat', 'atendente de chat'].includes(member.role.toLowerCase().trim())
+                                  ? 'bg-teal-100 text-teal-800'
                                   : 'bg-blue-100 text-blue-800'
                               }`}>
                                 {formatRole(member.role)}

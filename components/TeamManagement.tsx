@@ -24,6 +24,13 @@ const STORE_ALLOWED_ROLES = [
     color: 'bg-blue-100 text-blue-800', 
     border: 'border-blue-200', 
     desc: 'Atendimento e chat' 
+  },
+  { 
+    id: 'chat_agent', 
+    label: 'Atendente de Chat', 
+    color: 'bg-teal-100 text-teal-800', 
+    border: 'border-teal-200', 
+    desc: 'Acesso exclusivo à Central de Chat' 
   }
 ];
 
@@ -36,8 +43,27 @@ const ROLE_DISPLAY_MAP: Record<string, { label: string; color: string; border: s
   gerente: { label: 'Gerente', color: 'bg-emerald-100 text-emerald-800', border: 'border-emerald-200' },
   operador: { label: 'Operador / Balconista', color: 'bg-blue-100 text-blue-800', border: 'border-blue-200' },
   balconista: { label: 'Operador / Balconista', color: 'bg-blue-100 text-blue-800', border: 'border-blue-200' },
+  chat_agent: { label: 'Atendente de Chat', color: 'bg-teal-100 text-teal-800', border: 'border-teal-200' },
+  chat_only: { label: 'Atendente de Chat', color: 'bg-teal-100 text-teal-800', border: 'border-teal-200' },
+  atendente_chat: { label: 'Atendente de Chat', color: 'bg-teal-100 text-teal-800', border: 'border-teal-200' },
+  'atendente de chat': { label: 'Atendente de Chat', color: 'bg-teal-100 text-teal-800', border: 'border-teal-200' },
   entregador: { label: 'Entregador', color: 'bg-orange-100 text-orange-800', border: 'border-orange-200' }
 };
+
+function normalizeEditableRole(role?: string | null): string {
+  const clean = String(role || 'operador').trim().toLowerCase();
+  if (['chat_agent', 'chat_only', 'atendente_chat', 'atendente de chat'].includes(clean)) return 'chat_agent';
+  if (['operador', 'operator', 'atendente', 'balconista'].includes(clean)) return 'operador';
+  if (clean === 'gerente') return 'gerente';
+  return clean;
+}
+
+function formatCreatedAt(value?: string | null): string {
+  if (!value) return '—';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return '—';
+  return parsed.toLocaleDateString('pt-BR');
+}
 
 import { TeamsSettings } from './TeamsSettings';
 
@@ -125,6 +151,20 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ tenantId, sessio
     setIsModalOpen(true);
   };
 
+  const openEditModal = (userProfile: any) => {
+    setFormData({
+      id: userProfile.id,
+      full_name: userProfile.full_name || '',
+      email: userProfile.email || '',
+      role: normalizeEditableRole(userProfile.role),
+      is_active: userProfile.is_active !== false,
+      password: '',
+      store_id: userProfile.store_id || tenantId
+    });
+    setError('');
+    setIsModalOpen(true);
+  };
+
   const handleSave = async () => {
     if (!formData.full_name || (!formData.id && (!formData.email || !formData.password))) {
       setError('Preencha os campos obrigatórios.');
@@ -139,10 +179,18 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ tenantId, sessio
         ? `/api/v1/team/users/${formData.id}` 
         : `/api/v1/team/users`;
 
+      const payload = formData.id
+        ? {
+            full_name: formData.full_name.trim(),
+            role: formData.role,
+            is_active: formData.is_active
+          }
+        : formData;
+
       const res = await fetch(url, {
         method,
         headers,
-        body: JSON.stringify(formData)
+        body: JSON.stringify(payload)
       });
       
       const responseText = await res.text();
@@ -155,6 +203,7 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ tenantId, sessio
       
       if (!res.ok) throw new Error(responseData.error || 'Erro ao salvar usuário.');
       
+      toast.success(formData.id ? 'Colaborador atualizado com sucesso!' : 'Colaborador cadastrado com sucesso!');
       setIsModalOpen(false);
       fetchTeam();
     } catch (e: any) {
@@ -307,9 +356,17 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ tenantId, sessio
                          )}
                       </td>
                       <td className="py-4 px-6 text-xs text-gray-500">
-                         {new Date(t.created_at).toLocaleDateString()}
+                         {formatCreatedAt(t.created_at)}
                       </td>
                       <td className="py-4 px-6 text-right space-x-2 whitespace-nowrap">
+                        <button
+                          onClick={() => openEditModal(t)}
+                          className="px-3 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-sm bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 inline-flex items-center gap-1.5"
+                          title="Editar Nome e Perfil de Permissão"
+                        >
+                          <Edit3 size={13} />
+                          <span>Editar</span>
+                        </button>
                         <button 
                           onClick={() => handleToggleActive(t)} 
                           className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-sm ${t.is_active ? 'bg-gray-100 text-gray-700 hover:bg-gray-200' : 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100'}`}
@@ -423,7 +480,7 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ tenantId, sessio
                   <div className="text-xs text-gray-500 font-mono">{userToDelete.email}</div>
                 )}
                 <div className="text-xs text-gray-500">
-                  Função: <span className="font-semibold text-gray-700 capitalize">{userToDelete.role || 'Operador'}</span>
+                  Função: <span className="font-semibold text-gray-700">{ROLE_DISPLAY_MAP[(userToDelete.role || 'operador').toLowerCase()]?.label || userToDelete.role || 'Operador'}</span>
                 </div>
               </div>
             </div>
