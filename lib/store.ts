@@ -264,4 +264,103 @@ export const getProductShareUrl = (
   return productSlug ? `${base}/produto/${encodeURIComponent(productSlug)}` : base;
 };
 
+export const CANONICAL_PUBLIC_ORIGIN = 'https://farmaflow.online';
+
+export const SEO_SEARCH_FILTER_QUERY_KEYS = new Set<string>([
+  'search',
+  'busca',
+  'q',
+  'termo',
+  'category',
+  'categoria',
+  'category_id',
+  'dept',
+  'dept_id',
+  'departamento',
+  'promo_id',
+  'promocao_id',
+  'cupom_id',
+  'coupon',
+  'filter',
+  'filtro',
+  'sort',
+  'order',
+  'page',
+  'pagina',
+]);
+
+export const hasSearchOrFilterQueryParams = (search: string = ''): boolean => {
+  try {
+    const raw = String(search || '').trim();
+    if (!raw) return false;
+    const params = new URLSearchParams(raw.startsWith('?') ? raw.slice(1) : raw);
+    for (const [key] of params.entries()) {
+      if (SEO_SEARCH_FILTER_QUERY_KEYS.has(key.trim().toLowerCase())) {
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+};
+
+export const getCleanCustomDomain = (
+  tenant?: Partial<PharmacyConfig> & { custom_domain?: string }
+): string => {
+  const raw = String(tenant?.custom_domain || '').trim();
+  if (!raw) return '';
+  return raw.replace(/^https?:\/\//i, '').replace(/\/+$/, '').trim();
+};
+
+export const isDedicatedCustomDomainHost = (
+  tenant?: Partial<PharmacyConfig> & { custom_domain?: string },
+  hostname?: string
+): boolean => {
+  const cleanCustom = getCleanCustomDomain(tenant);
+  if (!cleanCustom) return false;
+  const rawHost = (
+    hostname ||
+    (typeof window !== 'undefined' ? window.location.hostname : '') ||
+    ''
+  )
+    .toLowerCase()
+    .split(':')[0]
+    .trim();
+  return Boolean(rawHost && rawHost === cleanCustom.toLowerCase());
+};
+
+export const getCanonicalStoreUrl = (
+  tenant?: Partial<PharmacyConfig> & { subdomain?: string; id?: string; name?: string; custom_domain?: string },
+  hostname?: string
+): string => {
+  if (!tenant) return CANONICAL_PUBLIC_ORIGIN;
+  const cleanCustom = getCleanCustomDomain(tenant);
+  if (cleanCustom && isDedicatedCustomDomainHost(tenant, hostname)) {
+    return `https://${cleanCustom}`;
+  }
+  const slug = getStoreSlug(tenant);
+  return slug
+    ? `${CANONICAL_PUBLIC_ORIGIN}/loja/${encodeURIComponent(slug)}`
+    : CANONICAL_PUBLIC_ORIGIN;
+};
+
+export const getCanonicalProductUrl = (
+  tenant?: Partial<PharmacyConfig> & { subdomain?: string; id?: string; name?: string; custom_domain?: string },
+  product?: ProductSlugInput | null,
+  hostname?: string
+): string => {
+  const baseStoreUrl = getCanonicalStoreUrl(tenant, hostname);
+  if (!product) return baseStoreUrl;
+  const productSlug = buildProductSlug(product);
+  if (!productSlug) return baseStoreUrl;
+  return `${baseStoreUrl}/produto/${encodeURIComponent(productSlug)}`;
+};
+
+export const notifySeoUrlChange = (): void => {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event('ff-url-change'));
+  }
+};
+
 

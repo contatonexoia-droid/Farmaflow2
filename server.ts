@@ -365,6 +365,10 @@ const handleSharePreviewRoute = async (req: express.Request, res: express.Respon
     if (prodSlug) {
       targetUrl = `${targetUrl}/produto/${encodeURIComponent(String(prodSlug))}`;
     }
+    const cleanShareSlug = getSeoTenantSlug(tenant || { id: baseDomain, slug: baseDomain });
+    const canonicalShareTarget = prodSlug
+      ? `https://farmaflow.online/loja/${encodeURIComponent(cleanShareSlug)}/produto/${encodeURIComponent(String(prodSlug))}`
+      : `https://farmaflow.online/loja/${encodeURIComponent(cleanShareSlug)}`;
 
     // 2. Definir headers anti-cache absolutos
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -379,37 +383,39 @@ const handleSharePreviewRoute = async (req: express.Request, res: express.Respon
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
-  <title>${storeName}</title>
-  <meta name="description" content="Faça seu pedido online com rapidez e comodidade na ${storeName}." />
+  <title>${escapeHtmlAttr(storeName)}</title>
+  <meta name="description" content="Faça seu pedido online com rapidez e comodidade na ${escapeHtmlAttr(storeName)}." />
+  <meta name="robots" content="noindex, follow" />
+  <link rel="canonical" href="${escapeHtmlAttr(canonicalShareTarget)}" />
   
   <!-- Open Graph / WhatsApp / Facebook -->
   <meta property="og:type" content="website" />
-  <meta property="og:site_name" content="${storeName}" />
-  <meta property="og:title" content="${storeName}" />
+  <meta property="og:site_name" content="${escapeHtmlAttr(storeName)}" />
+  <meta property="og:title" content="${escapeHtmlAttr(storeName)}" />
   <meta property="og:description" content="Faça seu pedido online com rapidez e comodidade na nossa drogaria." />
-  <meta property="og:image" content="${logoUrl}" />
-  <meta property="og:image:secure_url" content="${logoUrl}" />
+  <meta property="og:image" content="${escapeHtmlAttr(logoUrl)}" />
+  <meta property="og:image:secure_url" content="${escapeHtmlAttr(logoUrl)}" />
   <meta property="og:image:type" content="${imageType}" />
   <meta property="og:image:width" content="600" />
   <meta property="og:image:height" content="600" />
-  <meta property="og:image:alt" content="${storeName}" />
-  <meta property="og:url" content="${targetUrl}" />
+  <meta property="og:image:alt" content="${escapeHtmlAttr(storeName)}" />
+  <meta property="og:url" content="${escapeHtmlAttr(canonicalShareTarget)}" />
 
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="${storeName}" />
+  <meta name="twitter:title" content="${escapeHtmlAttr(storeName)}" />
   <meta name="twitter:description" content="Faça seu pedido online com rapidez e comodidade na nossa drogaria." />
-  <meta name="twitter:image" content="${logoUrl}" />
+  <meta name="twitter:image" content="${escapeHtmlAttr(logoUrl)}" />
 
-  <link rel="icon" href="${logoUrl}" />
-  <link rel="apple-touch-icon" href="${logoUrl}" />
+  <link rel="icon" href="${escapeHtmlAttr(logoUrl)}" />
+  <link rel="apple-touch-icon" href="${escapeHtmlAttr(logoUrl)}" />
 
   <!-- Redirecionamento instantâneo se um usuário humano abrir -->
-  <meta http-equiv="refresh" content="0;url=${targetUrl}" />
-  <script>window.location.replace("${targetUrl}");</script>
+  <meta http-equiv="refresh" content="0;url=${escapeHtmlAttr(targetUrl)}" />
+  <script>window.location.replace(${JSON.stringify(targetUrl)});</script>
 </head>
 <body>
-  <p>Redirecionando para <a href="${targetUrl}">${storeName}</a>...</p>
+  <p>Redirecionando para <a href="${escapeHtmlAttr(targetUrl)}">${escapeHtmlAttr(storeName)}</a>...</p>
 </body>
 </html>`);
   } catch (err: any) {
@@ -1001,6 +1007,41 @@ function acceptsHtmlForSeo(req: express.Request): boolean {
   return false;
 }
 
+const CANONICAL_PUBLIC_ORIGIN = "https://farmaflow.online";
+
+const SEO_SEARCH_FILTER_QUERY_KEYS = new Set<string>([
+  "search",
+  "busca",
+  "q",
+  "termo",
+  "category",
+  "categoria",
+  "category_id",
+  "dept",
+  "dept_id",
+  "departamento",
+  "promo_id",
+  "promocao_id",
+  "cupom_id",
+  "coupon",
+  "filter",
+  "filtro",
+  "sort",
+  "order",
+  "page",
+  "pagina",
+]);
+
+function hasSeoSearchOrFilterQuery(query: Record<string, any> | undefined | null): boolean {
+  if (!query || typeof query !== "object") return false;
+  for (const key of Object.keys(query)) {
+    if (SEO_SEARCH_FILTER_QUERY_KEYS.has(String(key || "").trim().toLowerCase())) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function resolveRequestOrigin(req: express.Request): { proto: string; host: string; baseUrl: string } {
   const host = String(req.headers["x-forwarded-host"] || req.headers.host || "farmaflow.online")
     .split(",")[0]
@@ -1011,6 +1052,25 @@ function resolveRequestOrigin(req: express.Request): { proto: string; host: stri
     .trim();
   const proto = rawProto === "http" && (host === "localhost" || host === "127.0.0.1") ? "http" : "https";
   return { proto, host, baseUrl: `${proto}://${host}` };
+}
+
+function resolveCanonicalOrigin(
+  req: express.Request,
+  tenant?: any | null
+): { canonicalOrigin: string; isCustomDomainHost: boolean; cleanCustomDomain: string; isSubdomainHost: boolean } {
+  const { host } = resolveRequestOrigin(req);
+  const lowerHost = host.toLowerCase();
+  const reservedSubdomains = ["www", "farmaflow", "nexoia", "app", "admin", "api", "portal"];
+  const isSubdomainHost =
+    (lowerHost.endsWith(".farmaflow.online") || lowerHost.endsWith(".nexoia.online")) &&
+    !reservedSubdomains.includes(lowerHost.split(".")[0]);
+  const cleanCustomDomain =
+    tenant?.custom_domain && String(tenant.custom_domain).trim()
+      ? String(tenant.custom_domain).replace(/^https?:\/\//i, "").replace(/\/+$/, "").trim()
+      : "";
+  const isCustomDomainHost = Boolean(cleanCustomDomain && lowerHost === cleanCustomDomain.toLowerCase());
+  const canonicalOrigin = isCustomDomainHost ? `https://${cleanCustomDomain}` : CANONICAL_PUBLIC_ORIGIN;
+  return { canonicalOrigin, isCustomDomainHost, cleanCustomDomain, isSubdomainHost };
 }
 
 function extractProductIdentifierFromRequest(req: express.Request): string {
@@ -1170,6 +1230,7 @@ interface TenantMetaRecord {
   storeLogoUrl: string;
   canonicalUrl: string;
   storeUrl: string;
+  robotsContent: string;
   location: string;
   phone: string;
   ogType: "website" | "product";
@@ -1264,9 +1325,10 @@ function ensureAbsoluteHttpsUrl(urlStr: string | undefined | null, fallbackUrl: 
 function buildTenantMetaRecordFromTenant(
   tenant: any,
   req: express.Request,
-  product?: any | null
+  product?: any | null,
+  options?: { missingProduct?: boolean; isRootAliasQuery?: boolean }
 ): TenantMetaRecord {
-  const { proto, host, baseUrl } = resolveRequestOrigin(req);
+  const { canonicalOrigin, isCustomDomainHost, cleanCustomDomain } = resolveCanonicalOrigin(req, tenant);
 
   const storeName = String(tenant.name || tenant.razao_social || "FarmaFlow Drogaria").trim();
   const neighborhood = String(tenant.neighborhood || tenant.bairro || "").trim();
@@ -1274,7 +1336,7 @@ function buildTenantMetaRecordFromTenant(
   const state = String(tenant.state || tenant.uf || "").trim();
   const locParts = [neighborhood, city, state].filter(Boolean);
   const location = locParts.length > 0 ? locParts.join(" - ") : "";
-  const cityState = [city, state].filter(Boolean).join("/");
+  const cityLabel = city || neighborhood;
 
   const tenantSlug = getSeoTenantSlug(tenant);
 
@@ -1285,32 +1347,22 @@ function buildTenantMetaRecordFromTenant(
   if ((rawLogo.startsWith("http://") || rawLogo.startsWith("https://")) && !rawLogo.startsWith("data:")) {
     storeLogoUrl = rawLogo.startsWith("http://") ? rawLogo.replace("http://", "https://") : rawLogo;
   } else if (tenant.id && (rawLogo.length > 0 || tenant.logo)) {
-    storeLogoUrl = `${baseUrl}/api/v1/store/${encodeURIComponent(tenant.id)}/logo.png`;
-    if (storeLogoUrl.startsWith("http://") && !host.startsWith("localhost")) {
-      storeLogoUrl = storeLogoUrl.replace("http://", "https://");
-    }
+    storeLogoUrl = `${CANONICAL_PUBLIC_ORIGIN}/api/v1/store/${encodeURIComponent(tenant.id)}/logo.png`;
   }
   storeLogoUrl = ensureAbsoluteHttpsUrl(storeLogoUrl, DEFAULT_FALLBACK_OG_LOGO);
 
-  const lowerHost = host.toLowerCase();
-  const reservedSubdomains = ["www", "farmaflow", "nexoia", "app", "admin", "api", "portal"];
-  const isSubdomainHost =
-    (lowerHost.endsWith(".farmaflow.online") || lowerHost.endsWith(".nexoia.online")) &&
-    !reservedSubdomains.includes(lowerHost.split(".")[0]);
-  const cleanCustomDomain =
-    tenant.custom_domain && String(tenant.custom_domain).trim()
-      ? String(tenant.custom_domain).replace(/^https?:\/\//, "").replace(/\/+$/, "").trim()
-      : "";
-  const isCustomDomainHost = Boolean(cleanCustomDomain && lowerHost === cleanCustomDomain.toLowerCase());
+  const storeUrl =
+    isCustomDomainHost && cleanCustomDomain
+      ? `https://${cleanCustomDomain}`
+      : `${canonicalOrigin}/loja/${encodeURIComponent(tenantSlug)}`;
 
-  let storeUrl = `${baseUrl}/loja/${encodeURIComponent(tenantSlug)}`;
-  if (isCustomDomainHost) {
-    storeUrl = `${proto}://${host}`;
-  } else if (isSubdomainHost) {
-    storeUrl = `${proto}://${host}`;
-  } else if (cleanCustomDomain) {
-    storeUrl = `https://${cleanCustomDomain}`;
-  }
+  const hasSearchOrFilter = hasSeoSearchOrFilterQuery(req.query);
+  const startOfToday = new Date().setHours(0, 0, 0, 0);
+  const isBlockedOrExpired = Boolean(
+    tenant.is_blocked === true ||
+      tenant.isblocked === true ||
+      (tenant.license_expiration && new Date(tenant.license_expiration).getTime() < startOfToday)
+  );
 
   // Metadados padrão da loja (Pharmacy)
   let title = `${storeName}${location ? ` (${location})` : ""} - Farmácia Online & Delivery`;
@@ -1331,6 +1383,13 @@ function buildTenantMetaRecordFromTenant(
   let availability: "InStock" | "OutOfStock" | undefined;
   let jsonLd: Record<string, any> = buildPharmacyJsonLd(tenant, storeName, storeUrl, storeLogoUrl);
 
+  let robotsContent = "index, follow";
+  if (isBlockedOrExpired) {
+    robotsContent = "noindex, nofollow";
+  } else if (hasSearchOrFilter || options?.missingProduct || options?.isRootAliasQuery) {
+    robotsContent = "noindex, follow";
+  }
+
   // Enriquecimento SEO para Produto (Product + Offer validado para Google Rich Results)
   if (product && product.name) {
     const productName = String(product.name).trim();
@@ -1342,16 +1401,16 @@ function buildTenantMetaRecordFromTenant(
     const productSlug = buildSeoProductSlug(product);
     logoUrl = ensureAbsoluteHttpsUrl(product.image || product.image_url, storeLogoUrl);
 
-    if (isSubdomainHost || isCustomDomainHost) {
-      canonicalUrl = `${proto}://${host}/produto/${encodeURIComponent(productSlug)}`;
-    } else if (cleanCustomDomain) {
-      canonicalUrl = `https://${cleanCustomDomain}/produto/${encodeURIComponent(productSlug)}`;
-    } else {
-      canonicalUrl = `${baseUrl}/loja/${encodeURIComponent(tenantSlug)}/produto/${encodeURIComponent(productSlug)}`;
-    }
+    const productCanonicalUrl =
+      isCustomDomainHost && cleanCustomDomain
+        ? `https://${cleanCustomDomain}/produto/${encodeURIComponent(productSlug)}`
+        : `${canonicalOrigin}/loja/${encodeURIComponent(tenantSlug)}/produto/${encodeURIComponent(productSlug)}`;
 
-    title = `${productName}${formattedBrPrice ? ` por ${formattedBrPrice}` : ""} | ${storeName}${cityState ? ` - ${cityState}` : ""}`;
-    description = `Compre ${productName}${product.presentation ? ` (${product.presentation})` : ""}${formattedBrPrice ? ` por ${formattedBrPrice}` : ""} na ${storeName}${location ? ` em ${location}` : ""}. ${inStock ? "Produto em estoque com entrega rápida" : "Consulte disponibilidade"} via WhatsApp.`;
+    // Se houver parâmetros de pesquisa ou filtro na query, o canonical aponta para o URL base limpo da loja
+    canonicalUrl = hasSearchOrFilter ? storeUrl : productCanonicalUrl;
+
+    title = `${productName} - Comprar na ${storeName}${cityLabel ? ` em ${cityLabel}` : ""} | FarmaFlow`;
+    description = `Compre ${productName}${product.presentation ? ` (${product.presentation})` : ""} na ${storeName}${location ? ` em ${location}` : ""}${formattedBrPrice ? ` por ${formattedBrPrice}` : ""}. ${inStock ? "Produto em estoque com entrega rápida" : "Consulte disponibilidade"} no FarmaFlow.`;
     ogType = "product";
     if (effectivePrice > 0) {
       priceAmount = formattedPriceDecimal;
@@ -1363,7 +1422,7 @@ function buildTenantMetaRecordFromTenant(
 
     const offerSchema: Record<string, any> = {
       "@type": "Offer",
-      url: canonicalUrl,
+      url: productCanonicalUrl,
       priceCurrency: "BRL",
       price: formattedPriceDecimal,
       availability: inStock ? "https://schema.org/InStock" : "https://schema.org/OutOfStock",
@@ -1406,6 +1465,7 @@ function buildTenantMetaRecordFromTenant(
     storeLogoUrl,
     canonicalUrl,
     storeUrl,
+    robotsContent,
     location,
     phone: String(tenant.telefone_contato || tenant.phone || tenant.whatsapp || ""),
     ogType,
@@ -1417,7 +1477,11 @@ function buildTenantMetaRecordFromTenant(
   };
 }
 
-async function getTenantMetaRecord(identifier: string, req: express.Request): Promise<TenantMetaRecord | null> {
+async function getTenantMetaRecord(
+  identifier: string,
+  req: express.Request,
+  options?: { isRootAliasQuery?: boolean }
+): Promise<TenantMetaRecord | null> {
   if (!identifier) return null;
   const tenant = await withSeoTimeout(getTenantCachedOrFetch(identifier), SEO_LOOKUP_TIMEOUT_MS);
   if (!tenant) return null;
@@ -1431,7 +1495,10 @@ async function getTenantMetaRecord(identifier: string, req: express.Request): Pr
     );
   }
 
-  return buildTenantMetaRecordFromTenant(tenant, req, productData);
+  return buildTenantMetaRecordFromTenant(tenant, req, productData, {
+    missingProduct: Boolean(targetProdIdentifier && !productData),
+    isRootAliasQuery: Boolean(options?.isRootAliasQuery),
+  });
 }
 
 function generateStoreOpenGraphHtml(meta: TenantMetaRecord): string {
@@ -1443,7 +1510,8 @@ function generateStoreOpenGraphHtml(meta: TenantMetaRecord): string {
   const descricao = escapeHtmlAttr(
     meta.description || `Faça seu pedido online com rapidez e comodidade na ${meta.name || "nossa drogaria"}.`
   );
-  const currentUrl = escapeHtmlAttr(meta.canonicalUrl || meta.storeUrl || "https://farmaflow.online");
+  const currentUrl = escapeHtmlAttr(meta.canonicalUrl || meta.storeUrl || CANONICAL_PUBLIC_ORIGIN);
+  const robotsVal = escapeHtmlAttr(meta.robotsContent || "index, follow");
   const ogType = meta.ogType === "product" ? "product" : "website";
   const priceMeta =
     meta.ogType === "product" && meta.priceAmount
@@ -1459,6 +1527,7 @@ function generateStoreOpenGraphHtml(meta: TenantMetaRecord): string {
   <meta charset="UTF-8">
   <title>${titleText}</title>
   <meta name="description" content="${descricao}" />
+  <meta name="robots" content="${robotsVal}" />
   <link rel="canonical" href="${currentUrl}" />
   <meta property="og:type" content="${ogType}" />
   <meta property="og:site_name" content="${siteName}" />
@@ -1592,11 +1661,16 @@ function injectStoreMetaIntoHtml(html: string, meta: TenantMetaRecord): string {
       );
     }
 
-    // Remove canonical ou JSON-LD anterior injetado caso exista
+    // Remove canonical, robots ou JSON-LD anterior injetado caso exista
     updated = updated.replace(/<link\s+rel="canonical"[^>]*>\s*/gi, "");
+    updated = updated.replace(/<meta\s+name="robots"[^>]*>\s*/gi, "");
     updated = updated.replace(/<script\s+type="application\/ld\+json"\s+data-farmaflow-seo="true">[\s\S]*?<\/script>\s*/gi, "");
 
-    const extraHeadTags: string[] = [`<link rel="canonical" href="${escUrl}" />`];
+    const escRobots = escapeHtmlAttr(meta.robotsContent || "index, follow");
+    const extraHeadTags: string[] = [
+      `<meta name="robots" content="${escRobots}" />`,
+      `<link rel="canonical" href="${escUrl}" />`,
+    ];
     if (meta.ogType === "product" && meta.priceAmount) {
       extraHeadTags.push(`<meta property="product:price:amount" content="${escapeHtmlAttr(meta.priceAmount)}" />`);
       extraHeadTags.push(`<meta property="product:price:currency" content="BRL" />`);
@@ -1611,6 +1685,27 @@ function injectStoreMetaIntoHtml(html: string, meta: TenantMetaRecord): string {
     return updated;
   } catch {
     // Fallback silencioso: nunca quebra o HTML original
+    return html;
+  }
+}
+
+function injectHeadDirectivesIntoHtml(
+  html: string,
+  options: { canonicalUrl: string; robotsContent: string }
+): string {
+  try {
+    let updated = html;
+    updated = updated.replace(/<link\s+rel="canonical"[^>]*>\s*/gi, "");
+    updated = updated.replace(/<meta\s+name="robots"[^>]*>\s*/gi, "");
+    const escUrl = escapeHtmlAttr(options.canonicalUrl);
+    const escRobots = escapeHtmlAttr(options.robotsContent);
+    const tags = [
+      `<meta name="robots" content="${escRobots}" />`,
+      `<link rel="canonical" href="${escUrl}" />`,
+    ];
+    updated = updated.replace(/<\/head>/i, () => `    ${tags.join("\n    ")}\n  </head>`);
+    return updated;
+  } catch {
     return html;
   }
 }
@@ -1677,17 +1772,34 @@ app.all(["/api/og-handler", "/api/og"], ogHandler);
 
 app.get("/robots.txt", (req, res) => {
   try {
-    const { baseUrl } = resolveRequestOrigin(req);
+    const { host } = resolveRequestOrigin(req);
+    const lowerHost = host.toLowerCase();
+    const isDedicatedCustomHost =
+      lowerHost !== "localhost" &&
+      lowerHost !== "127.0.0.1" &&
+      !lowerHost.endsWith(".farmaflow.online") &&
+      lowerHost !== "farmaflow.online" &&
+      lowerHost !== "www.farmaflow.online" &&
+      !lowerHost.endsWith(".nexoia.online") &&
+      lowerHost !== "nexoia.online" &&
+      !lowerHost.includes("run.app");
+    const sitemapBase = isDedicatedCustomHost ? `https://${host}` : CANONICAL_PUBLIC_ORIGIN;
     const body = [
       "User-agent: *",
+      "Allow: /",
       "Allow: /loja/",
       "Allow: /produto/",
+      "Allow: /sitemap.xml",
       "Allow: /google-shopping.xml",
       "Disallow: /admin",
       "Disallow: /painel",
+      "Disallow: /login",
+      "Disallow: /carrinho",
+      "Disallow: /cart",
+      "Disallow: /checkout",
       "Disallow: /api/",
       "",
-      `Sitemap: ${baseUrl}/sitemap.xml`,
+      `Sitemap: ${sitemapBase}/sitemap.xml`,
       "",
     ].join("\n");
 
@@ -1696,13 +1808,31 @@ app.get("/robots.txt", (req, res) => {
     return res.status(200).send(body);
   } catch {
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
-    return res.status(200).send("User-agent: *\nAllow: /loja/\nAllow: /produto/\nAllow: /google-shopping.xml\nDisallow: /admin\nDisallow: /painel\nDisallow: /api/\n");
+    return res.status(200).send(
+      "User-agent: *\nAllow: /\nAllow: /loja/\nAllow: /produto/\nAllow: /sitemap.xml\nAllow: /google-shopping.xml\nDisallow: /admin\nDisallow: /painel\nDisallow: /login\nDisallow: /carrinho\nDisallow: /cart\nDisallow: /checkout\nDisallow: /api/\nSitemap: https://farmaflow.online/sitemap.xml\n"
+    );
   }
 });
 
 app.get("/sitemap.xml", async (req, res) => {
-  const { host, baseUrl } = resolveRequestOrigin(req);
-  const cacheKey = baseUrl.toLowerCase();
+  const { host } = resolveRequestOrigin(req);
+  const lowerHost = host.toLowerCase();
+  const isSubdomain =
+    (lowerHost.endsWith(".farmaflow.online") || lowerHost.endsWith(".nexoia.online")) &&
+    !["www", "farmaflow", "nexoia", "app", "admin", "api", "portal"].includes(lowerHost.split(".")[0]);
+  const isMainPlatformHost =
+    lowerHost === "farmaflow.online" ||
+    lowerHost === "www.farmaflow.online" ||
+    lowerHost === "nexoia.online" ||
+    lowerHost === "farmaflow.nexoia.online" ||
+    lowerHost === "localhost" ||
+    lowerHost === "127.0.0.1" ||
+    lowerHost.includes("run.app") ||
+    lowerHost.endsWith(".farmaflow.online") ||
+    lowerHost.endsWith(".nexoia.online");
+
+  const canonicalSitemapOrigin = isMainPlatformHost ? CANONICAL_PUBLIC_ORIGIN : `https://${host}`;
+  const cacheKey = `${lowerHost}|${canonicalSitemapOrigin}`;
   const now = Date.now();
 
   res.setHeader("Content-Type", "application/xml; charset=utf-8");
@@ -1715,14 +1845,15 @@ app.get("/sitemap.xml", async (req, res) => {
     }
 
     const today = new Date().toISOString().split("T")[0];
-    const isSubdomain =
-      (host.endsWith(".farmaflow.online") || host.endsWith(".nexoia.online")) &&
-      !["www", "farmaflow", "nexoia", "app", "admin", "api", "portal"].includes(host.split(".")[0]);
+    const startOfToday = new Date().setHours(0, 0, 0, 0);
 
     let activeTenants: any[] = [];
     if (isSubdomain) {
-      const subTenant = await withSeoTimeout(getTenantCachedOrFetch(host.split(".")[0]), 2500);
+      const subTenant = await withSeoTimeout(getTenantCachedOrFetch(lowerHost.split(".")[0]), 2500);
       if (subTenant) activeTenants = [subTenant];
+    } else if (!isMainPlatformHost) {
+      const customTenant = await withSeoTimeout(getTenantCachedOrFetch(lowerHost), 2500);
+      if (customTenant) activeTenants = [customTenant];
     } else {
       let allTenants =
         allTenantsRamCache && allTenantsRamCache.expiresAt > now ? allTenantsRamCache.list : null;
@@ -1731,8 +1862,8 @@ app.get("/sitemap.xml", async (req, res) => {
           Promise.resolve(
             supabaseAdmin
               .from("tenants")
-              .select("id, slug, name, is_blocked, license_expiration")
-              .limit(1000)
+              .select("id, slug, name, custom_domain, is_blocked, license_expiration")
+              .limit(2000)
           ),
           3000
         );
@@ -1741,16 +1872,18 @@ app.get("/sitemap.xml", async (req, res) => {
         }
       }
       if (Array.isArray(allTenants)) {
-        const startOfToday = new Date().setHours(0, 0, 0, 0);
-        activeTenants = allTenants.filter((t: any) => {
-          if (!t || t.is_blocked === true || t.isblocked === true) return false;
-          if (t.license_expiration && new Date(t.license_expiration).getTime() < startOfToday) {
-            return false;
-          }
-          return Boolean(getSeoTenantSlug(t));
-        });
+        activeTenants = allTenants;
       }
     }
+
+    activeTenants = activeTenants.filter((t: any) => {
+      if (!t || t.is_blocked === true || t.isblocked === true) return false;
+      if (t.is_active === false || t.active === false) return false;
+      if (t.license_expiration && new Date(t.license_expiration).getTime() < startOfToday) {
+        return false;
+      }
+      return Boolean(getSeoTenantSlug(t));
+    });
 
     const seenSlugs = new Set<string>();
     const sitemapEntries: string[] = [];
@@ -1758,7 +1891,7 @@ app.get("/sitemap.xml", async (req, res) => {
       const slug = getSeoTenantSlug(t);
       if (!slug || seenSlugs.has(slug)) continue;
       seenSlugs.add(slug);
-      const loc = `${baseUrl}/loja/${encodeURIComponent(slug)}/sitemap.xml`;
+      const loc = `${canonicalSitemapOrigin}/loja/${encodeURIComponent(slug)}/sitemap.xml`;
       sitemapEntries.push(
         `  <sitemap>\n    <loc>${escapeXml(loc)}</loc>\n    <lastmod>${today}</lastmod>\n  </sitemap>`
       );
@@ -1777,72 +1910,95 @@ app.get("/loja/:tenantSlug/sitemap.xml", async (req, res) => {
   const tenantSlugParam = Array.isArray(req.params.tenantSlug)
     ? req.params.tenantSlug[0]
     : String(req.params.tenantSlug || "").trim();
-  const { host, baseUrl } = resolveRequestOrigin(req);
+  const { host } = resolveRequestOrigin(req);
   const lowerHost = host.toLowerCase();
-  const isStoreHost =
-    ((lowerHost.endsWith(".farmaflow.online") || lowerHost.endsWith(".nexoia.online")) &&
-      !["www", "farmaflow", "nexoia", "app", "admin", "api", "portal"].includes(lowerHost.split(".")[0])) ||
-    (lowerHost !== "farmaflow.online" &&
-      lowerHost !== "www.farmaflow.online" &&
-      lowerHost !== "nexoia.online" &&
-      lowerHost !== "farmaflow.nexoia.online" &&
-      lowerHost !== "localhost" &&
-      lowerHost !== "127.0.0.1" &&
-      !lowerHost.includes("run.app"));
-  const cacheKey = `${baseUrl.toLowerCase()}|${tenantSlugParam.toLowerCase()}`;
   const now = Date.now();
 
   res.setHeader("Content-Type", "application/xml; charset=utf-8");
   res.setHeader("Cache-Control", "public, max-age=3600, stale-while-revalidate=7200");
 
   try {
+    const tenant = await withSeoTimeout(getTenantCachedOrFetch(tenantSlugParam), 2500);
+    const startOfToday = new Date().setHours(0, 0, 0, 0);
+    const isTenantExpired =
+      tenant?.license_expiration &&
+      new Date(tenant.license_expiration).getTime() < startOfToday;
+    const isTenantInactive =
+      !tenant ||
+      tenant.is_blocked === true ||
+      tenant.isblocked === true ||
+      tenant.is_active === false ||
+      tenant.active === false ||
+      Boolean(isTenantExpired);
+
+    if (isTenantInactive) {
+      const emptyXml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>\n`;
+      return res.status(404).send(emptyXml);
+    }
+
+    const { canonicalOrigin, isCustomDomainHost, cleanCustomDomain } = resolveCanonicalOrigin(req, tenant);
+    const cacheKey = `${canonicalOrigin.toLowerCase()}|${String(tenant.id).toLowerCase()}`;
     const cached = storeSitemapRamCache.get(cacheKey);
     if (cached && cached.expiresAt > now) {
       return res.status(200).send(cached.xml);
     }
 
-    const tenant = await withSeoTimeout(getTenantCachedOrFetch(tenantSlugParam), 2500);
-    if (!tenant || tenant.is_blocked === true || tenant.isblocked === true) {
-      const emptyXml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>\n`;
-      return res.status(404).send(emptyXml);
-    }
-
     const cleanTenantSlug = getSeoTenantSlug(tenant);
     const today = new Date().toISOString().split("T")[0];
-    const storeLoc = isStoreHost
-      ? `${baseUrl}/`
-      : `${baseUrl}/loja/${encodeURIComponent(cleanTenantSlug)}`;
+    const storeLoc =
+      isCustomDomainHost && cleanCustomDomain
+        ? `https://${cleanCustomDomain}`
+        : `${canonicalOrigin}/loja/${encodeURIComponent(cleanTenantSlug)}`;
 
     const urls: string[] = [
       `  <url>\n    <loc>${escapeXml(storeLoc)}</loc>\n    <lastmod>${today}</lastmod>\n    <changefreq>daily</changefreq>\n    <priority>1.0</priority>\n  </url>`,
     ];
 
-    const prodRes = await withSeoTimeout(
-      Promise.resolve(
-        supabaseAdmin
-          .from("products")
-          .select("id, name, internal_code, barcode, price, stock")
-          .eq("tenant_id", tenant.id)
-          .gt("stock", 0)
-          .gt("price", 0)
-          .limit(5000)
-      ),
-      3500
-    );
+    const pageSize = 1000;
+    const maxProducts = 10000;
+    const allRows: any[] = [];
+    for (let offset = 0; offset < maxProducts; offset += pageSize) {
+      const prodRes = await withSeoTimeout(
+        Promise.resolve(
+          supabaseAdmin
+            .from("products")
+            .select("id, name, internal_code, barcode, price, stock, updated_at")
+            .eq("tenant_id", tenant.id)
+            .gt("stock", 0)
+            .gt("price", 0)
+            .range(offset, offset + pageSize - 1)
+        ),
+        3500
+      );
+      const batch = prodRes && Array.isArray((prodRes as any).data) ? (prodRes as any).data : [];
+      if (batch.length === 0) break;
+      allRows.push(...batch);
+      if (batch.length < pageSize) break;
+    }
 
-    const rows = prodRes && Array.isArray((prodRes as any).data) ? (prodRes as any).data : [];
     const seenProductSlugs = new Set<string>();
 
-    for (const prod of rows) {
-      if (!prod?.name || Number(prod.stock ?? 0) <= 0) continue;
+    for (const prod of allRows) {
+      if (!prod?.name || !String(prod.name).trim()) continue;
+      if (Number(prod.stock ?? 0) <= 0) continue;
+      if (parseSafePositivePrice(prod.price) <= 0) continue;
       const pSlug = buildSeoProductSlug(prod);
       if (!pSlug || seenProductSlugs.has(pSlug)) continue;
       seenProductSlugs.add(pSlug);
-      const prodLoc = isStoreHost
-        ? `${baseUrl}/produto/${encodeURIComponent(pSlug)}`
-        : `${baseUrl}/loja/${encodeURIComponent(cleanTenantSlug)}/produto/${encodeURIComponent(pSlug)}`;
+      const prodLoc =
+        isCustomDomainHost && cleanCustomDomain
+          ? `https://${cleanCustomDomain}/produto/${encodeURIComponent(pSlug)}`
+          : `${canonicalOrigin}/loja/${encodeURIComponent(cleanTenantSlug)}/produto/${encodeURIComponent(pSlug)}`;
+
+      let lastmod = today;
+      if (prod.updated_at) {
+        const parsedDate = new Date(prod.updated_at);
+        if (!isNaN(parsedDate.getTime())) {
+          lastmod = parsedDate.toISOString().split("T")[0];
+        }
+      }
       urls.push(
-        `  <url>\n    <loc>${escapeXml(prodLoc)}</loc>\n    <lastmod>${today}</lastmod>\n    <changefreq>daily</changefreq>\n    <priority>0.8</priority>\n  </url>`
+        `  <url>\n    <loc>${escapeXml(prodLoc)}</loc>\n    <lastmod>${lastmod}</lastmod>\n    <changefreq>daily</changefreq>\n    <priority>0.8</priority>\n  </url>`
       );
     }
 
@@ -2171,6 +2327,46 @@ app.get("/loja/:tenantSlug/google-shopping.xml", async (req, res) => {
   return handleGoogleShoppingFeedRequest(req, res, tenantSlugParam);
 });
 
+// Rotas privadas administrativas, login, carrinho e checkout: noindex, nofollow no HTML inicial
+app.get(
+  [
+    "/admin",
+    "/admin/*all",
+    "/painel",
+    "/painel/*all",
+    "/login",
+    "/login/*all",
+    "/checkout",
+    "/checkout/*all",
+    "/cart",
+    "/cart/*all",
+    "/carrinho",
+    "/carrinho/*all",
+  ],
+  (req, res, next) => {
+    if (req.method !== "GET" && req.method !== "HEAD") return next();
+    const accept = String(req.headers.accept || "").toLowerCase();
+    if (
+      accept &&
+      !accept.includes("text/html") &&
+      !accept.includes("*/*")
+    ) {
+      return next();
+    }
+    const htmlFromRam = getIndexHtmlFromRam();
+    if (!htmlFromRam) return next();
+    const cleanPath = String(req.path || "").replace(/\/+$/, "");
+    const injected = injectHeadDirectivesIntoHtml(htmlFromRam, {
+      canonicalUrl: `${CANONICAL_PUBLIC_ORIGIN}${cleanPath}`,
+      robotsContent: "noindex, nofollow",
+    });
+    res.setHeader("X-SEO-Injected", "noindex-private");
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    return res.status(200).send(injected);
+  }
+);
+
 // Interceptor de Rota de Loja Pública (/loja/:slug, /loja/:slug/produto/:productSlug e /produto/:productSlug em subdomínios)
 app.get(
   [
@@ -2238,7 +2434,12 @@ app.get(
         res.setHeader("X-SEO-Injected", "fallback");
         res.setHeader("Content-Type", "text/html; charset=utf-8");
         res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-        return res.status(200).send(htmlFromRam);
+        return res.status(200).send(
+          injectHeadDirectivesIntoHtml(htmlFromRam, {
+            canonicalUrl: CANONICAL_PUBLIC_ORIGIN,
+            robotsContent: "noindex, nofollow",
+          })
+        );
       }
       return next();
     } catch {
@@ -2253,7 +2454,7 @@ app.get(
   }
 );
 
-// Interceptor de Rota Raiz (/) para Lojas em Subdomínio, Parâmetros (?store/?loja/?produto) e Crawlers
+// Interceptor de Rota Raiz (/) para Lojas em Subdomínio, Domínio Próprio, Parâmetros (?store/?loja/?produto) e Portal Principal
 app.get("/", async (req, res, next) => {
   if (!acceptsHtmlForSeo(req)) return next();
 
@@ -2268,10 +2469,22 @@ app.get("/", async (req, res, next) => {
     const isSubdomain =
       (lowerHost.endsWith(".farmaflow.online") || lowerHost.endsWith(".nexoia.online")) &&
       !["www", "farmaflow", "nexoia", "app", "admin", "api", "portal"].includes(lowerHost.split(".")[0]);
+    const isMainRootHost =
+      lowerHost === "farmaflow.online" ||
+      lowerHost === "www.farmaflow.online" ||
+      lowerHost === "nexoia.online" ||
+      lowerHost === "farmaflow.nexoia.online" ||
+      lowerHost === "localhost" ||
+      lowerHost === "127.0.0.1" ||
+      lowerHost.includes("run.app");
 
-    const identifier = storeParam || (isSubdomain ? lowerHost.split(".")[0] : "");
+    const identifier =
+      storeParam || (isSubdomain ? lowerHost.split(".")[0] : !isMainRootHost ? lowerHost : "");
     if (identifier) {
-      const meta = await withSeoTimeout(getTenantMetaRecord(identifier, req), SEO_LOOKUP_TIMEOUT_MS);
+      const meta = await withSeoTimeout(
+        getTenantMetaRecord(identifier, req, { isRootAliasQuery: Boolean(storeParam) }),
+        SEO_LOOKUP_TIMEOUT_MS
+      );
       if (meta) {
         res.setHeader("X-SEO-Injected", meta.ogType === "product" ? "product" : "store");
         if (isSocialOnly) {
@@ -2293,8 +2506,25 @@ app.get("/", async (req, res, next) => {
         res.setHeader("X-SEO-Injected", "fallback");
         res.setHeader("Content-Type", "text/html; charset=utf-8");
         res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-        return res.status(200).send(htmlFromRam);
+        return res.status(200).send(
+          injectHeadDirectivesIntoHtml(htmlFromRam, {
+            canonicalUrl: CANONICAL_PUBLIC_ORIGIN,
+            robotsContent: "noindex, nofollow",
+          })
+        );
       }
+    }
+
+    if (htmlFromRam && !isSocialOnly) {
+      res.setHeader("X-SEO-Injected", "root");
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+      return res.status(200).send(
+        injectHeadDirectivesIntoHtml(htmlFromRam, {
+          canonicalUrl: CANONICAL_PUBLIC_ORIGIN,
+          robotsContent: hasSeoSearchOrFilterQuery(req.query) ? "noindex, follow" : "index, follow",
+        })
+      );
     }
     return next();
   } catch {
@@ -20517,15 +20747,31 @@ async function startServer() {
             const isSubdomain =
               (lowerHost.endsWith(".farmaflow.online") || lowerHost.endsWith(".nexoia.online")) &&
               !["www", "farmaflow", "nexoia", "app", "admin", "api", "portal"].includes(lowerHost.split(".")[0]);
-            if (isSubdomain) {
-              const subdomainId = lowerHost.split(".")[0];
-              const meta = await withSeoTimeout(getTenantMetaRecord(subdomainId, req), SEO_LOOKUP_TIMEOUT_MS);
+            const isMainRootHost =
+              lowerHost === "farmaflow.online" ||
+              lowerHost === "www.farmaflow.online" ||
+              lowerHost === "nexoia.online" ||
+              lowerHost === "farmaflow.nexoia.online" ||
+              lowerHost === "localhost" ||
+              lowerHost === "127.0.0.1" ||
+              lowerHost.includes("run.app");
+            const hostIdentifier = isSubdomain ? lowerHost.split(".")[0] : !isMainRootHost ? lowerHost : "";
+            if (hostIdentifier) {
+              const meta = await withSeoTimeout(getTenantMetaRecord(hostIdentifier, req), SEO_LOOKUP_TIMEOUT_MS);
               if (meta) {
                 res.setHeader("X-SEO-Injected", meta.ogType === "product" ? "product" : "store");
                 res.setHeader("Content-Type", "text/html; charset=utf-8");
                 return res.status(200).send(injectStoreMetaIntoHtml(htmlFromRam, meta));
               }
             }
+            res.setHeader("X-SEO-Injected", "fallback-noindex");
+            res.setHeader("Content-Type", "text/html; charset=utf-8");
+            return res.status(200).send(
+              injectHeadDirectivesIntoHtml(htmlFromRam, {
+                canonicalUrl: CANONICAL_PUBLIC_ORIGIN,
+                robotsContent: "noindex, nofollow",
+              })
+            );
           }
         } catch {
           // Fallback silencioso para o HTML padrão

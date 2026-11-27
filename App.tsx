@@ -78,6 +78,11 @@ import {
   findProductBySlugOrId,
   extractProductLookupToken,
   getProductShareUrl,
+  getCanonicalStoreUrl,
+  getCanonicalProductUrl,
+  hasSearchOrFilterQueryParams,
+  CANONICAL_PUBLIC_ORIGIN,
+  notifySeoUrlChange,
 } from "./lib/store";
 import {
   captureAndPersistOrderOrigin,
@@ -901,7 +906,19 @@ const App: React.FC = () => {
   const [zoomImage, setZoomImage] = useState<string | null>(null);
   const productModalScrollRef = useRef<HTMLDivElement>(null);
 
-  // Scroll to top of product modal & sync document title whenever a new product is selected
+  const [seoLocationVersion, setSeoLocationVersion] = useState(0);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const bump = () => setSeoLocationVersion((v) => v + 1);
+    window.addEventListener("popstate", bump);
+    window.addEventListener("ff-url-change", bump);
+    return () => {
+      window.removeEventListener("popstate", bump);
+      window.removeEventListener("ff-url-change", bump);
+    };
+  }, []);
+
+  // Scroll to top of product modal whenever a new product is selected
   useEffect(() => {
     setProductShareCopied(false);
     if (selectedProduct) {
@@ -912,22 +929,8 @@ const App: React.FC = () => {
       if (scrollEl) {
         scrollEl.scrollTo({ top: 0, behavior: "smooth" });
       }
-      if (typeof document !== "undefined" && currentTenant) {
-        const effPrice =
-          selectedProduct.promotionalPrice &&
-          selectedProduct.promotionalPrice > 0 &&
-          selectedProduct.promotionalPrice < selectedProduct.price
-            ? selectedProduct.promotionalPrice
-            : selectedProduct.price;
-        const priceLabel = effPrice > 0 ? ` por R$ ${effPrice.toFixed(2).replace(".", ",")}` : "";
-        const cityPart = [currentTenant.city, currentTenant.state].filter(Boolean).join("/");
-        document.title = `${selectedProduct.name}${priceLabel} | ${currentTenant.name}${cityPart ? ` - ${cityPart}` : ""}`;
-      }
-    } else if (typeof document !== "undefined" && currentTenant) {
-      const loc = [currentTenant.neighborhood, currentTenant.city, currentTenant.state].filter(Boolean).join(" - ");
-      document.title = `${currentTenant.name}${loc ? ` (${loc})` : ""} - Farmácia Online & Delivery`;
     }
-  }, [selectedProduct?.id, currentTenant?.id]);
+  }, [selectedProduct?.id]);
 
   const handleCloseProductModal = useCallback(() => {
     setSelectedProduct(null);
@@ -942,6 +945,7 @@ const App: React.FC = () => {
           currentUrl !== basePath
         ) {
           window.history.replaceState({ view: ViewMode.CATALOG, adminTab }, "", basePath);
+          notifySeoUrlChange();
         }
       }
     } catch (_) {}
@@ -1098,6 +1102,7 @@ const App: React.FC = () => {
               targetPath,
             );
           }
+          notifySeoUrlChange();
         }
       }
     } catch (_) {}
@@ -1385,13 +1390,14 @@ const App: React.FC = () => {
         // a URL precisa refletir a loja para que se copiada ou recarregada não caia no portal.
         let newUrl = "";
         if (newView === ViewMode.CATALOG && currentTenant) {
-          newUrl = `/loja/${currentTenant.slug || currentTenant.id}/`;
+          newUrl = getStoreBasePath(currentTenant);
         }
         window.history.pushState(
           { view: newView, adminTab },
           "",
           newUrl || undefined,
         );
+        notifySeoUrlChange();
       }
 
       if (newView === ViewMode.ADMIN_SUPER) {
@@ -2561,73 +2567,173 @@ const App: React.FC = () => {
     return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
   }, [currentTenant]);
 
-  // Sincronização dinâmica de título, favicon e meta tags Open Graph para WhatsApp e redes sociais
+  // Sincronização dinâmica unificada de título, canonical, robots, Open Graph e JSON-LD
   useEffect(() => {
+    if (typeof document === "undefined" || typeof window === "undefined") return;
+
+    const setMeta = (attr: string, key: string, content: string) => {
+      let el = document.querySelector(`meta[${attr}="${key}"]`);
+      if (!el) {
+        el = document.createElement("meta");
+        el.setAttribute(attr, key);
+        document.head.appendChild(el);
+      }
+      el.setAttribute("content", content);
+    };
+
+    const setCanonical = (href: string) => {
+      const existing = Array.from(document.querySelectorAll('link[rel="canonical"]')) as HTMLLinkElement[];
+      existing.forEach((el, idx) => {
+        if (idx > 0) el.remove();
+      });
+      let link = existing[0];
+      if (!link) {
+        link = document.createElement("link");
+        link.rel = "canonical";
+        document.head.appendChild(link);
+      }
+      link.href = href;
+    };
+
+    const pathname = window.location.pathname || "/";
+    const lowerPath = pathname.toLowerCase();
+    const search = window.location.search || "";
+    const isPrivateOrCheckoutRoute =
+      view === ViewMode.LOGIN ||
+      view === ViewMode.ADMIN_PHARMACY ||
+      view === ViewMode.ADMIN_SUPER ||
+      view === ViewMode.CART ||
+      lowerPath.startsWith("/admin") ||
+      lowerPath.startsWith("/painel") ||
+      lowerPath.startsWith("/login") ||
+      lowerPath.startsWith("/checkout") ||
+      lowerPath.startsWith("/cart") ||
+      lowerPath.startsWith("/carrinho");
+
+    if (isPrivateOrCheckoutRoute) {
+      setMeta("name", "robots", "noindex, nofollow");
+      const cleanPath = pathname.replace(/\/+$/, "");
+      setCanonical(`${CANONICAL_PUBLIC_ORIGIN}${cleanPath || ""}`);
+      if (view === ViewMode.CART && currentTenant) {
+        document.title = `Carrinho | ${currentTenant.name} | FarmaFlow`;
+      } else if (!currentTenant) {
+        document.title = "FarmaFlow - Farmácia e Perfumaria Online";
+      }
+      return;
+    }
+
     if (currentTenant && currentTenant.name) {
-      const loc = [currentTenant.neighborhood, currentTenant.city, currentTenant.state].filter(Boolean).join(" - ");
-      const pageTitle = `${currentTenant.name}${loc ? ` (${loc})` : ""} - Farmácia Online & Delivery`;
-      if (!selectedProduct) {
+      const isLicenseExpired =
+        currentTenant.licenseExpiration &&
+        new Date(currentTenant.licenseExpiration).getTime() < new Date().setHours(0, 0, 0, 0);
+      const isStoreUnavailable = Boolean(currentTenant.isBlocked || isLicenseExpired);
+
+      const neighborhood = String(currentTenant.neighborhood || "").trim();
+      const city = String(currentTenant.city || "").trim();
+      const state = String(currentTenant.state || "").trim();
+      const loc = [neighborhood, city, state].filter(Boolean).join(" - ");
+      const cityLabel = city || neighborhood;
+
+      const cleanStoreUrl = getCanonicalStoreUrl(currentTenant, window.location.hostname);
+      const hasSearchOrFilter = hasSearchOrFilterQueryParams(search);
+      const urlParams = new URLSearchParams(search);
+      const isRootAliasQuery =
+        pathname === "/" &&
+        Boolean(urlParams.get("store") || urlParams.get("loja") || urlParams.get("tenant") || urlParams.get("p"));
+
+      const robotsContent = isStoreUnavailable
+        ? "noindex, nofollow"
+        : hasSearchOrFilter || isRootAliasQuery
+          ? "noindex, follow"
+          : "index, follow";
+      setMeta("name", "robots", robotsContent);
+
+      const storeLogoUrl =
+        currentTenant.logo && currentTenant.logo.startsWith("http")
+          ? currentTenant.logo.replace(/^http:\/\//i, "https://")
+          : `${CANONICAL_PUBLIC_ORIGIN}/api/v1/store/${encodeURIComponent(currentTenant.slug || currentTenant.id)}/logo.png`;
+
+      if (selectedProduct && selectedProduct.name) {
+        const effPrice =
+          selectedProduct.promotionalPrice &&
+          selectedProduct.promotionalPrice > 0 &&
+          selectedProduct.promotionalPrice < selectedProduct.price
+            ? selectedProduct.promotionalPrice
+            : selectedProduct.price;
+        const priceLabel = effPrice > 0 ? `R$ ${effPrice.toFixed(2).replace(".", ",")}` : "";
+        const canonicalHref = hasSearchOrFilter
+          ? cleanStoreUrl
+          : getCanonicalProductUrl(currentTenant, selectedProduct, window.location.hostname);
+        const pageTitle = `${selectedProduct.name} - Comprar na ${currentTenant.name}${cityLabel ? ` em ${cityLabel}` : ""} | FarmaFlow`;
+        const desc = `Compre ${selectedProduct.name}${selectedProduct.presentation ? ` (${selectedProduct.presentation})` : ""} na ${currentTenant.name}${loc ? ` em ${loc}` : ""}${priceLabel ? ` por ${priceLabel}` : ""}. ${Number(selectedProduct.stock ?? 0) > 0 ? "Produto em estoque com entrega rápida" : "Consulte disponibilidade"} no FarmaFlow.`;
+        const prodImg =
+          selectedProduct.image && selectedProduct.image.startsWith("http")
+            ? selectedProduct.image.replace(/^http:\/\//i, "https://")
+            : storeLogoUrl;
+
         document.title = pageTitle;
+        setCanonical(canonicalHref);
+        setMeta("name", "description", desc);
+        setMeta("property", "og:type", "product");
+        setMeta("property", "og:title", pageTitle);
+        setMeta("property", "og:description", desc);
+        setMeta("property", "og:url", canonicalHref);
+        setMeta("property", "og:image", prodImg);
+        setMeta("property", "og:image:secure_url", prodImg);
+        setMeta("property", "og:site_name", currentTenant.name);
+        setMeta("name", "twitter:card", "summary_large_image");
+        setMeta("name", "twitter:title", pageTitle);
+        setMeta("name", "twitter:description", desc);
+        setMeta("name", "twitter:image", prodImg);
+      } else {
+        const pageTitle = `${currentTenant.name}${loc ? ` (${loc})` : ""} - Farmácia Online & Delivery`;
+        const desc =
+          currentTenant.bannerSubtitle ||
+          currentTenant.bannersubtitle ||
+          currentTenant.bannerTitle ||
+          currentTenant.bannertitle ||
+          (loc
+            ? `Peça medicamentos, perfumaria e receba em casa com entrega rápida em ${loc}. Compre online pelo WhatsApp.`
+            : "Faça seu pedido online com rapidez e comodidade. Medicamentos, perfumaria e cuidados diários com tele-entrega direta no seu WhatsApp.");
+
+        document.title = pageTitle;
+        setCanonical(cleanStoreUrl);
+        setMeta("name", "description", desc);
+        setMeta("property", "og:type", "website");
+        setMeta("property", "og:title", pageTitle);
+        setMeta("property", "og:description", desc);
+        setMeta("property", "og:url", cleanStoreUrl);
+        setMeta("property", "og:image", storeLogoUrl);
+        setMeta("property", "og:image:secure_url", storeLogoUrl);
+        setMeta("property", "og:image:type", "image/png");
+        setMeta("property", "og:image:width", "1200");
+        setMeta("property", "og:image:height", "630");
+        setMeta("property", "og:site_name", currentTenant.name);
+        setMeta("name", "twitter:card", "summary_large_image");
+        setMeta("name", "twitter:title", pageTitle);
+        setMeta("name", "twitter:description", desc);
+        setMeta("name", "twitter:image", storeLogoUrl);
       }
 
-      const desc =
-        currentTenant.bannerSubtitle ||
-        currentTenant.bannersubtitle ||
-        currentTenant.bannerTitle ||
-        currentTenant.bannertitle ||
-        (loc
-          ? `Peça medicamentos, perfumaria e receba em casa com entrega rápida em ${loc}. Compre online pelo WhatsApp.`
-          : "Faça seu pedido online com rapidez e comodidade. Medicamentos, perfumaria e cuidados diários com tele-entrega direta no seu WhatsApp.");
-
-      const storeUrl = getStoreUrl(currentTenant);
-      const logoUrl =
-        currentTenant.logo && currentTenant.logo.startsWith("http")
-          ? currentTenant.logo
-          : `${window.location.origin}/api/v1/store/${currentTenant.slug || currentTenant.id}/logo.png`;
-
-      const setMeta = (attr: string, key: string, content: string) => {
-        let el = document.querySelector(`meta[${attr}="${key}"]`);
-        if (!el) {
-          el = document.createElement("meta");
-          el.setAttribute(attr, key);
-          document.head.appendChild(el);
-        }
-        el.setAttribute("content", content);
-      };
-
-      setMeta("property", "og:type", "website");
-      setMeta("property", "og:title", pageTitle);
-      setMeta("property", "og:description", desc);
-      setMeta("property", "og:url", storeUrl);
-      setMeta("property", "og:image", logoUrl);
-      setMeta("property", "og:image:secure_url", logoUrl);
-      setMeta("property", "og:image:type", "image/png");
-      setMeta("property", "og:image:width", "1200");
-      setMeta("property", "og:image:height", "630");
-      setMeta("property", "og:site_name", currentTenant.name);
-      setMeta("name", "twitter:card", "summary_large_image");
-      setMeta("name", "twitter:title", pageTitle);
-      setMeta("name", "twitter:description", desc);
-      setMeta("name", "twitter:image", logoUrl);
-      setMeta("name", "description", desc);
-
-      if (logoUrl) {
+      if (storeLogoUrl) {
         const iconLink = document.querySelector('link[rel="icon"]') as HTMLLinkElement;
-        if (iconLink) iconLink.href = logoUrl;
+        if (iconLink) iconLink.href = storeLogoUrl;
         let appleIcon = document.querySelector('link[rel="apple-touch-icon"]') as HTMLLinkElement;
         if (appleIcon) {
-          appleIcon.href = logoUrl;
+          appleIcon.href = storeLogoUrl;
         } else {
           appleIcon = document.createElement("link");
           appleIcon.rel = "apple-touch-icon";
-          appleIcon.href = logoUrl;
+          appleIcon.href = storeLogoUrl;
           document.head.appendChild(appleIcon);
         }
       }
     } else {
       document.title = "FarmaFlow - Farmácia e Perfumaria Online";
+      setCanonical(CANONICAL_PUBLIC_ORIGIN);
+      setMeta("name", "robots", hasSearchOrFilterQueryParams(search) ? "noindex, follow" : "index, follow");
     }
-  }, [currentTenant]);
+  }, [currentTenant, selectedProduct, view, seoLocationVersion]);
 
   useEffect(() => {
     const init = async () => {
@@ -2976,19 +3082,10 @@ const App: React.FC = () => {
             setCurrentTenant(tenant);
             setView(ViewMode.CATALOG);
 
-            const targetSlug = tenant.slug
-              ? tenant.slug
-                  .toLowerCase()
-                  .normalize("NFD")
-                  .replace(/[\u0300-\u036f]/g, "")
-                  .replace(/[^a-z0-9\s-]/g, "")
-                  .trim()
-                  .replace(/\s+/g, "-")
-              : tenant.id;
-            // Preservação de integridade: se não estiver no /loja/slug/ nem em rota de produto, força para elegância do PWA preservando query params
+            const targetSlug = getStoreSlug(tenant) || tenant.id;
+            // Preservação de integridade: se não estiver no /loja/slug nem em rota de produto, força URL limpa sem barra final duplicada
             const currentSearch = window.location.search || "";
             if (
-              window.location.pathname !== `/loja/${targetSlug}/` &&
               window.location.pathname !== `/loja/${targetSlug}` &&
               !window.location.pathname.startsWith(`/loja/${targetSlug}/produto/`) &&
               !window.location.pathname.startsWith(`/produto/`)
@@ -2996,8 +3093,9 @@ const App: React.FC = () => {
               window.history.replaceState(
                 { view: ViewMode.CATALOG, adminTab: "dashboard" },
                 "",
-                `/loja/${targetSlug}/${currentSearch}`,
+                `/loja/${targetSlug}${currentSearch}`,
               );
+              notifySeoUrlChange();
             }
 
             const [prods, promos, coups] = await Promise.all([
@@ -5404,6 +5502,14 @@ const App: React.FC = () => {
                     </div>
                     <h1 className="text-2xl md:text-3xl font-black mb-1 text-gray-900 leading-tight">
                       {selectedProduct.name}
+                      {currentTenant?.name && (
+                        <span className="block text-sm md:text-base font-bold text-gray-500 mt-1">
+                          na {currentTenant.name}
+                          {(currentTenant.city || currentTenant.neighborhood)
+                            ? ` em ${currentTenant.city || currentTenant.neighborhood}${currentTenant.city && currentTenant.state ? `/${currentTenant.state}` : ""}`
+                            : ""}
+                        </span>
+                      )}
                     </h1>
                     {selectedProduct.presentation && (
                       <p className="text-sm font-black text-emerald-600 uppercase tracking-wide mb-1">

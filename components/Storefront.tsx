@@ -84,7 +84,7 @@ import {
   DEPARTMENT_MAPPING,
 } from "../lib/departments";
 import { StorefrontFooter } from "./StorefrontFooter";
-import { findProductBySlugOrId, extractProductLookupToken } from "../lib/store";
+import { findProductBySlugOrId, extractProductLookupToken, notifySeoUrlChange } from "../lib/store";
 import { captureAndPersistOrderOrigin } from "../lib/orderOrigin";
 import {
   parseRepeatOrderParam,
@@ -1857,6 +1857,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
       url.searchParams.set("dept_id", dept);
     }
     window.history.replaceState({}, "", url.toString());
+    notifySeoUrlChange();
   };
 
   const selectDepartmentAndCategory = (dept: string, cat: string) => {
@@ -1886,6 +1887,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
       url.searchParams.set("category_id", cat);
     }
     window.history.replaceState({}, "", url.toString());
+    notifySeoUrlChange();
   };
 
   const selectCategory = (cat: string) => {
@@ -1910,6 +1912,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
       url.searchParams.set("category_id", cat);
     }
     window.history.replaceState({}, "", url.toString());
+    notifySeoUrlChange();
   };
 
   const selectPromotion = useCallback((promoId: string | null) => {
@@ -1942,6 +1945,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
     url.searchParams.delete("dept_id");
     url.searchParams.delete("cupom_id");
     window.history.replaceState({}, "", url.toString());
+    notifySeoUrlChange();
   }, [startFilterTransition, INITIAL_PAGE_SIZE]);
 
   const selectCoupon = useCallback((coupon: CouponRule) => {
@@ -1970,6 +1974,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
     url.searchParams.delete("dept_id");
     url.searchParams.delete("category_id");
     window.history.replaceState({}, "", url.toString());
+    notifySeoUrlChange();
   }, [startFilterTransition, INITIAL_PAGE_SIZE]);
 
   const resetFilters = useCallback(() => {
@@ -1998,6 +2003,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
     url.searchParams.delete("category_id");
     url.searchParams.delete("cupom_id");
     window.history.replaceState({}, "", url.toString());
+    notifySeoUrlChange();
   }, [startFilterTransition, INITIAL_PAGE_SIZE]);
 
   useEffect(() => {
@@ -2105,6 +2111,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
     }
     if (changed) {
       window.history.replaceState({}, "", url.toString());
+      notifySeoUrlChange();
     }
   }, [selectedPromotion]);
 
@@ -4443,6 +4450,7 @@ export const Storefront: React.FC<StorefrontProps> = ({
                           }
                           if (urlChanged) {
                             window.history.replaceState({}, "", url.toString());
+                            notifySeoUrlChange();
                           }
                         }
                         return newFilters;
@@ -4769,9 +4777,15 @@ export const Storefront: React.FC<StorefrontProps> = ({
               OFERTAS DO MÊS
             </span>
           </div>
-          <h2 className="text-3xl md:text-5xl lg:text-6xl font-black tracking-tighter leading-[0.9] lg:max-w-none w-full drop-shadow-2xl">
-            {tenant.bannerTitle || tenant.name}
-          </h2>
+          {selectedProduct ? (
+            <h2 className="text-3xl md:text-5xl lg:text-6xl font-black tracking-tighter leading-[0.9] lg:max-w-none w-full drop-shadow-2xl">
+              {tenant.bannerTitle || tenant.name}
+            </h2>
+          ) : (
+            <h1 className="text-3xl md:text-5xl lg:text-6xl font-black tracking-tighter leading-[0.9] lg:max-w-none w-full drop-shadow-2xl">
+              {tenant.bannerTitle || tenant.name}
+            </h1>
+          )}
           {tenant.bannerSubtitle && (
             <p className="text-white/70 font-bold text-sm md:text-lg lg:text-xl lg:max-w-none w-full leading-relaxed uppercase tracking-widest mt-0">
               {tenant.bannerSubtitle}

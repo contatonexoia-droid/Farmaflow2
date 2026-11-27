@@ -265,7 +265,29 @@ export default async function handler(req: any, res: any) {
     const safeLogo = esc(logoUrl);
     const safeDesc = esc(description);
     const imageType = detectImageType(logoUrl);
-    const safeUrl = esc(hostStr ? `https://${hostStr}` : 'https://drogaria-esplendido.farmaflow.online');
+    const lowerOgHost = hostStr.toLowerCase().split(':')[0];
+    const cleanOgSlug = (slug || '')
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9\s-]/g, '')
+      .trim()
+      .replace(/\s+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+    const isMainOgHost =
+      !lowerOgHost ||
+      lowerOgHost === 'farmaflow.online' ||
+      lowerOgHost === 'www.farmaflow.online' ||
+      lowerOgHost.endsWith('.farmaflow.online') ||
+      lowerOgHost === 'nexoia.online' ||
+      lowerOgHost.endsWith('.nexoia.online');
+    const canonicalHref = isMainOgHost
+      ? cleanOgSlug
+        ? `https://farmaflow.online/loja/${encodeURIComponent(cleanOgSlug)}`
+        : 'https://farmaflow.online'
+      : `https://${lowerOgHost}`;
+    const safeUrl = esc(canonicalHref);
 
     const html = `<!DOCTYPE html>
 <html lang="pt-BR">
@@ -273,6 +295,7 @@ export default async function handler(req: any, res: any) {
   <meta charset="UTF-8">
   <title>${safeTitle}</title>
   <meta name="description" content="${safeDesc}" />
+  <link rel="canonical" href="${safeUrl}" />
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="${safeTitle}" />
   <meta property="og:title" content="${safeTitle}" />
