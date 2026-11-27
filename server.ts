@@ -27,7 +27,13 @@ import { contactMergeManager } from "./services/contactMergeManager.js";
 import { inboxStore } from "./services/inboxStore.js";
 import { chatStore } from "./services/chatStore.js";
 import { teamStore } from "./services/teamStore.js";
-import { aiAgentService, DEFAULT_AI_AGENT_PROMPT, isolateUrlsInText, extractUrlAndCleanText, ensureStoreUrlCacheBuster, formatToWhatsAppMarkdown, cleanSearchInterjections, PHARMA_EXPANSIONS, extractProductSize, productMatchesSize } from "./services/aiAgentService.js";
+import { aiAgentService, DEFAULT_AI_AGENT_PROMPT, DEFAULT_MANIPULACAO_PROMPT, isolateUrlsInText, extractUrlAndCleanText, ensureStoreUrlCacheBuster, formatToWhatsAppMarkdown, cleanSearchInterjections, PHARMA_EXPANSIONS, extractProductSize, productMatchesSize } from "./services/aiAgentService.js";
+import {
+  getManipulacaoTenant,
+  resolveTenantStoreType,
+  getInboxActiveConversationCounts,
+  processNextQueuedConversationIfFreed,
+} from "./services/manipulacaoRouter.js";
 import { enrichProductWithAi, enrichProductsBatchWithAi, generateProductImageWithAi } from "./services/productAiService.js";
 import {
   evolutionApiService,
@@ -3828,6 +3834,19 @@ app.get("/api/v1/inboxes", async (req, res) => {
       }
     }
 
+    const tenantRow = await getManipulacaoTenant(storeId);
+    const storeType = resolveTenantStoreType(tenantRow);
+    if (storeType === "manipulacao") {
+      const activeCounts = await getInboxActiveConversationCounts(tenantRow?.id || storeId);
+      const enriched = data.map((inbox) => ({
+        ...inbox,
+        ai_routing_enabled: Boolean(inbox.ai_routing_enabled),
+        is_available_for_routing: inbox.is_available_for_routing !== false,
+        active_conversations_count: activeCounts[inbox.id] || 0,
+      }));
+      return res.json({ data: enriched, store_type: "manipulacao" });
+    }
+
     return res.json({ data });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
@@ -3836,7 +3855,17 @@ app.get("/api/v1/inboxes", async (req, res) => {
 
 app.post("/api/v1/inboxes", requireNonRestrictedChatAdmin, async (req, res) => {
   try {
-    const { store_id, name, description, whatsapp_instance_id, channel_type, channel_mode, channelMode } = req.body;
+    const {
+      store_id,
+      name,
+      description,
+      whatsapp_instance_id,
+      channel_type,
+      channel_mode,
+      channelMode,
+      ai_routing_enabled,
+      is_available_for_routing,
+    } = req.body;
     const storeId = store_id || (req.headers["x-tenant-id"] as string) || "default";
     if (!name) return res.status(400).json({ error: "Nome é obrigatório." });
 
@@ -3849,7 +3878,11 @@ app.post("/api/v1/inboxes", requireNonRestrictedChatAdmin, async (req, res) => {
       description,
       whatsapp_instance_id,
       channel_type,
-      resolvedMode
+      resolvedMode,
+      {
+        ...(ai_routing_enabled !== undefined ? { ai_routing_enabled: Boolean(ai_routing_enabled) } : {}),
+        ...(is_available_for_routing !== undefined ? { is_available_for_routing: Boolean(is_available_for_routing) } : {}),
+      }
     );
     return res.status(201).json({ data: created });
   } catch (err: any) {
@@ -3860,7 +3893,17 @@ app.post("/api/v1/inboxes", requireNonRestrictedChatAdmin, async (req, res) => {
 app.put("/api/v1/inboxes/:id", requireNonRestrictedChatAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { store_id, name, description, whatsapp_instance_id, channel_type, channel_mode, channelMode } = req.body;
+    const {
+      store_id,
+      name,
+      description,
+      whatsapp_instance_id,
+      channel_type,
+      channel_mode,
+      channelMode,
+      ai_routing_enabled,
+      is_available_for_routing,
+    } = req.body;
     const storeId = store_id || (req.headers["x-tenant-id"] as string) || undefined;
     if (!name) return res.status(400).json({ error: "Nome é obrigatório." });
 
@@ -3873,8 +3916,40 @@ app.put("/api/v1/inboxes/:id", requireNonRestrictedChatAdmin, async (req, res) =
       description,
       whatsapp_instance_id,
       channel_type,
-      { storeId, channelMode: resolvedMode }
+      {
+        storeId,
+        channelMode: resolvedMode,
+        ...(ai_routing_enabled !== undefined ? { ai_routing_enabled: Boolean(ai_routing_enabled) } : {}),
+        ...(is_available_for_routing !== undefined ? { is_available_for_routing: Boolean(is_available_for_routing) } : {}),
+      }
     );
+    return res.json({ data: updated });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch("/api/v1/inboxes/:id/routing", requireNonRestrictedChatAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { store_id, storeId: bodyStoreId, ai_routing_enabled, is_available_for_routing } = req.body || {};
+    const storeId = store_id || bodyStoreId || (req.headers["x-tenant-id"] as string) || undefined;
+
+    const updated = await inboxStore.updateInboxRoutingSettings(id, {
+      storeId,
+      ...(ai_routing_enabled !== undefined ? { ai_routing_enabled: Boolean(ai_routing_enabled) } : {}),
+      ...(is_available_for_routing !== undefined ? { is_available_for_routing: Boolean(is_available_for_routing) } : {}),
+    });
+
+    if (!updated) {
+      return res.status(404).json({ error: "Caixa de entrada não encontrada." });
+    }
+
+    const effectiveStoreId = updated.store_id || storeId;
+    if (effectiveStoreId && is_available_for_routing === true) {
+      void processNextQueuedConversationIfFreed(effectiveStoreId, id);
+    }
+
     return res.json({ data: updated });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
@@ -4314,7 +4389,10 @@ app.all(["/api/v1/tenants/:tenantId/settings", "/api/v1/tenants/settings", "/api
     if (req.method === "GET") {
       return res.json({
         success: true,
-        data: sanitizeTenantErpCredentialsForClient(targetTenant),
+        data: {
+          ...sanitizeTenantErpCredentialsForClient(targetTenant),
+          store_type: resolveTenantStoreType(targetTenant),
+        },
       });
     }
 
@@ -4417,10 +4495,14 @@ app.all(["/api/v1/tenants/:tenantId/settings", "/api/v1/tenants/settings", "/api
       throw error;
     }
 
+    const finalTenantRow = updated || { ...targetTenant, ...updates };
     return res.json({
       success: true,
       message: "Configurações atualizadas com sucesso",
-      data: sanitizeTenantErpCredentialsForClient(updated || { ...targetTenant, ...updates }),
+      data: {
+        ...sanitizeTenantErpCredentialsForClient(finalTenantRow),
+        store_type: resolveTenantStoreType(finalTenantRow),
+      },
     });
   } catch (err: any) {
     console.error("[TenantSettings] Exceção ao processar configurações:", err.message);
@@ -6268,7 +6350,14 @@ app.post("/api/v1/tenants/admin", async (req, res) => {
 
     // Padronização e Enriquecimento Automático para Onboarding Plug-and-Play
     const enrichedPayload = { ...payload };
-    const pharmacyName = enrichedPayload.name || "Nossa Drogaria";
+    const resolvedStoreType: "drogaria" | "manipulacao" =
+      (enrichedPayload.store_type || enrichedPayload.storeType || enrichedPayload.smart_banners?._storeType) === "manipulacao"
+        ? "manipulacao"
+        : "drogaria";
+    enrichedPayload.store_type = resolvedStoreType;
+    delete enrichedPayload.storeType;
+
+    const pharmacyName = enrichedPayload.name || (resolvedStoreType === "manipulacao" ? "Nossa Farmácia de Manipulação" : "Nossa Drogaria");
     const pharmacySlug = enrichedPayload.slug || (enrichedPayload.id ? String(enrichedPayload.id).replace(/^store_/, '') : '');
     if (!enrichedPayload.slug && pharmacySlug) {
       enrichedPayload.slug = pharmacySlug;
@@ -6308,14 +6397,15 @@ app.post("/api/v1/tenants/admin", async (req, res) => {
         active: true,
         provider: 'gemini',
         model: 'gemini-2.5-flash',
-        systemPrompt: DEFAULT_AI_AGENT_PROMPT,
+        systemPrompt: resolvedStoreType === "manipulacao" ? DEFAULT_MANIPULACAO_PROMPT : DEFAULT_AI_AGENT_PROMPT,
         fallbackMessage: "Desculpe, estou com uma instabilidade momentânea. Um de nossos atendentes humanos responderá sua mensagem em breve!",
         transitionToHumanMessage: "Perfeito! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.",
         maxTokens: 500,
         temperature: 0.7,
         maxInteractionsPerSession: 4,
         antiAbuseGuardrailsEnabled: true,
-        strictStoreLinkEnforcement: true,
+        strictStoreLinkEnforcement: resolvedStoreType !== "manipulacao",
+        ...(resolvedStoreType === "manipulacao" ? { manipulacaoRoutingMode: "least_busy" } : {}),
         storeLink: defaultStoreLink
       };
     }
@@ -6464,6 +6554,7 @@ app.post("/api/v1/tenants/admin", async (req, res) => {
       ...(enrichedPayload.smart_banners && typeof enrichedPayload.smart_banners === "object"
         ? enrichedPayload.smart_banners
         : {}),
+      _storeType: resolvedStoreType,
       _erpCredentials: {
         ...existingCredsFromTenant,
         erp_base_url: incomingErpBaseUrl,
@@ -6487,6 +6578,7 @@ app.post("/api/v1/tenants/admin", async (req, res) => {
 
     const stripStructuredHoursFields = (obj: any) => {
       const copy = { ...obj };
+      delete copy.store_type;
       delete copy.opening_time_weekdays;
       delete copy.closing_time_weekdays;
       delete copy.opening_time_saturdays;
@@ -6520,16 +6612,24 @@ app.post("/api/v1/tenants/admin", async (req, res) => {
       return copy;
     };
 
+    const isMissingTenantColErr = (err: any) =>
+      Boolean(
+        err &&
+          (err.code === "42703" ||
+            err.code === "PGRST204" ||
+            /does not exist|Could not find/i.test(String(err.message || "")))
+      );
+
     if (isUpdate) {
       let { data, error } = await supabase
         .from("tenants")
         .upsert(enrichedPayload)
         .select();
-      if (error && (error.code === "42703" || error.message?.includes("does not exist"))) {
-        console.warn("[TENANTS ADMIN] Coluna estruturada não encontrada em tenants, tentando mantendo campos regulatórios:", error.message);
+      if (isMissingTenantColErr(error)) {
+        console.warn("[TENANTS ADMIN] Coluna estruturada não encontrada em tenants, tentando mantendo campos regulatórios:", error?.message);
         const firstFallbackPayload = stripStructuredHoursFields(enrichedPayload);
         const firstRetry = await supabase.from("tenants").upsert(firstFallbackPayload).select();
-        if (firstRetry.error && (firstRetry.error.code === "42703" || firstRetry.error.message?.includes("does not exist"))) {
+        if (isMissingTenantColErr(firstRetry.error)) {
           const cleanPayload = stripRegulatoryFields(enrichedPayload);
           const secondRetry = await supabase.from("tenants").upsert(cleanPayload).select();
           if (secondRetry.error) throw secondRetry.error;
@@ -6548,11 +6648,11 @@ app.post("/api/v1/tenants/admin", async (req, res) => {
         .from("tenants")
         .insert(enrichedPayload)
         .select();
-      if (error && (error.code === "42703" || error.message?.includes("does not exist"))) {
-        console.warn("[TENANTS ADMIN] Coluna estruturada não encontrada em tenants (insert), tentando mantendo campos regulatórios:", error.message);
+      if (isMissingTenantColErr(error)) {
+        console.warn("[TENANTS ADMIN] Coluna estruturada não encontrada em tenants (insert), tentando mantendo campos regulatórios:", error?.message);
         const firstFallbackPayload = stripStructuredHoursFields(enrichedPayload);
         const firstRetry = await supabase.from("tenants").insert(firstFallbackPayload).select();
-        if (firstRetry.error && (firstRetry.error.code === "42703" || firstRetry.error.message?.includes("does not exist"))) {
+        if (isMissingTenantColErr(firstRetry.error)) {
           const cleanPayload = stripRegulatoryFields(enrichedPayload);
           const secondRetry = await supabase.from("tenants").insert(cleanPayload).select();
           if (secondRetry.error) throw secondRetry.error;
@@ -16440,6 +16540,7 @@ function isConversationHumanOrPaused(
     Boolean((conversation as any).assigned_to) ||
     convStatusLower === "human" ||
     convStatusLower === "human_takeover" ||
+    convStatusLower === "waiting_routing" ||
     convStatusLower === "paused" ||
     convStatusLower === "closed" ||
     convStatusLower === "resolved" ||
@@ -17311,9 +17412,10 @@ app.post("/api/v1/chat/webhook", requireChatEnabled, async (req, res) => {
 
               console.log(`[WEBHOOK DEBOUNCE] 💬 Mensagem unificada para envio à IA na conversa ${conversation.id} (replyWithAudio: ${isAudioMessage}):\n"${consolidatedText}"`);
 
-              // g) Disparo Único da Mensagem de Boas-Vindas (se elegível hoje e NÃO for pedido de balconista)
+              // g) Disparo Único da Mensagem de Boas-Vindas (apenas Drogaria padrão; em Manipulação a IA Orquestradora conduz a triagem)
               let welcomeSent = false;
-              if (tenantAutomation.welcomeEnabled && !detectHumanHandoffIntent(consolidatedText).isHumanRequested) {
+              const isManipulacaoStoreWebhook = resolveTenantStoreType(resolvedTenant) === "manipulacao";
+              if (!isManipulacaoStoreWebhook && tenantAutomation.welcomeEnabled && !detectHumanHandoffIntent(consolidatedText).isHumanRequested) {
                 try {
                   welcomeSent = await handleDailyWelcomeMessage(storeId, conversation, instanceName, consolidatedText);
                 } catch (welcomeErr: any) {
@@ -20102,6 +20204,10 @@ const handleStageUpdate = async (req: express.Request, res: express.Response) =>
       manual: isManual,
       updated_at: new Date().toISOString()
     });
+
+    if (finalStage === "finalizado") {
+      void processNextQueuedConversationIfFreed(storeId, updated?.inbox_id);
+    }
 
     return res.json({ success: true, conversation: updated, stage: finalStage });
   } catch (err: any) {

@@ -253,11 +253,18 @@ export const mapDbTenantToApp = (t: any): PharmacyConfig => {
     smartBanners: smartBannersObj,
   });
   
+  const resolvedStoreType: "drogaria" | "manipulacao" =
+    (t.store_type || t.storetype || smartBannersObj?._storeType) === "manipulacao"
+      ? "manipulacao"
+      : "drogaria";
+
   return {
     id: t.id,
     slug: t.slug,
     custom_domain: t.custom_domain || t.customdomain,
     type: "PHARMACY",
+    store_type: resolvedStoreType,
+    storeType: resolvedStoreType,
     name: t.name || "Drogaria Sem Nome",
     whatsapp: t.whatsapp || "",
     logo: t.logo_url || t.logourl || t.logo || "",
@@ -677,6 +684,10 @@ export const saveTenant = async (
       welcome_message_link: tenant.welcomeMessageLink || "",
       is_ai_agent_enabled: tenant.isAiAgentEnabled ?? false,
       ai_agent_config: tenant.aiAgentConfig ?? null,
+      store_type:
+        (tenant.store_type ?? tenant.storeType) === "manipulacao"
+          ? "manipulacao"
+          : "drogaria",
     };
 
     const support = await checkSchemaSupport();
@@ -774,6 +785,10 @@ export const saveTenant = async (
 
     payload.smart_banners = {
       ...(payload.smart_banners || {}),
+      _storeType:
+        (tenant.store_type ?? tenant.storeType) === "manipulacao"
+          ? "manipulacao"
+          : "drogaria",
       _regulatoryData: regData,
       _erpCredentials: {
         ...(payload.smart_banners?._erpCredentials || {}),

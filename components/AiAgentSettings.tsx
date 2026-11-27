@@ -42,8 +42,29 @@ Seu objetivo é recepcionar o cliente com agilidade, tirar dúvidas sobre medica
 6. POSTURA E LIMITES:
    - Mantenha respostas curtas, gentis e objetivas (1 a 3 parágrafos). Não colete dados de cartão de crédito no chat.`;
 
+export const DEFAULT_MANIPULACAO_PROMPT = `Você é a Recepcionista Virtual Inteligente de triagem da Farmácia de Manipulação conectada a esta sessão.
+Seu objetivo é acolher o cliente com simpatia e agilidade no WhatsApp, coletar rapidamente o que ele precisa manipular e encaminhar o atendimento para uma de nossas atendentes/farmacêuticas finalizar o orçamento.
+
+1. COMO CONDUZIR A TRIAGEM INICIAL:
+   - Cumprimente de forma curta, acolhedora e natural (sem textos longos ou robóticos).
+   - Se o cliente ainda apenas cumprimentou (ex: "Oi", "Bom dia"), pergunte como pode ajudar hoje e peça para ele enviar a *foto ou PDF da receita médica*, ou informar o *nome dos ativos/fórmula, dosagem e quantidade* que deseja orçar.
+   - Use EXCLUSIVAMENTE negrito simples do WhatsApp (*texto*). Nunca use **texto**.
+   - NUNCA invente preços de fórmulas manipuladas e NUNCA envie links de loja/catálogo de drogaria.
+
+2. QUANDO FINALIZAR A TRIAGEM PARA DIRECIONAMENTO:
+   - Assim que o cliente informar a fórmula, ativos, dúvida específica de manipulação, orçamento ou pedir para falar com uma atendente/farmacêutica:
+     * Responda de forma breve e simpática confirmando o recebimento das informações.
+     * Inclua EXATAMENTE na última linha da sua resposta a tag técnica e o resumo interno (o sistema removerá esses marcadores antes de enviar ao cliente):
+[FINALIZAR_TRIAGEM_MANIPULACAO]
+RESUMO: <resumo objetivo em 1 linha do pedido, fórmula, receita ou necessidade do cliente>`;
+
 export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConfigUpdate }) => {
   const isSuperAdminAuthorized = config.isAiAgentEnabled === true;
+  const isManipulacao =
+    ((config as any)?.store_type ||
+      (config as any)?.storeType ||
+      (config as any)?.smartBanners?._storeType ||
+      'drogaria') === 'manipulacao';
   const storeDisplayName = (config as any)?.nome_loja || config.name || 'nossa farmácia';
 
   const defaultConfig: AiAgentConfig = {
@@ -51,19 +72,29 @@ export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConf
     provider: 'gemini',
     apiKey: '',
     model: 'gemini-2.5-flash',
-    systemPrompt: DEFAULT_UNIVERSAL_PROMPT,
+    systemPrompt: isManipulacao ? DEFAULT_MANIPULACAO_PROMPT : DEFAULT_UNIVERSAL_PROMPT,
     temperature: 0.7,
     maxTokens: 500,
     fallbackMessage: 'Desculpe, estou com uma instabilidade momentânea. Um de nossos atendentes humanos responderá sua mensagem em breve!',
     maxInteractionsPerSession: 4,
-    transitionToHumanMessage: 'Perfeito! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.',
+    transitionToHumanMessage: isManipulacao
+      ? 'Recebi suas informações! Já estou encaminhando seu atendimento para uma de nossas atendentes finalizar o seu orçamento em instantes.'
+      : 'Perfeito! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.',
     antiAbuseGuardrailsEnabled: true,
-    strictStoreLinkEnforcement: true,
+    strictStoreLinkEnforcement: isManipulacao ? false : true,
+    manipulacaoRoutingMode: 'least_busy',
   };
 
-  const [agentConfig, setAgentConfig] = useState<AiAgentConfig>({
-    ...defaultConfig,
-    ...(config.aiAgentConfig || {}),
+  const [agentConfig, setAgentConfig] = useState<AiAgentConfig>(() => {
+    const savedPrompt = config.aiAgentConfig?.systemPrompt;
+    return {
+      ...defaultConfig,
+      ...(config.aiAgentConfig || {}),
+      systemPrompt:
+        isManipulacao && (!savedPrompt || savedPrompt === DEFAULT_UNIVERSAL_PROMPT)
+          ? DEFAULT_MANIPULACAO_PROMPT
+          : (savedPrompt || defaultConfig.systemPrompt),
+    };
   });
 
   const [showApiKey, setShowApiKey] = useState(false);
@@ -245,14 +276,21 @@ export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConf
             <Bot size={28} />
           </div>
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <h4 className="text-xl font-black text-gray-900">Agente de Atendimento Inteligente</h4>
               <span className={`text-[10px] font-black uppercase px-2.5 py-0.5 rounded-full ${agentConfig.enabled ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-200 text-gray-600'}`}>
                 {agentConfig.enabled ? 'Ativo' : 'Pausado'}
               </span>
+              {isManipulacao && (
+                <span className="text-[10px] font-black uppercase px-2.5 py-0.5 rounded-full bg-teal-100 text-teal-800">
+                  Manipulação • Orquestrador
+                </span>
+              )}
             </div>
             <p className="text-xs text-gray-500 mt-0.5">
-              Personalize as instruções de atendimento e conecte sua chave de API para atendimento automatizado.
+              {isManipulacao
+                ? 'Modo Farmácia de Manipulação: a IA faz a triagem inicial (receita/fórmula) e direciona para a caixa de entrada livre.'
+                : 'Personalize as instruções de atendimento e conecte sua chave de API para atendimento automatizado.'}
             </p>
           </div>
         </div>
@@ -393,7 +431,7 @@ export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConf
                 </div>
                 <button
                   type="button"
-                  onClick={() => setAgentConfig({ ...agentConfig, systemPrompt: DEFAULT_UNIVERSAL_PROMPT })}
+                  onClick={() => setAgentConfig({ ...agentConfig, systemPrompt: isManipulacao ? DEFAULT_MANIPULACAO_PROMPT : DEFAULT_UNIVERSAL_PROMPT })}
                   className="text-xs font-bold text-purple-600 hover:text-purple-800 transition-colors flex items-center gap-1"
                 >
                   <RefreshCw size={12} /> Restaurar Padrão
@@ -411,7 +449,15 @@ export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConf
                 <div className="bg-purple-50/60 p-3.5 rounded-xl text-[11px] text-purple-900 flex items-start gap-2">
                   <Info size={16} className="shrink-0 mt-0.5 text-purple-700" />
                   <span>
-                    <strong>Dica de Ouro:</strong> O agente recebe automaticamente o catálogo de produtos e preços em estoque para indicar links da sua loja quando o cliente tiver dúvidas de compra.
+                    {isManipulacao ? (
+                      <>
+                        <strong>Modo Manipulação:</strong> O agente realiza a triagem inicial solicitando receita ou fórmula e direciona automaticamente o cliente para uma caixa de entrada disponível sem enviar links de catálogo de drogaria.
+                      </>
+                    ) : (
+                      <>
+                        <strong>Dica de Ouro:</strong> O agente recebe automaticamente o catálogo de produtos e preços em estoque para indicar links da sua loja quando o cliente tiver dúvidas de compra.
+                      </>
+                    )}
                   </span>
                 </div>
               </div>
@@ -503,8 +549,49 @@ export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConf
                 />
               </div>
 
+              {isManipulacao && (
+                <div className="space-y-3 bg-teal-50/70 p-4 md:p-5 rounded-2xl border border-teal-200/80">
+                  <div className="space-y-0.5">
+                    <label className="text-xs font-black uppercase text-teal-950 block">
+                      Regra quando todas as caixas estiverem ocupadas
+                    </label>
+                    <p className="text-[11px] text-teal-800">
+                      A Prioridade 1 sempre direciona para uma caixa com 0 atendimentos ativos. Escolha o comportamento quando todas estiverem ocupadas:
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-1 gap-2.5">
+                    <label className={`flex items-start gap-3 p-3 rounded-xl border-2 cursor-pointer transition-all ${(agentConfig.manipulacaoRoutingMode || 'least_busy') === 'least_busy' ? 'bg-white border-teal-500 shadow-xs' : 'bg-white/60 border-transparent hover:bg-white'}`}>
+                      <input
+                        type="radio"
+                        name="manipulacaoRoutingMode"
+                        checked={(agentConfig.manipulacaoRoutingMode || 'least_busy') === 'least_busy'}
+                        onChange={() => setAgentConfig({ ...agentConfig, manipulacaoRoutingMode: 'least_busy' })}
+                        className="mt-0.5 text-teal-600 focus:ring-teal-500"
+                      />
+                      <div>
+                        <span className="text-xs font-black text-gray-900 block">Direcionar para a caixa com menos atendimentos ativos</span>
+                        <span className="text-[11px] text-gray-500 block">Balanceamento imediato entre as atendentes disponíveis, evitando espera.</span>
+                      </div>
+                    </label>
+                    <label className={`flex items-start gap-3 p-3 rounded-xl border-2 cursor-pointer transition-all ${agentConfig.manipulacaoRoutingMode === 'wait_for_free' ? 'bg-white border-teal-500 shadow-xs' : 'bg-white/60 border-transparent hover:bg-white'}`}>
+                      <input
+                        type="radio"
+                        name="manipulacaoRoutingMode"
+                        checked={agentConfig.manipulacaoRoutingMode === 'wait_for_free'}
+                        onChange={() => setAgentConfig({ ...agentConfig, manipulacaoRoutingMode: 'wait_for_free' })}
+                        className="mt-0.5 text-teal-600 focus:ring-teal-500"
+                      />
+                      <div>
+                        <span className="text-xs font-black text-gray-900 block">Aguardar em fila até uma atendente ficar livre (0 ativos)</span>
+                        <span className="text-[11px] text-gray-500 block">Mantém o cliente na fila inteligente e transfere assim que uma caixa for finalizada.</span>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+              )}
+
               {/* Toggles de Proteção e Injeção de Link */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
+              <div className={`grid grid-cols-1 ${isManipulacao ? '' : 'sm:grid-cols-2'} gap-4 pt-2`}>
                 <label className="flex items-start gap-3 p-3.5 bg-emerald-50/70 border border-emerald-200 rounded-2xl cursor-pointer hover:bg-emerald-50 transition-colors">
                   <input
                     type="checkbox"
@@ -520,20 +607,22 @@ export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConf
                   </div>
                 </label>
 
-                <label className="flex items-start gap-3 p-3.5 bg-purple-50/70 border border-purple-200 rounded-2xl cursor-pointer hover:bg-purple-50 transition-colors">
-                  <input
-                    type="checkbox"
-                    checked={agentConfig.strictStoreLinkEnforcement !== false}
-                    onChange={(e) => setAgentConfig({ ...agentConfig, strictStoreLinkEnforcement: e.target.checked })}
-                    className="mt-1 rounded text-purple-600 focus:ring-purple-500"
-                  />
-                  <div>
-                    <span className="text-xs font-black text-purple-950 block">Link Obrigatório da Webloja</span>
-                    <span className="text-[11px] text-purple-800 leading-tight block mt-0.5">
-                      Garante que todas as mensagens do bot contenham o link oficial da loja virtual da farmácia.
-                    </span>
-                  </div>
-                </label>
+                {!isManipulacao && (
+                  <label className="flex items-start gap-3 p-3.5 bg-purple-50/70 border border-purple-200 rounded-2xl cursor-pointer hover:bg-purple-50 transition-colors">
+                    <input
+                      type="checkbox"
+                      checked={agentConfig.strictStoreLinkEnforcement !== false}
+                      onChange={(e) => setAgentConfig({ ...agentConfig, strictStoreLinkEnforcement: e.target.checked })}
+                      className="mt-1 rounded text-purple-600 focus:ring-purple-500"
+                    />
+                    <div>
+                      <span className="text-xs font-black text-purple-950 block">Link Obrigatório da Webloja</span>
+                      <span className="text-[11px] text-purple-800 leading-tight block mt-0.5">
+                        Garante que todas as mensagens do bot contenham o link oficial da loja virtual da farmácia.
+                      </span>
+                    </div>
+                  </label>
+                )}
               </div>
             </div>
 
@@ -634,7 +723,7 @@ export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConf
                     handleSendTestMessage();
                   }
                 }}
-                placeholder="Ex: Vocês têm Dipirona 500mg em estoque?"
+                placeholder={isManipulacao ? 'Ex: Olá, gostaria de orçar uma fórmula de minoxidil' : 'Ex: Vocês têm Dipirona 500mg em estoque?'}
                 className="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-3.5 py-2.5 text-xs text-white placeholder-gray-500 outline-none focus:border-purple-500 transition-colors"
               />
               <button

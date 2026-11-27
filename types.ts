@@ -226,6 +226,7 @@ export interface AiAgentConfig {
   transitionToHumanMessage?: string;
   antiAbuseGuardrailsEnabled?: boolean;
   strictStoreLinkEnforcement?: boolean;
+  manipulacaoRoutingMode?: 'least_busy' | 'wait_for_free';
   [key: string]: any;
 }
 
@@ -235,6 +236,8 @@ export interface PharmacyConfig {
   custom_domain?: string;
   owner_id?: string;
   type: "PHARMACY"; // Fixo em PHARMACY
+  store_type?: "drogaria" | "manipulacao";
+  storeType?: "drogaria" | "manipulacao";
   name: string;
   whatsapp: string;
   logo?: string;

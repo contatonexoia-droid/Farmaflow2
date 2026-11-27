@@ -638,6 +638,7 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
     
     setEditData({
         ...tenant,
+        store_type: ((tenant.store_type || tenant.storeType || (tenant.smartBanners as any)?._storeType) === 'manipulacao' ? 'manipulacao' : 'drogaria'),
         admin_password: '', // Clear password on edit. If empty on save, keeps the old one.
         secondaryColor: tenant.secondaryColor || '#047857',
         accentColor: tenant.accentColor || '#10b981'
@@ -728,10 +729,17 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
             finalPassword = existingTenant.admin_password || '';
         }
 
+        const resolvedStoreType: 'drogaria' | 'manipulacao' =
+          ((editData.store_type || editData.storeType || (editData.smartBanners as any)?._storeType) === 'manipulacao')
+            ? 'manipulacao'
+            : 'drogaria';
+
         const newTenant: PharmacyConfig = { 
           ...(existingTenant || {} as any),
           id: cleanId,
           type: 'PHARMACY',
+          store_type: resolvedStoreType,
+          storeType: resolvedStoreType,
           name: editData.name || '',
           whatsapp: (editData.whatsapp || '').replace(/\D/g, '').slice(0, 11),
           primaryColor: editData.primaryColor || '#059669',
@@ -1134,7 +1142,7 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
 
         <button 
             onClick={() => {
-              setEditData({ name: '', whatsapp: '', primaryColor: '#059669', secondaryColor: '#047857', accentColor: '#10b981', id: '', logo: '', admin_email: '', admin_password: '', isBlocked: false, licenseExpiration: '', type: 'PHARMACY', erpUrl: '', erpType: '', cnpj: '', fullAddress: '', corporateEmail: '', isNetworkMaster: false, networkId: '' });
+              setEditData({ name: '', whatsapp: '', primaryColor: '#059669', secondaryColor: '#047857', accentColor: '#10b981', id: '', logo: '', admin_email: '', admin_password: '', isBlocked: false, licenseExpiration: '', type: 'PHARMACY', store_type: 'drogaria', storeType: 'drogaria', erpUrl: '', erpType: '', cnpj: '', fullAddress: '', corporateEmail: '', isNetworkMaster: false, networkId: '' });
               setIsNewTenant(true);
               setIsEditing(true);
               setAttemptedSave(false);
@@ -1194,6 +1202,11 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
                 <div className="mb-6 space-y-2">
                     <div className="flex items-center justify-between text-[10px] font-black uppercase text-gray-400">
                         <span className="flex items-center gap-1.5"><Calendar size={12} /> Expira em: {t.licenseExpiration ? new Date(t.licenseExpiration).toLocaleDateString('pt-BR') : 'Sem data'}</span>
+                        {(t.store_type || t.storeType || (t.smartBanners as any)?._storeType) === 'manipulacao' && (
+                          <span className="flex items-center gap-1 bg-teal-100 text-teal-800 px-2 py-0.5 rounded-md font-extrabold text-[9px]">
+                            <Sparkles size={10} /> Manipulação
+                          </span>
+                        )}
                         {t.isAiAgentEnabled && (
                           <span className="flex items-center gap-1 bg-purple-100 text-purple-700 px-2 py-0.5 rounded-md font-extrabold text-[9px]">
                             <Bot size={10} /> Bot IA
@@ -1300,6 +1313,41 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
                       maxLength={15}
                     />
                   </div>
+                </div>
+
+                <div className="bg-white p-8 rounded-[2.5rem] border border-gray-100 space-y-4">
+                    <div className="flex items-center gap-2 mb-1">
+                        <Store size={16} className="text-emerald-600" />
+                        <span className="text-[11px] font-black text-gray-700 uppercase tracking-widest">Tipo de Empresa / Segmento</span>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <label className={`flex items-start gap-3 cursor-pointer p-4 rounded-2xl border-2 transition-all ${(editData.store_type || editData.storeType || 'drogaria') !== 'manipulacao' ? 'bg-emerald-50/70 border-emerald-500' : 'bg-gray-50 border-transparent hover:bg-gray-100'}`}>
+                            <input
+                              type="radio"
+                              name="companySegment"
+                              checked={(editData.store_type || editData.storeType || 'drogaria') !== 'manipulacao'}
+                              onChange={() => setEditData({ ...editData, store_type: 'drogaria', storeType: 'drogaria' })}
+                              className="mt-1 text-emerald-600"
+                            />
+                            <div>
+                              <span className="font-black text-sm text-gray-900 block">Drogaria (Padrão)</span>
+                              <span className="text-[11px] text-gray-500 leading-snug block mt-0.5">Catálogo, PDV/ERP, Webloja e fluxo padrão de atendimento.</span>
+                            </div>
+                        </label>
+                        <label className={`flex items-start gap-3 cursor-pointer p-4 rounded-2xl border-2 transition-all ${(editData.store_type || editData.storeType) === 'manipulacao' ? 'bg-teal-50/80 border-teal-500' : 'bg-gray-50 border-transparent hover:bg-gray-100'}`}>
+                            <input
+                              type="radio"
+                              name="companySegment"
+                              checked={(editData.store_type || editData.storeType) === 'manipulacao'}
+                              onChange={() => setEditData({ ...editData, store_type: 'manipulacao', storeType: 'manipulacao' })}
+                              className="mt-1 text-teal-600"
+                            />
+                            <div>
+                              <span className="font-black text-sm text-gray-900 block">Farmácia de Manipulação</span>
+                              <span className="text-[11px] text-gray-500 leading-snug block mt-0.5">Habilita o Agente de IA Orquestrador de Atendentes e triagem de receitas.</span>
+                            </div>
+                        </label>
+                    </div>
                 </div>
 
                 <div className="bg-white p-8 rounded-[2.5rem] border border-gray-100 space-y-6">

@@ -728,6 +728,8 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
         const isWaiting =
           c.status === 'PENDING' ||
           c.status === 'WAITING' ||
+          c.status === 'waiting_routing' ||
+          c.kanban_stage === 'waiting_routing' ||
           c.kanban_stage === 'NEW' ||
           c.kanban_stage === 'WAITING' ||
           c.kanban_stage === 'QUEUE';
@@ -1008,9 +1010,12 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
           c.status === 'human_takeover' ||
           c.status === 'HUMAN'
         );
+        const isWaitingRouting = !isClosed && c.status === 'waiting_routing';
         let stage = c.kanban_stage || c.stage;
         if (isClosed) {
           stage = 'finalizado';
+        } else if (isWaitingRouting) {
+          stage = 'waiting_routing';
         } else if (!stage) {
           if (c.status === 'PENDING' || c.status === 'WAITING' || c.bot_handoff_reason === 'STORE_REDIRECT') stage = 'aguardando_pagamento';
           else if (c.status === 'saiu_entrega' || c.status === 'delivery') stage = 'saiu_entrega';
@@ -1022,7 +1027,7 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
           ...c,
           contact: c.contact || { name: 'Cliente sem nome', phone_number: '' },
           is_human_controlled: isHuman,
-          is_bot_active: !isClosed && !isHuman && c.is_bot_active !== false,
+          is_bot_active: !isClosed && !isHuman && !isWaitingRouting && c.is_bot_active !== false,
           kanban_stage: stage,
           stage: stage
         };
@@ -2145,6 +2150,10 @@ export const ChatCentral = ({ currentUser, userRole, tenantId = DEMO_TENANT_ID }
                   {conv.status === 'CLOSED' || conv.kanban_stage === 'CLOSED' ? (
                     <span className="text-[9px] font-black uppercase tracking-wider text-slate-700 bg-slate-100 px-1.5 py-0.5 rounded">
                       Finalizado
+                    </span>
+                  ) : conv.status === 'waiting_routing' || conv.kanban_stage === 'waiting_routing' ? (
+                    <span className="text-[9px] font-black uppercase tracking-wider text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded">
+                      Aguardando Atendente Livre
                     </span>
                   ) : !conv.assigned_user_id ? (
                     <span className="text-[9px] font-black uppercase tracking-wider text-orange-700 bg-orange-100 px-1.5 py-0.5 rounded">

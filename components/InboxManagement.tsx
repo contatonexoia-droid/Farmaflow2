@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Inbox, Plus, Settings, Users, X, Check, Trash2, Smartphone, Shield, Loader2, Building2, Globe, MessageSquare, Instagram, MessageCircle, QrCode, RefreshCw, Zap, Search, CheckSquare, Square, Mail, AlertCircle, RotateCcw } from 'lucide-react';
+import { Inbox, Plus, Settings, Users, X, Check, Trash2, Smartphone, Shield, Loader2, Building2, Globe, MessageSquare, Instagram, MessageCircle, QrCode, RefreshCw, Zap, Search, CheckSquare, Square, Mail, AlertCircle, RotateCcw, Bot } from 'lucide-react';
 import { supabase } from '../services/supabase';
 import toast, { Toaster } from 'react-hot-toast';
 import { WhatsAppConnectModal } from './WhatsAppConnectModal';
@@ -28,8 +28,12 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
     description: '',
     whatsapp_instance_id: '',
     channel_type: 'whatsapp',
-    channel_mode: 'shared' as 'shared' | 'exclusive'
+    channel_mode: 'shared' as 'shared' | 'exclusive',
+    ai_routing_enabled: false,
+    is_available_for_routing: true
   });
+  const [isManipulacao, setIsManipulacao] = useState(false);
+  const [togglingRoutingId, setTogglingRoutingId] = useState<string | null>(null);
   const [formLoading, setFormLoading] = useState(false);
   const [connectInboxId, setConnectInboxId] = useState<string | null>(null);
   const [connectInboxExclusive, setConnectInboxExclusive] = useState<boolean>(false);
@@ -51,11 +55,23 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
   const [selectedTeamIds, setSelectedTeamIds] = useState<string[]>([]);
 
   useEffect(() => {
+    fetchStoreType();
     fetchInboxes();
     fetchTeam();
     fetchWhatsappInstances();
     fetchTeams();
   }, [tenantId]);
+
+  const fetchStoreType = async () => {
+    try {
+      const res = await fetch(`/api/v1/tenants/${tenantId}/settings`);
+      if (res.ok) {
+        const json = await res.json();
+        const st = json?.store_type || json?.storeType || json?.data?.store_type;
+        if (st) setIsManipulacao(st === 'manipulacao');
+      }
+    } catch (_) {}
+  };
 
   const fetchTeams = async () => {
     try {
@@ -111,6 +127,11 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
       const res = await fetch(`/api/v1/inboxes?storeId=${tenantId}`);
       if (res.ok) {
         const json = await res.json();
+        if (json.store_type === 'manipulacao') {
+          setIsManipulacao(true);
+        } else if (json.store_type === 'drogaria') {
+          setIsManipulacao(false);
+        }
         if (json.data) {
           setInboxes(json.data);
           localStorage.setItem(`inboxes_${tenantId}`, JSON.stringify(json.data));
@@ -326,6 +347,13 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
       const shouldOpenExclusiveConnectAfterSave =
         isWhatsappChannel && channelMode === 'exclusive' && !cleanInstanceId;
 
+      const routingPayload = isManipulacao
+        ? {
+            ai_routing_enabled: Boolean(formData.ai_routing_enabled),
+            is_available_for_routing: formData.is_available_for_routing !== false,
+          }
+        : {};
+
       if (formData.id) {
         // Edit existing
         const res = await fetch(`/api/v1/inboxes/${formData.id}`, {
@@ -340,7 +368,8 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
             description: formData.description || '',
             whatsapp_instance_id: cleanInstanceId,
             channel_type: formData.channel_type || 'whatsapp',
-            channel_mode: channelMode
+            channel_mode: channelMode,
+            ...routingPayload
           })
         });
 
@@ -366,6 +395,7 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
             id: formData.id,
             store_id: tenantId,
             ...dbPayload,
+            ...routingPayload,
             channel_type: formData.channel_type || 'whatsapp',
             ...(fallbackExclusiveName ? { exclusive_instance_name: fallbackExclusiveName } : {})
           };
@@ -377,7 +407,8 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
           name: trimmedName, 
           description: formData.description || '', 
           whatsapp_instance_id: resolvedInstId, 
-          channel_type: formData.channel_type || 'whatsapp' 
+          channel_type: formData.channel_type || 'whatsapp',
+          ...routingPayload
         } : item));
         toast.success('Caixa de entrada atualizada com sucesso!');
       } else {
@@ -394,7 +425,8 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
             description: formData.description || '',
             whatsapp_instance_id: cleanInstanceId,
             channel_type: formData.channel_type || 'whatsapp',
-            channel_mode: channelMode
+            channel_mode: channelMode,
+            ...routingPayload
           })
         });
 
@@ -840,6 +872,40 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
     }
   };
 
+  const handleToggleInboxAvailability = async (inbox: any) => {
+    if (!isManipulacao || !inbox?.id) return;
+    const nextAvailable = !(inbox.is_available_for_routing !== false);
+    setTogglingRoutingId(inbox.id);
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch(`/api/v1/inboxes/${inbox.id}/routing`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({
+          store_id: tenantId,
+          is_available_for_routing: nextAvailable
+        })
+      });
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.error || 'Falha ao atualizar disponibilidade da caixa.');
+      }
+      setInboxes(prev =>
+        prev.map(item =>
+          item.id === inbox.id
+            ? { ...item, is_available_for_routing: nextAvailable }
+            : item
+        )
+      );
+      toast.success(nextAvailable ? 'Caixa disponível para receber atendimentos da IA!' : 'Caixa pausada para novos atendimentos da fila.');
+      fetchInboxes();
+    } catch (e: any) {
+      toast.error(e?.message || 'Erro ao alterar disponibilidade.');
+    } finally {
+      setTogglingRoutingId(null);
+    }
+  };
+
   return (
     <div className="animate-in fade-in duration-300 pb-10">
       <Toaster position="top-right" />
@@ -870,7 +936,9 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                 description: '',
                 whatsapp_instance_id: primaryConnectedInstance?.id || '',
                 channel_type: 'whatsapp',
-                channel_mode: 'shared'
+                channel_mode: 'shared',
+                ai_routing_enabled: false,
+                is_available_for_routing: true
               });
               setSelectedTeamIds([]);
               setIsModalOpen(true);
@@ -940,7 +1008,9 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                           ? (linkedInst?.id || '')
                           : (primaryConnectedInstance?.id || inbox.whatsapp_instance_id || ''),
                         channel_type: inbox.channel_type || 'whatsapp',
-                        channel_mode: isExclusiveInst ? 'exclusive' : 'shared'
+                        channel_mode: isExclusiveInst ? 'exclusive' : 'shared',
+                        ai_routing_enabled: Boolean(inbox.ai_routing_enabled),
+                        is_available_for_routing: inbox.is_available_for_routing !== false
                       });
                       setSelectedTeamIds([]);
                       fetchInboxTeams(inbox.id);
@@ -961,6 +1031,57 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                   {inbox.name}
                 </h4>
                 <p className="text-xs text-gray-500 mt-1 line-clamp-2">{inbox.description || 'Sem descrição'}</p>
+                {isManipulacao && (
+                  <div className="mt-3 flex flex-wrap items-center justify-between gap-2 bg-gray-50/90 border border-gray-200/80 rounded-xl px-3 py-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-wider text-purple-700 bg-purple-100/80 px-2 py-0.5 rounded-md">
+                        <Bot className="w-3 h-3" /> {inbox.ai_routing_enabled ? 'Fila IA Ativa' : 'Fora da IA'}
+                      </span>
+                      {(() => {
+                        const activeCount = Number(inbox.active_conversations_count || 0);
+                        const available = inbox.is_available_for_routing !== false;
+                        if (!available) {
+                          return (
+                            <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-md bg-amber-100 text-amber-800">
+                              Pausada para fila
+                            </span>
+                          );
+                        }
+                        if (activeCount === 0) {
+                          return (
+                            <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800">
+                              0 ativos • Livre
+                            </span>
+                          );
+                        }
+                        return (
+                          <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-md bg-orange-100 text-orange-800">
+                            {activeCount} {activeCount === 1 ? 'ativo' : 'ativos'} • Ocupado
+                          </span>
+                        );
+                      })()}
+                    </div>
+                    {inbox.ai_routing_enabled && (
+                      <button
+                        type="button"
+                        disabled={togglingRoutingId === inbox.id}
+                        onClick={() => handleToggleInboxAvailability(inbox)}
+                        className={`text-[10px] font-black uppercase px-2.5 py-1 rounded-lg transition-colors border ${
+                          inbox.is_available_for_routing !== false
+                            ? 'bg-white text-emerald-700 border-emerald-300 hover:bg-emerald-50'
+                            : 'bg-amber-50 text-amber-800 border-amber-300 hover:bg-amber-100'
+                        }`}
+                        title="Alternar disponibilidade imediata para receber atendimentos da IA"
+                      >
+                        {togglingRoutingId === inbox.id
+                          ? 'Salvando...'
+                          : inbox.is_available_for_routing !== false
+                            ? 'Recebendo'
+                            : 'Reativar'}
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div className="mt-auto space-y-3 relative z-10">
@@ -1274,6 +1395,41 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                         </select>
                       </div>
                     )}
+                 </div>
+               )}
+
+               {isManipulacao && (
+                 <div className="space-y-3 bg-purple-50/70 p-4 rounded-2xl border border-purple-200/80">
+                   <div className="flex items-center gap-2">
+                     <Bot className="w-4 h-4 text-purple-700" />
+                     <label className="text-[11px] font-black text-purple-900 uppercase tracking-widest">
+                       IA Orquestradora (Manipulação)
+                     </label>
+                   </div>
+                   <label className="flex items-start gap-2.5 cursor-pointer bg-white p-3 rounded-xl border border-purple-100">
+                     <input
+                       type="checkbox"
+                       checked={Boolean(formData.ai_routing_enabled)}
+                       onChange={e => setFormData({ ...formData, ai_routing_enabled: e.target.checked })}
+                       className="mt-0.5 rounded text-purple-600 focus:ring-purple-500"
+                     />
+                     <div>
+                       <span className="text-xs font-bold text-gray-900 block">Participar da distribuição automática da IA</span>
+                       <span className="text-[11px] text-gray-500 block">Permite que a IA encaminhe clientes triados automaticamente para esta caixa.</span>
+                     </div>
+                   </label>
+                   <label className="flex items-start gap-2.5 cursor-pointer bg-white p-3 rounded-xl border border-purple-100">
+                     <input
+                       type="checkbox"
+                       checked={formData.is_available_for_routing !== false}
+                       onChange={e => setFormData({ ...formData, is_available_for_routing: e.target.checked })}
+                       className="mt-0.5 rounded text-emerald-600 focus:ring-emerald-500"
+                     />
+                     <div>
+                       <span className="text-xs font-bold text-gray-900 block">Disponível para receber atendimentos agora</span>
+                       <span className="text-[11px] text-gray-500 block">Desmarque se a atendente estiver em pausa, almoço ou fora do expediente.</span>
+                     </div>
+                   </label>
                  </div>
                )}
 

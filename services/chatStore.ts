@@ -1941,14 +1941,22 @@ class ChatStore {
       convInfo.stage === 'finalizada'
     ));
 
+    // Preserva a caixa de entrada já atribuída quando a conversa ainda está aberta (ex: transferida pela IA Orquestradora ou manualmente para outro atendente)
+    const effectiveInboxId: string | null =
+      (!isPreviouslyClosed && isValidUuid(convInfo?.inbox_id))
+        ? convInfo.inbox_id.trim()
+        : (resolvedInboxId || (isValidUuid(convInfo?.inbox_id) ? convInfo.inbox_id.trim() : null));
+
+    const isWaitingRouting = Boolean(!isPreviouslyClosed && convInfo?.status === "waiting_routing");
+
     // Se a última mensagem foi há mais de 2 horas ou saudação nova, consideramos uma nova sessão de atendimento da IA
     // Só permite reativação automática por saudação se a última mensagem tiver mais de 12 horas de inatividade (12 * 60 * 60 * 1000)
+    // E NUNCA sobrescreve uma conversa aberta já em atendimento humano ou aguardando na fila
     const lastMsgTime = convInfo?.last_message_at ? new Date(convInfo.last_message_at).getTime() : 0;
     const isGreetingText = /^(boa\s+noite|bom\s+dia|boa\s+tarde|ol[aá]|oi|oii|oiii|hello|hey|opa)\b/i.test(String(text || "").trim());
-    const isNewSessionAfterInactivity = !fromMe && lastMsgTime > 0 && (Date.now() - lastMsgTime > 12 * 60 * 60 * 1000) && isGreetingText;
 
     const alreadyInHumanMode = Boolean(
-      convInfo && (
+      convInfo && !isWaitingRouting && (
         convInfo.is_bot_active === false ||
         convInfo.is_human_controlled === true ||
         convInfo.kanban_stage === "em_atendimento" ||
@@ -1958,10 +1966,28 @@ class ChatStore {
       )
     );
 
-    let finalStage = convInfo ? (alreadyInHumanMode ? "em_atendimento" : (convInfo.kanban_stage || convInfo.stage || resolveConversationKanbanStage(convInfo))) : (fromMe ? (isBotEcho ? "ia_atendendo" : "em_atendimento") : "ia_atendendo");
-    let isBotActive = convInfo ? (alreadyInHumanMode ? false : (convInfo.is_bot_active ?? (finalStage === "ia_atendendo"))) : (!fromMe || isBotEcho);
-    let isHuman = convInfo ? (alreadyInHumanMode ? true : (convInfo.is_human_controlled ?? (finalStage === "em_atendimento" || Boolean(convInfo.assigned_user_id)))) : (fromMe && !isBotEcho);
-    let finalStatus = convInfo ? (alreadyInHumanMode ? (convInfo.status === "human" || convInfo.status === "human_takeover" ? convInfo.status : "human") : (convInfo.status || (isBotActive ? "bot" : (isHuman ? "human" : "OPEN")))) : (fromMe && !isBotEcho ? "human" : "bot");
+    const isNewSessionAfterInactivity =
+      !fromMe &&
+      !alreadyInHumanMode &&
+      !isWaitingRouting &&
+      lastMsgTime > 0 &&
+      (Date.now() - lastMsgTime > 12 * 60 * 60 * 1000) &&
+      isGreetingText;
+
+    let finalStage = convInfo
+      ? (isWaitingRouting
+          ? (convInfo.kanban_stage || "novos_triagem")
+          : (alreadyInHumanMode ? "em_atendimento" : (convInfo.kanban_stage || convInfo.stage || resolveConversationKanbanStage(convInfo))))
+      : (fromMe ? (isBotEcho ? "ia_atendendo" : "em_atendimento") : "ia_atendendo");
+    let isBotActive = convInfo
+      ? (isWaitingRouting ? false : (alreadyInHumanMode ? false : (convInfo.is_bot_active ?? (finalStage === "ia_atendendo"))))
+      : (!fromMe || isBotEcho);
+    let isHuman = convInfo
+      ? (isWaitingRouting ? false : (alreadyInHumanMode ? true : (convInfo.is_human_controlled ?? (finalStage === "em_atendimento" || Boolean(convInfo.assigned_user_id)))))
+      : (fromMe && !isBotEcho);
+    let finalStatus = convInfo
+      ? (isWaitingRouting ? "waiting_routing" : (alreadyInHumanMode ? (convInfo.status === "human" || convInfo.status === "human_takeover" ? convInfo.status : "human") : (convInfo.status || (isBotActive ? "bot" : (isHuman ? "human" : "OPEN")))))
+      : (fromMe && !isBotEcho ? "human" : "bot");
 
     if (fromMe && isBotEcho && !alreadyInHumanMode) {
       isHuman = false;
@@ -2026,7 +2052,7 @@ class ChatStore {
       id: convId,
       store_id: storeId,
       contact_id: contactId,
-      inbox_id: resolvedInboxId || convInfo?.inbox_id || null,
+      inbox_id: effectiveInboxId,
       status: finalStatus,
       is_human_controlled: isHuman,
       is_bot_active: isBotActive,
@@ -2054,7 +2080,7 @@ class ChatStore {
           id: convId,
           store_id: storeId,
           contact_id: contactId,
-          inbox_id: resolvedInboxId,
+          inbox_id: effectiveInboxId,
           last_message_at: now,
           last_message_content: text,
           unread_count: newUnreadCount,
@@ -2135,8 +2161,10 @@ class ChatStore {
           updated_at: now
         };
 
-        if (resolvedInboxId && !convInfo.inbox_id) {
+        if (wasReopened && resolvedInboxId) {
           convUpdateData.inbox_id = resolvedInboxId;
+        } else if (effectiveInboxId && !convInfo.inbox_id) {
+          convUpdateData.inbox_id = effectiveInboxId;
         }
 
         if (isWeblojaOrder) {
@@ -2156,6 +2184,10 @@ class ChatStore {
           convUpdateData.assigned_user_id = null;
           convUpdateData.bot_handoff_reason = null;
           convUpdateData.bot_interaction_count = 0;
+        } else if (isWaitingRouting) {
+          convUpdateData.status = "waiting_routing";
+          convUpdateData.is_bot_active = false;
+          convUpdateData.is_human_controlled = false;
         } else if (isNewSessionAfterInactivity) {
           convUpdateData.kanban_stage = "ia_atendendo";
           convUpdateData.stage = "ia_atendendo";

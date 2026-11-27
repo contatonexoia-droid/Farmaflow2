@@ -14,7 +14,7 @@ const supabaseAdmin = createClient(supabaseUrl, supabaseKey);
 
 const DATA_FILE = path.join(process.cwd(), "inboxes_data.json");
 
-interface InboxItem {
+export interface InboxItem {
   id: string;
   store_id: string;
   name: string;
@@ -23,7 +23,27 @@ interface InboxItem {
   channel_type?: string | null;
   channel_mode?: "shared" | "exclusive";
   exclusive_instance_name?: string | null;
+  ai_routing_enabled?: boolean;
+  is_available_for_routing?: boolean;
+  last_routed_at?: string | null;
   created_at: string;
+}
+
+function isMissingInboxColumnError(error: any): string | null {
+  const msg = String(error?.message || error?.details || "");
+  const code = String(error?.code || "");
+  if (
+    code === "42703" ||
+    code === "PGRST204" ||
+    /does not exist|Could not find the/i.test(msg)
+  ) {
+    const m =
+      msg.match(/Could not find the '([^']+)' column/i) ||
+      msg.match(/column "([^"]+)" of relation "inboxes" does not exist/i) ||
+      msg.match(/column inboxes\.([a-zA-Z0-9_]+) does not exist/i);
+    return m?.[1] || "__unknown__";
+  }
+  return null;
 }
 
 function isExclusiveInstanceName(name?: string | null): boolean {
@@ -87,15 +107,37 @@ class InboxStore {
       console.warn("[InboxStore] Supabase query error, falling back to memory:", err);
     }
 
-    // Ignora IDs sintéticos antigos (ex: inbox_default_*) do cache local
     const fileInboxes = this.inboxes.filter(i => i.store_id === storeId && isValidUuid(i.id));
-    
-    // Combine dbInboxes with any valid-UUID file inboxes that aren't yet in dbInboxes
+    const fileById = new Map<string, InboxItem>(fileInboxes.map(fi => [fi.id, fi]));
+
+    // Combine dbInboxes with file metadata (channel_mode, ai_routing_enabled, is_available_for_routing, last_routed_at)
     const dbIds = new Set(dbInboxes.map(i => i.id));
-    const merged = [...dbInboxes];
+    const merged: InboxItem[] = dbInboxes.map((dbItem) => {
+      const fi = fileById.get(dbItem.id);
+      return {
+        ...dbItem,
+        channel_mode: dbItem.channel_mode || fi?.channel_mode,
+        exclusive_instance_name: dbItem.exclusive_instance_name || fi?.exclusive_instance_name,
+        ai_routing_enabled:
+          typeof dbItem.ai_routing_enabled === "boolean"
+            ? dbItem.ai_routing_enabled
+            : (fi?.ai_routing_enabled ?? false),
+        is_available_for_routing:
+          typeof dbItem.is_available_for_routing === "boolean"
+            ? dbItem.is_available_for_routing
+            : (fi?.is_available_for_routing ?? true),
+        last_routed_at: dbItem.last_routed_at ?? fi?.last_routed_at ?? null,
+      };
+    });
+
     for (const fi of fileInboxes) {
       if (!dbIds.has(fi.id)) {
-        merged.push(fi);
+        merged.push({
+          ...fi,
+          ai_routing_enabled: fi.ai_routing_enabled ?? false,
+          is_available_for_routing: fi.is_available_for_routing ?? true,
+          last_routed_at: fi.last_routed_at ?? null,
+        });
       }
     }
 
@@ -233,12 +275,15 @@ class InboxStore {
     description?: string,
     whatsappInstanceId?: string | null,
     channelType?: string | null,
-    channelMode: "shared" | "exclusive" = "shared"
+    channelMode: "shared" | "exclusive" = "shared",
+    routingOptions?: { ai_routing_enabled?: boolean; is_available_for_routing?: boolean }
   ): Promise<InboxItem> {
     const resolvedChannelType = channelType || "whatsapp";
     let validInstId: string | null = isValidUuid(whatsappInstanceId) ? whatsappInstanceId.trim() : null;
     let exclusiveInstanceName: string | null = null;
     const generatedUuid = crypto.randomUUID();
+    const aiRoutingEnabled = Boolean(routingOptions?.ai_routing_enabled);
+    const isAvailableForRouting = routingOptions?.is_available_for_routing !== false;
 
     if (resolvedChannelType === "whatsapp") {
       if (channelMode === "exclusive") {
@@ -264,6 +309,9 @@ class InboxStore {
       channel_type: resolvedChannelType,
       channel_mode: channelMode,
       ...(exclusiveInstanceName ? { exclusive_instance_name: exclusiveInstanceName } : {}),
+      ai_routing_enabled: aiRoutingEnabled,
+      is_available_for_routing: isAvailableForRouting,
+      last_routed_at: null,
       created_at: new Date().toISOString()
     };
 
@@ -273,29 +321,47 @@ class InboxStore {
         store_id: storeId,
         name,
         description: description || null,
-        whatsapp_instance_id: validInstId
+        whatsapp_instance_id: validInstId,
+        ai_routing_enabled: aiRoutingEnabled,
+        is_available_for_routing: isAvailableForRouting,
       };
 
-      const { data, error } = await supabaseAdmin
-        .from("inboxes")
-        .insert([payload])
-        .select()
-        .single();
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const { data, error } = await supabaseAdmin
+          .from("inboxes")
+          .insert([payload])
+          .select()
+          .single();
 
-      if (!error && data) {
-        const item: InboxItem = {
-          ...data,
-          channel_type: resolvedChannelType || data.channel_type || "whatsapp",
-          channel_mode: channelMode,
-          ...(exclusiveInstanceName ? { exclusive_instance_name: exclusiveInstanceName } : {})
-        };
-        this.inboxes = this.inboxes.filter(i => i.id !== item.id && isValidUuid(i.id));
-        this.inboxes.push(item);
-        this.saveToFile();
-        return item;
-      }
-      if (error) {
-        console.warn("[InboxStore] Supabase insert warning:", error.message);
+        if (!error && data) {
+          const item: InboxItem = {
+            ...data,
+            channel_type: resolvedChannelType || data.channel_type || "whatsapp",
+            channel_mode: channelMode,
+            ...(exclusiveInstanceName ? { exclusive_instance_name: exclusiveInstanceName } : {}),
+            ai_routing_enabled: typeof data.ai_routing_enabled === "boolean" ? data.ai_routing_enabled : aiRoutingEnabled,
+            is_available_for_routing: typeof data.is_available_for_routing === "boolean" ? data.is_available_for_routing : isAvailableForRouting,
+            last_routed_at: data.last_routed_at ?? null,
+          };
+          this.inboxes = this.inboxes.filter(i => i.id !== item.id && isValidUuid(i.id));
+          this.inboxes.push(item);
+          this.saveToFile();
+          return item;
+        }
+        const missingCol = isMissingInboxColumnError(error);
+        if (missingCol) {
+          if (missingCol !== "__unknown__" && missingCol in payload) {
+            delete payload[missingCol];
+          } else {
+            delete payload.ai_routing_enabled;
+            delete payload.is_available_for_routing;
+          }
+          continue;
+        }
+        if (error) {
+          console.warn("[InboxStore] Supabase insert warning:", error.message);
+          break;
+        }
       }
     } catch (err) {
       console.warn("[InboxStore] Supabase insert failed, using fallback:", err);
@@ -313,7 +379,12 @@ class InboxStore {
     description?: string,
     whatsappInstanceId?: string | null,
     channelType?: string | null,
-    options?: { storeId?: string; channelMode?: "shared" | "exclusive" }
+    options?: {
+      storeId?: string;
+      channelMode?: "shared" | "exclusive";
+      ai_routing_enabled?: boolean;
+      is_available_for_routing?: boolean;
+    }
   ): Promise<InboxItem> {
     const resolvedChannelType = channelType || "whatsapp";
     const resolvedMode: "shared" | "exclusive" = options?.channelMode === "exclusive" ? "exclusive" : "shared";
@@ -359,31 +430,62 @@ class InboxStore {
       }
     }
 
+    const existingLocal = this.inboxes.find(i => i.id === id);
+    const resolvedAiRouting =
+      options?.ai_routing_enabled !== undefined
+        ? Boolean(options.ai_routing_enabled)
+        : (existingLocal?.ai_routing_enabled ?? false);
+    const resolvedAvailable =
+      options?.is_available_for_routing !== undefined
+        ? Boolean(options.is_available_for_routing)
+        : (existingLocal?.is_available_for_routing ?? true);
+
     const payload: any = {
       name,
       description: description || "",
-      whatsapp_instance_id: validInstId
+      whatsapp_instance_id: validInstId,
+      ...(options?.ai_routing_enabled !== undefined ? { ai_routing_enabled: resolvedAiRouting } : {}),
+      ...(options?.is_available_for_routing !== undefined ? { is_available_for_routing: resolvedAvailable } : {}),
     };
 
     if (isValidUuid(id)) {
       try {
-        const { data, error } = await supabaseAdmin
-          .from("inboxes")
-          .update(payload)
-          .eq("id", id)
-          .select()
-          .single();
+        const dbPayload = { ...payload };
+        for (let attempt = 0; attempt < 4; attempt++) {
+          const { data, error } = await supabaseAdmin
+            .from("inboxes")
+            .update(dbPayload)
+            .eq("id", id)
+            .select()
+            .single();
 
-        if (!error && data) {
-          const updatedItem: InboxItem = {
-            ...data,
-            channel_type: resolvedChannelType,
-            channel_mode: resolvedMode,
-            ...(exclusiveInstanceName ? { exclusive_instance_name: exclusiveInstanceName } : {})
-          };
-          this.inboxes = this.inboxes.map(i => i.id === id ? updatedItem : i);
-          this.saveToFile();
-          return updatedItem;
+          if (!error && data) {
+            const updatedItem: InboxItem = {
+              ...data,
+              channel_type: resolvedChannelType,
+              channel_mode: resolvedMode,
+              ...(exclusiveInstanceName ? { exclusive_instance_name: exclusiveInstanceName } : {}),
+              ai_routing_enabled: typeof data.ai_routing_enabled === "boolean" ? data.ai_routing_enabled : resolvedAiRouting,
+              is_available_for_routing: typeof data.is_available_for_routing === "boolean" ? data.is_available_for_routing : resolvedAvailable,
+              last_routed_at: data.last_routed_at ?? existingLocal?.last_routed_at ?? null,
+            };
+            this.inboxes = this.inboxes.some(i => i.id === id)
+              ? this.inboxes.map(i => i.id === id ? updatedItem : i)
+              : [...this.inboxes, updatedItem];
+            this.saveToFile();
+            return updatedItem;
+          }
+          const missingCol = isMissingInboxColumnError(error);
+          if (missingCol) {
+            if (missingCol !== "__unknown__" && missingCol in dbPayload) {
+              delete dbPayload[missingCol];
+            } else {
+              delete dbPayload.ai_routing_enabled;
+              delete dbPayload.is_available_for_routing;
+            }
+            continue;
+          }
+          break;
         }
       } catch (err) {
         console.warn("[InboxStore] Supabase update failed, using fallback:", err);
@@ -391,10 +493,15 @@ class InboxStore {
     }
 
     const localPayload = {
-      ...payload,
+      name,
+      description: description || "",
+      whatsapp_instance_id: validInstId,
       channel_type: resolvedChannelType,
       channel_mode: resolvedMode,
-      ...(exclusiveInstanceName ? { exclusive_instance_name: exclusiveInstanceName } : {})
+      ...(exclusiveInstanceName ? { exclusive_instance_name: exclusiveInstanceName } : {}),
+      ai_routing_enabled: resolvedAiRouting,
+      is_available_for_routing: resolvedAvailable,
+      last_routed_at: existingLocal?.last_routed_at ?? null,
     };
     const index = this.inboxes.findIndex(i => i.id === id);
     if (index >= 0) {
@@ -405,6 +512,106 @@ class InboxStore {
     }
     this.saveToFile();
     return this.inboxes.find(i => i.id === id) || { id, store_id: effectiveStoreId || "default", created_at: new Date().toISOString(), ...localPayload };
+  }
+
+  public async updateInboxRoutingSettings(
+    id: string,
+    updates: {
+      storeId?: string;
+      ai_routing_enabled?: boolean;
+      is_available_for_routing?: boolean;
+      last_routed_at?: string | null;
+    }
+  ): Promise<InboxItem | null> {
+    if (!id) return null;
+
+    const dbPatch: Record<string, any> = {};
+    if (updates.ai_routing_enabled !== undefined) {
+      dbPatch.ai_routing_enabled = Boolean(updates.ai_routing_enabled);
+    }
+    if (updates.is_available_for_routing !== undefined) {
+      dbPatch.is_available_for_routing = Boolean(updates.is_available_for_routing);
+    }
+    if (updates.last_routed_at !== undefined) {
+      dbPatch.last_routed_at = updates.last_routed_at;
+    }
+
+    let dbRow: any = null;
+    if (isValidUuid(id) && Object.keys(dbPatch).length > 0) {
+      try {
+        const tryPatch = { ...dbPatch };
+        for (let attempt = 0; attempt < 4; attempt++) {
+          const { data, error } = await supabaseAdmin
+            .from("inboxes")
+            .update(tryPatch)
+            .eq("id", id)
+            .select()
+            .single();
+          if (!error && data) {
+            dbRow = data;
+            break;
+          }
+          const missingCol = isMissingInboxColumnError(error);
+          if (missingCol) {
+            if (missingCol !== "__unknown__" && missingCol in tryPatch) {
+              delete tryPatch[missingCol];
+            } else {
+              delete tryPatch.ai_routing_enabled;
+              delete tryPatch.is_available_for_routing;
+              delete tryPatch.last_routed_at;
+            }
+            if (Object.keys(tryPatch).length === 0) break;
+            continue;
+          }
+          break;
+        }
+      } catch (err) {
+        console.warn("[InboxStore] updateInboxRoutingSettings fallback:", err);
+      }
+    }
+
+    const index = this.inboxes.findIndex(i => i.id === id);
+    if (index >= 0) {
+      this.inboxes[index] = {
+        ...this.inboxes[index],
+        ...(dbRow || {}),
+        ...dbPatch,
+      };
+      this.saveToFile();
+      return this.inboxes[index];
+    }
+
+    if (dbRow) {
+      const merged: InboxItem = { ...dbRow, ...dbPatch };
+      this.inboxes.push(merged);
+      this.saveToFile();
+      return merged;
+    }
+
+    if (updates.storeId && isValidUuid(id)) {
+      try {
+        const { data: existing } = await supabaseAdmin
+          .from("inboxes")
+          .select("*")
+          .eq("id", id)
+          .maybeSingle();
+        if (existing) {
+          const merged: InboxItem = { ...existing, ...dbPatch };
+          this.inboxes.push(merged);
+          this.saveToFile();
+          return merged;
+        }
+      } catch (_) {}
+    }
+
+    return null;
+  }
+
+  public async markInboxRouted(id: string, storeId?: string): Promise<void> {
+    await this.updateInboxRoutingSettings(id, {
+      storeId,
+      last_routed_at: new Date().toISOString(),
+    });
   }
 
   public async deleteInbox(id: string): Promise<boolean> {

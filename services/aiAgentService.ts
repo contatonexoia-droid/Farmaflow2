@@ -17,6 +17,7 @@ import {
 } from "./botHandoffManager.js";
 import { realtimeHub } from "./realtimeHub.js";
 import { evolutionApiService } from "./evolutionApiService.js";
+import { resolveTenantStoreType, routeManipulacaoConversation } from "./manipulacaoRouter.js";
 
 const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || "https://nalshjhoiecxooejpiaw.supabase.co";
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_Y2lAqlvDUhdjSNtv80GkJA_SiOgynYy";
@@ -88,6 +89,22 @@ Seu objetivo é atender o cliente como um balconista experiente, humano, empáti
    - NUNCA diga que não consegue ouvir áudios. Os áudios dos clientes são automaticamente transcritos pelo sistema antes de chegarem a você.
    - Responda SEMPRE em TEXTO, de forma concisa, educada e natural.`;
 
+export const DEFAULT_MANIPULACAO_PROMPT = `Você é a Recepcionista Virtual Inteligente de triagem da Farmácia de Manipulação conectada a esta sessão.
+Seu objetivo é acolher o cliente com simpatia e agilidade no WhatsApp, coletar rapidamente o que ele precisa manipular e encaminhar o atendimento para uma de nossas atendentes/farmacêuticas finalizar o orçamento.
+
+1. COMO CONDUZIR A TRIAGEM INICIAL:
+   - Cumprimente de forma curta, acolhedora e natural (sem textos longos ou robóticos).
+   - Se o cliente ainda apenas cumprimentou (ex: "Oi", "Bom dia"), pergunte como pode ajudar hoje e peça para ele enviar a *foto ou PDF da receita médica*, ou informar o *nome dos ativos/fórmula, dosagem e quantidade* que deseja orçar.
+   - Use EXCLUSIVAMENTE negrito simples do WhatsApp (*texto*). Nunca use **texto**.
+   - NUNCA invente preços de fórmulas manipuladas e NUNCA envie links de loja/catálogo de drogaria.
+
+2. QUANDO FINALIZAR A TRIAGEM PARA DIRECIONAMENTO:
+   - Assim que o cliente informar a fórmula, ativos, dúvida específica de manipulação, orçamento ou pedir para falar com uma atendente/farmacêutica:
+     * Responda de forma breve e simpática confirmando o recebimento das informações.
+     * Inclua EXATAMENTE na última linha da sua resposta a tag técnica e o resumo interno (o sistema removerá esses marcadores antes de enviar ao cliente):
+[FINALIZAR_TRIAGEM_MANIPULACAO]
+RESUMO: <resumo objetivo em 1 linha do pedido, fórmula, receita ou necessidade do cliente>`;
+
 export interface AiChatMessage {
   role: 'user' | 'model' | 'assistant' | 'system';
   content: string;
@@ -103,6 +120,8 @@ export interface AiAgentExecutionResult {
   maxInteractions?: number;
   handoffReason?: string;
   isBotActive?: boolean;
+  manipulacaoReadyToRoute?: boolean;
+  triageSummary?: string;
 }
 
 const STOP_WORDS = new Set([
@@ -1329,9 +1348,13 @@ export class AiAgentService {
     }
 
     // 5. Preparar Prompt do Sistema com variáveis
-    const storeName = tenant.name || "Nossa Drogaria";
-    let basePrompt = effectiveConfig.systemPrompt || DEFAULT_AI_AGENT_PROMPT;
-    if (basePrompt.includes("Explendido") || basePrompt.includes("Explêndido") || basePrompt.includes("Esplendido")) {
+    const isManipulacao = resolveTenantStoreType(tenant) === "manipulacao";
+    const storeName = tenant.name || (isManipulacao ? "Nossa Farmácia de Manipulação" : "Nossa Drogaria");
+    let basePrompt = effectiveConfig.systemPrompt || (isManipulacao ? DEFAULT_MANIPULACAO_PROMPT : DEFAULT_AI_AGENT_PROMPT);
+    if (isManipulacao && (!effectiveConfig.systemPrompt || effectiveConfig.systemPrompt.trim() === DEFAULT_AI_AGENT_PROMPT.trim())) {
+      basePrompt = DEFAULT_MANIPULACAO_PROMPT;
+    }
+    if (!isManipulacao && (basePrompt.includes("Explendido") || basePrompt.includes("Explêndido") || basePrompt.includes("Esplendido"))) {
       basePrompt = DEFAULT_AI_AGENT_PROMPT;
     }
     basePrompt = basePrompt
@@ -1340,7 +1363,20 @@ export class AiAgentService {
       .replace(/\{NOME_FARMACIA\}/g, storeName)
       .replace(/\{LINK_LOJA\}/g, storeLink);
 
-    // Garantir que as diretrizes de equivalência farmacêutica e resposta de múltiplas opções estejam sempre presentes e rigorosamente atualizadas
+    if (isManipulacao) {
+      if (!basePrompt.includes("[FINALIZAR_TRIAGEM_MANIPULACAO]")) {
+        basePrompt += `\n\n[DIRETRIZ DO ORQUESTRADOR DE MANIPULAÇÃO]:
+- Seu papel é fazer a triagem inicial (pedir foto/PDF da receita ou detalhes da fórmula/ativos) sem inventar preços e sem enviar links de catálogo de drogaria.
+- Assim que o cliente informar a necessidade/fórmula/orçamento ou solicitar atendimento humano, conclua com simpatia e adicione ao final:
+[FINALIZAR_TRIAGEM_MANIPULACAO]
+RESUMO: <resumo curto em 1 linha da solicitação do cliente>`;
+      }
+      if (!basePrompt.includes("Os áudios dos clientes são automaticamente transcritos")) {
+        basePrompt += `\n\nDIRETRIZ OBRIGATÓRIA PARA ÁUDIOS:\n- Os áudios dos clientes são automaticamente transcritos pelo sistema. Responda sempre em texto de forma breve e educada.`;
+      }
+    }
+
+    // Garantir que as diretrizes de equivalência farmacêutica e resposta de múltiplas opções estejam sempre presentes e rigorosamente atualizadas (apenas Drogaria)
     const EQUIVALENCE_RULES = `\n\nREGRAS DE EQUIVALÊNCIA FARMACÊUTICA:
 - 'DIPIRONA MONO' (Monoidratada) e 'DIPIRONA SODICA' são rigorosamente o mesmo medicamento (Dipirona).
 - Maxalgina, Dipimed, Novalgina e Nevraldor são nomes comerciais de Dipirona.
@@ -1396,23 +1432,25 @@ RECONHECIMENTO DE ESCOLHA DO CLIENTE:
   * Confirme de forma acolhedora que já anotou/separou a preferência.
   * Continue atendendo o cliente normalmente. NÃO transfira para atendente humano nem diga que um balconista vai assumir a menos que o cliente solicite expressamente.`;
 
-    if (basePrompt.includes("REGRAS DE EQUIVALÊNCIA FARMACÊUTICA")) {
-      basePrompt = basePrompt.replace(/REGRAS DE EQUIVALÊNCIA FARMACÊUTICA:[\s\S]*?(?=\n\n(?:[0-9]+\.|\bDIRETRIZ\b|\bCANAL\b|\bCATÁLOGO\b|\bPOSTURA\b|$))/i, EQUIVALENCE_RULES.trim());
-    } else {
-      basePrompt += EQUIVALENCE_RULES;
-    }
+    if (!isManipulacao) {
+      if (basePrompt.includes("REGRAS DE EQUIVALÊNCIA FARMACÊUTICA")) {
+        basePrompt = basePrompt.replace(/REGRAS DE EQUIVALÊNCIA FARMACÊUTICA:[\s\S]*?(?=\n\n(?:[0-9]+\.|\bDIRETRIZ\b|\bCANAL\b|\bCATÁLOGO\b|\bPOSTURA\b|$))/i, EQUIVALENCE_RULES.trim());
+      } else {
+        basePrompt += EQUIVALENCE_RULES;
+      }
 
-    const AUDIO_PROMPT_RULE = `\n\nDIRETRIZ OBRIGATÓRIA PARA ÁUDIOS:
+      const AUDIO_PROMPT_RULE = `\n\nDIRETRIZ OBRIGATÓRIA PARA ÁUDIOS:
 - NUNCA diga que não consegue ouvir áudios. Os áudios dos clientes são automaticamente transcritos pelo sistema antes de chegarem a você.
 - Responda SEMPRE em TEXTO, de forma concisa, educada e direta (1 a 3 parágrafos), apresentando as opções com valores e o link da loja virtual para fechamento.`;
 
-    if (!basePrompt.includes("Os áudios dos clientes são automaticamente transcritos")) {
-      basePrompt += AUDIO_PROMPT_RULE;
+      if (!basePrompt.includes("Os áudios dos clientes são automaticamente transcritos")) {
+        basePrompt += AUDIO_PROMPT_RULE;
+      }
     }
 
-    // 5.1 Regras Dinâmicas de Entrega e Taxa por Bairro / KM / Fixa
+    // 5.1 Regras Dinâmicas de Entrega e Taxa por Bairro / KM / Fixa (Drogaria)
     const deliverySettings = tenant?.delivery_settings || tenant?.deliverySettings;
-    if (deliverySettings && deliverySettings.enabled !== false) {
+    if (!isManipulacao && deliverySettings && deliverySettings.enabled !== false) {
       const dType = deliverySettings.delivery_fee_type || deliverySettings.type || "fixed";
       if (dType === "neighborhood") {
         const activeNeighs = (deliverySettings.neighborhoods || []).filter((n: any) => n.active !== false);
@@ -1459,9 +1497,11 @@ ${freeOrderText}`;
       }
     }
 
-    // 6. Busca contextual aprofundada de produtos no banco de dados real da drogaria
+    // 6. Busca contextual aprofundada de produtos no banco de dados real da drogaria (desativada em Manipulação)
     let catalogContext = "";
-    const choiceCheck = detectCustomerChoiceIntent(incomingMessage, chatHistory);
+    const choiceCheck = isManipulacao
+      ? { isChoice: false }
+      : detectCustomerChoiceIntent(incomingMessage, chatHistory);
     let resolvedChoice: ChosenProductDetails | null = null;
 
     const tenantIds = Array.from(
@@ -1476,7 +1516,9 @@ ${freeOrderText}`;
       )
     );
 
-    if (choiceCheck.isChoice) {
+    if (isManipulacao) {
+      catalogContext = "";
+    } else if (choiceCheck.isChoice) {
       resolvedChoice = await resolveCustomerChosenProduct(
         incomingMessage,
         chatHistory,
@@ -1569,13 +1611,16 @@ Nenhum produto específico identificado na mensagem.`;
         interactionCount: currentInteraction,
         maxInteractions,
         transferredToHuman: true,
-        handoffReason: "HUMAN_REQUESTED"
+        handoffReason: "HUMAN_REQUESTED",
+        ...(isManipulacao ? { manipulacaoReadyToRoute: true, triageSummary: `Cliente solicitou atendimento humano: "${incomingMessage.slice(0, 160)}"` } : {})
       };
     }
 
     let finalTurnDirective = "";
     if (isFinalSessionTurn) {
-      finalTurnDirective = `\n\n[DIRETRIZ CRÍTICA DE ÚLTIMA INTERAÇÃO DA SESSÃO]:
+      finalTurnDirective = isManipulacao
+        ? `\n\n[DIRETRIZ CRÍTICA DE ÚLTIMA INTERAÇÃO DE TRIAGEM]:\nEncerre a triagem imediatamente confirmando o recebimento e inclua [FINALIZAR_TRIAGEM_MANIPULACAO] e RESUMO: <resumo do pedido>.`
+        : `\n\n[DIRETRIZ CRÍTICA DE ÚLTIMA INTERAÇÃO DA SESSÃO]:
 Esta é a última resposta permitida nesta sessão antes do transbordo para o atendente humano.
 1. Responda a dúvida do cliente de forma conclusiva, amigável e direta.
 2. Informe que já chamou um dos nossos balconistas para continuar o atendimento logo em seguida.`;
@@ -1605,8 +1650,36 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
     if (provider === 'openai') {
       rawResult = await this.callOpenAi(apiKey, effectiveConfig.model || 'gpt-4o-mini', fullSystemInstruction, incomingMessage, chatHistory, storeLink, tenant);
     } else {
-      // Default: Google Gemini
+    // Default: Google Gemini
       rawResult = await this.callGemini(apiKey, effectiveConfig.model || 'gemini-2.5-flash', fullSystemInstruction, incomingMessage, chatHistory, storeLink, tenant);
+    }
+
+    if (isManipulacao) {
+      const hasManipTag = /\[FINALIZAR_TRIAGEM_MANIPULACAO\]/i.test(rawResult.reply);
+      const summaryMatch = rawResult.reply.match(/RESUMO:\s*([^\n]+)/i);
+      const triageSummary = summaryMatch?.[1]?.trim() || incomingMessage.slice(0, 180);
+      const outputSafety = detectAiOutputHandoffIntent(rawResult.reply);
+      const readyToRoute = hasManipTag || isFinalSessionTurn || outputSafety.isHandoffOutput;
+
+      let cleanManipReply = rawResult.reply
+        .replace(/\[FINALIZAR_TRIAGEM_MANIPULACAO\]/gi, '')
+        .replace(/RESUMO:\s*[^\n]*/gi, '')
+        .replace(/\[(TRANSFERIR_ATENDIMENTO|TRANSFER_TO_HUMAN|HANDOFF_HUMAN|TRANSBORDO)\]/gi, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+
+      cleanManipReply = formatToWhatsAppMarkdown(cleanManipReply);
+
+      return {
+        ...rawResult,
+        reply: cleanManipReply,
+        interactionCount: currentInteraction,
+        maxInteractions,
+        transferredToHuman: readyToRoute,
+        handoffReason: readyToRoute ? "MANIPULACAO_TRIAGE_COMPLETE" : undefined,
+        manipulacaoReadyToRoute: readyToRoute,
+        triageSummary
+      };
     }
 
     // 9. DUPLA GARANTIA INFALÍVEL DE TRANSFERÊNCIA (1a Input + 1b Output Safety Net + Limite de Turnos + Checkout)
@@ -2348,10 +2421,11 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       // 1. Obter tenant e validar se o módulo de IA está autorizado (resolvendo o UUID real)
       const tenant = await this.verifyTenantAuthorization(storeId);
       const realTenantId = tenant.id || storeId;
+      const isManipulacao = resolveTenantStoreType(tenant) === "manipulacao";
       const dbConfig: AiAgentConfig = tenant.ai_agent_config || tenant.aiagentconfig || {};
 
       if (dbConfig.active !== true || dbConfig.enabled !== true) {
-        console.log(`[AiAgentService] IA desativada/pausada nas configurações da drogaria "${tenant.name}"`);
+        console.log(`[AiAgentService] IA desativada/pausada nas configurações da loja "${tenant.name}"`);
         return { handled: false, transferredToHuman: false, reason: "AGENT_PAUSED" };
       }
 
@@ -2362,12 +2436,17 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         return { handled: true, transferredToHuman: true, reason: "WEBLOJA_ORDER_RECEIVED" };
       }
 
-      // 2. Obter conversa atual para inspecionar estado do bot (Silêncio Absoluto Pós-Transferência)
+      // 2. Obter conversa atual para inspecionar estado do bot (Silêncio Absoluto Pós-Transferência / Fila)
       const conv = await chatStore.getConversationById(conversationId);
       if (conv) {
         const s = String(conv.status || "").toLowerCase();
         const k = String(conv.kanban_stage || conv.stage || "").toLowerCase();
         const hasAssignedOperator = Boolean(conv.assigned_user_id) || Boolean((conv as any).assigned_to);
+
+        if (s === "waiting_routing") {
+          console.log(`[AiAgentService] ⏳ Conversa ${conversationId} está na fila aguardando atendente livre (waiting_routing). IA em silêncio.`);
+          return { handled: false, transferredToHuman: true, reason: "WAITING_FREE_INBOX" };
+        }
 
         const isHumanControlled =
           conv.is_human_controlled === true ||
@@ -2431,7 +2510,27 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       const isOtherMedia = !isAudioInput && (incomingMessage === "[Vídeo]" || incomingMessage === "[Figurinha]");
 
       if (isDocumentAttachment || isImageAttachment || isOtherMedia) {
-        console.log(`[AiAgentService] Anexo de documento/imagem detectado (${incomingMessage}) para conversa ${conversationId}. Registrando e acionando transbordo para conferência humana.`);
+        console.log(`[AiAgentService] Anexo de documento/imagem detectado (${incomingMessage}) para conversa ${conversationId}.`);
+        if (isManipulacao) {
+          const attachmentLabel = isDocumentAttachment ? "receita/documento em anexo" : "foto/imagem da receita";
+          const routeRes = await routeManipulacaoConversation({
+            storeId: realTenantId,
+            tenant,
+            conversationId,
+            instanceName: targetInstanceName,
+            phoneNumber: cleanPhone,
+            summaryText: `Cliente enviou ${attachmentLabel} para orçamento de manipulação.`,
+            customIntroText: `Olá! Recebemos o seu arquivo/receita com sucesso. 📄`,
+            interactionCount: currentCount + 1,
+          });
+          return {
+            handled: routeRes.handled,
+            replyText: routeRes.replyText,
+            transferredToHuman: true,
+            reason: routeRes.reason,
+          };
+        }
+
         const attachmentType = isDocumentAttachment ? "documento/receita" : "arquivo";
         const replyText = `Olá! Recebemos o seu ${attachmentType} com sucesso. 📄\n\nJá chamei um dos nossos balconistas aqui para conferir e continuar o seu atendimento, só um instante! 😊`;
 
@@ -2466,15 +2565,36 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
 
       // 5. DUPLA GARANTIA (1ª Camada - Input): Gatilho imediato na mensagem do cliente
       const inputHandoffCheck = detectHumanHandoffIntent(incomingMessage);
-      const handoffCheck = await botHandoffManager.processMessageState(
-        conversationId,
-        realTenantId,
-        incomingMessage,
-        conv?.status || "BOT"
-      );
+      const handoffCheck = isManipulacao
+        ? { isBotActive: true, handoffReason: undefined }
+        : await botHandoffManager.processMessageState(
+            conversationId,
+            realTenantId,
+            incomingMessage,
+            conv?.status || "BOT"
+          );
 
       if (inputHandoffCheck.isHumanRequested || handoffCheck.isBotActive === false) {
         const handoffReason = handoffCheck.handoffReason || inputHandoffCheck.reason || "HUMAN_REQUESTED";
+
+        if (isManipulacao) {
+          const routeRes = await routeManipulacaoConversation({
+            storeId: realTenantId,
+            tenant,
+            conversationId,
+            instanceName: targetInstanceName,
+            phoneNumber: cleanPhone,
+            summaryText: `Cliente solicitou atendimento direto (${handoffReason}): "${incomingMessage.slice(0, 180)}"`,
+            interactionCount: currentCount + 1,
+          });
+          return {
+            handled: routeRes.handled,
+            replyText: routeRes.replyText,
+            transferredToHuman: true,
+            reason: routeRes.reason,
+          };
+        }
+
         // Envia APENAS uma mensagem curta, completa e acolhedora, NUNCA anexando link da loja nem card de preview!
         const transMessage = DEFAULT_HUMAN_HANDOFF_MESSAGE;
 
@@ -2581,8 +2701,8 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       const nextCount = currentCount + 1;
       const isFinalTurn = nextCount >= maxInteractions;
 
-      // 8.0. Detecção de confirmação final de endereço e pagamento (Checkout Final)
-      const checkoutCheck = detectFinalCheckoutIntent(incomingMessage);
+      // 8.0. Detecção de confirmação final de endereço e pagamento (Checkout Final) - exclusivo para Drogarias
+      const checkoutCheck = isManipulacao ? { isFinalCheckout: false } : detectFinalCheckoutIntent(incomingMessage);
       if (checkoutCheck.isFinalCheckout) {
         console.log(`[AiAgentService] 📦 Confirmação de endereço/pagamento detectada ("${incomingMessage}") na conversa ${conversationId}. Transferindo para fechamento operacional.`);
         const checkoutReply = `Perfeito! Recebi seus dados para entrega e pagamento. 🛵💨\n\nJá chamei um dos nossos balconistas aqui para conferir e finalizar o envio do seu pedido, só um instante! 😊`;
@@ -2610,8 +2730,8 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         };
       }
 
-      // 8.1. Detecção Especial de Escolha de Produto / Intenção de Compra pelo Cliente
-      const choiceCheck = detectCustomerChoiceIntent(incomingMessage, history);
+      // 8.1. Detecção Especial de Escolha de Produto / Intenção de Compra pelo Cliente - exclusivo para Drogarias
+      const choiceCheck = isManipulacao ? { isChoice: false } : detectCustomerChoiceIntent(incomingMessage, history);
       if (choiceCheck.isChoice) {
         console.log(`[AiAgentService] 🎯 Escolha do cliente detectada ("${incomingMessage}") na conversa ${conversationId}. Identificando produto selecionado para gerar link direto (Turno ${nextCount}/${maxInteractions}).`);
         const tenantIds = Array.from(
@@ -2683,6 +2803,38 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       );
 
       let finalReply = aiResult.reply;
+
+      // 9.1 Fluxo exclusivo do Orquestrador de Manipulação: se a triagem foi concluída, direciona para caixa livre
+      if (isManipulacao) {
+        const readyToRoute =
+          Boolean(aiResult.manipulacaoReadyToRoute) ||
+          Boolean(aiResult.transferredToHuman) ||
+          isFinalTurn ||
+          detectAiOutputHandoffIntent(finalReply).isHandoffOutput;
+
+        if (readyToRoute) {
+          const introForCustomer =
+            finalReply && !/transferindo|direcionad|encaminh/i.test(finalReply)
+              ? finalReply
+              : null;
+          const routeRes = await routeManipulacaoConversation({
+            storeId: realTenantId,
+            tenant,
+            conversationId,
+            instanceName: targetInstanceName,
+            phoneNumber: cleanPhone,
+            summaryText: aiResult.triageSummary || incomingMessage.slice(0, 180),
+            customIntroText: introForCustomer,
+            interactionCount: nextCount,
+          });
+          return {
+            handled: routeRes.handled,
+            replyText: routeRes.replyText,
+            transferredToHuman: true,
+            reason: routeRes.reason,
+          };
+        }
+      }
 
       // 10. DUPLA GARANTIA (2ª Camada - Output Safety Net):
       // Se a resposta gerada pela IA contiver frases de transferência ("transfiro a conversa", "transferir", "vou te conectar",
