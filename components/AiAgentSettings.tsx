@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { PharmacyConfig, AiAgentConfig } from '../types';
 import { 
   Bot, Sparkles, Key, Settings, MessageSquare, Play, RefreshCw, 
@@ -47,16 +47,33 @@ Seu objetivo é acolher o cliente com simpatia e agilidade no WhatsApp, coletar 
 
 1. COMO CONDUZIR A TRIAGEM INICIAL:
    - Cumprimente de forma curta, acolhedora e natural (sem textos longos ou robóticos).
-   - Se o cliente ainda apenas cumprimentou (ex: "Oi", "Bom dia"), pergunte como pode ajudar hoje e peça para ele enviar a *foto ou PDF da receita médica*, ou informar o *nome dos ativos/fórmula, dosagem e quantidade* que deseja orçar.
+   - Se o cliente apenas cumprimentou (ex: "Oi", "Bom dia"), pergunte como pode ajudar hoje e peça para ele enviar a *foto ou PDF da receita médica*, ou informar o *nome dos ativos/fórmula, dosagem e quantidade* que deseja orçar.
+   - Se o cliente perguntar se manipulamos ou temos algum ativo/fórmula (ex: "Tem maca peruana?"), acolha positivamente explicando que preparamos fórmulas personalizadas mediante orçamento com nossa equipe, peça a dosagem/receita se faltar ou já encaminhe para uma atendente finalizar. NUNCA diga que não tem em estoque.
    - Use EXCLUSIVAMENTE negrito simples do WhatsApp (*texto*). Nunca use **texto**.
-   - NUNCA invente preços de fórmulas manipuladas e NUNCA envie links de loja/catálogo de drogaria.
+   - NUNCA invente preços e NUNCA envie links de catálogo ou loja online.
 
 2. QUANDO FINALIZAR A TRIAGEM PARA DIRECIONAMENTO:
-   - Assim que o cliente informar a fórmula, ativos, dúvida específica de manipulação, orçamento ou pedir para falar com uma atendente/farmacêutica:
+   - Assim que o cliente informar a fórmula, ativos, receita, dúvida de orçamento ou pedir para falar com uma atendente/farmacêutica:
      * Responda de forma breve e simpática confirmando o recebimento das informações.
      * Inclua EXATAMENTE na última linha da sua resposta a tag técnica e o resumo interno (o sistema removerá esses marcadores antes de enviar ao cliente):
 [FINALIZAR_TRIAGEM_MANIPULACAO]
 RESUMO: <resumo objetivo em 1 linha do pedido, fórmula, receita ou necessidade do cliente>`;
+
+export const DEFAULT_MANIPULACAO_FORWARD_MESSAGE =
+  'Perfeito! Já recebi suas informações e direcionei o seu atendimento para *{atendente}*, que vai continuar com você agora. 😊';
+
+function isDrugstorePromptUi(prompt?: string | null): boolean {
+  const p = String(prompt || '').trim();
+  if (!p) return true;
+  if (p === DEFAULT_UNIVERSAL_PROMPT.trim()) return true;
+  return (
+    p.includes('Atendente Virtual Inteligente da drogaria') ||
+    p.includes('consultar_dados_loja()') ||
+    p.includes('buscar_produtos(') ||
+    p.includes('REGRAS DE EQUIVALÊNCIA FARMACÊUTICA') ||
+    p.includes('CANAL PREFERENCIAL (CATÁLOGO ONLINE)')
+  );
+}
 
 export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConfigUpdate }) => {
   const isSuperAdminAuthorized = config.isAiAgentEnabled === true;
@@ -67,35 +84,48 @@ export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConf
       'drogaria') === 'manipulacao';
   const storeDisplayName = (config as any)?.nome_loja || config.name || 'nossa farmácia';
 
-  const defaultConfig: AiAgentConfig = {
-    enabled: false,
-    provider: 'gemini',
-    apiKey: '',
-    model: 'gemini-2.5-flash',
-    systemPrompt: isManipulacao ? DEFAULT_MANIPULACAO_PROMPT : DEFAULT_UNIVERSAL_PROMPT,
-    temperature: 0.7,
-    maxTokens: 500,
-    fallbackMessage: 'Desculpe, estou com uma instabilidade momentânea. Um de nossos atendentes humanos responderá sua mensagem em breve!',
-    maxInteractionsPerSession: 4,
-    transitionToHumanMessage: isManipulacao
-      ? 'Recebi suas informações! Já estou encaminhando seu atendimento para uma de nossas atendentes finalizar o seu orçamento em instantes.'
-      : 'Perfeito! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.',
-    antiAbuseGuardrailsEnabled: true,
-    strictStoreLinkEnforcement: isManipulacao ? false : true,
-    manipulacaoRoutingMode: 'least_busy',
+  const buildInitialAgentConfig = (cfgProp: PharmacyConfig, isManip: boolean): AiAgentConfig => {
+    const saved: Partial<AiAgentConfig> = cfgProp.aiAgentConfig || {};
+    const resolvedEnabled = isManip
+      ? saved.enabled === true
+      : (typeof saved.enabled === 'boolean' ? saved.enabled : Boolean(saved.active));
+    const savedPrompt = saved.systemPrompt;
+    const effectivePrompt = isManip
+      ? (isDrugstorePromptUi(savedPrompt) ? DEFAULT_MANIPULACAO_PROMPT : String(savedPrompt))
+      : (savedPrompt || DEFAULT_UNIVERSAL_PROMPT);
+
+    return {
+      ...saved,
+      enabled: resolvedEnabled,
+      active: resolvedEnabled,
+      provider: saved.provider || 'gemini',
+      apiKey: saved.apiKey || '',
+      model: saved.model || (saved.provider === 'openai' ? 'gpt-4o-mini' : 'gemini-2.5-flash'),
+      systemPrompt: effectivePrompt,
+      temperature: saved.temperature ?? 0.7,
+      maxTokens: saved.maxTokens || 500,
+      fallbackMessage:
+        saved.fallbackMessage ||
+        'Desculpe, estou com uma instabilidade momentânea. Um de nossos atendentes humanos responderá sua mensagem em breve!',
+      maxInteractionsPerSession: saved.maxInteractionsPerSession || 4,
+      transitionToHumanMessage: isManip
+        ? (saved.manipulacaoForwardMessage || saved.transitionToHumanMessage || DEFAULT_MANIPULACAO_FORWARD_MESSAGE)
+        : (saved.transitionToHumanMessage ||
+          'Perfeito! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.'),
+      antiAbuseGuardrailsEnabled: saved.antiAbuseGuardrailsEnabled !== false,
+      strictStoreLinkEnforcement: isManip ? false : (saved.strictStoreLinkEnforcement !== false),
+      manipulacaoRoutingMode: saved.manipulacaoRoutingMode || 'least_busy',
+      manipulacaoForwardMessage: saved.manipulacaoForwardMessage || DEFAULT_MANIPULACAO_FORWARD_MESSAGE,
+    };
   };
 
-  const [agentConfig, setAgentConfig] = useState<AiAgentConfig>(() => {
-    const savedPrompt = config.aiAgentConfig?.systemPrompt;
-    return {
-      ...defaultConfig,
-      ...(config.aiAgentConfig || {}),
-      systemPrompt:
-        isManipulacao && (!savedPrompt || savedPrompt === DEFAULT_UNIVERSAL_PROMPT)
-          ? DEFAULT_MANIPULACAO_PROMPT
-          : (savedPrompt || defaultConfig.systemPrompt),
-    };
-  });
+  const [agentConfig, setAgentConfig] = useState<AiAgentConfig>(() =>
+    buildInitialAgentConfig(config, isManipulacao)
+  );
+
+  useEffect(() => {
+    setAgentConfig(buildInitialAgentConfig(config, isManipulacao));
+  }, [config.id, isManipulacao, config.aiAgentConfig?.enabled, config.aiAgentConfig?.active]);
 
   const [showApiKey, setShowApiKey] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -113,6 +143,45 @@ export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConf
   const [testing, setTesting] = useState(false);
   const [testError, setTestError] = useState<string | null>(null);
 
+  const persistAgentConfig = async (cfgToSave: AiAgentConfig) => {
+    const normalizedEnabled = Boolean(cfgToSave.enabled);
+    const payloadAgentCfg: AiAgentConfig = {
+      ...cfgToSave,
+      enabled: normalizedEnabled,
+      active: normalizedEnabled,
+      strictStoreLinkEnforcement: isManipulacao ? false : (cfgToSave.strictStoreLinkEnforcement !== false),
+    };
+    const updatedConfig: PharmacyConfig = {
+      ...config,
+      aiAgentConfig: payloadAgentCfg
+    };
+    await onConfigUpdate(updatedConfig);
+    setAgentConfig(payloadAgentCfg);
+  };
+
+  const handleToggleEnabled = async (nextEnabled: boolean) => {
+    const nextCfg: AiAgentConfig = {
+      ...agentConfig,
+      enabled: nextEnabled,
+      active: nextEnabled,
+    };
+    setAgentConfig(nextCfg);
+    setSaving(true);
+    setSaveError(null);
+    setSaveSuccess(false);
+    try {
+      await persistAgentConfig(nextCfg);
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 3000);
+    } catch (err: any) {
+      console.error("Erro ao alternar status do Agente de IA:", err);
+      setSaveError(err.message || "Erro ao atualizar status do agente. Tente novamente.");
+      setAgentConfig(agentConfig);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const handleSave = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setSaving(true);
@@ -120,12 +189,7 @@ export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConf
     setSaveSuccess(false);
 
     try {
-      const updatedConfig: PharmacyConfig = {
-        ...config,
-        aiAgentConfig: agentConfig
-      };
-
-      await onConfigUpdate(updatedConfig);
+      await persistAgentConfig(agentConfig);
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3500);
     } catch (err: any) {
@@ -146,8 +210,10 @@ export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConf
     const newHistory = [...chatHistory, { role: 'user' as const, content: userText }];
     setChatHistory(newHistory);
 
-    // Validação preventiva de API Key no cliente
-    if (!agentConfig.apiKey?.trim()) {
+    const canUseServerDefaultKey = isManipulacao && agentConfig.provider === 'gemini';
+
+    // Validação preventiva de API Key no cliente (dispensada em Manipulação com Gemini, pois usa a chave padrão do servidor)
+    if (!agentConfig.apiKey?.trim() && !canUseServerDefaultKey) {
       const providerName = agentConfig.provider === 'gemini' ? 'Google AI Studio (Gemini)' : 'OpenAI';
       const keyUrl = agentConfig.provider === 'gemini' ? 'https://aistudio.google.com/app/apikey' : 'https://platform.openai.com/api-keys';
       setChatHistory(prev => [
@@ -301,8 +367,9 @@ export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConf
             <input
               type="checkbox"
               className="sr-only"
-              checked={agentConfig.enabled}
-              onChange={(e) => setAgentConfig({ ...agentConfig, enabled: e.target.checked })}
+              disabled={saving}
+              checked={Boolean(agentConfig.enabled)}
+              onChange={(e) => handleToggleEnabled(e.target.checked)}
             />
             <div className={`block w-12 h-7 rounded-full transition-colors ${agentConfig.enabled ? 'bg-purple-600' : 'bg-gray-300'}`}></div>
             <div className={`absolute left-1 top-1 bg-white w-5 h-5 rounded-full transition-transform ${agentConfig.enabled ? 'transform translate-x-5' : ''}`}></div>
@@ -395,7 +462,11 @@ export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConf
                     type={showApiKey ? 'text' : 'password'}
                     value={agentConfig.apiKey || ''}
                     onChange={(e) => setAgentConfig({ ...agentConfig, apiKey: e.target.value })}
-                    placeholder={agentConfig.provider === 'gemini' ? 'AIzaSy...' : 'sk-...'}
+                    placeholder={
+                      isManipulacao && agentConfig.provider === 'gemini'
+                        ? 'Opcional (usa a chave padrão do servidor se vazio)'
+                        : (agentConfig.provider === 'gemini' ? 'AIzaSy...' : 'sk-...')
+                    }
                     className="w-full bg-gray-50 border-2 border-gray-200 rounded-2xl p-3.5 pr-12 text-sm font-mono font-bold text-gray-800 outline-none focus:border-purple-500 transition-colors"
                   />
                   <button
@@ -406,6 +477,15 @@ export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConf
                     {showApiKey ? <EyeOff size={18} /> : <Eye size={18} />}
                   </button>
                 </div>
+
+                {isManipulacao && (
+                  <div className="bg-teal-50/80 border border-teal-200 p-3.5 rounded-xl text-[11px] text-teal-950 flex items-start gap-2">
+                    <ShieldCheck size={16} className="shrink-0 mt-0.5 text-teal-700" />
+                    <div>
+                      <strong>Transparência de Chave (Modo Orquestrador):</strong> Se o campo acima ficar vazio e <strong>Ativar Agente no Chat</strong> estiver ligado, o Orquestrador utilizará a chave padrão configurada no servidor (<code className="bg-teal-100 px-1 rounded">GEMINI_API_KEY</code>) com Gemini. Se você informar uma chave própria (Gemini ou OpenAI), o sistema usará exclusivamente a chave da sua farmácia.
+                    </div>
+                  </div>
+                )}
                 
                 {agentConfig.provider === 'gemini' && (
                   <div className="bg-amber-50/70 border border-amber-200/80 p-3 rounded-xl text-[11px] text-amber-900 flex items-start gap-2">
@@ -451,7 +531,7 @@ export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConf
                   <span>
                     {isManipulacao ? (
                       <>
-                        <strong>Modo Manipulação:</strong> O agente realiza a triagem inicial solicitando receita ou fórmula e direciona automaticamente o cliente para uma caixa de entrada disponível sem enviar links de catálogo de drogaria.
+                        <strong>Modo Manipulação:</strong> O texto acima é obedecido diretamente pelo Orquestrador para conduzir a triagem (receita/fórmula). Nenhuma consulta de estoque ou link de catálogo de drogaria é executado.
                       </>
                     ) : (
                       <>
@@ -525,29 +605,62 @@ export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConf
                 </div>
               </div>
 
-              {/* Mensagem Padrão de Transição para Atendimento Humano */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-black uppercase text-gray-500">Mensagem de Transição para o Atendente Humano</label>
-                  <button
-                    type="button"
-                    onClick={() => setAgentConfig({
-                      ...agentConfig,
-                      transitionToHumanMessage: 'Perfeito! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.'
-                    })}
-                    className="text-[11px] font-bold text-purple-600 hover:text-purple-800 transition-colors flex items-center gap-1"
-                  >
-                    <RefreshCw size={10} /> Restaurar Padrão
-                  </button>
+              {isManipulacao ? (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-black uppercase text-gray-500">
+                      Mensagem de Encaminhamento ao Atendente
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setAgentConfig({
+                          ...agentConfig,
+                          manipulacaoForwardMessage: DEFAULT_MANIPULACAO_FORWARD_MESSAGE,
+                        })
+                      }
+                      className="text-[11px] font-bold text-purple-600 hover:text-purple-800 transition-colors flex items-center gap-1"
+                    >
+                      <RefreshCw size={10} /> Restaurar Padrão
+                    </button>
+                  </div>
+                  <textarea
+                    rows={2}
+                    value={agentConfig.manipulacaoForwardMessage || ''}
+                    onChange={(e) =>
+                      setAgentConfig({ ...agentConfig, manipulacaoForwardMessage: e.target.value })
+                    }
+                    placeholder={DEFAULT_MANIPULACAO_FORWARD_MESSAGE}
+                    className="w-full bg-gray-50 border-2 border-gray-200 rounded-2xl p-3.5 text-xs md:text-sm font-medium text-gray-800 outline-none focus:border-purple-500 transition-colors"
+                  />
+                  <p className="text-[11px] text-gray-500">
+                    Use a variável <code className="bg-gray-100 px-1.5 py-0.5 rounded font-bold text-teal-700">{'{atendente}'}</code> para inserir automaticamente o nome da caixa/atendente escolhida (ex: <em>Carlos</em>).
+                  </p>
                 </div>
-                <textarea
-                  rows={2}
-                  value={agentConfig.transitionToHumanMessage || ''}
-                  onChange={(e) => setAgentConfig({ ...agentConfig, transitionToHumanMessage: e.target.value })}
-                  placeholder="Ex: Perfeito! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido."
-                  className="w-full bg-gray-50 border-2 border-gray-200 rounded-2xl p-3.5 text-xs md:text-sm font-medium text-gray-800 outline-none focus:border-purple-500 transition-colors"
-                />
-              </div>
+              ) : (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-black uppercase text-gray-500">Mensagem de Transição para o Atendente Humano</label>
+                    <button
+                      type="button"
+                      onClick={() => setAgentConfig({
+                        ...agentConfig,
+                        transitionToHumanMessage: 'Perfeito! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.'
+                      })}
+                      className="text-[11px] font-bold text-purple-600 hover:text-purple-800 transition-colors flex items-center gap-1"
+                    >
+                      <RefreshCw size={10} /> Restaurar Padrão
+                    </button>
+                  </div>
+                  <textarea
+                    rows={2}
+                    value={agentConfig.transitionToHumanMessage || ''}
+                    onChange={(e) => setAgentConfig({ ...agentConfig, transitionToHumanMessage: e.target.value })}
+                    placeholder="Ex: Perfeito! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido."
+                    className="w-full bg-gray-50 border-2 border-gray-200 rounded-2xl p-3.5 text-xs md:text-sm font-medium text-gray-800 outline-none focus:border-purple-500 transition-colors"
+                  />
+                </div>
+              )}
 
               {isManipulacao && (
                 <div className="space-y-3 bg-teal-50/70 p-4 md:p-5 rounded-2xl border border-teal-200/80">
@@ -649,10 +762,16 @@ export const AiAgentSettings: React.FC<AiAgentSettingsProps> = ({ config, onConf
                   <Sparkles size={18} />
                 </div>
                 <div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <h6 className="font-bold text-sm text-white">Simulador do Agente</h6>
                     {agentConfig.apiKey?.trim() ? (
-                      <span className="text-[9px] bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded-full font-bold">Chave Configurada</span>
+                      <span className="text-[9px] bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded-full font-bold">
+                        {isManipulacao ? 'Chave Própria Configurada' : 'Chave Configurada'}
+                      </span>
+                    ) : isManipulacao && agentConfig.provider === 'gemini' ? (
+                      <span className="text-[9px] bg-teal-500/20 text-teal-300 px-2 py-0.5 rounded-full font-bold">
+                        Chave do Servidor (Orquestrador)
+                      </span>
                     ) : (
                       <span className="text-[9px] bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded-full font-bold">Sem Chave</span>
                     )}

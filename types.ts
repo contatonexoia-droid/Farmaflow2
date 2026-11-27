@@ -227,6 +227,7 @@ export interface AiAgentConfig {
   antiAbuseGuardrailsEnabled?: boolean;
   strictStoreLinkEnforcement?: boolean;
   manipulacaoRoutingMode?: 'least_busy' | 'wait_for_free';
+  manipulacaoForwardMessage?: string;
   [key: string]: any;
 }
 

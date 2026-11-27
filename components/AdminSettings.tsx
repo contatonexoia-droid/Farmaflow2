@@ -217,6 +217,18 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
       integration_type: initialErp,
     };
   });
+
+  useEffect(() => {
+    setFormData((prev) => ({
+      ...prev,
+      store_type: config.store_type ?? prev.store_type,
+      storeType: config.storeType ?? prev.storeType,
+      isAiAgentEnabled: config.isAiAgentEnabled,
+      aiAgentConfig: config.aiAgentConfig,
+      smartBanners: config.smartBanners ?? prev.smartBanners,
+    }));
+  }, [config.id, config.store_type, config.storeType, config.isAiAgentEnabled, config.aiAgentConfig]);
+
   const [showSaved, setShowSaved] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);

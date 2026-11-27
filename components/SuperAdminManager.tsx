@@ -811,7 +811,26 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
           isChatEnabled: editData.isChatEnabled || false,
           isAiAgentEnabled: editData.isAiAgentEnabled || false,
           isAiCopilotEnabled: editData.isAiCopilotEnabled || false,
-          aiAgentConfig: editData.aiAgentConfig || existingTenant?.aiAgentConfig,
+          aiAgentConfig: (() => {
+            const baseCfg = editData.aiAgentConfig || existingTenant?.aiAgentConfig;
+            if (resolvedStoreType !== 'manipulacao') return baseCfg;
+            const rawCfg = baseCfg ? { ...baseCfg } : ({} as any);
+            const rawPrompt = String(rawCfg.systemPrompt || '');
+            const looksDrugstore =
+              !rawPrompt.trim() ||
+              rawPrompt.includes('Atendente Virtual Inteligente da drogaria') ||
+              rawPrompt.includes('consultar_dados_loja()') ||
+              rawPrompt.includes('buscar_produtos(') ||
+              rawPrompt.includes('REGRAS DE EQUIVALÊNCIA FARMACÊUTICA');
+            const syncedEnabled = rawCfg.enabled === true;
+            return {
+              ...rawCfg,
+              enabled: syncedEnabled,
+              active: syncedEnabled,
+              strictStoreLinkEnforcement: false,
+              ...(looksDrugstore ? { systemPrompt: '' } : {}),
+            };
+          })(),
           isNetworkMaster: editData.isNetworkMaster || false,
           networkId: editData.networkId || '',
           integrationToken: editData.integrationToken || (existingTenant?.integrationToken) || crypto.randomUUID(),

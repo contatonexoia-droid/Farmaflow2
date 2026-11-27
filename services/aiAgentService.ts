@@ -17,7 +17,13 @@ import {
 } from "./botHandoffManager.js";
 import { realtimeHub } from "./realtimeHub.js";
 import { evolutionApiService } from "./evolutionApiService.js";
-import { resolveTenantStoreType, routeManipulacaoConversation } from "./manipulacaoRouter.js";
+import {
+  resolveTenantStoreType,
+  routeManipulacaoConversation,
+  DEFAULT_MANIPULACAO_FORWARD_MESSAGE
+} from "./manipulacaoRouter.js";
+
+export { DEFAULT_MANIPULACAO_FORWARD_MESSAGE };
 
 const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || "https://nalshjhoiecxooejpiaw.supabase.co";
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_Y2lAqlvDUhdjSNtv80GkJA_SiOgynYy";
@@ -94,16 +100,33 @@ Seu objetivo é acolher o cliente com simpatia e agilidade no WhatsApp, coletar 
 
 1. COMO CONDUZIR A TRIAGEM INICIAL:
    - Cumprimente de forma curta, acolhedora e natural (sem textos longos ou robóticos).
-   - Se o cliente ainda apenas cumprimentou (ex: "Oi", "Bom dia"), pergunte como pode ajudar hoje e peça para ele enviar a *foto ou PDF da receita médica*, ou informar o *nome dos ativos/fórmula, dosagem e quantidade* que deseja orçar.
+   - Se o cliente apenas cumprimentou (ex: "Oi", "Bom dia"), pergunte como pode ajudar hoje e peça para ele enviar a *foto ou PDF da receita médica*, ou informar o *nome dos ativos/fórmula, dosagem e quantidade* que deseja orçar.
+   - Se o cliente perguntar se manipulamos ou temos algum ativo/fórmula (ex: "Tem maca peruana?"), acolha positivamente explicando que preparamos fórmulas personalizadas mediante orçamento com nossa equipe, peça a dosagem/receita se faltar ou já encaminhe para uma atendente finalizar. NUNCA diga que não tem em estoque.
    - Use EXCLUSIVAMENTE negrito simples do WhatsApp (*texto*). Nunca use **texto**.
-   - NUNCA invente preços de fórmulas manipuladas e NUNCA envie links de loja/catálogo de drogaria.
+   - NUNCA invente preços e NUNCA envie links de catálogo ou loja online.
 
 2. QUANDO FINALIZAR A TRIAGEM PARA DIRECIONAMENTO:
-   - Assim que o cliente informar a fórmula, ativos, dúvida específica de manipulação, orçamento ou pedir para falar com uma atendente/farmacêutica:
+   - Assim que o cliente informar a fórmula, ativos, receita, dúvida de orçamento ou pedir para falar com uma atendente/farmacêutica:
      * Responda de forma breve e simpática confirmando o recebimento das informações.
      * Inclua EXATAMENTE na última linha da sua resposta a tag técnica e o resumo interno (o sistema removerá esses marcadores antes de enviar ao cliente):
 [FINALIZAR_TRIAGEM_MANIPULACAO]
 RESUMO: <resumo objetivo em 1 linha do pedido, fórmula, receita ou necessidade do cliente>`;
+
+export function isDrugstoreDefaultPrompt(prompt?: string | null): boolean {
+  const p = String(prompt || "").trim();
+  if (!p) return true;
+  if (p === DEFAULT_AI_AGENT_PROMPT.trim()) return true;
+  if (
+    p.includes("Atendente Virtual Inteligente da drogaria") ||
+    p.includes("consultar_dados_loja()") ||
+    p.includes("buscar_produtos(") ||
+    p.includes("REGRAS DE EQUIVALÊNCIA FARMACÊUTICA") ||
+    p.includes("CANAL PREFERENCIAL (CATÁLOGO ONLINE)")
+  ) {
+    return true;
+  }
+  return false;
+}
 
 export interface AiChatMessage {
   role: 'user' | 'model' | 'assistant' | 'system';
@@ -1239,30 +1262,43 @@ export class AiAgentService {
       (resolvedProvider === 'gemini' ? process.env.GEMINI_API_KEY : process.env.OPENAI_API_KEY)
     )?.trim();
 
-    const resolvedActive =
-      typeof rawConfig.enabled === 'boolean'
-        ? rawConfig.enabled
-        : typeof rawConfig.active === 'boolean'
-          ? rawConfig.active
-          : false;
+    const isManipulacaoTenant = resolveTenantStoreType(tenant) === "manipulacao";
+    const resolvedActive = isManipulacaoTenant
+      ? rawConfig.enabled === true
+      : (typeof rawConfig.enabled === 'boolean'
+          ? rawConfig.enabled
+          : typeof rawConfig.active === 'boolean'
+            ? rawConfig.active
+            : false);
+
+    const resolvedSystemPrompt = isManipulacaoTenant
+      ? (isDrugstoreDefaultPrompt(rawConfig.systemPrompt) ? DEFAULT_MANIPULACAO_PROMPT : String(rawConfig.systemPrompt).trim())
+      : (rawConfig.systemPrompt || DEFAULT_AI_AGENT_PROMPT);
+
+    const resolvedTransitionMsg = isManipulacaoTenant
+      ? (rawConfig.manipulacaoForwardMessage || rawConfig.transitionToHumanMessage || DEFAULT_MANIPULACAO_FORWARD_MESSAGE)
+      : ((rawConfig.transitionToHumanMessage && !rawConfig.transitionToHumanMessage.includes("Encaminhei sua dúvida"))
+          ? rawConfig.transitionToHumanMessage
+          : "Perfeito! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.");
 
     tenant.ai_agent_config = {
+      ...rawConfig,
       provider: resolvedProvider,
       model: rawConfig.model || (resolvedProvider === 'openai' ? 'gpt-4o-mini' : 'gemini-2.5-flash'),
       apiKey: resolvedApiKey,
       openai_api_key: rawConfig.openai_api_key || (resolvedProvider === 'openai' ? resolvedApiKey : undefined),
-      systemPrompt: rawConfig.systemPrompt || DEFAULT_AI_AGENT_PROMPT,
+      systemPrompt: resolvedSystemPrompt,
       fallbackMessage: rawConfig.fallbackMessage || "Desculpe, estou com uma instabilidade momentânea. Um de nossos atendentes humanos responderá sua mensagem em breve!",
-      transitionToHumanMessage: (rawConfig.transitionToHumanMessage && !rawConfig.transitionToHumanMessage.includes("Encaminhei sua dúvida"))
-        ? rawConfig.transitionToHumanMessage
-        : "Perfeito! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.",
+      transitionToHumanMessage: resolvedTransitionMsg,
       maxTokens: rawConfig.maxTokens || 500,
       temperature: rawConfig.temperature ?? 0.7,
       maxInteractionsPerSession: rawConfig.maxInteractionsPerSession || 4,
       antiAbuseGuardrailsEnabled: rawConfig.antiAbuseGuardrailsEnabled !== false,
-      strictStoreLinkEnforcement: rawConfig.strictStoreLinkEnforcement !== false,
+      strictStoreLinkEnforcement: isManipulacaoTenant ? false : (rawConfig.strictStoreLinkEnforcement !== false),
       storeLink: rawConfig.storeLink || tenant.welcome_message_link || (tenant.custom_domain ? `https://${tenant.custom_domain}` : tenant.slug ? `https://${tenant.slug}.farmaflow.online` : `https://${tenant.id}.farmaflow.online`),
-      ...rawConfig,
+      ...(isManipulacaoTenant
+        ? { manipulacaoForwardMessage: rawConfig.manipulacaoForwardMessage || DEFAULT_MANIPULACAO_FORWARD_MESSAGE }
+        : {}),
       active: resolvedActive,
       enabled: resolvedActive
     };
@@ -1309,8 +1345,12 @@ export class AiAgentService {
     };
 
     // Se estiver em modo de execução normal (sem override forçando teste) e o agente estiver desativado
-    if (!configOverride && !effectiveConfig.active) {
-      throw new Error("O Agente de IA está pausado nas configurações da drogaria.");
+    const isManipForReply = resolveTenantStoreType(tenant) === "manipulacao";
+    const isEnabledForReply = isManipForReply
+      ? effectiveConfig.enabled === true
+      : (typeof effectiveConfig.enabled === "boolean" ? effectiveConfig.enabled : Boolean(effectiveConfig.active));
+    if (!configOverride && !isEnabledForReply) {
+      throw new Error("O Agente de IA está pausado nas configurações da loja.");
     }
 
     // 3. Montar link da Loja Online
@@ -1329,29 +1369,31 @@ export class AiAgentService {
     storeLink = ensureStoreUrlCacheBuster(storeLink.replace(/\/+$/, ''));
 
     // 4. Detecção Ativa de Prompt Injection e Padrões Abusivos (Proteção de Custos e Tokens)
+    const isManipulacao = resolveTenantStoreType(tenant) === "manipulacao";
     const guardrailsEnabled = effectiveConfig.antiAbuseGuardrailsEnabled !== false;
     if (guardrailsEnabled) {
       const abuseCheck = detectAbuseOrPromptInjection(incomingMessage);
       if (abuseCheck.isSuspicious) {
         console.warn(`[AiAgentService] Prompt Injection ou Abuso detectado (${tenantId}):`, abuseCheck.reason);
-        const transitionMsg = effectiveConfig.transitionToHumanMessage || buildHumanizedHandoffMessage(storeLink);
-        const safeReply = `Olá! Para garantir sua segurança e o melhor suporte sobre nossos produtos e medicamentos, você pode consultar nosso catálogo completo e valores em nossa Webloja:\n👉 ${storeLink}\n\n${transitionMsg}`;
+        const safeReply = isManipulacao
+          ? "Vou encaminhar o seu atendimento para uma de nossas atendentes dar continuidade por aqui. Só um instante!"
+          : `Olá! Para garantir sua segurança e o melhor suporte sobre nossos produtos e medicamentos, você pode consultar nosso catálogo completo e valores em nossa Webloja:\n👉 ${storeLink}\n\n${effectiveConfig.transitionToHumanMessage || buildHumanizedHandoffMessage(storeLink)}`;
         return {
           reply: safeReply,
           provider: 'guardrails',
           model: 'rule-based-safety',
           storeLinkUsed: storeLink,
           transferredToHuman: true,
-          handoffReason: 'SECURITY_INJECTION_DETECTED'
+          handoffReason: 'SECURITY_INJECTION_DETECTED',
+          ...(isManipulacao ? { manipulacaoReadyToRoute: true, triageSummary: `Atendimento encaminhado pelos filtros de segurança.` } : {})
         };
       }
     }
 
     // 5. Preparar Prompt do Sistema com variáveis
-    const isManipulacao = resolveTenantStoreType(tenant) === "manipulacao";
     const storeName = tenant.name || (isManipulacao ? "Nossa Farmácia de Manipulação" : "Nossa Drogaria");
     let basePrompt = effectiveConfig.systemPrompt || (isManipulacao ? DEFAULT_MANIPULACAO_PROMPT : DEFAULT_AI_AGENT_PROMPT);
-    if (isManipulacao && (!effectiveConfig.systemPrompt || effectiveConfig.systemPrompt.trim() === DEFAULT_AI_AGENT_PROMPT.trim())) {
+    if (isManipulacao && isDrugstoreDefaultPrompt(effectiveConfig.systemPrompt)) {
       basePrompt = DEFAULT_MANIPULACAO_PROMPT;
     }
     if (!isManipulacao && (basePrompt.includes("Explendido") || basePrompt.includes("Explêndido") || basePrompt.includes("Esplendido"))) {
@@ -1365,9 +1407,11 @@ export class AiAgentService {
 
     if (isManipulacao) {
       if (!basePrompt.includes("[FINALIZAR_TRIAGEM_MANIPULACAO]")) {
-        basePrompt += `\n\n[DIRETRIZ DO ORQUESTRADOR DE MANIPULAÇÃO]:
-- Seu papel é fazer a triagem inicial (pedir foto/PDF da receita ou detalhes da fórmula/ativos) sem inventar preços e sem enviar links de catálogo de drogaria.
-- Assim que o cliente informar a necessidade/fórmula/orçamento ou solicitar atendimento humano, conclua com simpatia e adicione ao final:
+        basePrompt += `\n\n[REGRAS ESTRUTURAIS DO ORQUESTRADOR DE MANIPULAÇÃO]:
+- Siga integralmente as instruções acima definidas pela farmácia.
+- NUNCA diga que não tem um ativo ou fórmula em estoque (farmácia de manipulação prepara fórmulas personalizadas mediante orçamento da equipe).
+- NUNCA mencione catálogo pronto ou links de loja online de drogaria.
+- Quando concluir a triagem (após o cliente informar fórmula, ativos, receita, orçamento ou pedir atendimento humano), inclua na última linha estes marcadores internos (removidos automaticamente antes do envio ao cliente):
 [FINALIZAR_TRIAGEM_MANIPULACAO]
 RESUMO: <resumo curto em 1 linha da solicitação do cliente>`;
       }
@@ -1604,7 +1648,9 @@ Nenhum produto específico identificado na mensagem.`;
     const earlyHumanCheck = detectHumanHandoffIntent(incomingMessage);
     if (earlyHumanCheck.isHumanRequested) {
       return {
-        reply: DEFAULT_HUMAN_HANDOFF_MESSAGE,
+        reply: isManipulacao
+          ? "Perfeito! Já estou encaminhando o seu atendimento para uma de nossas atendentes agora mesmo. Só um instante!"
+          : DEFAULT_HUMAN_HANDOFF_MESSAGE,
         provider: effectiveConfig.provider || 'gemini',
         model: effectiveConfig.model || 'rule-based-handoff',
         storeLinkUsed: storeLink,
@@ -1645,13 +1691,13 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       throw new Error(`Por favor, insira sua Chave de API do ${providerLabel} nas configurações ao lado para ativar as respostas inteligentes. Obtenha sua chave em: ${keyUrl}`);
     }
 
-    // 8. Chamada ao Provedor Escolhido
+    // 8. Chamada ao Provedor Escolhido (ferramentas de catálogo/estoque estritamente desativadas para Manipulação)
     let rawResult: AiAgentExecutionResult;
     if (provider === 'openai') {
-      rawResult = await this.callOpenAi(apiKey, effectiveConfig.model || 'gpt-4o-mini', fullSystemInstruction, incomingMessage, chatHistory, storeLink, tenant);
+      rawResult = await this.callOpenAi(apiKey, effectiveConfig.model || 'gpt-4o-mini', fullSystemInstruction, incomingMessage, chatHistory, storeLink, tenant, { disableTools: isManipulacao });
     } else {
     // Default: Google Gemini
-      rawResult = await this.callGemini(apiKey, effectiveConfig.model || 'gemini-2.5-flash', fullSystemInstruction, incomingMessage, chatHistory, storeLink, tenant);
+      rawResult = await this.callGemini(apiKey, effectiveConfig.model || 'gemini-2.5-flash', fullSystemInstruction, incomingMessage, chatHistory, storeLink, tenant, { disableTools: isManipulacao });
     }
 
     if (isManipulacao) {
@@ -2424,8 +2470,8 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       const isManipulacao = resolveTenantStoreType(tenant) === "manipulacao";
       const dbConfig: AiAgentConfig = tenant.ai_agent_config || tenant.aiagentconfig || {};
 
-      if (dbConfig.active !== true || dbConfig.enabled !== true) {
-        console.log(`[AiAgentService] IA desativada/pausada nas configurações da loja "${tenant.name}"`);
+      if (dbConfig.enabled !== true || ( !isManipulacao && dbConfig.active !== true )) {
+        console.log(`[AiAgentService] IA desativada/pausada nas configurações da loja "${tenant.name}" (enabled=${dbConfig.enabled}, active=${dbConfig.active})`);
         return { handled: false, transferredToHuman: false, reason: "AGENT_PAUSED" };
       }
 
@@ -2630,6 +2676,24 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         const abuseCheck = detectAbuseOrPromptInjection(incomingMessage);
         if (abuseCheck.isSuspicious) {
           console.warn(`[AiAgentService] Abuso/Injection bloqueado para conversa ${conversationId}:`, abuseCheck.reason);
+          if (isManipulacao) {
+            const routeRes = await routeManipulacaoConversation({
+              storeId: realTenantId,
+              tenant,
+              conversationId,
+              instanceName: targetInstanceName,
+              phoneNumber: cleanPhone,
+              summaryText: `Encaminhamento preventivo de triagem (${abuseCheck.reason || "SECURITY_INJECTION_DETECTED"}).`,
+              interactionCount: currentCount + 1,
+            });
+            return {
+              handled: routeRes.handled,
+              replyText: routeRes.replyText,
+              transferredToHuman: true,
+              reason: "SECURITY_INJECTION_DETECTED"
+            };
+          }
+
           const safeReply = DEFAULT_HUMAN_HANDOFF_MESSAGE;
 
           const dispatchResult = await this.dispatchBotReplyAndRecord(
@@ -2663,6 +2727,23 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
       // 7. Se já tiver atingido o limite de mensagens da sessão
       if (currentCount >= maxInteractions) {
         console.log(`[AiAgentService] Limite de interações atingido (${currentCount}/${maxInteractions}) para conversa ${conversationId}. Silenciando IA.`);
+        if (isManipulacao) {
+          const routeRes = await routeManipulacaoConversation({
+            storeId: realTenantId,
+            tenant,
+            conversationId,
+            instanceName: targetInstanceName,
+            phoneNumber: cleanPhone,
+            summaryText: `Limite de triagem atingido: "${incomingMessage.slice(0, 180)}"`,
+            interactionCount: currentCount,
+          });
+          return {
+            handled: routeRes.handled,
+            replyText: routeRes.replyText,
+            transferredToHuman: true,
+            reason: "MAX_INTERACTIONS_REACHED"
+          };
+        }
         await botHandoffManager.triggerHandoff(conversationId, realTenantId, "MAX_INTERACTIONS_REACHED", transitionMsg);
         return {
           handled: false,
@@ -3422,6 +3503,13 @@ ${taskInstruction}`;
     storeLink?: string,
     userMessage?: string
   ): Promise<any> {
+    if (resolveTenantStoreType(tenant) === "manipulacao") {
+      return {
+        manipulacao: true,
+        mensagem: "Esta loja é uma Farmácia de Manipulação. Não consulte catálogo ou estoque pronto de drogaria; acolha a solicitação e encaminhe para a equipe de atendimento elaborar o orçamento."
+      };
+    }
+
     if (name === "consultar_dados_loja") {
       const tenantId = tenant?.id;
       let freshTenant = tenant || {};
@@ -3605,7 +3693,8 @@ ${taskInstruction}`;
     incomingMessage: string,
     chatHistory: AiChatMessage[],
     storeLink: string,
-    tenant?: any
+    tenant?: any,
+    options?: { disableTools?: boolean }
   ): Promise<AiAgentExecutionResult> {
     try {
       const ai = new GoogleGenAI({ apiKey });
@@ -3631,7 +3720,7 @@ ${taskInstruction}`;
       const targetModel = modelName || 'gemini-2.5-flash';
 
       const tools: any[] = [];
-      if (tenant) {
+      if (tenant && !options?.disableTools) {
         tools.push({
           functionDeclarations: [
             {
@@ -3756,7 +3845,8 @@ ${taskInstruction}`;
     incomingMessage: string,
     chatHistory: AiChatMessage[],
     storeLink: string,
-    tenant?: any
+    tenant?: any,
+    options?: { disableTools?: boolean }
   ): Promise<AiAgentExecutionResult> {
     try {
       const messages: any[] = [
@@ -3772,7 +3862,7 @@ ${taskInstruction}`;
 
       const targetModel = modelName || 'gpt-4o-mini';
 
-      const openAiTools = tenant ? [
+      const openAiTools = (tenant && !options?.disableTools) ? [
         {
           "type": "function",
           "function": {

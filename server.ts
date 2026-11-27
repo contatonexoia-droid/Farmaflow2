@@ -27,7 +27,7 @@ import { contactMergeManager } from "./services/contactMergeManager.js";
 import { inboxStore } from "./services/inboxStore.js";
 import { chatStore } from "./services/chatStore.js";
 import { teamStore } from "./services/teamStore.js";
-import { aiAgentService, DEFAULT_AI_AGENT_PROMPT, DEFAULT_MANIPULACAO_PROMPT, isolateUrlsInText, extractUrlAndCleanText, ensureStoreUrlCacheBuster, formatToWhatsAppMarkdown, cleanSearchInterjections, PHARMA_EXPANSIONS, extractProductSize, productMatchesSize } from "./services/aiAgentService.js";
+import { aiAgentService, DEFAULT_AI_AGENT_PROMPT, DEFAULT_MANIPULACAO_PROMPT, DEFAULT_MANIPULACAO_FORWARD_MESSAGE, isDrugstoreDefaultPrompt, isolateUrlsInText, extractUrlAndCleanText, ensureStoreUrlCacheBuster, formatToWhatsAppMarkdown, cleanSearchInterjections, PHARMA_EXPANSIONS, extractProductSize, productMatchesSize } from "./services/aiAgentService.js";
 import {
   getManipulacaoTenant,
   resolveTenantStoreType,
@@ -6394,20 +6394,41 @@ app.post("/api/v1/tenants/admin", async (req, res) => {
 
     if (!enrichedPayload.ai_agent_config || typeof enrichedPayload.ai_agent_config !== 'object') {
       enrichedPayload.ai_agent_config = {
-        active: true,
+        active: resolvedStoreType === "manipulacao" ? false : true,
+        enabled: resolvedStoreType === "manipulacao" ? false : undefined,
         provider: 'gemini',
         model: 'gemini-2.5-flash',
         systemPrompt: resolvedStoreType === "manipulacao" ? DEFAULT_MANIPULACAO_PROMPT : DEFAULT_AI_AGENT_PROMPT,
         fallbackMessage: "Desculpe, estou com uma instabilidade momentânea. Um de nossos atendentes humanos responderá sua mensagem em breve!",
-        transitionToHumanMessage: "Perfeito! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.",
+        transitionToHumanMessage: resolvedStoreType === "manipulacao"
+          ? DEFAULT_MANIPULACAO_FORWARD_MESSAGE
+          : "Perfeito! Já notifiquei nossa equipe e um dos nossos balconistas vai dar continuidade ao seu atendimento em instantes para finalizar seu pedido.",
         maxTokens: 500,
         temperature: 0.7,
         maxInteractionsPerSession: 4,
         antiAbuseGuardrailsEnabled: true,
         strictStoreLinkEnforcement: resolvedStoreType !== "manipulacao",
-        ...(resolvedStoreType === "manipulacao" ? { manipulacaoRoutingMode: "least_busy" } : {}),
+        ...(resolvedStoreType === "manipulacao" ? {
+          manipulacaoRoutingMode: "least_busy",
+          manipulacaoForwardMessage: DEFAULT_MANIPULACAO_FORWARD_MESSAGE
+        } : {}),
         storeLink: defaultStoreLink
       };
+    } else if (resolvedStoreType === "manipulacao") {
+      const curCfg = { ...enrichedPayload.ai_agent_config };
+      if (isDrugstoreDefaultPrompt(curCfg.systemPrompt)) {
+        curCfg.systemPrompt = DEFAULT_MANIPULACAO_PROMPT;
+      }
+      curCfg.strictStoreLinkEnforcement = false;
+      if (!curCfg.manipulacaoRoutingMode) curCfg.manipulacaoRoutingMode = "least_busy";
+      if (!curCfg.manipulacaoForwardMessage) curCfg.manipulacaoForwardMessage = DEFAULT_MANIPULACAO_FORWARD_MESSAGE;
+      if (typeof curCfg.enabled === "boolean") {
+        curCfg.active = curCfg.enabled;
+      } else {
+        curCfg.enabled = false;
+        curCfg.active = false;
+      }
+      enrichedPayload.ai_agent_config = curCfg;
     }
 
     // Tratamento seguro e isolado por tenant_id para Login da API e Senha da API do Inovafarma
@@ -16484,13 +16505,16 @@ function resolveTenantAutomationFlags(tenant: any): {
     tenant.is_ai_agent_enabled === true || tenant.isaiagentenabled === true;
 
   const cfg = parseTenantAiAgentConfig(tenant);
-  // Precedência: `enabled` (chave principal salva pelo painel AiAgentSettings.tsx) > `active` (legado) > false
-  const agentConfigEnabled =
-    typeof cfg.enabled === "boolean"
-      ? cfg.enabled
-      : typeof cfg.active === "boolean"
-        ? cfg.active
-        : false;
+  const isManipStore = resolveTenantStoreType(tenant) === "manipulacao";
+  // Para Farmácias de Manipulação: exige `enabled === true` explícito salvo pelo toggle da UI (nunca herda legacy `active: true`).
+  // Para Drogarias padrão: mantém precedência `enabled` > `active` > false sem alterar o comportamento existente.
+  const agentConfigEnabled = isManipStore
+    ? cfg.enabled === true
+    : (typeof cfg.enabled === "boolean"
+        ? cfg.enabled
+        : typeof cfg.active === "boolean"
+          ? cfg.active
+          : false);
 
   if (!moduleAuthorized) {
     return {

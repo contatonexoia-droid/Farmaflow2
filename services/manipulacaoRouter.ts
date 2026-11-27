@@ -30,6 +30,26 @@ const CLOSED_STATUSES = new Set([
   "concluida",
 ]);
 
+export const DEFAULT_MANIPULACAO_FORWARD_MESSAGE =
+  "Perfeito! Já recebi suas informações e direcionei o seu atendimento para *{atendente}*, que vai continuar com você agora. 😊";
+
+export function formatManipulacaoForwardMessage(
+  tenant: any,
+  inboxName: string,
+  fallbackTemplate: string = DEFAULT_MANIPULACAO_FORWARD_MESSAGE
+): string {
+  const aiCfg = tenant?.ai_agent_config || tenant?.aiagentconfig || tenant?.aiAgentConfig || {};
+  const rawTemplate = String(aiCfg?.manipulacaoForwardMessage || "").trim() || fallbackTemplate;
+  const cleanInbox = String(inboxName || "nossa equipe").trim();
+  if (/\{atendente\}/i.test(rawTemplate)) {
+    return rawTemplate
+      .replace(/\*?\{atendente\}\*?/gi, `*${cleanInbox}*`)
+      .replace(/\*{2,}/g, "*")
+      .trim();
+  }
+  return `${rawTemplate}\n\nAtendente responsável: *${cleanInbox}*`.trim();
+}
+
 export function resolveTenantStoreType(tenant: any): StoreSegmentType {
   if (!tenant || typeof tenant !== "object") return "drogaria";
   const sb = tenant.smart_banners || tenant.smartbanners || tenant.smartBanners || {};
@@ -479,8 +499,8 @@ export async function routeManipulacaoConversation(params: {
   // Prioridade 1: Caixa elegível com 0 atendimentos ativos (livre)
   if (freeInboxes.length > 0) {
     const targetInbox = freeInboxes[0];
-    const customerMessage =
-      `${intro}Já recebi suas informações e direcionei o seu atendimento para *${targetInbox.name}*, que está livre agora para continuar com você! Em instantes respondemos. 😊`.trim();
+    const forwardMsg = formatManipulacaoForwardMessage(tenant, targetInbox.name);
+    const customerMessage = `${intro}${forwardMsg}`.trim();
 
     await assignConversationToTargetInbox({
       storeId,
@@ -595,8 +615,8 @@ export async function routeManipulacaoConversation(params: {
 
     // Modo padrão: 'least_busy' -> envia para a caixa com menor quantidade de atendimentos
     const leastBusyTarget = busyInboxes[0].inbox;
-    const customerMessage =
-      `${intro}Já recebi suas informações e direcionei o seu atendimento para *${leastBusyTarget.name}*! Em instantes nossa equipe dará continuidade ao seu orçamento. 😊`.trim();
+    const forwardMsg = formatManipulacaoForwardMessage(tenant, leastBusyTarget.name);
+    const customerMessage = `${intro}${forwardMsg}`.trim();
 
     await assignConversationToTargetInbox({
       storeId,
