@@ -134,7 +134,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
   const defaultInstanceName = initialInstanceName && initialInstanceName.trim()
     ? initialInstanceName.trim()
     : (exclusive && inboxId && inboxId !== 'default' && !inboxId.includes('default'))
-      ? `inbox_${inboxId.replace(/^inbox_/, '').replace(/[^a-zA-Z0-9]/g, "").toLowerCase()}`
+      ? `inbox_ex_${inboxId.replace(/^inbox_/i, '').replace(/[^a-zA-Z0-9]/g, "").toLowerCase().slice(0, 20)}`
       : (cleanStoreName ? `store_${cleanStoreName}` : 'store_principal');
 
   const currentWebhookUrl = (() => {
@@ -157,17 +157,23 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
+      setActiveTab('connect');
+      setStatus('DISCONNECTED');
+      setQrCodeBase64(null);
+      setPhoneNumber(null);
+      setIsPolling(false);
       setErrorMessage(null);
       setSuccessMessage(null);
       setTestResult(null);
       setWebhookStatus(null);
       setEvolutionKey('');
       setInstanceName(defaultInstanceName);
-      fetchInstanceStatus(true);
+      fetchInstanceStatus(true, defaultInstanceName);
     } else {
       setIsPolling(false);
+      setQrCodeBase64(null);
     }
-  }, [isOpen, tenantId, inboxId]);
+  }, [isOpen, tenantId, inboxId, exclusive, initialInstanceName]);
 
   // Polling automático de status enquanto exibe QR Code
   useEffect(() => {
@@ -178,15 +184,22 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
       }, 2500);
     }
     return () => clearInterval(interval);
-  }, [isPolling, status, activeTab]);
+  }, [isPolling, status, activeTab, instanceName, exclusive]);
 
-  const fetchInstanceStatus = async (isInitial: boolean | React.MouseEvent = false) => {
+  const fetchInstanceStatus = async (isInitial: boolean | React.MouseEvent = false, overrideInstanceName?: string) => {
     if (!tenantId) return;
     const isInit = isInitial === true;
+    const effectiveInstanceName = (
+      overrideInstanceName ||
+      (isInit ? defaultInstanceName : instanceName) ||
+      defaultInstanceName
+    ).trim();
+
     try {
       let url = `/api/v1/chat/instance/status?tenantId=${encodeURIComponent(tenantId)}`;
       if (inboxId) url += `&inboxId=${encodeURIComponent(inboxId)}`;
       if (exclusive) url += `&exclusive=true`;
+      if (effectiveInstanceName) url += `&instanceName=${encodeURIComponent(effectiveInstanceName)}`;
       
       const { ok, data } = await safeFetchJson(url, {
         headers: {
@@ -196,6 +209,24 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
       });
 
       if (ok && data) {
+        const returnedName = typeof data.instanceName === 'string' ? data.instanceName.trim() : '';
+        const isMismatchedExclusive = Boolean(
+          exclusive &&
+          returnedName &&
+          (
+            returnedName.toLowerCase().startsWith('store_') ||
+            (effectiveInstanceName && returnedName !== effectiveInstanceName)
+          )
+        );
+
+        if (isMismatchedExclusive) {
+          setStatus('DISCONNECTED');
+          setQrCodeBase64(null);
+          setPhoneNumber(null);
+          setIsPolling(false);
+          return;
+        }
+
         if (data.status === 'CONNECTED') {
           setStatus('CONNECTED');
           setIsPolling(false);
@@ -209,7 +240,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
           }
           setQrCodeBase64(b64);
           setStatus('QRCODE');
-        } else if (!qrCodeBase64) {
+        } else if (isInit || !qrCodeBase64) {
           setStatus('DISCONNECTED');
         }
         
@@ -236,8 +267,8 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
             localStorage.removeItem(`farmaflow_evo_key_${tenantId}`);
             localStorage.removeItem(`farmaflow_evo_url_${tenantId}`);
           }
-          if (data.instanceName && (isInit || !instanceName)) {
-            setInstanceName(data.instanceName);
+          if (returnedName && (!exclusive || !initialInstanceName) && (isInit || !instanceName)) {
+            setInstanceName(returnedName);
           }
         }
       }
@@ -584,7 +615,7 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
     setErrorMessage(null);
     try {
       const { payload } = buildEvolutionPayload();
-      const { ok } = await safeFetchJson('/api/v1/chat/instance/disconnect', {
+      const { ok, data, error } = await safeFetchJson('/api/v1/chat/instance/disconnect', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -599,9 +630,12 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
         setQrCodeBase64(null);
         setPhoneNumber(null);
         setIsPolling(false);
+      } else {
+        setErrorMessage(error || data?.error || "Não foi possível desconectar esta instância.");
       }
     } catch (e: any) {
       console.warn("[WhatsAppConnectModal] Erro ao desconectar:", e);
+      setErrorMessage(e?.message || "Erro ao desconectar instância.");
     } finally {
       setIsDisconnecting(false);
     }
@@ -615,9 +649,11 @@ export const WhatsAppConnectModal: React.FC<WhatsAppConnectModalProps> = ({
 
   if (!isOpen) return null;
 
-  const instanceTitle = inboxName 
-    ? `Caixa: ${inboxName}` 
-    : `Instância WhatsApp Principal`;
+  const instanceTitle = exclusive && inboxName
+    ? `Caixa Exclusiva: ${inboxName}`
+    : inboxName
+      ? `Caixa: ${inboxName}`
+      : `Instância WhatsApp Principal`;
 
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[250] flex items-center justify-center p-4">

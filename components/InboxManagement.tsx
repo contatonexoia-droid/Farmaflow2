@@ -225,10 +225,80 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
 
   const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-  const primaryConnectedInstance =
-    whatsappInstances.find(i => i.status === 'CONNECTED' && UUID_PATTERN.test(String(i.id || ''))) ||
-    whatsappInstances.find(i => UUID_PATTERN.test(String(i.id || ''))) ||
-    null;
+  const isExclusiveInstanceName = (name?: string | null) => {
+    const n = String(name || '').trim().toLowerCase();
+    return n.startsWith('inbox_ex_') || n.includes('_excl');
+  };
+
+  const instanceUsageCount = whatsappInstances.reduce<Record<string, number>>((acc, inst) => {
+    if (!inst?.id) return acc;
+    const count = inboxes.filter(ib => {
+      if ((ib.channel_type || 'whatsapp') !== 'whatsapp') return false;
+      return ib.whatsapp_instance_id === inst.id || ib.whatsapp_instance_id === inst.instance_name;
+    }).length;
+    acc[inst.id] = count;
+    return acc;
+  }, {});
+
+  const primaryConnectedInstance = (() => {
+    const validInsts = whatsappInstances.filter(i => UUID_PATTERN.test(String(i.id || '')));
+    if (validInsts.length === 0) return null;
+    const nonExclusivePool = validInsts.filter(i => !isExclusiveInstanceName(i.instance_name));
+    const pool = nonExclusivePool.length > 0 ? nonExclusivePool : validInsts;
+
+    const score = (i: any) => {
+      let s = 0;
+      const n = String(i.instance_name || '').toLowerCase();
+      const refs = instanceUsageCount[i.id] || 0;
+      if (i.status === 'CONNECTED') s += 1000;
+      if (n.startsWith('store_')) s += 300;
+      if (refs > 1) s += 200;
+      else if (refs === 1) s += 50;
+      return s;
+    };
+
+    const sorted = [...pool].sort((a, b) => {
+      const diff = score(b) - score(a);
+      if (diff !== 0) return diff;
+      const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
+      return ta - tb;
+    });
+    return sorted[0] || null;
+  })();
+
+  const createExclusiveInstanceFallback = async (targetInboxId: string) => {
+    const cleanInbox = String(targetInboxId || '')
+      .replace(/^inbox_/i, '')
+      .replace(/[^a-zA-Z0-9]/g, '')
+      .toLowerCase();
+    const baseSegment = (cleanInbox || Math.random().toString(36).slice(2, 10)).slice(0, 20);
+    const suffix = Math.random().toString(16).slice(2, 8);
+    const alreadyExists = whatsappInstances.some(
+      i => String(i.instance_name || '').toLowerCase() === `inbox_ex_${baseSegment}`
+    );
+    const instanceName = alreadyExists
+      ? `inbox_ex_${baseSegment.slice(0, 14)}_${suffix}`
+      : `inbox_ex_${baseSegment}`;
+
+    try {
+      const { data: instData } = await supabase
+        .from('whatsapp_instances')
+        .insert([{
+          store_id: tenantId,
+          instance_name: instanceName,
+          status: 'DISCONNECTED',
+          phone_number: null,
+          updated_at: new Date().toISOString()
+        }])
+        .select('id, instance_name')
+        .single();
+      if (instData?.id) {
+        return { instanceId: instData.id as string, instanceName: instData.instance_name as string };
+      }
+    } catch (_) {}
+    return { instanceId: null, instanceName };
+  };
 
   const handleSaveInbox = async () => {
     const trimmedName = (formData.name || '').trim();
@@ -251,7 +321,7 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
         ? null
         : channelMode === 'shared'
           ? (primaryConnectedInstance?.id || (rawSelectedId && UUID_PATTERN.test(rawSelectedId) ? rawSelectedId : null))
-          : (rawSelectedId && UUID_PATTERN.test(rawSelectedId) ? rawSelectedId : null);
+          : (rawSelectedId && UUID_PATTERN.test(rawSelectedId) && rawSelectedId !== primaryConnectedInstance?.id ? rawSelectedId : null);
 
       const shouldOpenExclusiveConnectAfterSave =
         isWhatsappChannel && channelMode === 'exclusive' && !cleanInstanceId;
@@ -279,14 +349,26 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
           savedInbox = json.data;
         } else {
           // Direct Supabase fallback (omits channel_type to match DB schema)
-          const isUuid = cleanInstanceId && UUID_PATTERN.test(cleanInstanceId);
+          let fallbackInstId = cleanInstanceId && UUID_PATTERN.test(cleanInstanceId) ? cleanInstanceId : null;
+          let fallbackExclusiveName: string | undefined = undefined;
+          if (shouldOpenExclusiveConnectAfterSave) {
+            const createdEx = await createExclusiveInstanceFallback(formData.id);
+            fallbackInstId = createdEx.instanceId;
+            fallbackExclusiveName = createdEx.instanceName;
+          }
           const dbPayload: any = { 
             name: trimmedName, 
             description: formData.description || '', 
-            whatsapp_instance_id: isUuid ? cleanInstanceId : null 
+            whatsapp_instance_id: fallbackInstId 
           };
           await supabase.from('inboxes').update(dbPayload).eq('id', formData.id);
-          savedInbox = { id: formData.id, store_id: tenantId, ...dbPayload, channel_type: formData.channel_type || 'whatsapp' };
+          savedInbox = {
+            id: formData.id,
+            store_id: tenantId,
+            ...dbPayload,
+            channel_type: formData.channel_type || 'whatsapp',
+            ...(fallbackExclusiveName ? { exclusive_instance_name: fallbackExclusiveName } : {})
+          };
         }
 
         const resolvedInstId = savedInbox?.whatsapp_instance_id ?? cleanInstanceId;
@@ -320,18 +402,32 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
           const json = await res.json();
           savedInbox = json.data;
         } else {
-          const isUuid = cleanInstanceId && UUID_PATTERN.test(cleanInstanceId);
-          const dbPayload = {
+          const newInboxUuid = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+            ? crypto.randomUUID()
+            : undefined;
+          let fallbackInstId = cleanInstanceId && UUID_PATTERN.test(cleanInstanceId) ? cleanInstanceId : null;
+          let fallbackExclusiveName: string | undefined = undefined;
+          if (shouldOpenExclusiveConnectAfterSave && newInboxUuid) {
+            const createdEx = await createExclusiveInstanceFallback(newInboxUuid);
+            fallbackInstId = createdEx.instanceId;
+            fallbackExclusiveName = createdEx.instanceName;
+          }
+          const dbPayload: any = {
+            ...(newInboxUuid ? { id: newInboxUuid } : {}),
             store_id: tenantId,
             name: trimmedName,
             description: formData.description || null,
-            whatsapp_instance_id: isUuid ? cleanInstanceId : null
+            whatsapp_instance_id: fallbackInstId
           };
           const { data, error } = await supabase.from('inboxes').insert([dbPayload]).select().single();
           if (error || !data) {
             throw new Error(error?.message || 'Não foi possível criar a caixa de entrada no banco de dados.');
           }
-          savedInbox = { ...data, channel_type: formData.channel_type || 'whatsapp' };
+          savedInbox = {
+            ...data,
+            channel_type: formData.channel_type || 'whatsapp',
+            ...(fallbackExclusiveName ? { exclusive_instance_name: fallbackExclusiveName } : {})
+          };
         }
 
         setInboxes(prev => [...prev, savedInbox]);
@@ -372,9 +468,11 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
 
       // Apenas abre o modal exclusivo se o usuário escolheu explicitamente "Conectar outro número (Exclusivo)"
       if (shouldOpenExclusiveConnectAfterSave && savedInbox?.id) {
+        const fallbackExclusiveName = `inbox_ex_${String(savedInbox.id).replace(/^inbox_/i, '').replace(/[^a-z0-9]/gi, '').toLowerCase().slice(0, 20)}`;
+        const exclusiveTargetName = savedInbox.exclusive_instance_name || fallbackExclusiveName;
         setConnectInboxId(savedInbox.id);
         setConnectInboxExclusive(true);
-        setConnectInitialInstanceName(undefined);
+        setConnectInitialInstanceName(exclusiveTargetName);
       }
     } catch (e: any) {
       console.error("[InboxManagement] Erro ao salvar caixa de entrada:", e);
@@ -828,15 +926,18 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                         : 0;
                       const isExclusiveInst = sharedCount <= 1 && Boolean(
                         linkedInst &&
-                        primaryConnectedInstance &&
-                        linkedInst.id !== primaryConnectedInstance.id &&
-                        String(linkedInst.instance_name || '').startsWith('inbox_')
+                        (
+                          isExclusiveInstanceName(linkedInst.instance_name) ||
+                          (primaryConnectedInstance && linkedInst.id !== primaryConnectedInstance.id)
+                        )
                       );
                       setFormData({
                         id: inbox.id,
                         name: inbox.name,
                         description: inbox.description || '',
-                        whatsapp_instance_id: inbox.whatsapp_instance_id || primaryConnectedInstance?.id || '',
+                        whatsapp_instance_id: isExclusiveInst
+                          ? (linkedInst?.id || '')
+                          : (primaryConnectedInstance?.id || inbox.whatsapp_instance_id || ''),
                         channel_type: inbox.channel_type || 'whatsapp',
                         channel_mode: isExclusiveInst ? 'exclusive' : 'shared'
                       });
@@ -891,7 +992,10 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                         const isSharedInstance = sharedInstanceCount > 1;
                         const isExclusive = !isSharedInstance && Boolean(
                           directInstance &&
-                          String(directInstance.instance_name || '').startsWith('inbox_')
+                          (
+                            isExclusiveInstanceName(directInstance.instance_name) ||
+                            (primaryConnectedInstance && directInstance.id !== primaryConnectedInstance.id)
+                          )
                         );
                         const instName = instance?.instance_name || 'Aguardando conexão';
                         const phone = instance?.phone_number;
@@ -1092,13 +1196,16 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                       </label>
 
                       <label
-                        onClick={() =>
+                        onClick={() => {
+                          const keepCurrentExclusive =
+                            formData.channel_mode === 'exclusive' &&
+                            formData.whatsapp_instance_id !== primaryConnectedInstance?.id;
                           setFormData({
                             ...formData,
                             channel_mode: 'exclusive',
-                            whatsapp_instance_id: ''
-                          })
-                        }
+                            whatsapp_instance_id: keepCurrentExclusive ? formData.whatsapp_instance_id : ''
+                          });
+                        }}
                         className={`flex items-start gap-2.5 p-3 rounded-xl border-2 cursor-pointer transition-all ${
                           formData.channel_mode === 'exclusive'
                             ? 'border-indigo-500 bg-white shadow-xs'
@@ -1109,13 +1216,16 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                           type="radio"
                           name="whatsapp_channel_mode"
                           checked={formData.channel_mode === 'exclusive'}
-                          onChange={() =>
+                          onChange={() => {
+                            const keepCurrentExclusive =
+                              formData.channel_mode === 'exclusive' &&
+                              formData.whatsapp_instance_id !== primaryConnectedInstance?.id;
                             setFormData({
                               ...formData,
                               channel_mode: 'exclusive',
-                              whatsapp_instance_id: ''
-                            })
-                          }
+                              whatsapp_instance_id: keepCurrentExclusive ? formData.whatsapp_instance_id : ''
+                            });
+                          }}
                           className="mt-0.5 accent-indigo-600"
                         />
                         <div className="text-xs">
@@ -1132,13 +1242,29 @@ export const InboxManagement: React.FC<InboxManagementProps> = ({ tenantId }) =>
                     {formData.channel_mode === 'exclusive' && (
                       <div className="pt-1 space-y-2">
                         <select 
-                          value={formData.whatsapp_instance_id} 
+                          value={
+                            formData.whatsapp_instance_id === primaryConnectedInstance?.id
+                              ? ''
+                              : formData.whatsapp_instance_id
+                          } 
                           onChange={e => setFormData({...formData, whatsapp_instance_id: e.target.value})} 
                           className="w-full bg-white border border-indigo-200 focus:border-indigo-500 rounded-xl py-2.5 px-3 outline-none font-bold text-gray-800 text-xs"
                         >
                           <option value="">(Conectar novo número exclusivo via QR Code ao salvar)</option>
                           {whatsappInstances
-                            .filter(inst => UUID_PATTERN.test(String(inst.id || '')))
+                            .filter(inst => {
+                              if (!UUID_PATTERN.test(String(inst.id || ''))) return false;
+                              if (primaryConnectedInstance && inst.id === primaryConnectedInstance.id) return false;
+                              if (String(inst.instance_name || '').toLowerCase().startsWith('store_')) return false;
+                              if ((instanceUsageCount[inst.id] || 0) > 1) return false;
+                              const usedByOtherInbox = inboxes.some(
+                                other =>
+                                  other.id !== formData.id &&
+                                  (other.whatsapp_instance_id === inst.id || other.whatsapp_instance_id === inst.instance_name)
+                              );
+                              if (usedByOtherInbox) return false;
+                              return true;
+                            })
                             .map(inst => (
                               <option key={inst.id} value={inst.id}>
                                 {inst.instance_name} {inst.phone_number ? `(${inst.phone_number})` : ''} - {inst.status || 'OFFLINE'}

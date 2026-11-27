@@ -41,6 +41,11 @@ export function isValidUuid(value?: unknown): value is string {
   return typeof value === "string" && UUID_REGEX.test(value.trim());
 }
 
+export function isExclusiveInstanceName(name?: unknown): boolean {
+  const n = String(name || "").trim().toLowerCase();
+  return n.startsWith("inbox_ex_") || n.includes("_excl");
+}
+
 export interface ResolvedConnectedInstance {
   id: string;
   instance_name: string;
@@ -193,7 +198,10 @@ export async function syncStoreInboxesToConnectedInstance(
     }
 
     // Se for conexão estritamente exclusiva para uma única caixa específica, atualiza apenas ela
-    if (options?.exclusive && isValidUuid(options.specificInboxId)) {
+    if (options?.exclusive) {
+      if (!isValidUuid(options.specificInboxId)) {
+        return { updatedCount: 0, updatedInboxIds: [] };
+      }
       const { error } = await supabaseAdmin
         .from("inboxes")
         .update({ whatsapp_instance_id: connectedInstanceId })
@@ -208,15 +216,21 @@ export async function syncStoreInboxesToConnectedInstance(
       return { updatedCount: 0, updatedInboxIds: [] };
     }
 
-    // 1. Buscar outras instâncias CONNECTED distintas desta mesma loja (para preservar canais exclusivos ativos)
+    // 1. Buscar instâncias desta loja para preservar canais exclusivos (ativos ou recém-criados)
     const { data: allInstances } = await supabaseAdmin
       .from("whatsapp_instances")
-      .select("id, status")
+      .select("id, status, instance_name")
       .in("store_id", candidateStoreIds);
 
     const otherConnectedIds = new Set<string>(
       (allInstances || [])
         .filter((i: any) => i.status === "CONNECTED" && isValidUuid(i.id) && i.id !== connectedInstanceId)
+        .map((i: any) => i.id)
+    );
+
+    const exclusiveInstanceIds = new Set<string>(
+      (allInstances || [])
+        .filter((i: any) => isValidUuid(i.id) && i.id !== connectedInstanceId && isExclusiveInstanceName(i.instance_name))
         .map((i: any) => i.id)
     );
 
@@ -247,12 +261,16 @@ export async function syncStoreInboxesToConnectedInstance(
       // Já está apontando para esta instância
       if (currentInstId === connectedInstanceId) continue;
 
-      // Se aponta para OUTRA instância exclusiva CONNECTED distinta (e não é o specificInboxId alvo), preserva
-      if (!isTargetSpecific && isValidUuid(currentInstId) && otherConnectedIds.has(currentInstId)) {
+      // Se aponta para OUTRA instância exclusiva (CONNECTED ou dedicada inbox_ex_*), preserva
+      if (
+        !isTargetSpecific &&
+        isValidUuid(currentInstId) &&
+        (otherConnectedIds.has(currentInstId) || exclusiveInstanceIds.has(currentInstId))
+      ) {
         continue;
       }
 
-      // Caso contrário (NULL, UUID antigo/órfão/desconectado, ou caixa alvo), sincroniza para a nova instância CONNECTED
+      // Caso contrário (NULL, UUID antigo/órfão/desconectado compartilhado, ou caixa alvo), sincroniza para a nova instância CONNECTED
       inboxIdsToUpdate.push(ib.id);
     }
 
@@ -319,6 +337,7 @@ export class EvolutionApiService {
     }
 
     let inboxRow: { id: string; store_id?: string | null; whatsapp_instance_id?: string | null } | null = null;
+    let isDedicatedExclusiveInbox = false;
 
     // 1. Tenta instância vinculada à Caixa de Entrada com status = 'CONNECTED'
     if (effectiveInboxId && isValidUuid(effectiveInboxId)) {
@@ -340,20 +359,30 @@ export class EvolutionApiService {
               .from("whatsapp_instances")
               .select("id, instance_name, store_id, phone_number, status")
               .eq("id", ib.whatsapp_instance_id)
-              .eq("status", "CONNECTED")
               .maybeSingle();
 
             if (linkedInst?.instance_name && !isValidUuid(linkedInst.instance_name)) {
-              return {
-                ...linkedInst,
-                source: "inbox",
-              };
+              if (linkedInst.status === "CONNECTED") {
+                return {
+                  ...linkedInst,
+                  source: "inbox",
+                };
+              }
+              // Se a caixa possui instância exclusiva dedicada (ex: inbox_ex_...) que ainda não conectou,
+              // não sobrescreve nem cai no número compartilhado de outra caixa.
+              if (isExclusiveInstanceName(linkedInst.instance_name)) {
+                isDedicatedExclusiveInbox = true;
+              }
             }
           }
         }
       } catch (err: any) {
         console.warn("[EvolutionApiService] Aviso ao consultar instância da inbox:", err.message);
       }
+    }
+
+    if (isDedicatedExclusiveInbox) {
+      return null;
     }
 
     // 2. Se um instanceName explícito foi informado, aceita SOMENTE se existir e estiver CONNECTED no banco
@@ -376,7 +405,7 @@ export class EvolutionApiService {
       } catch (_) {}
     }
 
-    // 3. Fallback automático: instância CONNECTED mais recente da loja (store_id)
+    // 3. Fallback automático: instância CONNECTED compartilhada mais recente da loja (store_id)
     const candidateStoreIds = await resolveStoreCandidateIds(effectiveStoreId || inboxRow?.store_id || params.storeId);
     if (candidateStoreIds.length > 0) {
       try {
@@ -385,11 +414,15 @@ export class EvolutionApiService {
           .select("id, instance_name, store_id, phone_number, status, updated_at")
           .in("store_id", candidateStoreIds)
           .eq("status", "CONNECTED")
-          .order("updated_at", { ascending: false })
-          .limit(1);
+          .order("updated_at", { ascending: false });
 
-        const fallbackInst = fallbackRows?.[0];
-        if (fallbackInst?.instance_name && !isValidUuid(fallbackInst.instance_name)) {
+        const validConnected = (fallbackRows || []).filter(
+          (r: any) => r?.instance_name && !isValidUuid(r.instance_name)
+        );
+        const nonExclusiveFallback = validConnected.find((r: any) => !isExclusiveInstanceName(r.instance_name));
+        const fallbackInst = nonExclusiveFallback || validConnected[0];
+
+        if (fallbackInst?.instance_name) {
           // Auto-cura em background o whatsapp_instance_id órfão/nulo da caixa usada
           if (inboxRow && isValidUuid(inboxRow.id) && inboxRow.whatsapp_instance_id !== fallbackInst.id) {
             supabaseAdmin

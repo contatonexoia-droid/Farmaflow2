@@ -33,6 +33,7 @@ import {
   safeUpdateWhatsappInstance,
   syncStoreInboxesToConnectedInstance,
   isValidUuid,
+  isExclusiveInstanceName,
   resolveStoreCandidateIds,
 } from "./services/evolutionApiService.js";
 import { transcribeAudio } from "./services/audioAiService.js";
@@ -14054,6 +14055,74 @@ function extractOverrideApiKey(override?: any): string {
   return '';
 }
 
+function buildFallbackExclusiveInstanceName(inboxId?: string | null): string {
+  const cleanInbox = String(inboxId || "")
+    .replace(/^inbox_/i, "")
+    .replace(/[^a-zA-Z0-9]/g, "")
+    .toLowerCase();
+  const segment = (cleanInbox || "default").slice(0, 20);
+  return `inbox_ex_${segment}`;
+}
+
+async function assertSafeExclusiveInstanceTarget(
+  tenantId: string,
+  targetInstanceName: string,
+  inboxId?: string | null
+): Promise<{ ok: boolean; error?: string }> {
+  const cleanTarget = String(targetInstanceName || "").trim();
+  if (!cleanTarget) {
+    return { ok: false, error: "Nome da instância exclusiva não informado." };
+  }
+  if (cleanTarget.toLowerCase().startsWith("store_")) {
+    return {
+      ok: false,
+      error: "Ação bloqueada: esta operação exclusiva não pode alterar a instância principal compartilhada da loja.",
+    };
+  }
+
+  try {
+    const { data: instRow } = await supabaseAdmin
+      .from("whatsapp_instances")
+      .select("id, instance_name, store_id")
+      .eq("instance_name", cleanTarget)
+      .maybeSingle();
+
+    if (instRow?.id && isValidUuid(instRow.id)) {
+      const { data: linkedInboxes } = await supabaseAdmin
+        .from("inboxes")
+        .select("id")
+        .eq("whatsapp_instance_id", instRow.id);
+
+      const otherInboxes = (linkedInboxes || []).filter(
+        (ib: any) => ib?.id && (!inboxId || ib.id !== inboxId)
+      );
+
+      if (otherInboxes.length > 0) {
+        return {
+          ok: false,
+          error: `Ação bloqueada: a instância "${cleanTarget}" está em uso compartilhado por outra(s) caixa(s) de entrada da loja.`,
+        };
+      }
+
+      // Se a instância não tem padrão exclusivo (ex: inbox_<uuid> de outra caixa ou antiga compartilhada),
+      // verifica se o nome não pertence a outra caixa da loja
+      if (!isExclusiveInstanceName(cleanTarget) && inboxId) {
+        const cleanInboxId = String(inboxId).replace(/^inbox_/i, "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+        if (cleanTarget.toLowerCase().startsWith("inbox_") && !cleanTarget.toLowerCase().includes(cleanInboxId)) {
+          return {
+            ok: false,
+            error: `Ação bloqueada: a instância "${cleanTarget}" não pertence a esta caixa exclusiva.`,
+          };
+        }
+      }
+    }
+  } catch (err: any) {
+    console.warn("[ExclusiveGuard] Aviso ao validar instância exclusiva:", err?.message || err);
+  }
+
+  return { ok: true };
+}
+
 async function resolveEvolutionConfig(
   tenantId: string,
   bodyOverrideOrInboxId?: string | Record<string, any>,
@@ -14103,6 +14172,16 @@ async function resolveEvolutionConfig(
 
   // 1. Identificar ou resolver o nome da instância
   const isExclusiveRequest = Boolean(override?.exclusive === true || override?.exclusive === "true");
+
+  // Em requisições exclusivas, nunca aceita instância compartilhada/store_* vinda de estado antigo do cliente
+  if (instanceName && isExclusiveRequest && inboxId) {
+    const safeCheck = await assertSafeExclusiveInstanceTarget(tenantId, instanceName, inboxId);
+    if (!safeCheck.ok) {
+      console.warn(`[resolveEvolutionConfig] Ignorando instanceName "${instanceName}" para caixa exclusiva ${inboxId}: ${safeCheck.error}`);
+      instanceName = '';
+    }
+  }
+
   if (!instanceName) {
     if (inboxId && inboxId !== "default" && !inboxId.includes("default")) {
       try {
@@ -14135,30 +14214,37 @@ async function resolveEvolutionConfig(
           }
 
           if (linkedInst?.instance_name) {
-            instanceName = linkedInst.instance_name;
+            if (isExclusiveRequest) {
+              const safeLinked = await assertSafeExclusiveInstanceTarget(tenantId, linkedInst.instance_name, inboxId);
+              if (safeLinked.ok) {
+                instanceName = linkedInst.instance_name;
+              }
+            } else {
+              instanceName = linkedInst.instance_name;
+            }
           }
         }
       } catch (e) {}
 
       if (!instanceName) {
         if (isExclusiveRequest) {
-          const cleanInbox = inboxId.replace(/^inbox_/, '').replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-          instanceName = `inbox_${cleanInbox}`;
+          instanceName = buildFallbackExclusiveInstanceName(inboxId);
         } else {
-          // Modo compartilhado: busca instância CONNECTED da loja antes de cair no padrão store_<loja>
+          // Modo compartilhado: busca instância CONNECTED compartilhada da loja antes de cair no padrão store_<loja>
           try {
             const candidateStoreIds = await resolveStoreCandidateIds(tenantId);
             if (candidateStoreIds.length > 0) {
-              const { data: storeInst } = await supabaseAdmin
+              const { data: storeInsts } = await supabaseAdmin
                 .from('whatsapp_instances')
-                .select('instance_name')
+                .select('instance_name, updated_at')
                 .in('store_id', candidateStoreIds)
                 .eq('status', 'CONNECTED')
-                .order('updated_at', { ascending: false })
-                .limit(1)
-                .maybeSingle();
-              if (storeInst?.instance_name) {
-                instanceName = storeInst.instance_name;
+                .order('updated_at', { ascending: false });
+
+              const validConnected = (storeInsts || []).filter((i: any) => i?.instance_name);
+              const sharedInst = validConnected.find((i: any) => !isExclusiveInstanceName(i.instance_name)) || validConnected[0];
+              if (sharedInst?.instance_name) {
+                instanceName = sharedInst.instance_name;
               }
             }
           } catch (_) {}
@@ -14419,10 +14505,18 @@ app.post("/api/v1/chat/instance/save-config", requireChatEnabled, async (req, re
     if (!tenantId) return res.status(400).json({ error: "Tenant ID is required." });
 
     const resolved = await resolveEvolutionConfig(tenantId, req.body);
+    const isExclusiveSave = Boolean(req.body.exclusive === true || req.body.exclusive === "true");
     const explicitKey = extractOverrideApiKey(req.body);
     const targetInstanceName = resolved.instanceName;
     const normalizedUrl = resolved.evolutionUrl;
     const cleanKeyToSave = explicitKey || (resolved.keySource === 'env' ? resolved.evolutionKey : '');
+
+    if (isExclusiveSave) {
+      const safeCheck = await assertSafeExclusiveInstanceTarget(tenantId, targetInstanceName, inboxId);
+      if (!safeCheck.ok) {
+        return res.status(400).json({ success: false, error: safeCheck.error, instanceName: targetInstanceName });
+      }
+    }
 
     // 1. Procura registro existente por instance_name
     let existing: any = null;
@@ -14435,18 +14529,19 @@ app.post("/api/v1/chat/instance/save-config", requireChatEnabled, async (req, re
       existing = data;
     } catch (e) {}
 
-    // 2. Se não encontrou por instance_name, tenta buscar pelo primeiro registro da loja
-    if (!existing) {
+    // 2. Se não encontrou por instance_name (APENAS no modo compartilhado/store_*), tenta buscar pelo primeiro registro da loja
+    if (!existing && !isExclusiveSave && !targetInstanceName.startsWith('inbox_')) {
       try {
         const { data: storeInstances } = await supabaseAdmin
           .from('whatsapp_instances')
-          .select('id')
+          .select('id, instance_name')
           .eq('store_id', tenantId)
           .order('updated_at', { ascending: false })
-          .limit(1);
+          .limit(5);
 
-        if (storeInstances && storeInstances.length > 0) {
-          existing = storeInstances[0];
+        const nonExclusiveRow = (storeInstances || []).find((i: any) => !isExclusiveInstanceName(i.instance_name));
+        if (nonExclusiveRow) {
+          existing = nonExclusiveRow;
         }
       } catch (e) {}
     }
@@ -14581,10 +14676,23 @@ app.post("/api/v1/chat/instance/create", requireChatEnabled, async (req, res) =>
     const tenantId = (req as any).tenantId || req.body.tenantId || (req.headers["x-tenant-id"] as string);
     const inboxId = req.body.inboxId;
     const forceRecreate = Boolean(req.body.recreate || req.body.force);
+    const isExclusiveCreate = Boolean(req.body.exclusive === true || req.body.exclusive === "true");
     if (!tenantId) return res.status(400).json({ success: false, error: "Tenant ID is required." });
 
     const evoConfig = await resolveEvolutionConfig(tenantId, req.body);
     const { evolutionUrl, instanceName } = evoConfig;
+
+    if (isExclusiveCreate) {
+      const safeCheck = await assertSafeExclusiveInstanceTarget(tenantId, instanceName, inboxId);
+      if (!safeCheck.ok) {
+        return res.status(400).json({
+          success: false,
+          error: safeCheck.error,
+          instanceName,
+          evolutionUrl,
+        });
+      }
+    }
 
     if (!evolutionUrl || !evoConfig.evolutionKey) {
       return res.status(400).json({
@@ -14896,9 +15004,15 @@ app.get("/api/v1/chat/instance/status", requireChatEnabled, async (req, res) => 
     try {
         const tenantId = (req as any).tenantId || req.query.tenantId;
         const inboxId = req.query.inboxId as string;
+        const isExclusiveStatus = req.query.exclusive === "true";
+        const requestedInstanceName = typeof req.query.instanceName === "string" ? req.query.instanceName.trim() : undefined;
         if (!tenantId) return res.status(400).json({ error: "Tenant ID is required." });
         
-        const evoConfig = await resolveEvolutionConfig(String(tenantId), { inboxId });
+        const evoConfig = await resolveEvolutionConfig(String(tenantId), {
+          inboxId,
+          exclusive: isExclusiveStatus,
+          ...(requestedInstanceName ? { instanceName: requestedInstanceName } : {}),
+        });
         const { evolutionUrl, instanceName } = evoConfig;
 
         const buildStatusMeta = () => ({
@@ -14908,7 +15022,19 @@ app.get("/api/v1/chat/instance/status", requireChatEnabled, async (req, res) => 
           keySource: evoConfig.keySource,
           keyPreview: evoConfig.evolutionKey ? maskEvolutionKeyPreview(evoConfig.evolutionKey) : null,
           isCustomServer: evoConfig.isCustomServer,
+          exclusive: isExclusiveStatus,
         });
+
+        if (isExclusiveStatus) {
+          const safeCheck = await assertSafeExclusiveInstanceTarget(String(tenantId), instanceName, inboxId);
+          if (!safeCheck.ok) {
+            return res.json({
+              status: 'DISCONNECTED',
+              ...buildStatusMeta(),
+              instanceName: buildFallbackExclusiveInstanceName(inboxId),
+            });
+          }
+        }
 
         // Se Evolution estiver configurada, consulta estado real com timeout
         if (evolutionUrl && evoConfig.evolutionKey) {
@@ -14931,7 +15057,6 @@ app.get("/api/v1/chat/instance/status", requireChatEnabled, async (req, res) => 
               const connectionState = stateRes.data?.instance?.state || stateRes.data?.state;
               if (connectionState === "open") {
                   const phoneNumber = stateRes.data?.instance?.owner?.split('@')[0] || stateRes.data?.owner?.split('@')[0] || null;
-                  const isExclusiveStatus = req.query.exclusive === "true";
                   
                   const { data: existing } = await supabaseAdmin.from('whatsapp_instances').select('id').eq('instance_name', instanceName).maybeSingle();
                   let instId = existing?.id;
@@ -15045,10 +15170,23 @@ app.post(["/api/v1/chat/instance/recreate", "/api/v1/chat/instance/restart"], re
     const tenantId = (req as any).tenantId || req.body.tenantId || (req.headers["x-tenant-id"] as string);
     const inboxId = req.body.inboxId;
     const isRestartOnly = req.path.endsWith('/restart');
+    const isExclusiveRecreate = Boolean(req.body.exclusive === true || req.body.exclusive === "true");
     if (!tenantId) return res.status(400).json({ success: false, error: "Tenant ID is required." });
 
     const evoConfig = await resolveEvolutionConfig(tenantId, req.body);
     const { evolutionUrl, instanceName } = evoConfig;
+
+    if (isExclusiveRecreate) {
+      const safeCheck = await assertSafeExclusiveInstanceTarget(tenantId, instanceName, inboxId);
+      if (!safeCheck.ok) {
+        return res.status(400).json({
+          success: false,
+          error: safeCheck.error,
+          instanceName,
+          evolutionUrl,
+        });
+      }
+    }
 
     if (!evolutionUrl || !evoConfig.evolutionKey) {
       return res.status(400).json({
@@ -15263,7 +15401,6 @@ app.post(["/api/v1/chat/instance/recreate", "/api/v1/chat/instance/restart"], re
     });
 
     // 5. Atualiza no banco (limpando QR codes quando CONNECTED e sincronizando inboxes da loja)
-    const isExclusiveRecreate = Boolean(req.body.exclusive === true || req.body.exclusive === "true");
     try {
       const { data: upserted } = await supabaseAdmin.from('whatsapp_instances').upsert({
         store_id: tenantId,
@@ -15383,6 +15520,12 @@ app.post("/api/v1/chat/instance/confirm", requireChatEnabled, async (req, res) =
     const { instanceName, evolutionUrl, evolutionKey } = await resolveEvolutionConfig(tenantId, req.body);
 
     const isExclusiveConfirm = Boolean(req.body.exclusive === true || req.body.exclusive === "true");
+    if (isExclusiveConfirm) {
+      const safeCheck = await assertSafeExclusiveInstanceTarget(tenantId, instanceName, inboxId);
+      if (!safeCheck.ok) {
+        return res.status(400).json({ success: false, error: safeCheck.error, instanceName });
+      }
+    }
     const { data: existing } = await supabaseAdmin.from('whatsapp_instances').select('id').eq('instance_name', instanceName).maybeSingle();
     let instId = existing?.id;
 
@@ -15428,9 +15571,22 @@ app.post("/api/v1/chat/instance/confirm", requireChatEnabled, async (req, res) =
 app.post("/api/v1/chat/instance/disconnect", requireChatEnabled, async (req, res) => {
   try {
     const tenantId = (req as any).tenantId || req.body.tenantId || (req.headers["x-tenant-id"] as string);
+    const inboxId = req.body.inboxId;
+    const isExclusiveDisconnect = Boolean(req.body.exclusive === true || req.body.exclusive === "true");
     if (!tenantId) return res.status(400).json({ error: "Tenant ID is required." });
 
     const evoConfig = await resolveEvolutionConfig(tenantId, req.body);
+
+    if (isExclusiveDisconnect) {
+      const safeCheck = await assertSafeExclusiveInstanceTarget(tenantId, evoConfig.instanceName, inboxId);
+      if (!safeCheck.ok) {
+        return res.status(400).json({
+          success: false,
+          error: safeCheck.error,
+          instanceName: evoConfig.instanceName,
+        });
+      }
+    }
 
     if (evoConfig.evolutionUrl && evoConfig.evolutionKey) {
       evolutionRequestWithFallback(
