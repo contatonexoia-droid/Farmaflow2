@@ -6,9 +6,9 @@ import {
   Loader2, Sparkles, Wand2, Upload, FileSpreadsheet, Factory, 
   Package, CheckSquare, Square, ListChecks, CheckCircle2, Star, ChevronDown, Filter,
   RefreshCw, Info, AlertCircle, CheckCircle, ArrowRight, History, FileText, Printer, FileImage, Link as LinkIcon, Store, ShoppingCart, ArrowDown, Minus, Download, Tag, RotateCcw, ImageOff, ScanLine, Layers,
-  Barcode, Bell
+  Barcode, Bell, Zap
 } from 'lucide-react';
-import { fetchProductDetails, generateAiProductImage } from '../services/gemini';
+import { fetchProductDetails, generateAiProductImage, hydrateCatalogByEanBase } from '../services/gemini';
 import { processAiEnrichmentQueue, AiEnrichmentReport } from '../services/aiProcessor';
 import * as XLSX from 'xlsx';
 import Papa from 'papaparse';
@@ -24,7 +24,7 @@ import { DynamicFlyerGenerator, resolveFlyerProductPricing } from './DynamicFlye
 import { PushNotificationModal } from './PushNotificationModal';
 import { CatalogAiEnrichmentModal } from './CatalogAiEnrichmentModal';
 import { CatalogAiCategorizeModal } from './CatalogAiCategorizeModal';
-import { getTenants, getProductsByTenant, saveProductsByTenant } from '../services/storage';
+import { getTenants, getProductsByTenant, saveProductsByTenant, patchCachedProductsForTenant } from '../services/storage';
 import { supabase } from '../services/supabase';
 import { isProductIncomplete } from '../utils/productCompleteness';
 
@@ -45,6 +45,7 @@ interface ImportSummary {
     imagesValidated: number;
     newImageSearches: number;
     tokensSaved: number;
+    eanHydratedItems?: number;
 }
 
 interface AdminProductManagerProps {
@@ -827,6 +828,9 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
   const [isUpdatingBulkPrescription, setIsUpdatingBulkPrescription] = useState(false);
   const [isDeletingBulk, setIsDeletingBulk] = useState(false);
   const [overwriteExistingData, setOverwriteExistingData] = useState(false);
+  const [hydrateEanOnSimpleImport, setHydrateEanOnSimpleImport] = useState(true);
+  const [isHydratingByEanImport, setIsHydratingByEanImport] = useState(false);
+  const [eanHydrateImportFeedback, setEanHydrateImportFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [importSummary, setImportSummary] = useState<ImportSummary | null>(null);
 
   // Estados de enriquecimento de fotos por EAN (Supabase Storage)
@@ -3949,13 +3953,57 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
             }
         }
 
+        let eanHydratedItems = 0;
+        if (importType === 'simple' && hydrateEanOnSimpleImport) {
+            try {
+                const hydration = await hydrateCatalogByEanBase({ tenantId: tenant.id });
+                eanHydratedItems = hydration.updatedProducts;
+                if (hydration.updatedItems.length > 0) {
+                    const latestProducts = productsRef.current;
+                    const patchById = new Map(hydration.updatedItems.map((u) => [u.id, u.patch]));
+                    const mergedBatch: Product[] = [];
+                    for (const prod of latestProducts) {
+                        const patch = patchById.get(prod.id);
+                        if (!patch) continue;
+                        mergedBatch.push({
+                            ...prod,
+                            ...(patch.description !== undefined ? { description: patch.description } : {}),
+                            ...(patch.activePrinciple !== undefined ? { activePrinciple: patch.activePrinciple } : {}),
+                            ...(patch.presentation !== undefined ? { presentation: patch.presentation } : {}),
+                            ...(patch.indications !== undefined ? { indications: patch.indications } : {}),
+                            ...(patch.usage !== undefined ? { usage: patch.usage } : {}),
+                            ...(patch.drugType !== undefined ? { drugType: patch.drugType } : {}),
+                            requires_prescription: Boolean(prod.requires_prescription || patch.requires_prescription),
+                            isAiEnriched: true,
+                        });
+                    }
+                    if (mergedBatch.length > 0) {
+                        onProductsStateUpdate(mergedBatch);
+                        await patchCachedProductsForTenant(tenant.id, mergedBatch).catch(() => {});
+                    }
+                }
+                if (hydration.updatedProducts > 0) {
+                    audit.unshift({
+                        name: 'BASE EAN FARMAFLOW (0 TOKENS)',
+                        code: 'EAN',
+                        status: 'updated',
+                        details: `${hydration.updatedProducts} produto(s) e ${hydration.fieldsFilled} campo(s) preenchidos gratuitamente pela base EAN compartilhada.`,
+                    });
+                    setAuditReport([...audit]);
+                }
+            } catch (hydErr: any) {
+                console.warn("[FarmaFlow Import] Aviso ao hidratar catálogo pela base EAN:", hydErr?.message || hydErr);
+            }
+        }
+
         setImportSummary({
             totalItems: total,
             ignoredItems: importType === 'ai' ? ignoredItems : countNoChange,
             enrichedItems,
             imagesValidated: 0,
             newImageSearches: 0,
-            tokensSaved: 0 // This will be updated asynchronously by the AI job, but we set initial state here
+            tokensSaved: 0,
+            eanHydratedItems,
         });
   };
 
@@ -4016,6 +4064,55 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
         alert("Erro na importação: " + err.message);
     } finally {
         setIsImporting(false);
+    }
+  };
+
+  const handleInstantEanHydration = async () => {
+    if (isHydratingByEanImport) return;
+    setIsHydratingByEanImport(true);
+    setEanHydrateImportFeedback(null);
+
+    try {
+      const report = await hydrateCatalogByEanBase({ tenantId: tenant.id });
+      if (report.updatedItems.length > 0) {
+        const latestProducts = productsRef.current;
+        const patchById = new Map(report.updatedItems.map((u) => [u.id, u.patch]));
+        const mergedBatch: Product[] = [];
+        for (const prod of latestProducts) {
+          const patch = patchById.get(prod.id);
+          if (!patch) continue;
+          mergedBatch.push({
+            ...prod,
+            ...(patch.description !== undefined ? { description: patch.description } : {}),
+            ...(patch.activePrinciple !== undefined ? { activePrinciple: patch.activePrinciple } : {}),
+            ...(patch.presentation !== undefined ? { presentation: patch.presentation } : {}),
+            ...(patch.indications !== undefined ? { indications: patch.indications } : {}),
+            ...(patch.usage !== undefined ? { usage: patch.usage } : {}),
+            ...(patch.drugType !== undefined ? { drugType: patch.drugType } : {}),
+            requires_prescription: Boolean(prod.requires_prescription || patch.requires_prescription),
+            isAiEnriched: true,
+          });
+        }
+        if (mergedBatch.length > 0) {
+          onProductsStateUpdate(mergedBatch);
+          await patchCachedProductsForTenant(tenant.id, mergedBatch).catch(() => {});
+        }
+      }
+
+      setEanHydrateImportFeedback({
+        type: 'success',
+        message:
+          report.updatedProducts > 0
+            ? `${report.updatedProducts} produto(s) e ${report.fieldsFilled} campo(s) preenchidos gratuitamente pela base EAN do FarmaFlow (0 tokens)!`
+            : `Todos os itens compatíveis com a base EAN já estão preenchidos (${report.matchedEans} EAN(s) verificados, 0 tokens gastos).`,
+      });
+    } catch (err: any) {
+      setEanHydrateImportFeedback({
+        type: 'error',
+        message: err?.message || 'Erro ao preencher dados técnicos pela base EAN.',
+      });
+    } finally {
+      setIsHydratingByEanImport(false);
     }
   };
 
@@ -5249,6 +5346,45 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                             
                             <div className="space-y-3"><label className="text-xs font-black uppercase text-gray-400 tracking-widest ml-2">Modo de Importação</label><div className="flex bg-gray-50 p-1.5 rounded-2xl">{['UPDATE', 'REPLACE'].map(mode => (<button key={mode} onClick={() => setImportMode(mode as any)} className={`flex-1 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${importMode === mode ? 'bg-white shadow-md text-gray-900' : 'text-gray-400 hover:text-gray-600'}`}>{mode === 'UPDATE' ? 'Atualizar Existentes' : 'Substituir Catálogo (Apagar não listados)'}</button>))}</div></div>
 
+                            {importType === 'simple' && (
+                                <div className="space-y-3">
+                                    <label className="text-xs font-black uppercase text-gray-400 tracking-widest ml-2">Base Compartilhada por EAN (0 Tokens)</label>
+                                    <div className="flex items-center gap-3 bg-emerald-50 p-4 rounded-2xl cursor-pointer border border-emerald-200" onClick={() => setHydrateEanOnSimpleImport(!hydrateEanOnSimpleImport)}>
+                                        <div className={`w-6 h-6 rounded-md flex items-center justify-center border-2 transition-all shrink-0 ${hydrateEanOnSimpleImport ? 'bg-emerald-600 border-emerald-600 text-white' : 'border-emerald-300 bg-white'}`}>
+                                            {hydrateEanOnSimpleImport && <CheckCircle2 size={16} />}
+                                        </div>
+                                        <div>
+                                            <p className="text-sm font-bold text-emerald-950">Preencher dados técnicos pela base EAN do FarmaFlow (Grátis / 0 tokens)</p>
+                                            <p className="text-[10px] font-medium text-emerald-800">Após importar a planilha, completa descrição, princípio ativo, apresentação, indicações e modo de uso pelos EANs já enriquecidos no FarmaFlow (sem alterar preços ou estoque).</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            <div className="bg-indigo-50/70 border border-indigo-200 rounded-2xl p-4 space-y-3">
+                                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                                    <div>
+                                        <p className="text-xs font-black text-indigo-950 uppercase tracking-wide">Sincronizou pelo ERP ou já importou antes?</p>
+                                        <p className="text-[11px] font-medium text-indigo-800 mt-0.5">Hidrate agora mesmo todo o catálogo da loja pelos EANs já enriquecidos no FarmaFlow sem gastar tokens de IA.</p>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={handleInstantEanHydration}
+                                        disabled={isHydratingByEanImport || isImporting}
+                                        className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-black text-xs transition-all flex items-center justify-center gap-2 shrink-0 disabled:opacity-50"
+                                    >
+                                        {isHydratingByEanImport ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />}
+                                        {isHydratingByEanImport ? 'Preenchendo...' : 'Preencher dados técnicos pela base EAN do FarmaFlow (Grátis / 0 tokens)'}
+                                    </button>
+                                </div>
+                                {eanHydrateImportFeedback && (
+                                    <div className={`p-3 rounded-xl text-xs font-bold flex items-center gap-2 border ${eanHydrateImportFeedback.type === 'success' ? 'bg-emerald-50 border-emerald-200 text-emerald-900' : 'bg-red-50 border-red-200 text-red-700'}`}>
+                                        {eanHydrateImportFeedback.type === 'success' ? <CheckCircle2 size={14} className="text-emerald-600 shrink-0" /> : <AlertCircle size={14} className="text-red-600 shrink-0" />}
+                                        <span>{eanHydrateImportFeedback.message}</span>
+                                    </div>
+                                )}
+                            </div>
+
                             {importType === 'ai' && (
                                 <div className="space-y-3">
                                     <label className="text-xs font-black uppercase text-gray-400 tracking-widest ml-2">Sobrescrever Dados Existentes</label>
@@ -5398,6 +5534,12 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                                             <p className="text-2xl font-black text-gray-900">{importSummary.ignoredItems}</p>
                                         </div>
                                     )}
+                                    {(importSummary.eanHydratedItems ?? 0) > 0 && (
+                                        <div className="col-span-2 bg-indigo-50 p-4 rounded-2xl border border-indigo-200">
+                                            <p className="text-[10px] font-black uppercase text-indigo-700">Hidratados pela Base EAN FarmaFlow (Grátis / 0 tokens)</p>
+                                            <p className="text-2xl font-black text-indigo-900">{importSummary.eanHydratedItems} produto(s)</p>
+                                        </div>
+                                    )}
                                     {importSummary.tokensSaved > 0 && (
                                         <div className="col-span-2 bg-emerald-50 p-4 rounded-2xl border border-emerald-100">
                                             <p className="text-[10px] font-black uppercase text-emerald-600">Economia Gerada (Tokens Poupados)</p>
@@ -5459,6 +5601,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                 isOpen={isCatalogAiModalOpen}
                 onClose={() => setIsCatalogAiModalOpen(false)}
                 tenantId={tenant.id}
+                isNetworkMaster={Boolean(tenant?.isNetworkMaster)}
                 products={products}
                 selectedProductIds={selectedProducts}
                 onProductsMerged={(updatedBatch) => {

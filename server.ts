@@ -39,6 +39,10 @@ import {
   enrichProductsBatchWithAi,
   enrichProductsBatchDetailedWithAi,
   generateProductImageWithAi,
+  isValidCommercialEan,
+  propagateEnrichedSourcesToOtherStores,
+  syncAllStoresEanEnrichmentZeroTokens,
+  hydrateTenantCatalogFromEanBase,
 } from "./services/productAiService.js";
 import {
   parseCmedSpreadsheetBuffer,
@@ -20177,6 +20181,8 @@ app.post(["/api/ai/enrich-product", "/api/v1/ai/enrich-product"], requireProduct
       activePrinciple,
       drugType,
       requires_prescription,
+      tenantId,
+      propagateToOtherStores,
     } = req.body || {};
 
     if (!name || typeof name !== "string" || !name.trim()) {
@@ -20195,6 +20201,34 @@ app.post(["/api/ai/enrich-product", "/api/v1/ai/enrich-product"], requireProduct
       drugType,
       requires_prescription,
     });
+
+    // Propagação automática assíncrona em background (0 tokens) para outras drogarias com mesmo EAN válido
+    const resolvedTenantId = String(tenantId || req.resolvedTenantId || "").trim() || undefined;
+    const validEan = isValidCommercialEan(barcode);
+    if (
+      propagateToOtherStores !== false &&
+      validEan &&
+      (data.confidence === "high" || Boolean(data.anvisaMatched))
+    ) {
+      void propagateEnrichedSourcesToOtherStores([
+        {
+          sourceTenantId: resolvedTenantId,
+          ean: validEan,
+          name: String(name).trim(),
+          activePrinciple: data.activePrinciple || undefined,
+          drugType: data.drugType || undefined,
+          presentation: data.presentation || undefined,
+          description: data.description || undefined,
+          indications: data.indications || undefined,
+          usage: data.usage || undefined,
+          requiresPrescription: Boolean(data.requiresPrescription),
+          confidence: data.confidence,
+          anvisaMatched: Boolean(data.anvisaMatched),
+        },
+      ]).catch((propErr: any) => {
+        console.warn("[API /api/ai/enrich-product] Aviso na propagação por EAN:", propErr?.message || propErr);
+      });
+    }
 
     return res.json({ success: true, data });
   } catch (err: any) {
@@ -20217,7 +20251,14 @@ app.post(
   requireProductAiAuth,
   async (req: any, res) => {
     try {
-      const { products, tenantId, targetFields, overwriteExisting, persist } = req.body || {};
+      const {
+        products,
+        tenantId,
+        targetFields,
+        overwriteExisting,
+        persist,
+        propagateToOtherStores,
+      } = req.body || {};
       if (!Array.isArray(products) || products.length === 0) {
         return res.status(400).json({ error: "Envie uma lista válida em 'products'." });
       }
@@ -20225,19 +20266,51 @@ app.post(
       const resolvedTenantId = String(tenantId || req.resolvedTenantId || "").trim() || undefined;
       const shouldPersist = Boolean(persist && resolvedTenantId);
 
-      const { items, outcomes } = await enrichProductsBatchDetailedWithAi(products, {
+      const { items, outcomes, propagation } = await enrichProductsBatchDetailedWithAi(products, {
         tenantId: resolvedTenantId,
         targetFields: Array.isArray(targetFields) ? targetFields : undefined,
         overwriteExisting: Boolean(overwriteExisting),
         persist: shouldPersist,
+        propagateToOtherStores: propagateToOtherStores !== false,
       });
 
-      return res.json({ success: true, items, outcomes });
+      return res.json({ success: true, items, outcomes, propagation });
     } catch (err: any) {
       console.error("[API /api/ai/enrich-batch Error]:", err?.message || err);
       const status = Number(err?.statusCode) || 500;
       return res.status(status).json({
         error: err?.message || "Erro ao enriquecer lote de produtos com IA no servidor.",
+      });
+    }
+  }
+);
+
+// Hidratação instantânea por base EAN do FarmaFlow (Grátis / 0 tokens — ideal para lojas novas após importação ou sync ERP)
+app.post(
+  ["/api/ai/hydrate-by-ean", "/api/v1/ai/hydrate-by-ean"],
+  requireProductAiAuth,
+  async (req: any, res) => {
+    try {
+      const resolvedTenantId = String(
+        req.body?.tenantId || req.resolvedTenantId || ""
+      ).trim();
+      if (!resolvedTenantId) {
+        return res.status(400).json({
+          error: "O 'tenantId' da loja é obrigatório para preencher dados pela base EAN.",
+        });
+      }
+
+      const productIds = Array.isArray(req.body?.productIds)
+        ? req.body.productIds.map((id: any) => String(id).trim()).filter(Boolean)
+        : undefined;
+
+      const report = await hydrateTenantCatalogFromEanBase(resolvedTenantId, productIds);
+      return res.json({ success: true, ...report });
+    } catch (err: any) {
+      console.error("[API /api/ai/hydrate-by-ean Error]:", err?.message || err);
+      const status = Number(err?.statusCode) || 500;
+      return res.status(status).json({
+        error: err?.message || "Erro ao preencher dados técnicos pela base EAN.",
       });
     }
   }
@@ -20603,6 +20676,27 @@ app.post("/api/super-admin/anvisa-cmed/import", requireSuperAdminAuth, async (re
     });
   }
 });
+
+// Sincronização retroativa global por EAN entre todas as drogarias (0 tokens, exclusivo Super Admin)
+app.post(
+  "/api/super-admin/products/sync-ean-enrichment",
+  requireSuperAdminAuth,
+  async (_req, res) => {
+    try {
+      const report = await syncAllStoresEanEnrichmentZeroTokens();
+      return res.json({
+        success: true,
+        ...report,
+      });
+    } catch (err: any) {
+      console.error("[API /api/super-admin/products/sync-ean-enrichment Error]:", err?.message || err);
+      const status = Number(err?.statusCode) || 500;
+      return res.status(status).json({
+        error: err?.message || "Erro ao sincronizar enriquecimento por EAN entre lojas.",
+      });
+    }
+  }
+);
 
 // Endpoint para alternar estado do Bot de IA em uma conversa (Silenciar / Reativar)
 app.post("/api/v1/chat/conversations/:id/toggle-bot", async (req, res) => {

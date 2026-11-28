@@ -50,9 +50,26 @@ export interface CatalogMiniBatchOutcome {
   error?: string;
 }
 
+export interface EanPropagationSummary {
+  updatedProducts: number;
+  updatedStores: number;
+  fieldsFilled: number;
+  eansPropagated: number;
+}
+
 export interface CatalogMiniBatchResponse {
   items: Record<string, any>[];
   outcomes: CatalogMiniBatchOutcome[];
+  propagation?: EanPropagationSummary;
+}
+
+export interface TenantEanHydrationResponse {
+  totalScanned: number;
+  matchedEans: number;
+  updatedProducts: number;
+  fieldsFilled: number;
+  updatedItems: Array<{ id: string; patch: Record<string, any> }>;
+  tokensUsed: 0;
 }
 
 async function getAiRequestHeaders(tenantId?: string): Promise<Record<string, string>> {
@@ -96,6 +113,7 @@ export const enrichCatalogMiniBatch = async (params: {
   targetFields?: EnrichableFieldKey[];
   overwriteExisting?: boolean;
   persist?: boolean;
+  propagateToOtherStores?: boolean;
   signal?: AbortSignal;
 }): Promise<CatalogMiniBatchResponse> => {
   const {
@@ -104,6 +122,7 @@ export const enrichCatalogMiniBatch = async (params: {
     targetFields,
     overwriteExisting = false,
     persist = true,
+    propagateToOtherStores = true,
     signal,
   } = params;
 
@@ -122,6 +141,7 @@ export const enrichCatalogMiniBatch = async (params: {
       targetFields,
       overwriteExisting,
       persist,
+      propagateToOtherStores,
     }),
   });
 
@@ -161,6 +181,38 @@ export const enrichCatalogMiniBatch = async (params: {
   return {
     items: normalizedItems,
     outcomes: rawOutcomes,
+    propagation: data?.propagation,
+  };
+};
+
+export const hydrateCatalogByEanBase = async (params: {
+  tenantId: string;
+  productIds?: string[];
+}): Promise<TenantEanHydrationResponse> => {
+  const { tenantId, productIds } = params;
+  const headers = await getAiRequestHeaders(tenantId);
+
+  const response = await fetch("/api/ai/hydrate-by-ean", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      tenantId,
+      ...(Array.isArray(productIds) && productIds.length > 0 ? { productIds } : {}),
+    }),
+  });
+
+  const data = await parseJsonSafe(response);
+  if (!response.ok) {
+    throw new Error(data?.error || "Falha ao preencher dados técnicos pela base EAN do FarmaFlow.");
+  }
+
+  return {
+    totalScanned: Number(data?.totalScanned || 0),
+    matchedEans: Number(data?.matchedEans || 0),
+    updatedProducts: Number(data?.updatedProducts || 0),
+    fieldsFilled: Number(data?.fieldsFilled || 0),
+    updatedItems: Array.isArray(data?.updatedItems) ? data.updatedItems : [],
+    tokensUsed: 0,
   };
 };
 

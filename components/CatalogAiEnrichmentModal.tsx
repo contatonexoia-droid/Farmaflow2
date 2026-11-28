@@ -30,6 +30,7 @@ import {
 import {
   CatalogMiniBatchOutcome,
   enrichCatalogMiniBatch,
+  hydrateCatalogByEanBase,
 } from '../services/gemini';
 import { patchCachedProductsForTenant } from '../services/storage';
 
@@ -37,6 +38,7 @@ interface CatalogAiEnrichmentModalProps {
   isOpen: boolean;
   onClose: () => void;
   tenantId: string;
+  isNetworkMaster?: boolean;
   products: Product[];
   selectedProductIds: Set<string>;
   onProductsMerged: (updatedProducts: Product[]) => void;
@@ -52,6 +54,7 @@ export const CatalogAiEnrichmentModal: React.FC<CatalogAiEnrichmentModalProps> =
   isOpen,
   onClose,
   tenantId,
+  isNetworkMaster = false,
   products,
   selectedProductIds,
   onProductsMerged,
@@ -61,16 +64,26 @@ export const CatalogAiEnrichmentModal: React.FC<CatalogAiEnrichmentModalProps> =
   const [departmentFilter, setDepartmentFilter] = useState<string>('Todos');
   const [prioritizeInStock, setPrioritizeInStock] = useState<boolean>(true);
   const [overwriteExisting, setOverwriteExisting] = useState<boolean>(false);
+  const [propagateToOtherStores, setPropagateToOtherStores] = useState<boolean>(true);
   const [targetFields, setTargetFields] = useState<EnrichableFieldKey[]>([
     ...ALL_ENRICHABLE_FIELDS,
   ]);
   const [quantityLimit, setQuantityLimit] = useState<number>(50);
+
+  // Instant 0-token EAN hydration state
+  const [isHydratingByEan, setIsHydratingByEan] = useState<boolean>(false);
+  const [eanHydrationFeedback, setEanHydrationFeedback] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
 
   // Runtime state
   const [totalQueued, setTotalQueued] = useState<number>(0);
   const [processedCount, setProcessedCount] = useState<number>(0);
   const [currentBatchNames, setCurrentBatchNames] = useState<string[]>([]);
   const [outcomes, setOutcomes] = useState<CatalogMiniBatchOutcome[]>([]);
+  const [propagatedProductsCount, setPropagatedProductsCount] = useState<number>(0);
+  const [propagatedFieldsCount, setPropagatedFieldsCount] = useState<number>(0);
   const [wasCancelled, setWasCancelled] = useState<boolean>(false);
   const [fatalError, setFatalError] = useState<string | null>(null);
 
@@ -183,6 +196,62 @@ export const CatalogAiEnrichmentModal: React.FC<CatalogAiEnrichmentModalProps> =
     );
   };
 
+  const handleHydrateByEanBase = async () => {
+    if (isHydratingByEan || !tenantId) return;
+    setIsHydratingByEan(true);
+    setEanHydrationFeedback(null);
+
+    try {
+      const report = await hydrateCatalogByEanBase({ tenantId });
+      if (report.updatedItems.length > 0) {
+        const productById = new Map<string, Product>();
+        products.forEach((p) => productById.set(p.id, p));
+
+        const mergedForState: Product[] = [];
+        for (const item of report.updatedItems) {
+          const orig = productById.get(item.id);
+          if (!orig) continue;
+          const patch = item.patch || {};
+          mergedForState.push({
+            ...orig,
+            ...(patch.description !== undefined ? { description: patch.description } : {}),
+            ...(patch.activePrinciple !== undefined
+              ? { activePrinciple: patch.activePrinciple }
+              : {}),
+            ...(patch.presentation !== undefined ? { presentation: patch.presentation } : {}),
+            ...(patch.indications !== undefined ? { indications: patch.indications } : {}),
+            ...(patch.usage !== undefined ? { usage: patch.usage } : {}),
+            ...(patch.drugType !== undefined ? { drugType: patch.drugType } : {}),
+            requires_prescription: Boolean(
+              orig.requires_prescription || patch.requires_prescription
+            ),
+            isAiEnriched: true,
+          });
+        }
+
+        if (mergedForState.length > 0) {
+          onProductsMerged(mergedForState);
+          await patchCachedProductsForTenant(tenantId, mergedForState);
+        }
+      }
+
+      setEanHydrationFeedback({
+        type: 'success',
+        message:
+          report.updatedProducts > 0
+            ? `${report.updatedProducts} produto(s) e ${report.fieldsFilled} campo(s) preenchidos gratuitamente pela base EAN do FarmaFlow (0 tokens)!`
+            : `Nenhum item novo compatível encontrado na base EAN (${report.matchedEans} EAN(s) já estavam completos). 0 tokens gastos.`,
+      });
+    } catch (err: any) {
+      setEanHydrationFeedback({
+        type: 'error',
+        message: err?.message || 'Erro ao preencher dados técnicos pela base EAN.',
+      });
+    } finally {
+      setIsHydratingByEan(false);
+    }
+  };
+
   const handleStartEnrichment = async () => {
     if (targetFields.length === 0 || queueToRun.length === 0) return;
 
@@ -194,6 +263,8 @@ export const CatalogAiEnrichmentModal: React.FC<CatalogAiEnrichmentModalProps> =
     setTotalQueued(batchList.length);
     setProcessedCount(0);
     setOutcomes([]);
+    setPropagatedProductsCount(0);
+    setPropagatedFieldsCount(0);
     setWasCancelled(false);
     setFatalError(null);
 
@@ -236,11 +307,16 @@ export const CatalogAiEnrichmentModal: React.FC<CatalogAiEnrichmentModalProps> =
           targetFields,
           overwriteExisting,
           persist: true,
+          propagateToOtherStores: isNetworkMaster ? propagateToOtherStores : true,
           signal: abortControllerRef.current?.signal,
         });
 
         const batchOutcomes = response.outcomes || [];
         setOutcomes((prev) => [...prev, ...batchOutcomes]);
+        if (response.propagation) {
+          setPropagatedProductsCount((prev) => prev + Number(response.propagation?.updatedProducts || 0));
+          setPropagatedFieldsCount((prev) => prev + Number(response.propagation?.fieldsFilled || 0));
+        }
 
         // Sincroniza estado React + localforage imediatamente após cada mini-lote de 5
         const mergedForState: Product[] = [];
@@ -405,6 +481,53 @@ export const CatalogAiEnrichmentModal: React.FC<CatalogAiEnrichmentModalProps> =
                 <span className="text-lg font-black text-gray-900">{stats.missingUsage}</span>
               </div>
             </div>
+
+            {stage === 'config' && stats.incomplete > 0 && (
+              <div className="pt-2 space-y-2">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-emerald-50/80 border border-emerald-200 rounded-2xl p-3.5">
+                  <div className="text-xs">
+                    <p className="font-black text-emerald-950">
+                      Hidratação Instantânea pelo Banco Compartilhado do FarmaFlow
+                    </p>
+                    <p className="font-medium text-emerald-800">
+                      Reaproveita descrições e dados técnicos já validados pelo EAN sem gastar tokens da IA.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleHydrateByEanBase}
+                    disabled={isHydratingByEan}
+                    className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black transition-all flex items-center justify-center gap-2 shrink-0 disabled:opacity-60 shadow-sm"
+                  >
+                    {isHydratingByEan ? (
+                      <Loader2 size={14} className="animate-spin" />
+                    ) : (
+                      <Zap size={14} />
+                    )}
+                    {isHydratingByEan
+                      ? 'Preenchendo...'
+                      : 'Preencher dados técnicos pela base EAN do FarmaFlow (Grátis / 0 tokens)'}
+                  </button>
+                </div>
+
+                {eanHydrationFeedback && (
+                  <div
+                    className={`p-3 rounded-2xl text-xs font-bold flex items-center gap-2 border ${
+                      eanHydrationFeedback.type === 'success'
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                        : 'bg-red-50 border-red-200 text-red-700'
+                    }`}
+                  >
+                    {eanHydrationFeedback.type === 'success' ? (
+                      <CheckCircle2 size={15} className="text-emerald-600 shrink-0" />
+                    ) : (
+                      <AlertCircle size={15} className="text-red-600 shrink-0" />
+                    )}
+                    <span>{eanHydrationFeedback.message}</span>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {stage === 'config' && (
@@ -537,6 +660,25 @@ export const CatalogAiEnrichmentModal: React.FC<CatalogAiEnrichmentModalProps> =
                       </span>
                     </div>
                   </label>
+
+                  {isNetworkMaster && (
+                    <label className="flex items-start gap-3 p-3.5 rounded-2xl bg-indigo-50/80 border border-indigo-200 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={propagateToOtherStores}
+                        onChange={(e) => setPropagateToOtherStores(e.target.checked)}
+                        className="mt-0.5 w-4 h-4 accent-indigo-600 rounded"
+                      />
+                      <div>
+                        <span className="block text-sm font-black text-indigo-950">
+                          Propagar automaticamente para todas as lojas com mesmo EAN
+                        </span>
+                        <span className="block text-xs font-medium text-indigo-800">
+                          Preenche apenas campos vazios nas filiais e demais drogarias sem gastar tokens extras (preços e estoques nunca são alterados).
+                        </span>
+                      </div>
+                    </label>
+                  )}
                 </div>
               </div>
 
@@ -689,7 +831,7 @@ export const CatalogAiEnrichmentModal: React.FC<CatalogAiEnrichmentModalProps> =
                 )}
               </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
                 <div className="bg-emerald-50 p-4 rounded-2xl border border-emerald-200">
                   <span className="block text-[10px] font-black uppercase text-emerald-700">
                     Enriquecidos IA
@@ -712,6 +854,14 @@ export const CatalogAiEnrichmentModal: React.FC<CatalogAiEnrichmentModalProps> =
                   </span>
                   <span className="text-2xl font-black text-blue-900">
                     {summary.reusedCache}
+                  </span>
+                </div>
+                <div className="bg-indigo-50 p-4 rounded-2xl border border-indigo-200">
+                  <span className="block text-[10px] font-black uppercase text-indigo-700">
+                    Propagados para outras lojas (0 tokens)
+                  </span>
+                  <span className="text-2xl font-black text-indigo-900">
+                    {propagatedProductsCount}
                   </span>
                 </div>
                 <div className="bg-amber-50 p-4 rounded-2xl border border-amber-200">
@@ -760,12 +910,12 @@ export const CatalogAiEnrichmentModal: React.FC<CatalogAiEnrichmentModalProps> =
                   </h4>
                   <p className="text-xs font-medium mt-0.5">
                     {fatalError ||
-                      `${processedCount} de ${totalQueued} itens avaliados (${summary.anvisaHits} validados diretamente por EAN na base ANVISA). Todos os mini-lotes concluídos foram salvos no banco.`}
+                      `${processedCount} de ${totalQueued} itens avaliados (${summary.anvisaHits} validados diretamente por EAN na base ANVISA${propagatedProductsCount > 0 ? ` • ${propagatedProductsCount} produto(s) propagado(s) para outras lojas com 0 tokens` : ''}). Todos os mini-lotes concluídos foram salvos no banco.`}
                   </p>
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
                 <div className="bg-emerald-50 p-4 rounded-2xl border border-emerald-200">
                   <span className="block text-[10px] font-black uppercase text-emerald-700">
                     Atualizados via IA
@@ -789,6 +939,21 @@ export const CatalogAiEnrichmentModal: React.FC<CatalogAiEnrichmentModalProps> =
                   <span className="text-2xl font-black text-blue-900">
                     {summary.reusedCache}
                   </span>
+                </div>
+                <div className="bg-indigo-50 p-4 rounded-2xl border border-indigo-200 flex flex-col justify-between">
+                  <span className="text-[10px] font-black uppercase text-indigo-700">
+                    Propagados para outras lojas (0 tokens)
+                  </span>
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="text-2xl font-black text-indigo-900">
+                      {propagatedProductsCount}
+                    </span>
+                    {propagatedFieldsCount > 0 && (
+                      <span className="text-[10px] font-bold text-indigo-700">
+                        ({propagatedFieldsCount} campos)
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <div className="bg-amber-50 p-4 rounded-2xl border border-amber-200">
                   <span className="block text-[10px] font-black uppercase text-amber-700">

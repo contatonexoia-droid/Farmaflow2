@@ -4,6 +4,7 @@ import { OFFICIAL_DEPARTMENTS, classifyProductTaxonomy } from "../lib/department
 import {
   ALL_ENRICHABLE_FIELDS,
   EnrichableFieldKey,
+  getMissingEnrichableFields,
   isEnrichableFieldEmpty,
   isMedicationProduct,
   isShallowOrDuplicateDescription,
@@ -90,6 +91,14 @@ export interface CatalogBatchEnrichOptions {
   targetFields?: EnrichableFieldKey[];
   overwriteExisting?: boolean;
   persist?: boolean;
+  propagateToOtherStores?: boolean;
+}
+
+export interface EanPropagationSummary {
+  updatedProducts: number;
+  updatedStores: number;
+  fieldsFilled: number;
+  eansPropagated: number;
 }
 
 export interface CatalogBatchItemOutcome {
@@ -240,6 +249,32 @@ export function normalizeEanDigits(barcode?: string | null): string {
   const digits = String(barcode || "").replace(/\D/g, "");
   if (digits.length >= 8 && digits.length <= 14) return digits;
   return "";
+}
+
+const DUMMY_EAN_PATTERNS = new Set([
+  "12345678",
+  "87654321",
+  "123456789012",
+  "012345678901",
+  "1234567890123",
+  "0123456789012",
+  "12345678901234",
+]);
+
+/**
+ * Valida se o barcode é um EAN comercial real elegível para compartilhamento/propagação entre lojas.
+ * Rejeita códigos internos curtos (ex: 123, 00001), sequências repetidas (0000000000000, 9999999999999),
+ * prefixos internos de balança/loja (02 / 20..29 em EAN-13) e zeros excessivos à esquerda.
+ */
+export function isValidCommercialEan(barcode?: string | null): string {
+  const raw = String(barcode ?? "").trim();
+  if (!raw || !/^\d+$/.test(raw)) return "";
+  if (![8, 12, 13, 14].includes(raw.length)) return "";
+  if (/^(\d)\1+$/.test(raw)) return "";
+  if (/^0{5,}/.test(raw)) return "";
+  if (raw.length === 13 && /^(02|2[0-9])/.test(raw)) return "";
+  if (DUMMY_EAN_PATTERNS.has(raw)) return "";
+  return raw;
 }
 
 export function normalizeCompareText(str?: string | null): string {
@@ -667,7 +702,7 @@ export async function lookupEanReferenceBatch(
 
     if (Array.isArray(peerRows)) {
       for (const peer of peerRows) {
-        const ean = normalizeEanDigits(peer.barcode);
+        const ean = isValidCommercialEan(peer.barcode);
         if (!ean) continue;
         const entry = resultMap.get(ean);
         if (!entry) continue;
@@ -1308,7 +1343,11 @@ REGRAS OBRIGATÓRIAS DAS 5 CAMADAS DE SEGURANÇA:
 async function processMiniBatchInternal(
   miniBatch: ProductAiBatchInput[],
   options: CatalogBatchEnrichOptions = {}
-): Promise<{ items: Record<string, any>[]; outcomes: CatalogBatchItemOutcome[] }> {
+): Promise<{
+  items: Record<string, any>[];
+  outcomes: CatalogBatchItemOutcome[];
+  propagation: EanPropagationSummary;
+}> {
   const targetFields: EnrichableFieldKey[] =
     Array.isArray(options.targetFields) && options.targetFields.length > 0
       ? (options.targetFields.filter((f): f is EnrichableFieldKey =>
@@ -1768,6 +1807,82 @@ async function processMiniBatchInternal(
     }
   }
 
+  // Propagação automática em lote (0 tokens) para outras drogarias com o mesmo EAN comercial válido
+  let propagation: EanPropagationSummary = {
+    updatedProducts: 0,
+    updatedStores: 0,
+    fieldsFilled: 0,
+    eansPropagated: 0,
+  };
+
+  if (shouldPersist && options.propagateToOtherStores !== false) {
+    const propagationSources: EanPropagationSource[] = [];
+    for (const inp of normalizedInputs) {
+      const input = inp;
+      const authRow = dbRowsById.get(inp.id) || inp;
+      const ce = normalizeEanDigits(inp.barcode || authRow.barcode);
+      const eanInfo = ce ? eanLookupMap.get(ce) : undefined;
+      const outcome = outcomeById.get(input.id);
+      if (!outcome || (outcome.status !== "updated" && outcome.status !== "reused_cache")) continue;
+      if (outcome.confidence !== "high" && !outcome.anvisaMatched) continue;
+
+      const validEan = isValidCommercialEan(input.barcode || authRow.barcode || outcome.barcode);
+      if (!validEan) continue;
+
+      const legacy = legacyItemById.get(input.id) || {};
+      const mergedDesc = String(outcome.patch?.description || authRow.description || "").trim();
+      const mergedActive = String(
+        outcome.patch?.activePrinciple || authRow.active_principle || authRow.activePrinciple || ""
+      ).trim();
+      const mergedDrugType = String(
+        outcome.patch?.drugType || authRow.drug_type || authRow.drugType || ""
+      ).trim();
+      const mergedPres = String(
+        outcome.patch?.presentation || authRow.presentation || ""
+      ).trim();
+      const mergedInd = String(
+        outcome.patch?.indications || authRow.indications || ""
+      ).trim();
+      const mergedUsage = String(outcome.patch?.usage || authRow.usage || "").trim();
+      const mergedRx = Boolean(
+        authRow.requires_prescription || outcome.patch?.requires_prescription
+      );
+
+      if (
+        mergedDesc ||
+        mergedActive ||
+        mergedPres ||
+        mergedInd ||
+        mergedUsage ||
+        mergedDrugType ||
+        legacy
+      ) {
+        propagationSources.push({
+          sourceTenantId: tenantId || undefined,
+          ean: validEan,
+          name: String(eanInfo?.anvisa?.productName || input.name || authRow.name || "").trim(),
+          activePrinciple: mergedActive || undefined,
+          drugType: mergedDrugType || undefined,
+          presentation: mergedPres || undefined,
+          description: mergedDesc || undefined,
+          indications: mergedInd || undefined,
+          usage: mergedUsage || undefined,
+          requiresPrescription: mergedRx,
+          confidence: outcome.confidence,
+          anvisaMatched: outcome.anvisaMatched,
+        });
+      }
+    }
+
+    if (propagationSources.length > 0) {
+      try {
+        propagation = await propagateEnrichedSourcesToOtherStores(propagationSources);
+      } catch (propErr: any) {
+        console.warn("[ProductAiService] Aviso na propagação por EAN pós-lote:", propErr?.message || propErr);
+      }
+    }
+  }
+
   const orderedOutcomes = normalizedInputs.map(
     (inp) =>
       outcomeById.get(inp.id) || {
@@ -1784,7 +1899,7 @@ async function processMiniBatchInternal(
   );
 
   const orderedItems = normalizedInputs.map((inp) => legacyItemById.get(inp.id) || {});
-  return { items: orderedItems, outcomes: orderedOutcomes };
+  return { items: orderedItems, outcomes: orderedOutcomes, propagation };
 }
 
 /**
@@ -1793,23 +1908,46 @@ async function processMiniBatchInternal(
 export async function enrichProductsBatchDetailedWithAi(
   productsToEnrich: ProductAiBatchInput[],
   options: CatalogBatchEnrichOptions = {}
-): Promise<{ items: Record<string, any>[]; outcomes: CatalogBatchItemOutcome[] }> {
+): Promise<{
+  items: Record<string, any>[];
+  outcomes: CatalogBatchItemOutcome[];
+  propagation: EanPropagationSummary;
+}> {
   if (!Array.isArray(productsToEnrich) || productsToEnrich.length === 0) {
-    return { items: [], outcomes: [] };
+    return {
+      items: [],
+      outcomes: [],
+      propagation: { updatedProducts: 0, updatedStores: 0, fieldsFilled: 0, eansPropagated: 0 },
+    };
   }
 
   const allItems: Record<string, any>[] = [];
   const allOutcomes: CatalogBatchItemOutcome[] = [];
+  const propagationAgg: EanPropagationSummary = {
+    updatedProducts: 0,
+    updatedStores: 0,
+    fieldsFilled: 0,
+    eansPropagated: 0,
+  };
 
   try {
     const capped = productsToEnrich.slice(0, 25);
     for (let i = 0; i < capped.length; i += MAX_BATCH_SIZE) {
       const slice = capped.slice(i, i + MAX_BATCH_SIZE);
-      const { items, outcomes } = await processMiniBatchInternal(slice, options);
+      const { items, outcomes, propagation } = await processMiniBatchInternal(slice, options);
       allItems.push(...items);
       allOutcomes.push(...outcomes);
+      if (propagation) {
+        propagationAgg.updatedProducts += propagation.updatedProducts;
+        propagationAgg.updatedStores = Math.max(
+          propagationAgg.updatedStores,
+          propagation.updatedStores
+        );
+        propagationAgg.fieldsFilled += propagation.fieldsFilled;
+        propagationAgg.eansPropagated += propagation.eansPropagated;
+      }
     }
-    return { items: allItems, outcomes: allOutcomes };
+    return { items: allItems, outcomes: allOutcomes, propagation: propagationAgg };
   } catch (err: any) {
     console.error("[ProductAiService enrichProductsBatchDetailedWithAi Error]:", err?.message || err);
     throw mapGeminiException(err, "Não foi possível enriquecer o lote de produtos com a IA.");
@@ -1822,6 +1960,744 @@ export async function enrichProductsBatchWithAi(
 ): Promise<Record<string, any>[]> {
   const { items } = await enrichProductsBatchDetailedWithAi(productsToEnrich, options);
   return items;
+}
+
+export interface EanPropagationSource {
+  sourceTenantId?: string;
+  ean: string;
+  name: string;
+  activePrinciple?: string;
+  drugType?: string;
+  presentation?: string;
+  description?: string;
+  indications?: string;
+  usage?: string;
+  requiresPrescription?: boolean;
+  confidence: AiConfidenceLevel;
+  anvisaMatched: boolean;
+}
+
+const GENERIC_DRUG_TYPE_VALUES = new Set(["", "outros", "livre", "outro"]);
+
+/**
+ * Busca IDs de lojas configuradas como Farmácia de Manipulação (`store_type === 'manipulacao'`).
+ * Faz fallback seguro caso a coluna `store_type` ainda não exista.
+ */
+async function fetchManipulacaoTenantIds(supabaseAdmin: SupabaseClient): Promise<Set<string>> {
+  const blocked = new Set<string>();
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("tenants")
+      .select("id, store_type");
+
+    if (!error && Array.isArray(data)) {
+      for (const row of data) {
+        if (String(row?.store_type || "").trim().toLowerCase() === "manipulacao") {
+          blocked.add(String(row.id));
+        }
+      }
+    }
+  } catch (_) {
+    // Fallback seguro: nenhuma loja bloqueada se a coluna store_type ainda não existir
+  }
+  return blocked;
+}
+
+/**
+ * Monta atualização parcial estritamente segura para uma loja de destino:
+ * - SOMENTE campos técnicos/comerciais permitidos
+ * - SOMENTE campos vazios ou rasos no destino
+ * - `requires_prescription` apenas em mão única (false -> true)
+ * - NUNCA toca em preço, estoque, nome, categoria, departamento, foto, fabricante ou destaques
+ */
+function buildSafeTargetEanUpdate(
+  targetRow: Record<string, any>,
+  source: EanPropagationSource
+): { dbUpdate: Record<string, any>; patch: Record<string, any>; fieldsCount: number } {
+  const dbUpdate: Record<string, any> = {};
+  const patch: Record<string, any> = {};
+  let fieldsCount = 0;
+
+  const targetName = String(targetRow.name || source.name || "").trim();
+
+  // 1. description (somente se destino vazio/raso/igual ao nome e fonte rica)
+  const srcDesc = String(source.description || "").trim();
+  if (
+    srcDesc &&
+    !isShallowOrDuplicateDescription(srcDesc, source.name) &&
+    !isShallowOrDuplicateDescription(srcDesc, targetName) &&
+    isShallowOrDuplicateDescription(targetRow.description, targetName)
+  ) {
+    dbUpdate.description = srcDesc;
+    patch.description = srcDesc;
+    fieldsCount++;
+  }
+
+  // 2. active_principle
+  const srcActive = String(source.activePrinciple || "").trim();
+  if (
+    srcActive &&
+    isEnrichableFieldEmpty({ active_principle: targetRow.active_principle }, "activePrinciple")
+  ) {
+    const targetIsMed =
+      source.anvisaMatched ||
+      isMedicationProduct({
+        name: targetName,
+        drug_type: targetRow.drug_type || source.drugType,
+        requires_prescription: Boolean(
+          targetRow.requires_prescription || source.requiresPrescription
+        ),
+      });
+    if (targetIsMed) {
+      dbUpdate.active_principle = srcActive;
+      patch.activePrinciple = srcActive;
+      fieldsCount++;
+    }
+  }
+
+  // 3. drug_type
+  const srcDrugType = String(source.drugType || "").trim();
+  const curDrugType = String(targetRow.drug_type || "").trim().toLowerCase();
+  if (srcDrugType && GENERIC_DRUG_TYPE_VALUES.has(curDrugType)) {
+    if (String(targetRow.drug_type || "").trim() !== srcDrugType) {
+      dbUpdate.drug_type = srcDrugType;
+      patch.drugType = srcDrugType;
+      fieldsCount++;
+    }
+  }
+
+  // 4. presentation (com trava de coerência numérica contra o nome do produto de destino)
+  const srcPres = String(source.presentation || "").trim();
+  if (
+    srcPres &&
+    isEnrichableFieldEmpty({ presentation: targetRow.presentation }, "presentation") &&
+    validatePresentationCoherence(targetName, srcPres).valid
+  ) {
+    dbUpdate.presentation = srcPres;
+    patch.presentation = srcPres;
+    fieldsCount++;
+  }
+
+  // 5. indications
+  const srcInd = String(source.indications || "").trim();
+  if (
+    srcInd &&
+    !isEnrichableFieldEmpty({ indications: srcInd }, "indications") &&
+    isEnrichableFieldEmpty({ indications: targetRow.indications }, "indications")
+  ) {
+    dbUpdate.indications = srcInd;
+    patch.indications = srcInd;
+    fieldsCount++;
+  }
+
+  // 6. usage
+  const srcUsage = String(source.usage || "").trim();
+  if (
+    srcUsage &&
+    !isEnrichableFieldEmpty({ usage: srcUsage }, "usage") &&
+    isEnrichableFieldEmpty({ usage: targetRow.usage }, "usage")
+  ) {
+    dbUpdate.usage = srcUsage;
+    patch.usage = srcUsage;
+    fieldsCount++;
+  }
+
+  // 7. requires_prescription (mão única: somente false -> true)
+  if (!Boolean(targetRow.requires_prescription) && source.requiresPrescription === true) {
+    dbUpdate.requires_prescription = true;
+    patch.requires_prescription = true;
+    fieldsCount++;
+  }
+
+  if (fieldsCount > 0) {
+    dbUpdate.is_ai_enriched = true;
+    patch.isAiEnriched = true;
+  }
+
+  return { dbUpdate, patch, fieldsCount };
+}
+
+interface PendingRowUpdate {
+  id: string;
+  tenantId: string;
+  dbUpdate: Record<string, any>;
+  fieldsCount: number;
+}
+
+/**
+ * Agrupa atualizações idênticas por `(tenantId, payload)` em lotes de até 100 IDs
+ * e executa em paralelo controlado para máxima performance no Supabase.
+ */
+async function executeGroupedProductUpdates(
+  supabaseAdmin: SupabaseClient,
+  updates: PendingRowUpdate[]
+): Promise<{ updatedProducts: number; updatedStores: number; fieldsFilled: number }> {
+  if (updates.length === 0) {
+    return { updatedProducts: 0, updatedStores: 0, fieldsFilled: 0 };
+  }
+
+  const groups = new Map<
+    string,
+    { tenantId: string; dbUpdate: Record<string, any>; ids: string[]; fieldsCount: number }
+  >();
+
+  for (const item of updates) {
+    const sortedKeys = Object.keys(item.dbUpdate).sort();
+    const canonicalPayload: Record<string, any> = {};
+    for (const k of sortedKeys) canonicalPayload[k] = item.dbUpdate[k];
+    const groupKey = `${item.tenantId}::${JSON.stringify(canonicalPayload)}`;
+
+    const existing = groups.get(groupKey);
+    if (existing) {
+      existing.ids.push(item.id);
+    } else {
+      groups.set(groupKey, {
+        tenantId: item.tenantId,
+        dbUpdate: canonicalPayload,
+        ids: [item.id],
+        fieldsCount: item.fieldsCount,
+      });
+    }
+  }
+
+  const tasks: Array<() => Promise<{ count: number; tenantId: string; fields: number }>> = [];
+  for (const group of groups.values()) {
+    for (let i = 0; i < group.ids.length; i += 100) {
+      const idChunk = group.ids.slice(i, i + 100);
+      tasks.push(async () => {
+        const { error } = await supabaseAdmin
+          .from("products")
+          .update(group.dbUpdate)
+          .in("id", idChunk)
+          .eq("tenant_id", group.tenantId);
+
+        if (error) {
+          console.warn(
+            `[ProductAiService] Falha ao atualizar lote agrupado na loja ${group.tenantId}:`,
+            error.message
+          );
+          return { count: 0, tenantId: group.tenantId, fields: 0 };
+        }
+        return {
+          count: idChunk.length,
+          tenantId: group.tenantId,
+          fields: idChunk.length * group.fieldsCount,
+        };
+      });
+    }
+  }
+
+  let updatedProducts = 0;
+  let fieldsFilled = 0;
+  const storesTouched = new Set<string>();
+  const CONCURRENCY = 8;
+
+  for (let i = 0; i < tasks.length; i += CONCURRENCY) {
+    const slice = tasks.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(slice.map((fn) => fn()));
+    for (const r of results) {
+      if (r.count > 0) {
+        updatedProducts += r.count;
+        fieldsFilled += r.fields;
+        storesTouched.add(r.tenantId);
+      }
+    }
+  }
+
+  return {
+    updatedProducts,
+    updatedStores: storesTouched.size,
+    fieldsFilled,
+  };
+}
+
+/**
+ * Propaga automaticamente em tempo real (0 tokens) dados técnicos/comerciais de SKUs
+ * enriquecidos com alta confiança / ANVISA para todas as demais drogarias com mesmo EAN válido.
+ */
+export async function propagateEnrichedSourcesToOtherStores(
+  rawSources: EanPropagationSource[]
+): Promise<EanPropagationSummary> {
+  const supabaseAdmin = getSupabaseAdmin();
+  if (!supabaseAdmin || !Array.isArray(rawSources) || rawSources.length === 0) {
+    return { updatedProducts: 0, updatedStores: 0, fieldsFilled: 0, eansPropagated: 0 };
+  }
+
+  // Filtra estritamente: alta confiança ou ANVISA confirmada + EAN comercial válido
+  const sourceByEan = new Map<string, EanPropagationSource>();
+  for (const s of rawSources) {
+    if (!s || (s.confidence !== "high" && !s.anvisaMatched)) continue;
+    const validEan = isValidCommercialEan(s.ean);
+    if (!validEan) continue;
+
+    const existing = sourceByEan.get(validEan);
+    const score = (src: EanPropagationSource) =>
+      (src.anvisaMatched ? 10 : 0) +
+      (!isShallowOrDuplicateDescription(src.description, src.name) ? 3 : 0) +
+      (src.indications ? 1 : 0) +
+      (src.usage ? 1 : 0) +
+      (src.presentation ? 1 : 0) +
+      (src.activePrinciple ? 1 : 0);
+
+    if (!existing || score(s) > score(existing)) {
+      sourceByEan.set(validEan, { ...s, ean: validEan });
+    }
+  }
+
+  const uniqueEans = Array.from(sourceByEan.keys());
+  if (uniqueEans.length === 0) {
+    return { updatedProducts: 0, updatedStores: 0, fieldsFilled: 0, eansPropagated: 0 };
+  }
+
+  const manipulacaoTenants = await fetchManipulacaoTenantIds(supabaseAdmin);
+  const pendingUpdates: PendingRowUpdate[] = [];
+  const eansWithUpdates = new Set<string>();
+
+  for (let i = 0; i < uniqueEans.length; i += 150) {
+    const eanChunk = uniqueEans.slice(i, i + 150);
+    let offset = 0;
+    const PAGE_SIZE = 1000;
+
+    while (true) {
+      const { data: targetRows, error } = await supabaseAdmin
+        .from("products")
+        .select(
+          "id, tenant_id, name, barcode, active_principle, drug_type, presentation, description, indications, usage, requires_prescription, is_ai_enriched"
+        )
+        .in("barcode", eanChunk)
+        .range(offset, offset + PAGE_SIZE - 1);
+
+      if (error || !Array.isArray(targetRows) || targetRows.length === 0) break;
+
+      for (const target of targetRows) {
+        const targetTenantId = String(target.tenant_id || "").trim();
+        if (!targetTenantId || manipulacaoTenants.has(targetTenantId)) continue;
+
+        const targetEan = isValidCommercialEan(target.barcode);
+        if (!targetEan) continue;
+
+        const source = sourceByEan.get(targetEan);
+        if (!source) continue;
+        if (source.sourceTenantId && targetTenantId === source.sourceTenantId) continue;
+
+        const { dbUpdate, fieldsCount } = buildSafeTargetEanUpdate(target, source);
+        if (fieldsCount > 0) {
+          pendingUpdates.push({
+            id: String(target.id),
+            tenantId: targetTenantId,
+            dbUpdate,
+            fieldsCount,
+          });
+          eansWithUpdates.add(targetEan);
+        }
+      }
+
+      if (targetRows.length < PAGE_SIZE) break;
+      offset += PAGE_SIZE;
+    }
+  }
+
+  const execRes = await executeGroupedProductUpdates(supabaseAdmin, pendingUpdates);
+  return {
+    ...execRes,
+    eansPropagated: eansWithUpdates.size,
+  };
+}
+
+function buildBestMasterSourceForEan(
+  ean: string,
+  peers: Array<Record<string, any>>,
+  anvisa?: AnvisaMatchInfo
+): EanPropagationSource | null {
+  const enrichedPeers = peers.filter((r) => Boolean(r.is_ai_enriched));
+  if (enrichedPeers.length === 0) return null;
+
+  let bestName = "";
+  let bestDesc = "";
+  let bestActive = "";
+  let bestDrugType = "";
+  let bestPres = "";
+  let bestInd = "";
+  let bestUsage = "";
+  let anyRx = false;
+
+  for (const row of enrichedPeers) {
+    const rowName = String(row.name || "").trim();
+    if (!bestName && rowName) bestName = rowName;
+
+    const desc = String(row.description || "").trim();
+    if (
+      desc &&
+      !isShallowOrDuplicateDescription(desc, rowName) &&
+      desc.length > bestDesc.length
+    ) {
+      bestDesc = desc;
+    }
+
+    const act = String(row.active_principle || "").trim();
+    if (act && act.length > bestActive.length) bestActive = act;
+
+    const dt = String(row.drug_type || "").trim();
+    if (dt && !GENERIC_DRUG_TYPE_VALUES.has(dt.toLowerCase()) && !bestDrugType) {
+      bestDrugType = dt;
+    }
+
+    const pres = String(row.presentation || "").trim();
+    if (
+      pres &&
+      pres.length > bestPres.length &&
+      validatePresentationCoherence(rowName, pres).valid
+    ) {
+      bestPres = pres;
+    }
+
+    const ind = String(row.indications || "").trim();
+    if (ind && ind.length >= 5 && ind.length > bestInd.length) bestInd = ind;
+
+    const usage = String(row.usage || "").trim();
+    if (usage && usage.length >= 5 && usage.length > bestUsage.length) bestUsage = usage;
+
+    if (row.requires_prescription === true) anyRx = true;
+  }
+
+  const anvisaFound = Boolean(anvisa?.found);
+  if (anvisaFound) {
+    const lockedAct = formatAnvisaSubstanceToDcb(anvisa?.activePrinciple);
+    if (lockedAct) bestActive = lockedAct;
+    const lockedDt = mapAnvisaTipoProdutoToDrugType(anvisa?.drugType);
+    if (lockedDt) bestDrugType = lockedDt;
+    if (!bestPres && anvisa?.presentation) bestPres = String(anvisa.presentation).trim();
+    if (doesAnvisaTarjaRequirePrescription(anvisa?.tarja)) anyRx = true;
+  }
+
+  const signalCount =
+    (bestDesc ? 1 : 0) +
+    (bestInd ? 1 : 0) +
+    (bestUsage ? 1 : 0) +
+    (bestPres ? 1 : 0) +
+    (bestActive ? 1 : 0);
+
+  if (signalCount < 2) return null;
+
+  return {
+    ean,
+    name: String(anvisa?.productName || bestName || "").trim(),
+    activePrinciple: bestActive || undefined,
+    drugType: bestDrugType || undefined,
+    presentation: bestPres || undefined,
+    description: bestDesc || undefined,
+    indications: bestInd || undefined,
+    usage: bestUsage || undefined,
+    requiresPrescription: anyRx,
+    confidence: "high",
+    anvisaMatched: anvisaFound,
+  };
+}
+
+export interface GlobalEanSyncReport {
+  storesBenefited: number;
+  updatedProducts: number;
+  fieldsFilled: number;
+  eansProcessed: number;
+  masterProductsScanned: number;
+  tokensUsed: 0;
+}
+
+/**
+ * Sincronização Retroativa Global (Portal Super Admin, 0 tokens):
+ * Usa todos os produtos já enriquecidos com EAN comercial válido como base mestre
+ * para preencher os campos vazios das demais drogarias do FarmaFlow.
+ */
+export async function syncAllStoresEanEnrichmentZeroTokens(): Promise<GlobalEanSyncReport> {
+  const supabaseAdmin = getSupabaseAdmin();
+  if (!supabaseAdmin) {
+    throw createProductAiError("Conexão administrativa com o banco não configurada.", 503);
+  }
+
+  const manipulacaoTenants = await fetchManipulacaoTenantIds(supabaseAdmin);
+
+  const rowsByEan = new Map<string, Array<Record<string, any>>>();
+  let masterProductsScanned = 0;
+  let offset = 0;
+  const PAGE_SIZE = 1000;
+
+  while (true) {
+    const { data: pageRows, error } = await supabaseAdmin
+      .from("products")
+      .select(
+        "id, tenant_id, name, barcode, active_principle, drug_type, presentation, description, indications, usage, requires_prescription, is_ai_enriched"
+      )
+      .not("barcode", "is", null)
+      .neq("barcode", "")
+      .range(offset, offset + PAGE_SIZE - 1);
+
+    if (error) {
+      throw createProductAiError(
+        `Erro ao ler catálogo global para sincronização por EAN: ${error.message}`,
+        500
+      );
+    }
+    if (!Array.isArray(pageRows) || pageRows.length === 0) break;
+
+    for (const row of pageRows) {
+      const tId = String(row.tenant_id || "").trim();
+      if (!tId || manipulacaoTenants.has(tId)) continue;
+
+      const validEan = isValidCommercialEan(row.barcode);
+      if (!validEan) continue;
+
+      if (row.is_ai_enriched) masterProductsScanned++;
+
+      const list = rowsByEan.get(validEan);
+      if (list) list.push(row);
+      else rowsByEan.set(validEan, [row]);
+    }
+
+    if (pageRows.length < PAGE_SIZE) break;
+    offset += PAGE_SIZE;
+  }
+
+  // Seleciona apenas EANs que possuem pelo menos 1 mestre enriquecido E pelo menos 2 registros (ou outro item para atualizar)
+  const candidateEans: string[] = [];
+  for (const [ean, group] of rowsByEan.entries()) {
+    if (group.length < 2) continue;
+    if (group.some((r) => Boolean(r.is_ai_enriched))) {
+      candidateEans.push(ean);
+    }
+  }
+
+  // Consulta dados oficiais ANVISA em lotes de 150 EANs para travamento DCB/Tipo/Tarja
+  const anvisaByEan = new Map<string, AnvisaMatchInfo>();
+  for (let i = 0; i < candidateEans.length; i += 150) {
+    const chunk = candidateEans.slice(i, i + 150);
+    const lookup = await lookupEanReferenceBatch(chunk);
+    for (const [ean, info] of lookup.entries()) {
+      if (info?.anvisa?.found) {
+        anvisaByEan.set(ean, info.anvisa);
+      }
+    }
+  }
+
+  const pendingUpdates: PendingRowUpdate[] = [];
+  let eansProcessed = 0;
+
+  for (const ean of candidateEans) {
+    const group = rowsByEan.get(ean) || [];
+    const master = buildBestMasterSourceForEan(ean, group, anvisaByEan.get(ean));
+    if (!master) continue;
+
+    eansProcessed++;
+    for (const targetRow of group) {
+      const { dbUpdate, fieldsCount } = buildSafeTargetEanUpdate(targetRow, master);
+      if (fieldsCount > 0) {
+        pendingUpdates.push({
+          id: String(targetRow.id),
+          tenantId: String(targetRow.tenant_id),
+          dbUpdate,
+          fieldsCount,
+        });
+      }
+    }
+  }
+
+  const execRes = await executeGroupedProductUpdates(supabaseAdmin, pendingUpdates);
+  return {
+    storesBenefited: execRes.updatedStores,
+    updatedProducts: execRes.updatedProducts,
+    fieldsFilled: execRes.fieldsFilled,
+    eansProcessed,
+    masterProductsScanned,
+    tokensUsed: 0,
+  };
+}
+
+export interface TenantEanHydrationReport {
+  totalScanned: number;
+  matchedEans: number;
+  updatedProducts: number;
+  fieldsFilled: number;
+  updatedItems: Array<{ id: string; patch: Record<string, any> }>;
+  tokensUsed: 0;
+}
+
+/**
+ * Hidrata instantaneamente o catálogo de uma loja (0 tokens) usando EANs comerciais
+ * já enriquecidos e validados na base do FarmaFlow + trava ANVISA/CMED.
+ */
+export async function hydrateTenantCatalogFromEanBase(
+  tenantId: string,
+  productIds?: string[]
+): Promise<TenantEanHydrationReport> {
+  const cleanTenantId = String(tenantId || "").trim();
+  if (!cleanTenantId) {
+    throw createProductAiError("Informe o 'tenantId' da loja para hidratar pela base EAN.", 400);
+  }
+
+  const supabaseAdmin = getSupabaseAdmin();
+  if (!supabaseAdmin) {
+    throw createProductAiError("Conexão administrativa com o banco não configurada.", 503);
+  }
+
+  const manipulacaoTenants = await fetchManipulacaoTenantIds(supabaseAdmin);
+  if (manipulacaoTenants.has(cleanTenantId)) {
+    return {
+      totalScanned: 0,
+      matchedEans: 0,
+      updatedProducts: 0,
+      fieldsFilled: 0,
+      updatedItems: [],
+      tokensUsed: 0,
+    };
+  }
+
+  const targetIdSet =
+    Array.isArray(productIds) && productIds.length > 0
+      ? new Set(productIds.map((id) => String(id).trim()).filter(Boolean))
+      : null;
+
+  const tenantRows: Array<Record<string, any>> = [];
+  let offset = 0;
+  const PAGE_SIZE = 1000;
+
+  while (true) {
+    const { data: rows, error } = await supabaseAdmin
+      .from("products")
+      .select(
+        "id, tenant_id, name, barcode, active_principle, drug_type, presentation, description, indications, usage, requires_prescription, is_ai_enriched, category"
+      )
+      .eq("tenant_id", cleanTenantId)
+      .not("barcode", "is", null)
+      .neq("barcode", "")
+      .range(offset, offset + PAGE_SIZE - 1);
+
+    if (error) {
+      throw createProductAiError(
+        `Erro ao consultar produtos da loja para hidratação por EAN: ${error.message}`,
+        500
+      );
+    }
+    if (!Array.isArray(rows) || rows.length === 0) break;
+
+    for (const r of rows) {
+      if (targetIdSet && !targetIdSet.has(String(r.id))) continue;
+      tenantRows.push(r);
+    }
+
+    if (rows.length < PAGE_SIZE) break;
+    offset += PAGE_SIZE;
+  }
+
+  // Seleciona apenas itens com EAN comercial válido que possuem algum campo técnico faltante/raso
+  const incompleteWithValidEan: Array<{ row: Record<string, any>; ean: string }> = [];
+  const uniqueEanSet = new Set<string>();
+
+  for (const row of tenantRows) {
+    const validEan = isValidCommercialEan(row.barcode);
+    if (!validEan) continue;
+    const missing = getMissingEnrichableFields({
+      name: row.name,
+      description: row.description,
+      active_principle: row.active_principle,
+      presentation: row.presentation,
+      indications: row.indications,
+      usage: row.usage,
+      drug_type: row.drug_type,
+      category: row.category,
+      requires_prescription: row.requires_prescription,
+    });
+    if (missing.length > 0) {
+      incompleteWithValidEan.push({ row, ean: validEan });
+      uniqueEanSet.add(validEan);
+    }
+  }
+
+  const uniqueEans = Array.from(uniqueEanSet);
+  if (uniqueEans.length === 0) {
+    return {
+      totalScanned: tenantRows.length,
+      matchedEans: 0,
+      updatedProducts: 0,
+      fieldsFilled: 0,
+      updatedItems: [],
+      tokensUsed: 0,
+    };
+  }
+
+  // Busca peers já enriquecidos na base do FarmaFlow + base ANVISA em lotes de 150 EANs
+  const peersByEan = new Map<string, Array<Record<string, any>>>();
+  const anvisaByEan = new Map<string, AnvisaMatchInfo>();
+
+  for (let i = 0; i < uniqueEans.length; i += 150) {
+    const chunk = uniqueEans.slice(i, i + 150);
+
+    const { data: peerRows } = await supabaseAdmin
+      .from("products")
+      .select(
+        "id, tenant_id, name, barcode, active_principle, drug_type, presentation, description, indications, usage, requires_prescription, is_ai_enriched"
+      )
+      .in("barcode", chunk)
+      .eq("is_ai_enriched", true)
+      .neq("tenant_id", cleanTenantId)
+      .limit(1000);
+
+    if (Array.isArray(peerRows)) {
+      for (const p of peerRows) {
+        if (manipulacaoTenants.has(String(p.tenant_id || ""))) continue;
+        const pEan = isValidCommercialEan(p.barcode);
+        if (!pEan) continue;
+        const arr = peersByEan.get(pEan);
+        if (arr) arr.push(p);
+        else peersByEan.set(pEan, [p]);
+      }
+    }
+
+    const lookup = await lookupEanReferenceBatch(chunk, cleanTenantId);
+    for (const [ean, info] of lookup.entries()) {
+      if (info?.anvisa?.found) {
+        anvisaByEan.set(ean, info.anvisa);
+      }
+    }
+  }
+
+  const masterByEan = new Map<string, EanPropagationSource>();
+  for (const [ean, peers] of peersByEan.entries()) {
+    const master = buildBestMasterSourceForEan(ean, peers, anvisaByEan.get(ean));
+    if (master) {
+      masterByEan.set(ean, master);
+    }
+  }
+
+  const pendingUpdates: PendingRowUpdate[] = [];
+  const updatedItems: Array<{ id: string; patch: Record<string, any> }> = [];
+  const matchedEanSet = new Set<string>();
+
+  for (const { row, ean } of incompleteWithValidEan) {
+    const master = masterByEan.get(ean);
+    if (!master) continue;
+
+    matchedEanSet.add(ean);
+    const { dbUpdate, patch, fieldsCount } = buildSafeTargetEanUpdate(row, master);
+    if (fieldsCount > 0) {
+      const id = String(row.id);
+      pendingUpdates.push({
+        id,
+        tenantId: cleanTenantId,
+        dbUpdate,
+        fieldsCount,
+      });
+      updatedItems.push({ id, patch });
+    }
+  }
+
+  const execRes = await executeGroupedProductUpdates(supabaseAdmin, pendingUpdates);
+  return {
+    totalScanned: tenantRows.length,
+    matchedEans: matchedEanSet.size,
+    updatedProducts: execRes.updatedProducts,
+    fieldsFilled: execRes.fieldsFilled,
+    updatedItems,
+    tokensUsed: 0,
+  };
 }
 
 export async function generateProductImageWithAi(productName: string): Promise<{ image: string }> {

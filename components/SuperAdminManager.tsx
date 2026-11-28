@@ -74,6 +74,15 @@ export const SuperAdminManager: React.FC<SuperAdminManagerProps> = ({ session, o
   const [isCmedModalOpen, setIsCmedModalOpen] = useState(false);
   const [cmedStats, setCmedStats] = useState<AnvisaCmedStats | null>(null);
   const [loadingCmedStats, setLoadingCmedStats] = useState(false);
+  const [isSyncingEanAcrossStores, setIsSyncingEanAcrossStores] = useState(false);
+  const [eanSyncReport, setEanSyncReport] = useState<{
+    storesBenefited: number;
+    updatedProducts: number;
+    fieldsFilled: number;
+    eansProcessed: number;
+    tokensUsed: number;
+  } | null>(null);
+  const [eanSyncError, setEanSyncError] = useState<string | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   const handleSyncTenantInovafarma = async () => {
@@ -387,6 +396,39 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
       console.error('Erro ao carregar estatisticas ANVISA CMED:', e);
     } finally {
       setLoadingCmedStats(false);
+    }
+  };
+
+  const handleSyncEanAcrossStores = async () => {
+    if (isSyncingEanAcrossStores) return;
+    setIsSyncingEanAcrossStores(true);
+    setEanSyncError(null);
+    setEanSyncReport(null);
+
+    try {
+      const authHeaders = await getSuperAdminAuthHeaders();
+      const response = await fetch('/api/super-admin/products/sync-ean-enrichment', {
+        method: 'POST',
+        headers: {
+          ...authHeaders,
+          'Content-Type': 'application/json',
+        },
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data?.error || `Falha HTTP ${response.status} ao sincronizar EANs entre lojas.`);
+      }
+      setEanSyncReport({
+        storesBenefited: Number(data?.storesBenefited || 0),
+        updatedProducts: Number(data?.updatedProducts || 0),
+        fieldsFilled: Number(data?.fieldsFilled || 0),
+        eansProcessed: Number(data?.eansProcessed || 0),
+        tokensUsed: 0,
+      });
+    } catch (err: any) {
+      setEanSyncError(err?.message || 'Erro ao sincronizar enriquecimento por EAN entre lojas.');
+    } finally {
+      setIsSyncingEanAcrossStores(false);
     }
   };
 
@@ -1157,72 +1199,167 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
         <StatusMonitor />
       </div>
 
-      <div className="bg-white rounded-[2.5rem] border border-gray-100 shadow-sm p-6 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
-        <div className="flex items-start sm:items-center gap-4">
-          <div className="w-14 h-14 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-700 flex items-center justify-center shrink-0">
-            <ShieldCheck size={28} />
+      <div className="bg-white rounded-[2.5rem] border border-gray-100 shadow-sm p-6 space-y-4">
+        <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
+          <div className="flex items-start sm:items-center gap-4">
+            <div className="w-14 h-14 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-700 flex items-center justify-center shrink-0">
+              <ShieldCheck size={28} />
+            </div>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-lg font-black text-gray-900">Base Oficial ANVISA / CMED</h3>
+                {cmedStats && !cmedStats.schemaReady ? (
+                  <span className="bg-amber-100 text-amber-800 px-2.5 py-0.5 rounded-lg text-[10px] font-black uppercase">
+                    Migração SQL Pendente
+                  </span>
+                ) : cmedStats && cmedStats.totalCount > 0 ? (
+                  <span className="bg-emerald-100 text-emerald-800 px-2.5 py-0.5 rounded-lg text-[10px] font-black uppercase flex items-center gap-1">
+                    <CheckCircle2 size={11} /> Camada 1 Ativa
+                  </span>
+                ) : (
+                  <span className="bg-gray-100 text-gray-600 px-2.5 py-0.5 rounded-lg text-[10px] font-black uppercase">
+                    Base Vazia
+                  </span>
+                )}
+              </div>
+              <p className="text-xs font-medium text-gray-500 mt-1">
+                Tabela global <code className="bg-gray-100 px-1.5 py-0.5 rounded text-gray-700 font-mono">anvisa_medicamentos</code> usada para validar EAN, DCB, tipo legal e tarja no Enriquecimento IA.
+              </p>
+              <div className="flex flex-wrap items-center gap-4 mt-2 text-xs font-bold text-gray-600">
+                <span>
+                  Registros:{' '}
+                  <strong className="text-gray-900 font-black">
+                    {loadingCmedStats && !cmedStats
+                      ? '...'
+                      : (cmedStats?.totalCount ?? 0).toLocaleString('pt-BR')}
+                  </strong>
+                </span>
+                <span>
+                  Última atualização:{' '}
+                  <strong className="text-gray-900 font-black">
+                    {cmedStats?.lastUpdatedAt
+                      ? new Date(cmedStats.lastUpdatedAt).toLocaleString('pt-BR')
+                      : 'Nunca importado'}
+                  </strong>
+                </span>
+              </div>
+            </div>
           </div>
-          <div>
-            <div className="flex flex-wrap items-center gap-2">
-              <h3 className="text-lg font-black text-gray-900">Base Oficial ANVISA / CMED</h3>
-              {cmedStats && !cmedStats.schemaReady ? (
-                <span className="bg-amber-100 text-amber-800 px-2.5 py-0.5 rounded-lg text-[10px] font-black uppercase">
-                  Migração SQL Pendente
-                </span>
-              ) : cmedStats && cmedStats.totalCount > 0 ? (
-                <span className="bg-emerald-100 text-emerald-800 px-2.5 py-0.5 rounded-lg text-[10px] font-black uppercase flex items-center gap-1">
-                  <CheckCircle2 size={11} /> Camada 1 Ativa
-                </span>
+
+          <div className="flex flex-wrap items-center gap-3 w-full lg:w-auto justify-end shrink-0">
+            <button
+              type="button"
+              onClick={loadCmedStats}
+              disabled={loadingCmedStats || isSyncingEanAcrossStores}
+              className="px-4 py-3 rounded-2xl bg-gray-100 hover:bg-gray-200 text-gray-700 font-black text-xs transition-all flex items-center gap-2 disabled:opacity-50"
+              title="Atualizar contagem da base CMED"
+            >
+              <RefreshCw size={15} className={loadingCmedStats ? 'animate-spin' : ''} />
+              Atualizar
+            </button>
+            <button
+              type="button"
+              onClick={handleSyncEanAcrossStores}
+              disabled={isSyncingEanAcrossStores}
+              className="px-5 py-3.5 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white font-black text-xs shadow-lg transition-all flex items-center gap-2 disabled:opacity-60"
+              title="Reaproveita produtos já enriquecidos para preencher campos vazios em todas as drogarias pelo EAN válido sem gastar tokens de IA"
+            >
+              {isSyncingEanAcrossStores ? (
+                <Loader2 size={16} className="animate-spin" />
               ) : (
-                <span className="bg-gray-100 text-gray-600 px-2.5 py-0.5 rounded-lg text-[10px] font-black uppercase">
-                  Base Vazia
-                </span>
+                <Sparkles size={16} />
               )}
-            </div>
-            <p className="text-xs font-medium text-gray-500 mt-1">
-              Tabela global <code className="bg-gray-100 px-1.5 py-0.5 rounded text-gray-700 font-mono">anvisa_medicamentos</code> usada para validar EAN, DCB, tipo legal e tarja no Enriquecimento IA.
-            </p>
-            <div className="flex flex-wrap items-center gap-4 mt-2 text-xs font-bold text-gray-600">
-              <span>
-                Registros:{' '}
-                <strong className="text-gray-900 font-black">
-                  {loadingCmedStats && !cmedStats
-                    ? '...'
-                    : (cmedStats?.totalCount ?? 0).toLocaleString('pt-BR')}
-                </strong>
-              </span>
-              <span>
-                Última atualização:{' '}
-                <strong className="text-gray-900 font-black">
-                  {cmedStats?.lastUpdatedAt
-                    ? new Date(cmedStats.lastUpdatedAt).toLocaleString('pt-BR')
-                    : 'Nunca importado'}
-                </strong>
-              </span>
-            </div>
+              {isSyncingEanAcrossStores
+                ? 'Sincronizando EANs entre Lojas...'
+                : 'Sincronizar Enriquecimento por EAN entre Lojas (0 tokens)'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsCmedModalOpen(true)}
+              className="px-6 py-3.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs shadow-lg transition-all flex items-center gap-2"
+            >
+              <FileSpreadsheet size={16} />
+              Importar Planilha CMED (ANVISA)
+            </button>
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-3 w-full lg:w-auto justify-end shrink-0">
-          <button
-            type="button"
-            onClick={loadCmedStats}
-            disabled={loadingCmedStats}
-            className="px-4 py-3 rounded-2xl bg-gray-100 hover:bg-gray-200 text-gray-700 font-black text-xs transition-all flex items-center gap-2 disabled:opacity-50"
-            title="Atualizar contagem da base CMED"
-          >
-            <RefreshCw size={15} className={loadingCmedStats ? 'animate-spin' : ''} />
-            Atualizar
-          </button>
-          <button
-            type="button"
-            onClick={() => setIsCmedModalOpen(true)}
-            className="px-6 py-3.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs shadow-lg transition-all flex items-center gap-2"
-          >
-            <FileSpreadsheet size={16} />
-            Importar Planilha CMED (ANVISA)
-          </button>
-        </div>
+        {isSyncingEanAcrossStores && (
+          <div className="p-4 rounded-2xl bg-indigo-50 border border-indigo-200 flex items-center gap-3 text-xs font-bold text-indigo-900">
+            <Loader2 size={18} className="animate-spin text-indigo-600 shrink-0" />
+            <span>
+              Cruzando produtos enriquecidos com EAN comercial válido e preenchendo apenas campos vazios/rasos nas drogarias (preços, estoques, fotos e lojas de manipulação ficam 100% intactos)...
+            </span>
+          </div>
+        )}
+
+        {eanSyncError && (
+          <div className="p-4 rounded-2xl bg-red-50 border border-red-200 flex items-center justify-between gap-3 text-xs font-bold text-red-700">
+            <div className="flex items-center gap-2">
+              <AlertCircle size={16} className="shrink-0" />
+              <span>{eanSyncError}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setEanSyncError(null)}
+              className="p-1 rounded-lg hover:bg-red-100"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
+
+        {eanSyncReport && (
+          <div className="p-4 rounded-3xl bg-indigo-50/70 border border-indigo-200 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-xs font-black text-indigo-950 uppercase tracking-wide">
+                <CheckCircle2 size={16} className="text-emerald-600" />
+                Sincronização Global por EAN Concluída
+              </div>
+              <button
+                type="button"
+                onClick={() => setEanSyncReport(null)}
+                className="text-indigo-400 hover:text-indigo-700 p-1"
+              >
+                <X size={14} />
+              </button>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="bg-white p-3 rounded-2xl border border-indigo-100">
+                <span className="block text-[10px] font-black uppercase text-gray-400">
+                  Lojas beneficiadas
+                </span>
+                <span className="text-xl font-black text-indigo-900">
+                  {eanSyncReport.storesBenefited.toLocaleString('pt-BR')}
+                </span>
+              </div>
+              <div className="bg-white p-3 rounded-2xl border border-indigo-100">
+                <span className="block text-[10px] font-black uppercase text-gray-400">
+                  Produtos atualizados
+                </span>
+                <span className="text-xl font-black text-emerald-700">
+                  {eanSyncReport.updatedProducts.toLocaleString('pt-BR')}
+                </span>
+              </div>
+              <div className="bg-white p-3 rounded-2xl border border-indigo-100">
+                <span className="block text-[10px] font-black uppercase text-gray-400">
+                  Campos preenchidos
+                </span>
+                <span className="text-xl font-black text-gray-900">
+                  {eanSyncReport.fieldsFilled.toLocaleString('pt-BR')}
+                </span>
+              </div>
+              <div className="bg-emerald-50 p-3 rounded-2xl border border-emerald-200">
+                <span className="block text-[10px] font-black uppercase text-emerald-700">
+                  Consumo de IA
+                </span>
+                <span className="text-xl font-black text-emerald-900">
+                  0 tokens consumidos
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="flex flex-col xl:flex-row justify-between items-start xl:items-center gap-6">
