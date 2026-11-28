@@ -6,6 +6,7 @@ import {
   EnrichableFieldKey,
   isEnrichableFieldEmpty,
   isMedicationProduct,
+  isShallowOrDuplicateDescription,
 } from "../utils/productCompleteness.js";
 
 const DEFAULT_ENRICH_MODEL = "gemini-2.5-flash";
@@ -671,9 +672,9 @@ export async function lookupEanReferenceBatch(
         const entry = resultMap.get(ean);
         if (!entry) continue;
 
-        // Prioriza peer mais completo (especialmente com description + indications + usage + presentation)
+        // Prioriza peer mais completo (especialmente com description rica >= 40 chars e diferente do nome + indications + usage + presentation)
         const completenessScore = (row: any) =>
-          (row.description && String(row.description).trim().length >= 10 ? 2 : 0) +
+          (!isShallowOrDuplicateDescription(row.description, row.name) ? 2 : 0) +
           (row.presentation && String(row.presentation).trim().length >= 2 ? 1 : 0) +
           (row.indications && String(row.indications).trim().length >= 5 ? 1 : 0) +
           (row.usage && String(row.usage).trim().length >= 5 ? 1 : 0) +
@@ -1003,7 +1004,13 @@ function buildValidatedPatch(
     const incomingStr = String(incomingVal ?? "").trim();
     if (!incomingStr) return false;
     if (overwriteExisting) return true;
-    return isEnrichableFieldEmpty({ [field]: currentVal }, field);
+    return isEnrichableFieldEmpty(
+      {
+        name: origProduct.name,
+        [field]: currentVal,
+      },
+      field
+    );
   };
 
   if (canFill("description", origProduct.description, candidateFields.description)) {
@@ -1111,6 +1118,187 @@ function buildValidatedPatch(
   }
 
   return { patch, dbUpdate, updatedFieldNames };
+}
+
+interface PendingBatchAiEntry {
+  input: ProductAiBatchInput & { id: string };
+  authRow: Record<string, any>;
+  eanInfo?: EanLookupResult;
+}
+
+function normalizeBatchRefKey(rawRef: unknown): string {
+  const raw = String(rawRef || "").trim().toUpperCase();
+  if (!raw) return "";
+  const m = raw.match(/^ITEM[_\s-]*(\d+)$/);
+  if (m) return `ITEM_${m[1]}`;
+  return raw;
+}
+
+/**
+ * Chama o Gemini mapeando internamente os itens para `batch_ref` curto ("ITEM_1".."ITEM_5")
+ * e reconvertendo para o UUID real no servidor via Map (evita erros de eco de UUID de 36 chars).
+ */
+async function invokeGeminiEnrichMiniBatch(
+  entries: PendingBatchAiEntry[]
+): Promise<Map<string, any>> {
+  const aiById = new Map<string, any>();
+  if (entries.length === 0) return aiById;
+
+  const refToEntry = new Map<string, PendingBatchAiEntry>();
+  const aiPayload = entries.map((entry, idx) => {
+    const batchRef = `ITEM_${idx + 1}`;
+    refToEntry.set(batchRef, entry);
+    const { input, authRow, eanInfo } = entry;
+    return {
+      batch_ref: batchRef,
+      barcode: normalizeEanDigits(input.barcode || authRow.barcode) || input.barcode || "",
+      name: input.name,
+      manufacturer: input.manufacturer || authRow.manufacturer || "",
+      department: input.department || "",
+      category: input.category || authRow.category || "",
+      drugType: input.drugType || authRow.drug_type || "",
+      presentation: input.presentation || authRow.presentation || "",
+      activePrinciple: input.activePrinciple || authRow.active_principle || "",
+      ...(eanInfo?.anvisa?.found
+        ? { anvisa_official_data: buildLockedAnvisaContext(eanInfo.anvisa) }
+        : {}),
+    };
+  });
+
+  const ai = getServerGeminiClient();
+
+  const response = await retryWithBackoff<GenerateContentResponse>(() =>
+    ai.models.generateContent({
+      model: DEFAULT_ENRICH_MODEL,
+      contents: `Você é um Farmacêutico Sênior Especialista em Catálogo Farmacêutico e Conversão de Vendas Online (FarmaFlow).
+Processe rigorosamente TODOS os ${aiPayload.length} itens abaixo e retorne um array JSON contendo um objeto para CADA "batch_ref" recebido (${aiPayload.map((p) => p.batch_ref).join(", ")}):
+${JSON.stringify(aiPayload)}
+
+REGRAS OBRIGATÓRIAS DAS 5 CAMADAS DE SEGURANÇA:
+1. IDENTIFICAÇÃO ESTRITA POR batch_ref E NOME:
+   - Cada objeto retornado DEVE conter exatamente o campo "batch_ref" recebido (ex: "ITEM_1") e "matched_product_name" ecoando exatamente o campo "name" original correspondente. Nunca troque, omita ou misture itens.
+2. REGRA "MELHOR VAZIO DO QUE ERRADO" (PROIBIDO CHUTAR):
+   - Avalie a certeza da identificação como "high", "medium" ou "low" em "confidence" e justifique em "confidence_reason".
+   - Se o nome for genérico/truncado (ex: "ITEM DIVERSOS", código interno sem marca/ativo) e não houver "anvisa_official_data", retorne confidence="low" e deixe os campos descritivos vazios.
+3. FONTE OFICIAL ANVISA/CMED TRAVADA POR EAN:
+   - Quando "anvisa_official_data" estiver presente, a identificação oficial já está confirmada (use confidence="high").
+   - Utilize exatamente o "principio_ativo_dcb", "nome_comercial", "apresentacao", "laboratorio" e "classe_terapeutica" oficiais para gerar Descrição Comercial, Indicações e Modo de Uso 100% fiéis àquele medicamento, sem alterar ou inventar o fármaco.
+4. SEPARAÇÃO MEDICAMENTO vs NÃO-MEDICAMENTO:
+   - is_medication=true para medicamentos (Referência, Genérico, Similar, Fitoterápico, Biológico, Específico): activePrinciple DEVE seguir DCB oficial em PT-BR sem marca e sem dosagem (ex: "Progesterona", "Dipirona Monoidratada + Cafeína").
+   - is_medication=false para Cosméticos, Higiene, Perfumaria, Mamãe e Bebê, Correlatos e Conveniência: retorne activePrinciple="" (vazio) se não houver ativo cosmético explícito no nome, focando em apresentação, descrição comercial vendedora, indicações e modo de uso.
+5. COERÊNCIA DE DOSAGEM/VOLUME NA APRESENTAÇÃO:
+   - Se o nome traz dosagem, peso, volume ou quantidade (ex: "200MG", "14 CAP", "250 ML"), "presentation" NÃO pode contradizer esses valores.
+6. DESCRIÇÃO COMERCIAL, INDICAÇÕES, MODO DE USO E SEGURANÇA SANITÁRIA:
+   - description: 2 a 4 frases objetivas, claras e persuasivas em português do Brasil para conversão na loja online, sem promessas milagrosas.
+   - indications: para que serve / benefícios principais.
+   - usage: Modo de Uso claro e responsável. Em medicamentos, mantenha orientação geral fiel à bula e inclua sempre recomendação de seguir prescrição médica ou orientação do farmacêutico (nunca invente posologias arriscadas).
+   - requiresPrescription: true apenas para tarjados/controlados/antimicrobianos sob receita.
+7. TAXONOMIA OFICIAL:
+   - drugType: EXATAMENTE um de ['Referência', 'Genérico', 'Similar', 'Fitoterápico', 'Biológico', 'Específico', 'Cosmético', 'Higiene', 'Suplemento', 'Correlato', 'Outros'].
+   - department e category: use EXCLUSIVAMENTE os 7 Departamentos Oficiais e suas Subcategorias Oficiais:
+     * Medicamentos: ['Dor e Febre', 'Gripe e Resfriado', 'Alergias', 'Saúde Digestiva', 'Saúde Respiratória', 'Diabetes', 'Pressão e Coração', 'Saúde da Mulher', 'Saúde do Homem', 'Outros Medicamentos']
+     * Saúde e Bem-Estar: ['Vitaminas e Minerais', 'Suplementos', 'Imunidade', 'Saúde Digestiva', 'Energia e Disposição', 'Sono e Relaxamento', 'Controle de Peso', 'Esporte e Performance', 'Saúde da Mulher', 'Saúde do Homem']
+     * Dermocosméticos e Beleza: ['Cuidados com o Rosto', 'Cuidados com o Corpo', 'Proteção Solar', 'Cabelos', 'Maquiagem', 'Perfumes', 'Cuidados com as Unhas', 'Beleza Masculina']
+     * Higiene e Cuidados Pessoais: ['Higiene Bucal', 'Banho e Corpo', 'Desodorantes', 'Higiene Íntima', 'Cuidados Masculinos', 'Absorventes e Cuidados Femininos', 'Lenços e Algodão']
+     * Mamãe e Bebê: ['Fraldas', 'Higiene do Bebê', 'Alimentação Infantil', 'Amamentação', 'Cuidados com a Mamãe']
+     * Saúde, Ortopedia e Primeiros Socorros: ['Primeiros Socorros', 'Aparelhos de Saúde', 'Ortopédicos', 'Cuidados para Idosos', 'Outros Acessórios de Saúde']
+     * Conveniência: ['Alimentos e Bebidas', 'Snacks', 'Produtos para o Dia a Dia', 'Acessórios', 'Utilidades']`,
+      config: {
+        maxOutputTokens: 8192,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              batch_ref: { type: Type.STRING },
+              matched_product_name: { type: Type.STRING },
+              confidence: { type: Type.STRING, enum: ["high", "medium", "low"] },
+              confidence_reason: { type: Type.STRING },
+              is_medication: { type: Type.BOOLEAN },
+              description: { type: Type.STRING },
+              activePrinciple: { type: Type.STRING },
+              drugType: {
+                type: Type.STRING,
+                enum: [
+                  "Referência",
+                  "Genérico",
+                  "Similar",
+                  "Fitoterápico",
+                  "Biológico",
+                  "Específico",
+                  "Cosmético",
+                  "Higiene",
+                  "Suplemento",
+                  "Correlato",
+                  "Outros",
+                ],
+              },
+              department: { type: Type.STRING, enum: [...OFFICIAL_DEPARTMENTS] },
+              category: { type: Type.STRING },
+              manufacturer: { type: Type.STRING },
+              presentation: { type: Type.STRING },
+              indications: { type: Type.STRING },
+              usage: { type: Type.STRING },
+              requiresPrescription: { type: Type.BOOLEAN },
+            },
+            required: [
+              "batch_ref",
+              "matched_product_name",
+              "confidence",
+              "confidence_reason",
+              "is_medication",
+            ],
+          },
+        },
+      },
+    })
+  );
+
+  if (!response.text) {
+    throw createProductAiError("A IA retornou uma resposta vazia.", 502);
+  }
+
+  const jsonStr = cleanJsonResponse(response.text);
+  let parsed: any[] = [];
+  try {
+    parsed = JSON.parse(jsonStr);
+  } catch (parseError) {
+    const fixes = ['"]}', "]}", "]", '"}', "}", '"]', '"} ]', '"}]'];
+    for (const fix of fixes) {
+      try {
+        const repaired = JSON.parse(jsonStr + fix);
+        if (Array.isArray(repaired)) {
+          parsed = repaired;
+          break;
+        }
+      } catch (_) {}
+    }
+    if (!parsed || parsed.length === 0) {
+      try {
+        const lastBraceIndex = jsonStr.lastIndexOf("}");
+        if (lastBraceIndex > 0) {
+          const repaired = JSON.parse(jsonStr.substring(0, lastBraceIndex + 1) + "]");
+          if (Array.isArray(repaired)) parsed = repaired;
+        }
+      } catch (_) {}
+    }
+    if (!parsed || parsed.length === 0) throw parseError;
+  }
+
+  if (!Array.isArray(parsed)) return aiById;
+
+  // Camada 2: Indexa resposta ESTRITAMENTE por `batch_ref` e reconverte para o UUID real via Map
+  for (const row of parsed) {
+    if (!row || row.batch_ref === undefined || row.batch_ref === null) continue;
+    const refKey = normalizeBatchRefKey(row.batch_ref);
+    const entry = refToEntry.get(refKey);
+    if (entry && !aiById.has(entry.input.id)) {
+      aiById.set(entry.input.id, row);
+    }
+  }
+
+  return aiById;
 }
 
 /**
@@ -1254,7 +1442,7 @@ async function processMiniBatchInternal(
       const stillMissingAfterPeer = targetFields.filter((f) => {
         if (f === "activePrinciple" && !isMed) return false;
         const resultingVal = patch[f] ?? authRow[f === "activePrinciple" ? "active_principle" : f];
-        return isEnrichableFieldEmpty({ [f]: resultingVal }, f);
+        return isEnrichableFieldEmpty({ name: inp.name, [f]: resultingVal }, f);
       });
 
       if (stillMissingAfterPeer.length === 0) {
@@ -1327,147 +1515,41 @@ async function processMiniBatchInternal(
 
   // Chama Gemini apenas para os itens restantes (máx 5 por requisição)
   if (pendingForAi.length > 0) {
-    const aiPayload = pendingForAi.map(({ input, authRow, eanInfo }) => ({
-      id: input.id,
-      barcode: normalizeEanDigits(input.barcode || authRow.barcode) || input.barcode || "",
-      name: input.name,
-      manufacturer: input.manufacturer || authRow.manufacturer || "",
-      department: input.department || "",
-      category: input.category || authRow.category || "",
-      drugType: input.drugType || authRow.drug_type || "",
-      presentation: input.presentation || authRow.presentation || "",
-      activePrinciple: input.activePrinciple || authRow.active_principle || "",
-      ...(eanInfo?.anvisa?.found
-        ? { anvisa_official_data: buildLockedAnvisaContext(eanInfo.anvisa) }
-        : {}),
-    }));
-
-    const ai = getServerGeminiClient();
-
-    const response = await retryWithBackoff<GenerateContentResponse>(() =>
-      ai.models.generateContent({
-        model: DEFAULT_ENRICH_MODEL,
-        contents: `Você é um Farmacêutico Sênior Especialista em Catálogo Farmacêutico e Conversão de Vendas Online (FarmaFlow).
-Processe rigorosamente os ${aiPayload.length} itens abaixo e retorne um array JSON com exatamente os mesmos IDs recebidos:
-${JSON.stringify(aiPayload)}
-
-REGRAS OBRIGATÓRIAS DAS 5 CAMADAS DE SEGURANÇA:
-1. IDENTIFICAÇÃO ESTRITA POR ID E NOME:
-   - Cada objeto retornado DEVE conter exatamente o campo "id" recebido e "matched_product_name" ecoando exatamente o campo "name" original correspondente. Nunca troque ou misture itens.
-2. REGRA "MELHOR VAZIO DO QUE ERRADO" (PROIBIDO CHUTAR):
-   - Avalie a certeza da identificação como "high", "medium" ou "low" em "confidence" e justifique em "confidence_reason".
-   - Se o nome for genérico/truncado (ex: "ITEM DIVERSOS", código interno sem marca/ativo) e não houver "anvisa_official_data", retorne confidence="low" e deixe os campos descritivos vazios.
-3. FONTE OFICIAL ANVISA/CMED TRAVADA POR EAN:
-   - Quando "anvisa_official_data" estiver presente, a identificação oficial já está confirmada (use confidence="high").
-   - Utilize exatamente o "principio_ativo_dcb", "nome_comercial", "apresentacao", "laboratorio" e "classe_terapeutica" oficiais para gerar Descrição Comercial, Indicações e Modo de Uso 100% fiéis àquele medicamento, sem alterar ou inventar o fármaco.
-4. SEPARAÇÃO MEDICAMENTO vs NÃO-MEDICAMENTO:
-   - is_medication=true para medicamentos (Referência, Genérico, Similar, Fitoterápico, Biológico, Específico): activePrinciple DEVE seguir DCB oficial em PT-BR sem marca e sem dosagem (ex: "Progesterona", "Dipirona Monoidratada + Cafeína").
-   - is_medication=false para Cosméticos, Higiene, Perfumaria, Mamãe e Bebê, Correlatos e Conveniência: retorne activePrinciple="" (vazio) se não houver ativo cosmético explícito no nome, focando em apresentação, descrição comercial vendedora, indicações e modo de uso.
-5. COERÊNCIA DE DOSAGEM/VOLUME NA APRESENTAÇÃO:
-   - Se o nome traz dosagem, peso, volume ou quantidade (ex: "200MG", "14 CAP", "250 ML"), "presentation" NÃO pode contradizer esses valores.
-6. DESCRIÇÃO COMERCIAL, INDICAÇÕES, MODO DE USO E SEGURANÇA SANITÁRIA:
-   - description: 2 a 4 frases objetivas, claras e persuasivas em português do Brasil para conversão na loja online, sem promessas milagrosas.
-   - indications: para que serve / benefícios principais.
-   - usage: Modo de Uso claro e responsável. Em medicamentos, mantenha orientação geral fiel à bula e inclua sempre recomendação de seguir prescrição médica ou orientação do farmacêutico (nunca invente posologias arriscadas).
-   - requiresPrescription: true apenas para tarjados/controlados/antimicrobianos sob receita.
-7. TAXONOMIA OFICIAL:
-   - drugType: EXATAMENTE um de ['Referência', 'Genérico', 'Similar', 'Fitoterápico', 'Biológico', 'Específico', 'Cosmético', 'Higiene', 'Suplemento', 'Correlato', 'Outros'].
-   - department e category: use EXCLUSIVAMENTE os 7 Departamentos Oficiais e suas Subcategorias Oficiais:
-     * Medicamentos: ['Dor e Febre', 'Gripe e Resfriado', 'Alergias', 'Saúde Digestiva', 'Saúde Respiratória', 'Diabetes', 'Pressão e Coração', 'Saúde da Mulher', 'Saúde do Homem', 'Outros Medicamentos']
-     * Saúde e Bem-Estar: ['Vitaminas e Minerais', 'Suplementos', 'Imunidade', 'Saúde Digestiva', 'Energia e Disposição', 'Sono e Relaxamento', 'Controle de Peso', 'Esporte e Performance', 'Saúde da Mulher', 'Saúde do Homem']
-     * Dermocosméticos e Beleza: ['Cuidados com o Rosto', 'Cuidados com o Corpo', 'Proteção Solar', 'Cabelos', 'Maquiagem', 'Perfumes', 'Cuidados com as Unhas', 'Beleza Masculina']
-     * Higiene e Cuidados Pessoais: ['Higiene Bucal', 'Banho e Corpo', 'Desodorantes', 'Higiene Íntima', 'Cuidados Masculinos', 'Absorventes e Cuidados Femininos', 'Lenços e Algodão']
-     * Mamãe e Bebê: ['Fraldas', 'Higiene do Bebê', 'Alimentação Infantil', 'Amamentação', 'Cuidados com a Mamãe']
-     * Saúde, Ortopedia e Primeiros Socorros: ['Primeiros Socorros', 'Aparelhos de Saúde', 'Ortopédicos', 'Cuidados para Idosos', 'Outros Acessórios de Saúde']
-     * Conveniência: ['Alimentos e Bebidas', 'Snacks', 'Produtos para o Dia a Dia', 'Acessórios', 'Utilidades']`,
-        config: {
-          maxOutputTokens: 8192,
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                id: { type: Type.STRING },
-                matched_product_name: { type: Type.STRING },
-                confidence: { type: Type.STRING, enum: ["high", "medium", "low"] },
-                confidence_reason: { type: Type.STRING },
-                is_medication: { type: Type.BOOLEAN },
-                description: { type: Type.STRING },
-                activePrinciple: { type: Type.STRING },
-                drugType: {
-                  type: Type.STRING,
-                  enum: [
-                    "Referência",
-                    "Genérico",
-                    "Similar",
-                    "Fitoterápico",
-                    "Biológico",
-                    "Específico",
-                    "Cosmético",
-                    "Higiene",
-                    "Suplemento",
-                    "Correlato",
-                    "Outros",
-                  ],
-                },
-                department: { type: Type.STRING, enum: [...OFFICIAL_DEPARTMENTS] },
-                category: { type: Type.STRING },
-                manufacturer: { type: Type.STRING },
-                presentation: { type: Type.STRING },
-                indications: { type: Type.STRING },
-                usage: { type: Type.STRING },
-                requiresPrescription: { type: Type.BOOLEAN },
-              },
-              required: [
-                "id",
-                "matched_product_name",
-                "confidence",
-                "confidence_reason",
-                "is_medication",
-              ],
-            },
-          },
-        },
-      })
-    );
-
-    if (!response.text) {
-      throw createProductAiError("A IA retornou uma resposta vazia.", 502);
-    }
-
-    const jsonStr = cleanJsonResponse(response.text);
-    let parsed: any[] = [];
+    let aiById = new Map<string, any>();
     try {
-      parsed = JSON.parse(jsonStr);
-    } catch (parseError) {
-      const fixes = ['"]}', "]}", "]", '"}', "}", '"]', '"} ]', '"}]'];
-      for (const fix of fixes) {
-        try {
-          const repaired = JSON.parse(jsonStr + fix);
-          if (Array.isArray(repaired)) {
-            parsed = repaired;
-            break;
-          }
-        } catch (_) {}
+      aiById = await invokeGeminiEnrichMiniBatch(pendingForAi);
+    } catch (batchErr: any) {
+      if (batchErr?.statusCode && [401, 403, 429, 502, 503].includes(batchErr.statusCode)) {
+        throw batchErr;
       }
-      if (!parsed || parsed.length === 0) {
-        try {
-          const lastBraceIndex = jsonStr.lastIndexOf("}");
-          if (lastBraceIndex > 0) {
-            const repaired = JSON.parse(jsonStr.substring(0, lastBraceIndex + 1) + "]");
-            if (Array.isArray(repaired)) parsed = repaired;
-          }
-        } catch (_) {}
+      if (pendingForAi.length === 1) {
+        throw batchErr;
       }
-      if (!parsed || parsed.length === 0) throw parseError;
+      console.warn(
+        `[ProductAiService] Falha no parse/resposta do mini-lote (${pendingForAi.length} itens); tentando retentativa individual:`,
+        batchErr?.message || batchErr
+      );
     }
 
-    // Camada 2: Indexa resposta ESTRITAMENTE por `id` (nunca por posição do array!)
-    const aiById = new Map<string, any>();
-    for (const row of parsed) {
-      if (row && row.id !== undefined && row.id !== null) {
-        aiById.set(String(row.id).trim(), row);
+    // 1 retentativa individual automática para itens omitidos na resposta do mini-lote
+    const missingFromBatch = pendingForAi.filter((entry) => !aiById.has(entry.input.id));
+    if (missingFromBatch.length > 0) {
+      for (const missingEntry of missingFromBatch) {
+        try {
+          const singleRetryMap = await invokeGeminiEnrichMiniBatch([missingEntry]);
+          const retriedRow = singleRetryMap.get(missingEntry.input.id);
+          if (retriedRow) {
+            aiById.set(missingEntry.input.id, retriedRow);
+          }
+        } catch (retryErr: any) {
+          if (retryErr?.statusCode && [401, 403, 429, 503].includes(retryErr.statusCode)) {
+            throw retryErr;
+          }
+          console.warn(
+            `[ProductAiService] Falha na retentativa individual de "${missingEntry.input.name}":`,
+            retryErr?.message || retryErr
+          );
+        }
       }
     }
 
@@ -1483,7 +1565,8 @@ REGRAS OBRIGATÓRIAS DAS 5 CAMADAS DE SEGURANÇA:
           barcode: cleanEan || input.barcode,
           status: "skipped_low_confidence",
           confidence: "low",
-          confidenceReason: "ID do produto não retornado pela IA (bloqueado para evitar troca entre SKUs).",
+          confidenceReason:
+            "Item não retornado pela IA mesmo após retentativa individual (bloqueado para evitar troca entre SKUs).",
           anvisaMatched,
           updatedFields: [],
           patch: {},

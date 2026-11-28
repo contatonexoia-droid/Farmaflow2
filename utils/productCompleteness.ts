@@ -72,6 +72,47 @@ function readFieldString(product: ProductCompletenessLike, field: EnrichableFiel
   return String((product as any)[field] ?? "").trim();
 }
 
+function normalizeDescCompare(value: string): string {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Detecta descrições vazias, placeholders, curtas demais (< 40 caracteres)
+ * ou praticamente idênticas ao próprio nome do produto (típico de importação de ERP).
+ */
+export function isShallowOrDuplicateDescription(
+  description?: string | null,
+  productName?: string | null
+): boolean {
+  const val = String(description ?? "").trim();
+  if (!val) return true;
+  if (EMPTY_PLACEHOLDER_VALUES.has(val.toLowerCase())) return true;
+  if (val.length < 40) return true;
+
+  if (productName) {
+    const normDesc = normalizeDescCompare(val);
+    const normName = normalizeDescCompare(productName);
+    if (normDesc && normName) {
+      if (normDesc === normName) return true;
+      if (normDesc.includes(normName) || normName.includes(normDesc)) {
+        const minLen = Math.min(normDesc.length, normName.length);
+        const maxLen = Math.max(normDesc.length, normName.length);
+        if (maxLen > 0 && minLen / maxLen >= 0.75) {
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
 export function isEnrichableFieldEmpty(
   product: ProductCompletenessLike,
   field: EnrichableFieldKey
@@ -83,7 +124,7 @@ export function isEnrichableFieldEmpty(
 
   switch (field) {
     case "description":
-      return val.length < 10;
+      return isShallowOrDuplicateDescription(val, product?.name);
     case "activePrinciple":
       return val.length < 2;
     case "presentation":
