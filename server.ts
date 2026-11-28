@@ -8503,9 +8503,9 @@ app.post(
       return res.status(200).json({
         success: true,
         accessToken: authResult.accessToken,
-        expiresAt: authResult.expiresAt,
+        expiresAt: authResult.tokenExpiration,
         endpointUsed: authResult.endpointUsed,
-        reusedCachedToken: authResult.reusedCachedToken,
+        reusedCachedToken: authResult.fromCache,
       });
     } catch (err: any) {
       return res.status(401).json({
@@ -20500,19 +20500,19 @@ app.post(
         return res.status(400).json({ error: "Envie uma lista válida em 'products'." });
       }
 
-      if (products.length > 10) {
+      if (products.length > 20) {
         return res.status(400).json({
-          error: "Envie no máximo 10 produtos por mini-lote de categorização.",
+          error: "Envie no máximo 20 produtos por mini-lote de categorização.",
         });
       }
 
-      const { outcomes } = await categorizeProductsBatchWithAi(products, {
+      const result = await categorizeProductsBatchWithAi(products, {
         tenantId: resolvedTenantId,
         departments: Array.isArray(departments) ? departments : undefined,
         persist: persist !== false,
       });
 
-      return res.json({ success: true, outcomes });
+      return res.json({ success: true, outcomes: result.outcomes, resolvedWithoutAi: result.resolvedWithoutAi || 0 });
     } catch (err: any) {
       console.error("[API /api/ai/categorize-batch Error]:", err?.message || err);
       const status = Number(err?.statusCode) || 500;

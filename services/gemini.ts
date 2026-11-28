@@ -252,11 +252,11 @@ export const categorizeCatalogMiniBatch = async (params: {
   departments?: DepartmentConfig[];
   persist?: boolean;
   signal?: AbortSignal;
-}): Promise<{ outcomes: CatalogCategorizeOutcome[] }> => {
+}): Promise<{ outcomes: CatalogCategorizeOutcome[]; resolvedWithoutAi: number }> => {
   const { tenantId, products, departments, persist = true, signal } = params;
 
   if (!Array.isArray(products) || products.length === 0) {
-    return { outcomes: [] };
+    return { outcomes: [], resolvedWithoutAi: 0 };
   }
 
   const headers = await getAiRequestHeaders(tenantId);
@@ -283,6 +283,7 @@ export const categorizeCatalogMiniBatch = async (params: {
 
   return {
     outcomes: Array.isArray(data?.outcomes) ? data.outcomes : [],
+    resolvedWithoutAi: Number(data?.resolvedWithoutAi) || 0,
   };
 };
 

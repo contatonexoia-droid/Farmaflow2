@@ -15,6 +15,7 @@ export const INOVAFARMA_HOMOLOGACAO_PRESET = {
   erp_route_id: "homologacao",
   erp_cnpj: INOVAFARMA_HOMOLOGACAO_CNPJ,
   erp_login: "homologacao@inovafarma.com.br",
+  erp_password: "",
 } as const;
 
 export interface InovafarmaTenantConfig {

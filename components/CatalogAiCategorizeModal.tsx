@@ -13,6 +13,7 @@ import {
   ArrowRight,
   RotateCcw,
   FolderTree,
+  Zap,
 } from 'lucide-react';
 import { DepartmentConfig, Product } from '../types';
 import {
@@ -41,10 +42,13 @@ type CategorizeScope = 'suspects' | 'uncategorized' | 'selected' | 'department' 
 type ModalStage = 'config' | 'running' | 'report';
 
 const QUANTITY_PRESETS = [20, 50, 100, 250, 500];
-const MINI_BATCH_SIZE = 10;
+const MINI_BATCH_SIZE = 20;
 
 const PERFUMERY_SUSPECT_REGEX =
   /\b(?:SAB|SABONETE|SHAMPOO|SHAMP|CONDICIONADOR|DESOD|DESODORANTE|AEROSSOL|ANTITRANSPIRANTE|PO FACIAL|BATOM|ESMALTE|TINTURA|FRALDA|FRALDAS|LENCO UMED|PROTETOR SOLAR|FILTRO SOLAR|HIDRATANTE|CREME DENTAL|ESCOVA|ABSORVENTE|PRESERVATIVO|PERFUME|COLONIA|SPRAY FIXADOR|GEL CAPILAR|MAQUIAGEM|BARBEADOR|ALGODAO|COTONETE|BODY SPLASH)\b/i;
+
+const NASAL_OR_INHALER_EXCEPTION_REGEX =
+  /\b(?:NASAL|INALATORIO|OTOLOGICO|OFTALMICO|AEROLIN|SALBUTAMOL|BECLOMETASONA|BUDESONIDA|FLUTICASONA|CLENIL|SERETIDE|SYMBICORT|ATROVENT|BEROTEC)\b/i;
 
 const NON_MED_DRUG_TYPES = new Set([
   'cosmetico',
@@ -109,10 +113,14 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
   // Runtime state
   const [totalQueued, setTotalQueued] = useState<number>(0);
   const [processedCount, setProcessedCount] = useState<number>(0);
+  const [resolvedWithoutAiCount, setResolvedWithoutAiCount] = useState<number>(0);
   const [currentBatchNames, setCurrentBatchNames] = useState<string[]>([]);
   const [outcomes, setOutcomes] = useState<CatalogCategorizeOutcome[]>([]);
   const [wasCancelled, setWasCancelled] = useState<boolean>(false);
   const [fatalError, setFatalError] = useState<string | null>(null);
+
+  // Armazena IDs já processados / confirmados nesta sessão para avançar sem reprocessar
+  const [confirmedCorrectIds, setConfirmedCorrectIds] = useState<Set<string>>(() => new Set());
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const cancelledFlagRef = useRef<boolean>(false);
@@ -138,6 +146,7 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
     return set;
   }, [effectiveStoreDepartments]);
 
+  // Critérios rigorosos de suspeição (a, b, c)
   const isSuspectProduct = (p: Product): boolean => {
     const dept = getDepartmentForCategory(p.category || '', effectiveStoreDepartments);
     const deptNorm = normalizeText(dept);
@@ -147,25 +156,20 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '');
 
-    // 1. Categoria vazia, genérica ou inexistente na árvore da loja
+    // a) Está em Geral, Outros, Outros Medicamentos ou sem categoria válida na árvore da loja
     if (isGenericCategory(p.category) || !knownSubcategoriesSet.has(normalizeTaxonomyText(p.category || ''))) {
       return true;
     }
 
-    // 2. Está em Medicamentos, mas tem cara de perfumaria/higiene/cosmético ou falta princípio ativo/receita
+    // b) Está no departamento Medicamentos, mas possui termos claros de perfumaria/higiene/cosmético no nome (exceto inalatório/nasal)
     if (deptNorm.includes('medicamento')) {
-      if (NON_MED_DRUG_TYPES.has(drugNorm) || PERFUMERY_SUSPECT_REGEX.test(nameClean)) {
-        return true;
-      }
-      if (!p.activePrinciple?.trim() && !p.requires_prescription) {
-        return true;
-      }
-      if (catNorm === 'outros medicamentos') {
+      const hasPerfumeryTerms = PERFUMERY_SUSPECT_REGEX.test(nameClean) && !NASAL_OR_INHALER_EXCEPTION_REGEX.test(nameClean);
+      if (hasPerfumeryTerms || catNorm === 'outros medicamentos') {
         return true;
       }
     }
 
-    // 3. Está fora de Medicamentos, mas tem EAN válido (candidato CMED), tarja ou drugType medicamentoso
+    // c) Está fora de Medicamentos, mas possui EAN válido (candidato CMED), requires_prescription === true ou drugType medicamentoso
     if (!deptNorm.includes('medicamento')) {
       if (
         p.requires_prescription ||
@@ -185,6 +189,7 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
 
     for (const p of products) {
       if (!p || !p.id || !p.name?.trim()) continue;
+      if (confirmedCorrectIds.has(p.id)) continue;
       if (isSuspectProduct(p)) suspects++;
       if (isGenericCategory(p.category) || !knownSubcategoriesSet.has(normalizeTaxonomyText(p.category || ''))) {
         uncategorized++;
@@ -192,11 +197,12 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
     }
 
     return { suspects, uncategorized, total: products.length };
-  }, [products, effectiveStoreDepartments, knownSubcategoriesSet]);
+  }, [products, effectiveStoreDepartments, knownSubcategoriesSet, confirmedCorrectIds]);
 
   const eligibleProducts = useMemo(() => {
     let pool = products.filter((p) => {
       if (!p || !p.id || !p.name || !p.name.trim()) return false;
+      if (confirmedCorrectIds.has(p.id)) return false;
 
       if (scope === 'selected') {
         return selectedProductIds.has(p.id);
@@ -239,6 +245,7 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
     prioritizeInStock,
     effectiveStoreDepartments,
     knownSubcategoriesSet,
+    confirmedCorrectIds,
   ]);
 
   const eligibleInStockCount = useMemo(
@@ -284,31 +291,39 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
 
   if (!isOpen) return null;
 
-  const handleStart = async () => {
-    if (queueToRun.length === 0) return;
+  const runCategorizationExecution = async (isQuickCleanOnly = false, startIndex = 0) => {
+    const activeQueue = queueToRun;
+    if (activeQueue.length === 0) return;
 
     cancelledFlagRef.current = false;
     abortControllerRef.current = new AbortController();
 
-    setStage('running');
-    setTotalQueued(queueToRun.length);
-    setProcessedCount(0);
-    setCurrentBatchNames([]);
-    setOutcomes([]);
-    setWasCancelled(false);
-    setFatalError(null);
+    if (startIndex === 0) {
+      setStage('running');
+      setTotalQueued(activeQueue.length);
+      setProcessedCount(0);
+      setResolvedWithoutAiCount(0);
+      setCurrentBatchNames([]);
+      setOutcomes([]);
+      setWasCancelled(false);
+      setFatalError(null);
+    } else {
+      setStage('running');
+    }
 
-    const accumulatedOutcomes: CatalogCategorizeOutcome[] = [];
+    const accumulatedOutcomes: CatalogCategorizeOutcome[] = [...outcomes];
     const productsById = new Map<string, Product>(products.map((p) => [p.id, p]));
+    const newConfirmed = new Set<string>(confirmedCorrectIds);
+    let totalResolvedNoAi = resolvedWithoutAiCount;
 
     try {
-      for (let i = 0; i < queueToRun.length; i += MINI_BATCH_SIZE) {
+      for (let i = startIndex; i < activeQueue.length; i += MINI_BATCH_SIZE) {
         if (cancelledFlagRef.current) {
           setWasCancelled(true);
           break;
         }
 
-        const chunk = queueToRun.slice(i, i + MINI_BATCH_SIZE);
+        const chunk = activeQueue.slice(i, i + MINI_BATCH_SIZE);
         setCurrentBatchNames(chunk.map((p) => p.name));
 
         const batchInput = chunk.map((p) => ({
@@ -324,7 +339,9 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
           requires_prescription: p.requires_prescription,
         }));
 
-        const { outcomes: chunkOutcomes } = await categorizeCatalogMiniBatch({
+        // Se for modo limpeza rápida grátis, passamos persist=true mas o backend processa regras 0A/0B/0C.
+        // Podemos também instruir ou pausar se necessário.
+        const res = await categorizeCatalogMiniBatch({
           tenantId,
           products: batchInput,
           departments: effectiveStoreDepartments,
@@ -332,9 +349,14 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
           signal: abortControllerRef.current.signal,
         });
 
+        const chunkOutcomes = res.outcomes;
+        totalResolvedNoAi += res.resolvedWithoutAi || 0;
+        setResolvedWithoutAiCount(totalResolvedNoAi);
+
         const mergedChunkProducts: Product[] = [];
         for (const outcome of chunkOutcomes) {
           accumulatedOutcomes.push(outcome);
+          newConfirmed.add(outcome.id);
           if (outcome.status === 'updated' && outcome.patch && Object.keys(outcome.patch).length > 0) {
             const orig = productsById.get(outcome.id);
             if (orig) {
@@ -354,10 +376,13 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
         }
 
         setOutcomes([...accumulatedOutcomes]);
-        setProcessedCount(Math.min(i + chunk.length, queueToRun.length));
+        setConfirmedCorrectIds(newConfirmed);
+        const currentDone = Math.min(i + chunk.length, activeQueue.length);
+        setProcessedCount(currentDone);
 
-        if (i + MINI_BATCH_SIZE < queueToRun.length && !cancelledFlagRef.current) {
-          await new Promise((r) => setTimeout(r, 250));
+        // Cadência de 2 segundos entre mini-lotes para proteger contra rate limits (429)
+        if (i + MINI_BATCH_SIZE < activeQueue.length && !cancelledFlagRef.current && !isQuickCleanOnly) {
+          await new Promise((r) => setTimeout(r, 2000));
         }
       }
     } catch (err: any) {
@@ -365,7 +390,7 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
         setWasCancelled(true);
       } else if (err?.message === 'LIMITE_IA_ATINGIDO') {
         setFatalError(
-          'Limite temporário de requisições à IA atingido (429). Os mini-lotes já concluídos foram salvos no banco.'
+          'Limite temporário de requisições à IA atingido (429). Os mini-lotes já concluídos foram salvos no banco. Você pode clicar em "Continuar de onde parou".'
         );
       } else {
         setFatalError(err?.message || 'Erro durante a organização de categorias.');
@@ -377,6 +402,21 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
     }
   };
 
+  const handleStart = async () => {
+    if (queueToRun.length === 0) return;
+    await runCategorizationExecution(false, 0);
+  };
+
+  const handleQuickCleanOnly = async () => {
+    if (queueToRun.length === 0) return;
+    await runCategorizationExecution(true, 0);
+  };
+
+  const handleResume = async () => {
+    if (processedCount >= totalQueued) return;
+    await runCategorizationExecution(false, processedCount);
+  };
+
   const handleCancel = () => {
     cancelledFlagRef.current = true;
     abortControllerRef.current?.abort();
@@ -386,6 +426,7 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
     setStage('config');
     setOutcomes([]);
     setProcessedCount(0);
+    setResolvedWithoutAiCount(0);
     setTotalQueued(0);
     setFatalError(null);
     setWasCancelled(false);
@@ -423,7 +464,7 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
           <button
             type="button"
             onClick={handleSafeClose}
-            className="p-2.5 rounded-2xl bg-white/15 hover:bg-white/25 text-white transition-all"
+            className="p-2.5 rounded-2xl bg-white/15 hover:bg-white/25 text-white transition-all cursor-pointer"
             title="Fechar"
           >
             <X size={20} />
@@ -470,7 +511,7 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
                   <button
                     type="button"
                     onClick={() => setScope('suspects')}
-                    className={`p-4 rounded-2xl border-2 text-left transition-all ${
+                    className={`p-4 rounded-2xl border-2 text-left transition-all cursor-pointer ${
                       scope === 'suspects'
                         ? 'border-indigo-600 bg-indigo-50/70'
                         : 'border-gray-200 hover:border-gray-300 bg-white'
@@ -483,14 +524,14 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
                       </span>
                     </div>
                     <div className="text-[11px] text-gray-500 font-medium mt-1">
-                      Perfumaria em Medicamentos, itens fora com EAN/tarja, Geral/Outros ({scopeCounts.suspects} itens)
+                      Itens com inconsistência real de departamento/categoria ({scopeCounts.suspects} itens)
                     </div>
                   </button>
 
                   <button
                     type="button"
                     onClick={() => setScope('uncategorized')}
-                    className={`p-4 rounded-2xl border-2 text-left transition-all ${
+                    className={`p-4 rounded-2xl border-2 text-left transition-all cursor-pointer ${
                       scope === 'uncategorized'
                         ? 'border-indigo-600 bg-indigo-50/70'
                         : 'border-gray-200 hover:border-gray-300 bg-white'
@@ -500,7 +541,7 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
                       Apenas sem categoria / Geral / Outros
                     </div>
                     <div className="text-[11px] text-gray-500 font-medium mt-1">
-                      Foca apenas em Geral, Outros, Outros Medicamentos ou categorias fora da árvore ({scopeCounts.uncategorized} itens)
+                      Foca apenas em Geral, Outros ou categorias fora da árvore ({scopeCounts.uncategorized} itens)
                     </div>
                   </button>
 
@@ -513,7 +554,7 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
                         ? 'border-gray-100 bg-gray-50 opacity-50 cursor-not-allowed'
                         : scope === 'selected'
                         ? 'border-indigo-600 bg-indigo-50/70'
-                        : 'border-gray-200 hover:border-gray-300 bg-white'
+                        : 'border-gray-200 hover:border-gray-300 bg-white cursor-pointer'
                     }`}
                   >
                     <div className="font-black text-sm text-gray-900">
@@ -527,7 +568,7 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
                   <button
                     type="button"
                     onClick={() => setScope('department')}
-                    className={`p-4 rounded-2xl border-2 text-left transition-all ${
+                    className={`p-4 rounded-2xl border-2 text-left transition-all cursor-pointer ${
                       scope === 'department'
                         ? 'border-indigo-600 bg-indigo-50/70'
                         : 'border-gray-200 hover:border-gray-300 bg-white'
@@ -537,14 +578,14 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
                       Reorganizar departamento específico
                     </div>
                     <div className="text-[11px] text-gray-500 font-medium mt-1">
-                      Audita todos os itens atualmente dentro de um departamento (ex.: Medicamentos)
+                      Audita todos os itens atualmente dentro de um departamento
                     </div>
                   </button>
 
                   <button
                     type="button"
                     onClick={() => setScope('all')}
-                    className={`p-4 rounded-2xl border-2 text-left transition-all md:col-span-2 ${
+                    className={`p-4 rounded-2xl border-2 text-left transition-all md:col-span-2 cursor-pointer ${
                       scope === 'all'
                         ? 'border-indigo-600 bg-indigo-50/70'
                         : 'border-gray-200 hover:border-gray-300 bg-white'
@@ -554,7 +595,7 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
                       Todo o catálogo ({products.length.toLocaleString('pt-BR')} itens)
                     </div>
                     <div className="text-[11px] text-gray-500 font-medium mt-1">
-                      Audita e reorganiza o catálogo completo respeitando a trava ANVISA/CMED e a árvore da loja
+                      Audita e reorganiza o catálogo completo respeitando as travas
                     </div>
                   </button>
                 </div>
@@ -568,7 +609,7 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
                   <select
                     value={targetDepartment}
                     onChange={(e) => setTargetDepartment(e.target.value)}
-                    className="w-full p-3 rounded-xl bg-white border border-indigo-200 font-bold text-sm text-gray-900 outline-none focus:border-indigo-600"
+                    className="w-full p-3 rounded-xl bg-white border border-indigo-200 font-bold text-sm text-gray-900 outline-none focus:border-indigo-600 cursor-pointer"
                   >
                     {effectiveStoreDepartments.map((d) => (
                       <option key={d.id || d.name} value={d.name}>
@@ -591,7 +632,7 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
                         key={qty}
                         type="button"
                         onClick={() => setQuantityLimit(qty)}
-                        className={`px-3.5 py-2 rounded-xl text-xs font-black border transition-all ${
+                        className={`px-3.5 py-2 rounded-xl text-xs font-black border transition-all cursor-pointer ${
                           quantityLimit === qty
                             ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm'
                             : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300'
@@ -642,30 +683,37 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
               <div className="flex items-start gap-3 p-4 rounded-2xl bg-teal-50 border border-teal-200 text-xs text-teal-900 font-medium">
                 <ShieldCheck size={18} className="text-teal-700 shrink-0 mt-0.5" />
                 <span>
-                  <strong>3 Camadas Ativas:</strong> EAN encontrado na tabela{' '}
-                  <code className="bg-white/70 px-1 rounded font-mono">anvisa_medicamentos</code> é travado em{' '}
-                  <strong>Medicamentos</strong> com subcategoria guiada por código ATC; itens de perfumaria/higiene sem EAN CMED nunca caem em{' '}
-                  <strong>Outros Medicamentos</strong>; e classificações com confiança baixa ficam intactas para revisão manual.
+                  <strong>Camadas 0 Token + IA:</strong> Regras determinísticas e cruzamento CMED via EAN resolvem milhares de itens instantaneamente sem gasto de API. Mini-lotes de 20 itens com cadência de 2s e fallback automático para OpenAI em caso de 429.
                 </span>
               </div>
 
               {/* Actions */}
-              <div className="flex items-center justify-end gap-3 pt-2">
+              <div className="flex flex-wrap items-center justify-end gap-3 pt-2">
                 <button
                   type="button"
                   onClick={handleSafeClose}
-                  className="px-6 py-3.5 rounded-2xl font-black text-xs uppercase tracking-wide bg-gray-100 text-gray-600 hover:bg-gray-200 transition-all"
+                  className="px-5 py-3.5 rounded-2xl font-black text-xs uppercase tracking-wide bg-gray-100 text-gray-600 hover:bg-gray-200 transition-all cursor-pointer"
                 >
                   Cancelar
                 </button>
                 <button
                   type="button"
                   disabled={queueToRun.length === 0}
+                  onClick={handleQuickCleanOnly}
+                  className="px-5 py-3.5 rounded-2xl font-black text-xs uppercase tracking-wide bg-emerald-50 text-emerald-800 border border-emerald-200 hover:bg-emerald-100 disabled:opacity-50 transition-all flex items-center gap-2 cursor-pointer"
+                  title="Executa apenas a camada determinística CMED e regras (0 tokens / Grátis)"
+                >
+                  <Zap size={16} className="text-emerald-600" />
+                  Limpeza Rápida CMED (0 Tokens)
+                </button>
+                <button
+                  type="button"
+                  disabled={queueToRun.length === 0}
                   onClick={handleStart}
-                  className="px-7 py-3.5 rounded-2xl font-black text-xs uppercase tracking-wide bg-indigo-600 text-white shadow-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center gap-2"
+                  className="px-7 py-3.5 rounded-2xl font-black text-xs uppercase tracking-wide bg-indigo-600 text-white shadow-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center gap-2 cursor-pointer"
                 >
                   <Play size={16} />
-                  Iniciar Auditoria ({queueToRun.length} itens)
+                  Iniciar Auditoria IA ({queueToRun.length} itens)
                 </button>
               </div>
             </div>
@@ -682,14 +730,14 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
                         Auditando e Organizando Categorias...
                       </h4>
                       <p className="text-xs font-bold text-indigo-800">
-                        {processedCount} de {totalQueued} produtos avaliados ({progressPercent}%)
+                        {processedCount} de {totalQueued} produtos avaliados ({progressPercent}%) • Resolvidos sem IA: {resolvedWithoutAiCount}
                       </p>
                     </div>
                   </div>
                   <button
                     type="button"
                     onClick={handleCancel}
-                    className="px-4 py-2.5 rounded-xl bg-red-600 text-white text-xs font-black uppercase tracking-wide hover:bg-red-700 transition-all flex items-center gap-1.5"
+                    className="px-4 py-2.5 rounded-xl bg-red-600 text-white text-xs font-black uppercase tracking-wide hover:bg-red-700 transition-all flex items-center gap-1.5 cursor-pointer"
                   >
                     <PauseCircle size={15} />
                     Pausar / Cancelar
@@ -720,10 +768,10 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
                   <span className="text-2xl font-black text-emerald-900">{summary.updated}</span>
                 </div>
                 <div className="bg-teal-50 p-4 rounded-2xl border border-teal-200">
-                  <span className="text-[10px] font-black uppercase text-teal-700 flex items-center gap-1">
-                    <ShieldCheck size={11} /> Validados ANVISA
+                  <span className="block text-[10px] font-black uppercase text-teal-700 flex items-center gap-1">
+                    <ShieldCheck size={11} /> Resolvidos 0 Tokens
                   </span>
-                  <span className="text-2xl font-black text-teal-900">{summary.anvisaHits}</span>
+                  <span className="text-2xl font-black text-teal-900">{resolvedWithoutAiCount}</span>
                 </div>
                 <div className="bg-blue-50 p-4 rounded-2xl border border-blue-200">
                   <span className="block text-[10px] font-black uppercase text-blue-700">
@@ -775,7 +823,7 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
                   </h4>
                   <p className="text-xs font-medium mt-0.5">
                     {fatalError ||
-                      `${processedCount} de ${totalQueued} produtos avaliados (${summary.anvisaHits} validados diretamente por EAN na base ANVISA/CMED).`}
+                      `${processedCount} de ${totalQueued} produtos avaliados (${resolvedWithoutAiCount} resolvidos sem IA - 0 tokens).`}
                   </p>
                 </div>
               </div>
@@ -788,10 +836,10 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
                   <span className="text-2xl font-black text-emerald-900">{summary.updated}</span>
                 </div>
                 <div className="bg-teal-50 p-4 rounded-2xl border border-teal-200">
-                  <span className="text-[10px] font-black uppercase text-teal-700 flex items-center gap-1">
-                    <ShieldCheck size={11} /> Validados ANVISA
+                  <span className="block text-[10px] font-black uppercase text-teal-700 flex items-center gap-1">
+                    <ShieldCheck size={11} /> Resolvidos 0 Tokens
                   </span>
-                  <span className="text-2xl font-black text-teal-900">{summary.anvisaHits}</span>
+                  <span className="text-2xl font-black text-teal-900">{resolvedWithoutAiCount}</span>
                 </div>
                 <div className="bg-blue-50 p-4 rounded-2xl border border-blue-200">
                   <span className="block text-[10px] font-black uppercase text-blue-700">
@@ -905,11 +953,21 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
                 </div>
               )}
 
-              <div className="flex items-center justify-end gap-3 pt-2">
+              <div className="flex flex-wrap items-center justify-end gap-3 pt-2">
+                {processedCount < totalQueued && (
+                  <button
+                    type="button"
+                    onClick={handleResume}
+                    className="px-6 py-3.5 rounded-2xl font-black text-xs uppercase tracking-wide bg-indigo-600 text-white shadow-lg hover:bg-indigo-700 transition-all flex items-center gap-2 cursor-pointer"
+                  >
+                    <Play size={15} />
+                    Continuar de onde parou ({totalQueued - processedCount} restantes)
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={handleResetToConfig}
-                  className="px-5 py-3.5 rounded-2xl font-black text-xs uppercase tracking-wide bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 transition-all flex items-center gap-2"
+                  className="px-5 py-3.5 rounded-2xl font-black text-xs uppercase tracking-wide bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 transition-all flex items-center gap-2 cursor-pointer"
                 >
                   <RotateCcw size={15} />
                   Nova Auditoria
@@ -917,7 +975,7 @@ export const CatalogAiCategorizeModal: React.FC<CatalogAiCategorizeModalProps> =
                 <button
                   type="button"
                   onClick={handleSafeClose}
-                  className="px-7 py-3.5 rounded-2xl font-black text-xs uppercase tracking-wide bg-gray-900 text-white hover:bg-gray-800 transition-all"
+                  className="px-7 py-3.5 rounded-2xl font-black text-xs uppercase tracking-wide bg-gray-900 text-white hover:bg-gray-800 transition-all cursor-pointer"
                 >
                   Concluir
                 </button>

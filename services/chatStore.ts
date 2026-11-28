@@ -208,6 +208,7 @@ export interface ChatConversation {
   last_message_content: string;
   unread_count?: number;
   is_bot_active?: boolean;
+  ai_enabled?: boolean;
   bot_interaction_count?: number;
   bot_handoff_reason?: string;
   bot_handoff_at?: string;

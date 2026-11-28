@@ -179,6 +179,13 @@ export interface DepartmentConfig {
 export interface SmartBannerConfig {
   enabled: boolean;
   imageUrl?: string;
+  _erpCredentials?: {
+    erp_type?: string;
+    erpType?: string;
+    erp_password?: string;
+    [key: string]: any;
+  };
+  [key: string]: any;
 }
 
 export interface DeliveryFeeRange {

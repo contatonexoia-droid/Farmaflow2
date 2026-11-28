@@ -27,7 +27,7 @@ import {
 } from "./productAiService.js";
 
 const DEFAULT_CATEGORIZE_MODEL = "gemini-4-hydrogen";
-const MAX_CATEGORIZE_BATCH_SIZE = 10;
+const MAX_CATEGORIZE_BATCH_SIZE = 20;
 
 export interface ProductCategorizeInput {
   id: string;
@@ -445,9 +445,9 @@ function buildNonMedicationFallback(
 export async function categorizeProductsBatchWithAi(
   products: ProductCategorizeInput[],
   options: CategorizeBatchOptions
-): Promise<{ outcomes: CategorizeItemOutcome[] }> {
+): Promise<{ outcomes: CategorizeItemOutcome[]; resolvedWithoutAi: number }> {
   if (!Array.isArray(products) || products.length === 0) {
-    return { outcomes: [] };
+    return { outcomes: [], resolvedWithoutAi: 0 };
   }
   if (products.length > MAX_CATEGORIZE_BATCH_SIZE) {
     throw createProductAiError(
@@ -940,7 +940,8 @@ ${JSON.stringify(payloadForPrompt, null, 2)}`;
     outcomes.push(outcome);
   }
 
-  return { outcomes };
+  const resolvedWithoutAi = outcomes.filter(o => o.status === "updated" && (o.reason?.includes("CMED") || o.reason?.includes("regra"))).length;
+  return { outcomes, resolvedWithoutAi };
 }
 
 async function finalizeAndPersistCategorizeOutcome(params: {

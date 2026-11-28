@@ -2785,14 +2785,14 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
             const lastMsg = filteredMsgs[filteredMsgs.length - 1];
             if (
               lastMsg &&
-              (lastMsg.sender_type === "CUSTOMER" || lastMsg.sender === "CUSTOMER" || lastMsg.senderType === "CUSTOMER") &&
+              (lastMsg.sender_type === "CUSTOMER" || String((lastMsg as any).sender || (lastMsg as any).senderType || "") === "CUSTOMER") &&
               String(lastMsg.content || "").trim() === String(incomingMessage || "").trim()
             ) {
               filteredMsgs.pop();
             }
 
             history = filteredMsgs.slice(-15).map((m: any) => ({
-              role: (m.sender_type === "CUSTOMER" || m.sender === "CUSTOMER" || m.senderType === "CUSTOMER") ? "user" : "assistant",
+              role: (m.sender_type === "CUSTOMER" || String(m.sender || m.senderType || "") === "CUSTOMER") ? "user" : "assistant",
               content: m.content || ""
             }));
           }
@@ -2943,7 +2943,7 @@ Esta é a última resposta permitida nesta sessão antes do transbordo para o at
         isFinalTurn ||
         checkoutCheck.isFinalCheckout ||
         inputHandoffCheck.isHumanRequested ||
-        handoffCheck.isBotActive === false ||
+        (handoffCheck as any).isBotActive === false ||
         outputHandoffCheck.isHandoffOutput;
 
       if (shouldHandoff) {
