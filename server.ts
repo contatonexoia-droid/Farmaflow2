@@ -122,6 +122,7 @@ import {
   getTenantPushSubscriptions,
   verifyPushSubscriptionExists,
   sendPromotionalPushToTenant,
+  sendOrderDispatchedPush,
   isValidRealPushEndpoint,
 } from "./services/webPushService.js";
 
@@ -577,9 +578,85 @@ app.get("/api/v1/tenants/:id/orders", async (req, res) => {
   }
 });
 
+app.get(
+  ["/api/v1/store/:tenantId/orders/:orderId/status", "/api/store/:tenantId/orders/:orderId/status"],
+  async (req, res) => {
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    try {
+      const tenantId = String(req.params.tenantId || "").trim();
+      const orderId = String(req.params.orderId || "").trim();
+      if (!tenantId || !orderId || orderId.length > 80) {
+        return res.status(400).json({ error: "Parâmetros inválidos." });
+      }
+
+      const { data, error } = await supabaseAdmin
+        .from("orders")
+        .select("id, status, delivery_mode, date, created_at")
+        .eq("tenant_id", tenantId)
+        .eq("id", orderId)
+        .maybeSingle();
+
+      if (error) {
+        if (error.code === "PGRST116") {
+          return res.status(404).json({ error: "Pedido não encontrado." });
+        }
+        return res.status(500).json({ error: "Erro ao consultar status do pedido." });
+      }
+
+      if (!data) {
+        return res.status(404).json({ error: "Pedido não encontrado." });
+      }
+
+      return res.status(200).json({
+        success: true,
+        order: {
+          id: data.id,
+          status: data.status || "pending",
+          deliveryMode: data.delivery_mode === "pickup" ? "pickup" : "delivery",
+          date: data.date || data.created_at || new Date().toISOString(),
+        },
+      });
+    } catch (e: any) {
+      return res.status(500).json({ error: e?.message || "Erro interno." });
+    }
+  }
+);
+
 app.put("/api/v1/tenants/:id/orders", async (req, res) => {
   try {
+    const tenantId = String(req.params.id || "").trim();
     const dbOrders = req.body;
+    const orderList = Array.isArray(dbOrders) ? dbOrders : dbOrders ? [dbOrders] : [];
+
+    // Identifica pedidos que estão mudando para "dispatched" para disparar Web Push de entrega
+    const dispatchedCandidates = orderList.filter(
+      (o: any) => o && o.id && String(o.status || "").toLowerCase() === "dispatched"
+    );
+    const previousStatusMap = new Map<string, string>();
+    if (dispatchedCandidates.length > 0 && tenantId) {
+      try {
+        const candidateIds = dispatchedCandidates.map((o: any) => String(o.id));
+        const { data: existingRows } = await supabaseAdmin
+          .from("orders")
+          .select("id, status")
+          .eq("tenant_id", tenantId)
+          .in("id", candidateIds);
+        if (Array.isArray(existingRows)) {
+          for (const row of existingRows) {
+            previousStatusMap.set(String(row.id), String(row.status || "").toLowerCase());
+          }
+        }
+      } catch (_) {}
+    }
+
+    const stripMissingOrderCols = (row: any, removeOrigin: boolean, removeMarketingOptIn: boolean) => {
+      if (!row || typeof row !== "object") return row;
+      const copy = { ...row };
+      if (removeOrigin) delete copy.origin;
+      if (removeMarketingOptIn) delete copy.marketing_opt_in;
+      return copy;
+    };
+
     const { error } = await supabaseAdmin
       .from("orders")
       .upsert(dbOrders);
@@ -587,29 +664,73 @@ app.put("/api/v1/tenants/:id/orders", async (req, res) => {
     if (error) {
       const code = String((error as any)?.code || "");
       const msg = `${(error as any)?.message || ""} ${(error as any)?.details || ""} ${(error as any)?.hint || ""}`.toLowerCase();
-      const isMissingOriginCol =
+      const isMissingCol =
         code === "42703" ||
         code === "PGRST204" ||
-        (msg.includes("origin") &&
+        ((msg.includes("origin") || msg.includes("marketing_opt_in")) &&
           (msg.includes("column") || msg.includes("schema cache") || msg.includes("does not exist")));
 
-      if (isMissingOriginCol) {
-        const stripOrigin = (row: any) => {
-          if (!row || typeof row !== "object") return row;
-          const { origin: _removed, ...rest } = row;
-          return rest;
-        };
+      if (isMissingCol) {
+        const removeOrigin = msg.includes("origin") || code === "42703" || code === "PGRST204";
+        const removeMarketing = msg.includes("marketing_opt_in") || code === "42703" || code === "PGRST204";
         const sanitizedPayload = Array.isArray(dbOrders)
-          ? dbOrders.map(stripOrigin)
-          : stripOrigin(dbOrders);
+          ? dbOrders.map((r: any) => stripMissingOrderCols(r, removeOrigin, removeMarketing))
+          : stripMissingOrderCols(dbOrders, removeOrigin, removeMarketing);
         const { error: retryError } = await supabaseAdmin
           .from("orders")
           .upsert(sanitizedPayload);
         if (retryError) throw retryError;
-        return res.json({ success: true });
+      } else {
+        throw error;
       }
-      throw error;
     }
+
+    // Dispara Web Push assíncrono apenas na transição para "dispatched"
+    const newlyDispatched = dispatchedCandidates.filter(
+      (o: any) => previousStatusMap.get(String(o.id)) !== "dispatched"
+    );
+    if (newlyDispatched.length > 0 && tenantId) {
+      void (async () => {
+        try {
+          const { data: tenantRow } = await supabaseAdmin
+            .from("tenants")
+            .select("id, slug, name, logo, logo_url")
+            .eq("id", tenantId)
+            .maybeSingle();
+
+          const resolvedSlug =
+            slugifyStoreIdentifier(tenantRow?.slug) ||
+            slugifyStoreIdentifier(tenantRow?.id) ||
+            slugifyStoreIdentifier(tenantRow?.name) ||
+            slugifyStoreIdentifier(tenantId);
+
+          let resolvedIconUrl = "/icon-192.svg";
+          const rawLogo = String(tenantRow?.logo_url || tenantRow?.logo || "").trim();
+          if (rawLogo.startsWith("http://") || rawLogo.startsWith("https://")) {
+            resolvedIconUrl = rawLogo;
+          } else if (rawLogo.startsWith("data:")) {
+            resolvedIconUrl = `/api/v1/store/${encodeURIComponent(tenantId)}/logo.png`;
+          }
+
+          for (const ord of newlyDispatched) {
+            const cust = ord.customer || {};
+            await sendOrderDispatchedPush(supabaseAdmin, {
+              tenantId,
+              orderId: String(ord.id),
+              customerPhone: cust.phone || ord.customer_phone || "",
+              customerName: cust.name || ord.customer_name || "",
+              tenantName: tenantRow?.name || "Nossa Farmácia",
+              tenantSlug: resolvedSlug,
+              deliveryMode: ord.delivery_mode || ord.deliveryMode || "delivery",
+              iconUrl: resolvedIconUrl,
+            });
+          }
+        } catch (pushErr) {
+          console.warn("[WebPush Dispatch Order Error]:", pushErr);
+        }
+      })();
+    }
+
     res.json({ success: true });
   } catch (e: any) {
     res.status(500).json({ error: e.message });
@@ -10888,9 +11009,36 @@ app.post("/api/checkout/deduct-stock", async (req, res) => {
 
 app.post("/api/checkout/address-save", async (req, res) => {
   try {
-    const { tenant_id, whatsapp, customer_name, cep, street, number, neighborhood, city, complement, delivery_mode } = req.body;
+    const { tenant_id, whatsapp, customer_name, cep, street, number, neighborhood, city, complement, delivery_mode, marketing_opt_in } = req.body;
     if (!tenant_id || !whatsapp) {
       return res.status(400).json({ error: "whatsapp and tenant_id are required" });
+    }
+
+    const cleanWhatsapp = String(whatsapp).replace(/\D/g, "");
+    const hasMarketingOptIn = typeof marketing_opt_in === "boolean";
+
+    if (hasMarketingOptIn && cleanWhatsapp.length >= 8) {
+      void (async () => {
+        try {
+          const suffix = cleanWhatsapp.slice(-8);
+          const { data: contacts } = await supabaseAdmin
+            .from("chat_contacts")
+            .select("id")
+            .eq("tenant_id", tenant_id)
+            .ilike("phone", `%${suffix}`)
+            .limit(3);
+          if (Array.isArray(contacts) && contacts.length > 0) {
+            for (const c of contacts) {
+              const { error: cErr } = await supabaseAdmin
+                .from("chat_contacts")
+                .update({ marketing_opt_in } as any)
+                .eq("id", c.id)
+                .eq("tenant_id", tenant_id);
+              if (cErr) break;
+            }
+          }
+        } catch (_) {}
+      })();
     }
 
     // Se o pedido for retirada na loja, NÃO sobrescrever nem salvar endereço de entrega residencial!
@@ -21155,6 +21303,17 @@ app.post(
       const userAgent = String(
         body.userAgent || body.user_agent || req.headers["user-agent"] || ""
       ).trim();
+      const customerPhone = String(
+        body.customerPhone || body.customer_phone || ""
+      )
+        .replace(/\D/g, "")
+        .slice(0, 20);
+      const customerName = String(
+        body.customerName || body.customer_name || ""
+      )
+        .replace(/[\r\n\t]+/g, " ")
+        .trim()
+        .slice(0, 120);
 
       let targetTenantIds: string[] = [];
       if (tenantId) {
@@ -21191,6 +21350,8 @@ app.post(
           p256dh,
           auth,
           userAgent,
+          customerPhone: customerPhone || undefined,
+          customerName: customerName || undefined,
         });
         if (!primarySaved) primarySaved = saved;
 

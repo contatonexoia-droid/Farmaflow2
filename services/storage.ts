@@ -1652,16 +1652,32 @@ const isMissingOriginColumnError = (err: any): boolean => {
   );
 };
 
+const isMissingOptionalOrderColumnError = (error: any): boolean => {
+  if (!error) return false;
+  const code = String(error?.code || "");
+  const msg = `${error?.message || ""} ${error?.details || ""} ${error?.hint || ""}`.toLowerCase();
+  return (
+    code === "42703" ||
+    code === "PGRST204" ||
+    ((msg.includes("origin") || msg.includes("marketing_opt_in")) &&
+      (msg.includes("column") || msg.includes("schema cache") || msg.includes("does not exist")))
+  );
+};
+
 export const saveOrderByTenant = async (tenantId: string, order: Order) => {
   if (!isSupabaseConfigured()) throw new Error("CONFIG_MISSING");
   try {
     const safeOrigin = normalizeOrderOrigin(order.origin) || "direto";
+    const resolvedMarketingOptIn = Boolean(
+      order.marketingOptIn ?? order.marketing_opt_in ?? order.customer?.marketingOptIn ?? false
+    );
     const basePayload = {
       id: order.id,
       tenant_id: tenantId,
       items: order.items,
       customer: {
         ...order.customer,
+        marketingOptIn: resolvedMarketingOptIn,
         couponDiscount: order.couponDiscount, // Store here as fallback for missing column
         orderOrigin: safeOrigin, // Fallback seguro caso a coluna origin ainda não exista no banco
       },
@@ -1674,18 +1690,28 @@ export const saveOrderByTenant = async (tenantId: string, order: Order) => {
       delivery_mode: order.deliveryMode || "delivery",
     };
 
-    const payloadWithOrigin = {
+    const payloadWithExtendedCols = {
       ...basePayload,
       origin: safeOrigin,
+      marketing_opt_in: resolvedMarketingOptIn,
     };
 
     await retryRequest(async () => {
-      const { error } = await supabase.from("orders").insert(payloadWithOrigin);
+      const { error } = await supabase.from("orders").insert(payloadWithExtendedCols);
       if (error) {
-        if (isMissingOriginColumnError(error)) {
-          console.warn("[Orders] Coluna 'origin' ainda não existe no Supabase. Repetindo insert sem esse campo.");
-          const { error: fallbackError } = await supabase.from("orders").insert(basePayload);
-          if (fallbackError) throw fallbackError;
+        if (isMissingOptionalOrderColumnError(error)) {
+          // Tenta preservar origin caso apenas marketing_opt_in falte; se falhar de novo, usa basePayload
+          const { error: originOnlyError } = await supabase
+            .from("orders")
+            .insert({ ...basePayload, origin: safeOrigin });
+          if (originOnlyError) {
+            if (isMissingOriginColumnError(originOnlyError) || isMissingOptionalOrderColumnError(originOnlyError)) {
+              const { error: fallbackError } = await supabase.from("orders").insert(basePayload);
+              if (fallbackError) throw fallbackError;
+            } else {
+              throw originOnlyError;
+            }
+          }
         } else {
           throw error;
         }
@@ -1714,12 +1740,16 @@ export const saveOrdersByTenant = async (tenantId: string, orders: Order[]) => {
   const dbOrdersBase = orders.map((o) => {
     const safeOrigin =
       normalizeOrderOrigin(o.origin || (o.customer as any)?.orderOrigin) || "direto";
+    const resolvedMarketingOptIn = Boolean(
+      o.marketingOptIn ?? o.marketing_opt_in ?? o.customer?.marketingOptIn ?? false
+    );
     return {
       id: o.id,
       tenant_id: tenantId,
       status: o.status,
       customer: {
         ...o.customer,
+        marketingOptIn: resolvedMarketingOptIn,
         couponDiscount: o.couponDiscount,
         orderOrigin: safeOrigin,
       },
@@ -1731,18 +1761,24 @@ export const saveOrdersByTenant = async (tenantId: string, orders: Order[]) => {
       applied_coupon: o.appliedCoupon,
     };
   });
-  const dbOrdersWithOrigin = dbOrdersBase.map((row, idx) => ({
+  const dbOrdersWithExtendedCols = dbOrdersBase.map((row, idx) => ({
     ...row,
     origin:
       normalizeOrderOrigin(orders[idx]?.origin || (orders[idx]?.customer as any)?.orderOrigin) ||
       "direto",
+    marketing_opt_in: Boolean(
+      orders[idx]?.marketingOptIn ??
+        orders[idx]?.marketing_opt_in ??
+        orders[idx]?.customer?.marketingOptIn ??
+        false
+    ),
   }));
 
   try {
     const res = await fetch(`/api/v1/tenants/${encodeURIComponent(tenantId)}/orders`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(dbOrdersWithOrigin),
+      body: JSON.stringify(dbOrdersWithExtendedCols),
     });
     if (res.ok) return;
   } catch (apiError) {
@@ -1750,9 +1786,9 @@ export const saveOrdersByTenant = async (tenantId: string, orders: Order[]) => {
   }
   try {
     await retryRequest(async () => {
-      const { error } = await supabase.from("orders").upsert(dbOrdersWithOrigin);
+      const { error } = await supabase.from("orders").upsert(dbOrdersWithExtendedCols);
       if (error) {
-        if (isMissingOriginColumnError(error)) {
+        if (isMissingOptionalOrderColumnError(error)) {
           const { error: fallbackError } = await supabase.from("orders").upsert(dbOrdersBase);
           if (fallbackError) throw fallbackError;
         } else {

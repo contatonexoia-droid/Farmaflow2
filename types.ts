@@ -98,6 +98,7 @@ export interface CustomerInfo {
   paymentMethod: "Pix" | "Cartão" | "Dinheiro" | "Mercado Pago";
   changeFor?: string;
   locationUrl?: string;
+  marketingOptIn?: boolean;
 }
 
 export type OrderStatus = "pending" | "confirmed" | "dispatched" | "cancelled" | "pending_erp" | "enviado_ao_pdv" | "impresso_no_pdv" | "concluido_no_pdv" | "erro_integracao_pdv";
@@ -155,6 +156,8 @@ export interface Order {
   entregaFinalizada?: boolean;
   vendaEliminada?: boolean;
   origin?: string;
+  marketingOptIn?: boolean;
+  marketing_opt_in?: boolean;
 }
 
 export interface AppReview {

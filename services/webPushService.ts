@@ -14,7 +14,10 @@ export interface PushSubscriptionRow {
   p256dh: string;
   auth: string;
   user_agent?: string | null;
+  customer_phone?: string | null;
+  customer_name?: string | null;
   created_at: string;
+  updated_at?: string | null;
 }
 
 export interface VapidKeysConfig {
@@ -57,11 +60,19 @@ export async function ensurePushSubscriptionsTable(): Promise<void> {
         p256dh TEXT NOT NULL,
         auth TEXT NOT NULL,
         user_agent TEXT,
+        customer_phone TEXT,
+        customer_name TEXT,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()),
         CONSTRAINT push_subscriptions_tenant_id_endpoint_key UNIQUE (tenant_id, endpoint)
       );
+      ALTER TABLE public.push_subscriptions ADD COLUMN IF NOT EXISTS customer_phone TEXT;
+      ALTER TABLE public.push_subscriptions ADD COLUMN IF NOT EXISTS customer_name TEXT;
+      ALTER TABLE public.push_subscriptions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now());
       CREATE INDEX IF NOT EXISTS idx_push_subscriptions_tenant_id
         ON public.push_subscriptions(tenant_id);
+      CREATE INDEX IF NOT EXISTS idx_push_subscriptions_tenant_phone
+        ON public.push_subscriptions(tenant_id, customer_phone);
     `);
     console.log("[WebPush] Tabela push_subscriptions verificada com sucesso.");
   } catch (err: any) {
@@ -224,6 +235,29 @@ export function isValidRealPushEndpoint(endpoint: string): boolean {
   return true;
 }
 
+function isMissingOptionalPushColumnError(error: any): boolean {
+  if (!error) return false;
+  const code = String(error?.code || "");
+  const msg = `${error?.message || ""} ${error?.details || ""} ${error?.hint || ""}`.toLowerCase();
+  return (
+    code === "42703" ||
+    code === "PGRST204" ||
+    ((msg.includes("customer_phone") ||
+      msg.includes("customer_name") ||
+      msg.includes("updated_at")) &&
+      (msg.includes("column") || msg.includes("schema cache") || msg.includes("does not exist")))
+  );
+}
+
+function normalizePhoneDigitsForMatch(phone?: string | null): string {
+  const digits = String(phone || "").replace(/\D/g, "");
+  if (!digits) return "";
+  if (digits.startsWith("55") && digits.length >= 12) {
+    return digits.slice(2);
+  }
+  return digits.slice(0, 20);
+}
+
 /**
  * Registra ou atualiza uma inscrição Web Push isolada por tenant_id
  */
@@ -235,6 +269,8 @@ export async function savePushSubscription(
     p256dh: string;
     auth: string;
     userAgent?: string;
+    customerPhone?: string;
+    customerName?: string;
   }
 ): Promise<PushSubscriptionRow> {
   await ensurePushSubscriptionsTable();
@@ -244,6 +280,13 @@ export async function savePushSubscription(
   const cleanP256dh = String(params.p256dh || "").trim();
   const cleanAuth = String(params.auth || "").trim();
   const cleanUa = String(params.userAgent || "").trim();
+  const cleanPhone = String(params.customerPhone || "")
+    .replace(/\D/g, "")
+    .slice(0, 20);
+  const cleanName = String(params.customerName || "")
+    .replace(/[\r\n\t]+/g, " ")
+    .trim()
+    .slice(0, 120);
 
   if (!isValidRealPushEndpoint(cleanEndpoint)) {
     throw new Error(
@@ -263,29 +306,53 @@ export async function savePushSubscription(
     p256dh: cleanP256dh,
     auth: cleanAuth,
     user_agent: cleanUa || null,
+    customer_phone: cleanPhone || null,
+    customer_name: cleanName || null,
     created_at: nowIso,
+    updated_at: nowIso,
   };
 
   // 1. Salva na tabela push_subscriptions do Supabase isolado por (tenant_id, endpoint)
   try {
-    const { data, error } = await supabaseAdmin
+    const upsertPayload: Record<string, any> = {
+      tenant_id: cleanTenantId,
+      endpoint: cleanEndpoint,
+      p256dh: cleanP256dh,
+      auth: cleanAuth,
+      user_agent: cleanUa || null,
+      updated_at: nowIso,
+    };
+    if (cleanPhone) upsertPayload.customer_phone = cleanPhone;
+    if (cleanName) upsertPayload.customer_name = cleanName;
+
+    let { data, error } = await supabaseAdmin
       .from("push_subscriptions")
-      .upsert(
-        {
-          tenant_id: cleanTenantId,
-          endpoint: cleanEndpoint,
-          p256dh: cleanP256dh,
-          auth: cleanAuth,
-          user_agent: cleanUa || null,
-          created_at: nowIso,
-        },
-        { onConflict: "tenant_id,endpoint" }
-      )
+      .upsert(upsertPayload, { onConflict: "tenant_id,endpoint" })
       .select("*")
       .maybeSingle();
 
+    if (error && isMissingOptionalPushColumnError(error)) {
+      const legacyPayload = {
+        tenant_id: cleanTenantId,
+        endpoint: cleanEndpoint,
+        p256dh: cleanP256dh,
+        auth: cleanAuth,
+        user_agent: cleanUa || null,
+        created_at: nowIso,
+      };
+      const retryRes = await supabaseAdmin
+        .from("push_subscriptions")
+        .upsert(legacyPayload, { onConflict: "tenant_id,endpoint" })
+        .select("*")
+        .maybeSingle();
+      data = retryRes.data;
+      error = retryRes.error;
+    }
+
     if (!error && data) {
       row.id = data.id || row.id;
+      row.customer_phone = data.customer_phone || row.customer_phone || null;
+      row.customer_name = data.customer_name || row.customer_name || null;
     } else if (error) {
       // Fallback seguro isolado por (tenant_id, endpoint) — nunca sobrescreve outra drogaria
       const { data: existingList } = await supabaseAdmin
@@ -298,24 +365,63 @@ export async function savePushSubscription(
       const existing = Array.isArray(existingList) ? existingList[0] : null;
 
       if (existing?.id) {
-        await supabaseAdmin
+        const updatePayload: Record<string, any> = {
+          p256dh: cleanP256dh,
+          auth: cleanAuth,
+          user_agent: cleanUa || null,
+        };
+        if (cleanPhone) updatePayload.customer_phone = cleanPhone;
+        if (cleanName) updatePayload.customer_name = cleanName;
+
+        const { error: updErr } = await supabaseAdmin
           .from("push_subscriptions")
-          .update({
-            p256dh: cleanP256dh,
-            auth: cleanAuth,
-            user_agent: cleanUa || null,
-          })
+          .update(updatePayload)
           .eq("id", existing.id)
           .eq("tenant_id", cleanTenantId);
+        if (updErr && isMissingOptionalPushColumnError(updErr)) {
+          await supabaseAdmin
+            .from("push_subscriptions")
+            .update({
+              p256dh: cleanP256dh,
+              auth: cleanAuth,
+              user_agent: cleanUa || null,
+            })
+            .eq("id", existing.id)
+            .eq("tenant_id", cleanTenantId);
+        }
         row.id = existing.id;
       } else {
+        const baseInsert = {
+          id: row.id,
+          tenant_id: cleanTenantId,
+          endpoint: cleanEndpoint,
+          p256dh: cleanP256dh,
+          auth: cleanAuth,
+          user_agent: cleanUa || null,
+          created_at: nowIso,
+        };
         const { data: inserted, error: insertError } = await supabaseAdmin
           .from("push_subscriptions")
-          .insert(row)
+          .insert(
+            cleanPhone || cleanName
+              ? {
+                  ...baseInsert,
+                  ...(cleanPhone ? { customer_phone: cleanPhone } : {}),
+                  ...(cleanName ? { customer_name: cleanName } : {}),
+                }
+              : baseInsert
+          )
           .select("id")
           .maybeSingle();
         if (!insertError && inserted?.id) {
           row.id = inserted.id;
+        } else if (insertError && isMissingOptionalPushColumnError(insertError)) {
+          const { data: retryIns } = await supabaseAdmin
+            .from("push_subscriptions")
+            .insert(baseInsert)
+            .select("id")
+            .maybeSingle();
+          if (retryIns?.id) row.id = retryIns.id;
         } else if (insertError) {
           console.warn(
             "[WebPush] Aviso ao inserir inscrição multi-loja (verifique se a constraint UNIQUE(tenant_id, endpoint) foi aplicada no Supabase):",
@@ -334,7 +440,12 @@ export async function savePushSubscription(
     (r) => r.tenant_id === cleanTenantId && r.endpoint === cleanEndpoint
   );
   if (idx >= 0) {
-    localRows[idx] = { ...localRows[idx], ...row };
+    localRows[idx] = {
+      ...localRows[idx],
+      ...row,
+      customer_phone: cleanPhone || localRows[idx].customer_phone || null,
+      customer_name: cleanName || localRows[idx].customer_name || null,
+    };
   } else {
     localRows.push(row);
   }
@@ -381,7 +492,10 @@ export async function getTenantPushSubscriptions(
             p256dh: String(item.p256dh),
             auth: String(item.auth),
             user_agent: item.user_agent || null,
+            customer_phone: item.customer_phone || null,
+            customer_name: item.customer_name || null,
             created_at: item.created_at || new Date().toISOString(),
+            updated_at: item.updated_at || null,
           });
         }
       }
@@ -739,4 +853,102 @@ export async function sendPromotionalPushToTenant(
     errorStatuses: Array.from(errorStatusesSet),
     summary,
   };
+}
+
+/**
+ * Envia alerta Web Push de entrega em tempo real quando o pedido sai para entrega,
+ * filtrando exclusivamente pelo tenant_id e pelo customer_phone vinculado à inscrição.
+ */
+export async function sendOrderDispatchedPush(
+  supabaseAdmin: SupabaseClient,
+  params: {
+    tenantId: string;
+    orderId: string;
+    customerPhone?: string | null;
+    customerName?: string | null;
+    tenantName?: string | null;
+    tenantSlug?: string | null;
+    deliveryMode?: "delivery" | "pickup" | string;
+    iconUrl?: string | null;
+  }
+): Promise<{ sentCount: number; removedCount: number }> {
+  const cleanTenantId = String(params.tenantId || "").trim();
+  const normalizedTargetPhone = normalizePhoneDigitsForMatch(params.customerPhone);
+  if (!cleanTenantId || !normalizedTargetPhone || normalizedTargetPhone.length < 8) {
+    return { sentCount: 0, removedCount: 0 };
+  }
+
+  const keys = await getOrInitVapidKeys(supabaseAdmin);
+  if (!keys) return { sentCount: 0, removedCount: 0 };
+
+  const allTenantSubs = await getTenantPushSubscriptions(supabaseAdmin, cleanTenantId);
+  const matchingSubs = allTenantSubs.filter((sub) => {
+    const subPhone = normalizePhoneDigitsForMatch(sub.customer_phone);
+    if (!subPhone) return false;
+    return (
+      subPhone === normalizedTargetPhone ||
+      (subPhone.length >= 8 &&
+        normalizedTargetPhone.length >= 8 &&
+        subPhone.slice(-8) === normalizedTargetPhone.slice(-8))
+    );
+  });
+
+  if (matchingSubs.length === 0) {
+    return { sentCount: 0, removedCount: 0 };
+  }
+
+  const cleanSlug = String(params.tenantSlug || "").trim();
+  const storeName = String(params.tenantName || "Nossa Farmácia").trim();
+  const isPickup = String(params.deliveryMode || "").toLowerCase() === "pickup";
+  const targetUrl = cleanSlug ? `/loja/${cleanSlug}?acompanhar=${encodeURIComponent(params.orderId)}` : "/";
+
+  const firstName = String(params.customerName || "").trim().split(" ")[0];
+  const greeting = firstName ? `${firstName}, ` : "";
+
+  const payloadString = JSON.stringify({
+    title: isPickup
+      ? `🏪 Pedido #${params.orderId} pronto para retirada!`
+      : `🛵 ${greeting}seu pedido #${params.orderId} saiu para entrega!`,
+    body: isPickup
+      ? `Seu pedido na ${storeName} já está separado e pronto para retirada no balcão.`
+      : `Nosso motoboy da ${storeName} já está a caminho com o seu pedido. Fique atento!`,
+    icon: params.iconUrl || "/icon-192.svg",
+    badge: params.iconUrl || "/icon-192.svg",
+    url: targetUrl,
+    targetUrl,
+    tenantId: cleanTenantId,
+    tenantSlug: cleanSlug || null,
+    tag: `order-dispatch-${params.orderId}`,
+    actionTitle: "Acompanhar Pedido",
+  });
+
+  let sentCount = 0;
+  let removedCount = 0;
+
+  await Promise.all(
+    matchingSubs.map(async (sub) => {
+      try {
+        await webPush.sendNotification(
+          {
+            endpoint: sub.endpoint,
+            keys: { p256dh: sub.p256dh, auth: sub.auth },
+          },
+          payloadString,
+          { TTL: 3600, urgency: "high" }
+        );
+        sentCount++;
+      } catch (err: any) {
+        const statusCode = Number(err?.statusCode || err?.status || 0);
+        if (statusCode === 404 || statusCode === 410) {
+          removedCount++;
+          await removePushSubscriptionByEndpoint(supabaseAdmin, sub.endpoint, {
+            id: sub.id,
+            tenantId: cleanTenantId,
+          });
+        }
+      }
+    })
+  );
+
+  return { sentCount, removedCount };
 }

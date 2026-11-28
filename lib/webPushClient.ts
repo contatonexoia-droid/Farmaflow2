@@ -1,7 +1,20 @@
+import {
+  clearPushPromptCooldown,
+  dispatchPushSubscribedEvent,
+  getStorefrontCustomerHint,
+  isEmbeddedWebView,
+  isIosSafariNonStandalone,
+} from './pushEnvironment';
+
 export interface SilentSyncResult {
   synced: boolean;
   renewed: boolean;
   endpoint?: string;
+}
+
+export interface PushCustomerMetadata {
+  customerPhone?: string;
+  customerName?: string;
 }
 
 const lastSyncTimestampByTenant = new Map<string, number>();
@@ -171,6 +184,7 @@ const postSubscriptionUpsert = async (
   sub: PushSubscription,
   vapidPublicKey: string,
   oldEndpoint?: string | null,
+  customerMeta?: PushCustomerMetadata,
 ): Promise<boolean> => {
   const subJson = sub.toJSON();
   if (
@@ -180,6 +194,14 @@ const postSubscriptionUpsert = async (
   ) {
     return false;
   }
+
+  const storedHint = getStorefrontCustomerHint(tenantId);
+  const resolvedPhone = String(customerMeta?.customerPhone || storedHint.phone || '')
+    .replace(/\D/g, '')
+    .slice(0, 20);
+  const resolvedName = String(customerMeta?.customerName || storedHint.name || '')
+    .trim()
+    .slice(0, 120);
 
   const res = await fetch('/api/v1/push/subscribe', {
     method: 'POST',
@@ -192,6 +214,8 @@ const postSubscriptionUpsert = async (
       oldEndpoint: oldEndpoint && oldEndpoint !== subJson.endpoint ? oldEndpoint : undefined,
       subscription: subJson,
       userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : 'FarmaFlow-PWA',
+      customerPhone: resolvedPhone || undefined,
+      customerName: resolvedName || undefined,
     }),
   });
 
@@ -206,6 +230,8 @@ const postSubscriptionUpsert = async (
     localStorage.setItem(`ff_push_vapid_key_${tenantId}`, vapidPublicKey);
     localStorage.setItem(`push_subscribed_${tenantId}`, 'true');
     localStorage.setItem(`ff_push_subscribed_${tenantId}`, 'true');
+    clearPushPromptCooldown(tenantId);
+    dispatchPushSubscribedEvent(tenantId);
   } catch {
     // ignore storage quota
   }
@@ -220,7 +246,7 @@ const postSubscriptionUpsert = async (
  */
 export const silentSyncPushSubscription = async (
   tenantId: string,
-  options?: { force?: boolean },
+  options?: { force?: boolean; customerPhone?: string; customerName?: string },
 ): Promise<SilentSyncResult> => {
   if (
     typeof window === 'undefined' ||
@@ -261,6 +287,11 @@ export const silentSyncPushSubscription = async (
       !isRealPushEndpoint(currentSub.endpoint) ||
       !areApplicationServerKeysEqual(currentSub, expectedKeyBytes, vapidPublicKey, tenantId);
 
+    const customerMeta: PushCustomerMetadata = {
+      customerPhone: options?.customerPhone,
+      customerName: options?.customerName,
+    };
+
     if (needsRenewal) {
       if (currentSub) {
         await currentSub.unsubscribe().catch(() => {});
@@ -270,12 +301,24 @@ export const silentSyncPushSubscription = async (
       if (!freshSub || !isRealPushEndpoint(freshSub.endpoint)) {
         return { synced: false, renewed: false };
       }
-      const ok = await postSubscriptionUpsert(tenantId, freshSub, vapidPublicKey, oldEndpoint);
+      const ok = await postSubscriptionUpsert(
+        tenantId,
+        freshSub,
+        vapidPublicKey,
+        oldEndpoint,
+        customerMeta,
+      );
       return { synced: ok, renewed: ok, endpoint: freshSub.endpoint };
     }
 
     // Assinatura atual já usa a VAPID_PUBLIC_KEY correta: garante upsert silencioso no Supabase
-    const ok = await postSubscriptionUpsert(tenantId, currentSub, vapidPublicKey);
+    const ok = await postSubscriptionUpsert(
+      tenantId,
+      currentSub,
+      vapidPublicKey,
+      undefined,
+      customerMeta,
+    );
     return { synced: ok, renewed: false, endpoint: currentSub.endpoint };
   } catch {
     return { synced: false, renewed: false };
@@ -288,15 +331,23 @@ export const silentSyncPushSubscription = async (
  */
 export const requestAndSubscribePush = async (
   tenantId: string,
+  customerMeta?: PushCustomerMetadata,
 ): Promise<{ ok: boolean; permission: NotificationPermission | 'unsupported'; reason?: string }> => {
   if (
     typeof window === 'undefined' ||
     !tenantId ||
+    isEmbeddedWebView() ||
+    isIosSafariNonStandalone() ||
     !('Notification' in window) ||
     !('serviceWorker' in navigator) ||
     !('PushManager' in window)
   ) {
-    return { ok: false, permission: 'unsupported', reason: 'unsupported' };
+    const reason = isIosSafariNonStandalone()
+      ? 'ios_requires_standalone'
+      : isEmbeddedWebView()
+        ? 'embedded_webview'
+        : 'unsupported';
+    return { ok: false, permission: 'unsupported', reason };
   }
 
   try {
@@ -305,7 +356,11 @@ export const requestAndSubscribePush = async (
       return { ok: false, permission };
     }
 
-    const result = await silentSyncPushSubscription(tenantId, { force: true });
+    const result = await silentSyncPushSubscription(tenantId, {
+      force: true,
+      customerPhone: customerMeta?.customerPhone,
+      customerName: customerMeta?.customerName,
+    });
     return { ok: result.synced, permission };
   } catch {
     return { ok: false, permission: Notification.permission };
