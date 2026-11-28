@@ -20296,8 +20296,14 @@ const requireSuperAdminAuth = async (req: any, res: any, next: any) => {
 
 function cleanAnvisaCmedEan(raw: unknown): string | null {
   if (raw === null || raw === undefined) return null;
+  if (typeof raw === "number") {
+    if (!Number.isFinite(raw) || raw <= 0) return null;
+    const digits = Math.trunc(raw).toString();
+    if (digits.length < 8 || digits.length > 14 || /^0+$/.test(digits)) return null;
+    return digits;
+  }
   let str = String(raw).trim();
-  if (!str || str === "-" || str === "--" || str.toLowerCase() === "null") return null;
+  if (!str || !/[0-9]/.test(str)) return null;
 
   if (/^\d+(?:[.,]\d+)?e\+?\d+$/i.test(str)) {
     const num = Number(str.replace(",", "."));
@@ -20316,8 +20322,33 @@ function cleanAnvisaCmedEan(raw: unknown): string | null {
 function cleanCmedText(raw: unknown, maxLen = 250): string | null {
   if (raw === null || raw === undefined) return null;
   const str = String(raw).replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
-  if (!str || str === "-") return null;
+  if (!str || !/[a-zA-Z0-9\u00C0-\u024F]/.test(str)) return null;
+  const lower = str.toLowerCase();
+  if (lower === "n/a" || lower === "na" || lower === "null" || lower === "undefined") {
+    return null;
+  }
   return str.slice(0, maxLen);
+}
+
+function cleanCmedTarja(raw: unknown): string | null {
+  const cleaned = cleanCmedText(raw, 120);
+  if (!cleaned) return null;
+  const norm = cleaned
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (
+    !norm ||
+    norm === "nao informada" ||
+    norm === "nao informado" ||
+    norm === "indefinida" ||
+    norm === "indefinido"
+  ) {
+    return null;
+  }
+  return cleaned;
 }
 
 // Estatísticas da Base Oficial ANVISA / CMED (`anvisa_medicamentos`)
@@ -20423,7 +20454,7 @@ app.post("/api/super-admin/anvisa-cmed/import", requireSuperAdminAuth, async (re
         apresentacao: cleanCmedText(r.apresentacao, 260),
         classe_terapeutica: cleanCmedText(r.classe_terapeutica, 220),
         tipo_produto: cleanCmedText(r.tipo_produto, 120),
-        tarja: cleanCmedText(r.tarja, 120),
+        tarja: cleanCmedTarja(r.tarja),
         updated_at: nowIso,
       };
 

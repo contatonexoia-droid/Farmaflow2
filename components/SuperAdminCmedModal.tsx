@@ -33,7 +33,7 @@ interface ParsedCmedRow {
   apresentacao: string;
   classe_terapeutica: string;
   tipo_produto: string;
-  tarja: string;
+  tarja: string | null;
 }
 
 interface SuperAdminCmedModalProps {
@@ -83,14 +83,40 @@ function normalizeHeaderCell(val: unknown): string {
 
 function cleanCmedCellText(val: unknown): string {
   const s = String(val ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
-  if (!s || s === '-' || s === '--') return '';
+  if (!s) return '';
+  if (!/[a-zA-Z0-9\u00C0-\u024F]/.test(s)) return '';
+  const lower = s.toLowerCase();
+  if (lower === 'n/a' || lower === 'na' || lower === 'null' || lower === 'undefined') return '';
   return s;
+}
+
+function cleanCmedTarjaClient(val: unknown): string | null {
+  const cleaned = cleanCmedCellText(val);
+  if (!cleaned) return null;
+  const norm = normalizeHeaderCell(cleaned);
+  if (
+    !norm ||
+    norm === 'nao informada' ||
+    norm === 'nao informado' ||
+    norm === 'indefinida' ||
+    norm === 'indefinido' ||
+    norm === '*'
+  ) {
+    return null;
+  }
+  return cleaned;
 }
 
 function cleanCmedEanClient(val: unknown): string {
   if (val === null || val === undefined) return '';
+  if (typeof val === 'number') {
+    if (!Number.isFinite(val) || val <= 0) return '';
+    const digits = Math.trunc(val).toString();
+    if (digits.length < 8 || digits.length > 14 || /^0+$/.test(digits)) return '';
+    return digits;
+  }
   let str = String(val).trim();
-  if (!str || str === '-' || str === '--') return '';
+  if (!str || !/[0-9]/.test(str)) return '';
 
   if (/^\d+(?:[.,]\d+)?e\+?\d+$/i.test(str)) {
     const num = Number(str.replace(',', '.'));
@@ -104,6 +130,17 @@ function cleanCmedEanClient(val: unknown): string {
     return '';
   }
   return digits;
+}
+
+function readSheetCellRaw(sheet: XLSX.WorkSheet, row: number, col: number): unknown {
+  if (col < 0) return '';
+  const addr = XLSX.utils.encode_cell({ r: row, c: col });
+  const cell = sheet[addr];
+  if (!cell) return '';
+  if (cell.v !== undefined && cell.v !== null && cell.v !== '') {
+    return cell.v;
+  }
+  return cell.w ?? '';
 }
 
 function findColumnIndex(headers: string[], candidates: string[]): number {
@@ -127,6 +164,7 @@ export const SuperAdminCmedModal: React.FC<SuperAdminCmedModalProps> = ({
 }) => {
   const [stage, setStage] = useState<ModalStage>('idle');
   const [fileName, setFileName] = useState<string>('');
+  const [detectedSheetName, setDetectedSheetName] = useState<string>('');
   const [isParsing, setIsParsing] = useState<boolean>(false);
   const [parseError, setParseError] = useState<string | null>(null);
   const [totalReadRows, setTotalReadRows] = useState<number>(0);
@@ -160,6 +198,7 @@ export const SuperAdminCmedModal: React.FC<SuperAdminCmedModalProps> = ({
   const resetModal = () => {
     setStage('idle');
     setFileName('');
+    setDetectedSheetName('');
     setParseError(null);
     setTotalReadRows(0);
     setIgnoredNoEanCount(0);
@@ -186,13 +225,22 @@ export const SuperAdminCmedModal: React.FC<SuperAdminCmedModalProps> = ({
     setIsParsing(true);
     setParseError(null);
     setFileName(file.name);
+    setDetectedSheetName('');
 
     try {
+      const lowerName = file.name.toLowerCase().trim();
+      const isSupportedExt = /\.(xlsx|xls|csv)(\.(xlsx|xls|csv))*$/i.test(lowerName);
+      if (!isSupportedExt) {
+        throw new Error(
+          'Formato de arquivo não suportado. Selecione uma planilha oficial CMED (.xlsx, .xls ou .csv).'
+        );
+      }
+
       const buffer = await file.arrayBuffer();
-      const lowerName = file.name.toLowerCase();
+      const isCsv = /\.csv(\.csv)*$/i.test(lowerName);
       let workbook: XLSX.WorkBook;
 
-      if (lowerName.endsWith('.csv')) {
+      if (isCsv) {
         const bytes = new Uint8Array(buffer);
         let decoded = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
         if (decoded.includes('\uFFFD')) {
@@ -200,80 +248,101 @@ export const SuperAdminCmedModal: React.FC<SuperAdminCmedModalProps> = ({
         }
         workbook = XLSX.read(decoded, { type: 'string', raw: true });
       } else {
-        workbook = XLSX.read(buffer, { type: 'array' });
+        // Ignora estilos/fórmulas/HTML para ler arquivos CMED grandes (13+ MB) rapidamente e sem estourar memória
+        workbook = XLSX.read(buffer, {
+          type: 'array',
+          cellFormula: false,
+          cellHTML: false,
+          cellStyles: false,
+          cellNF: false,
+        });
       }
 
-      const firstSheetName = workbook.SheetNames[0];
-      if (!firstSheetName) {
-        throw new Error('Nenhuma planilha encontrada no arquivo enviado.');
+      if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
+        throw new Error('Nenhuma aba encontrada no arquivo enviado.');
       }
 
-      const sheet = workbook.Sheets[firstSheetName];
-      const matrix = XLSX.utils.sheet_to_json<any[]>(sheet, {
-        header: 1,
-        defval: '',
-        raw: false,
-      });
-
-      if (!Array.isArray(matrix) || matrix.length === 0) {
-        throw new Error('A planilha selecionada está vazia.');
-      }
-
-      // Localiza automaticamente a linha real de cabeçalho da CMED (procurando SUBSTÂNCIA + EAN 1)
+      // Varre TODAS as abas do workbook procurando nas primeiras 50 linhas o cabeçalho oficial ("SUBSTÂNCIA" + "EAN 1")
+      let targetSheetName = '';
+      let targetSheet: XLSX.WorkSheet | null = null;
+      let targetRange: XLSX.Range | null = null;
       let headerRowIndex = -1;
       let normalizedHeaders: string[] = [];
-      const scanLimit = Math.min(matrix.length, 80);
 
-      for (let i = 0; i < scanLimit; i++) {
-        const rowCells = Array.isArray(matrix[i]) ? matrix[i] : [];
-        const norm = rowCells.map(normalizeHeaderCell);
-        const hasSubstancia = norm.some((c) => c === 'substancia' || c.startsWith('substancia'));
-        const hasEan1 = norm.some((c) => c === 'ean 1' || c === 'ean1' || c === 'ean');
-        if (hasSubstancia && hasEan1) {
-          headerRowIndex = i;
-          normalizedHeaders = norm;
-          break;
+      for (const sheetName of workbook.SheetNames) {
+        const candidateSheet = workbook.Sheets[sheetName];
+        if (!candidateSheet || !candidateSheet['!ref']) continue;
+
+        const range = XLSX.utils.decode_range(candidateSheet['!ref']);
+        const firstRow = Math.max(0, range.s.r);
+        const scanEndRow = Math.min(range.e.r, firstRow + 49);
+
+        for (let r = firstRow; r <= scanEndRow; r++) {
+          const rowHeaders: string[] = [];
+          for (let c = range.s.c; c <= range.e.c; c++) {
+            rowHeaders.push(normalizeHeaderCell(readSheetCellRaw(candidateSheet, r, c)));
+          }
+          const hasSubstancia = rowHeaders.some(
+            (h) => h === 'substancia' || h.startsWith('substancia')
+          );
+          const hasEan1 = rowHeaders.some(
+            (h) => h === 'ean 1' || h === 'ean1' || h === 'ean'
+          );
+
+          if (hasSubstancia && hasEan1) {
+            targetSheetName = sheetName;
+            targetSheet = candidateSheet;
+            targetRange = range;
+            headerRowIndex = r;
+            normalizedHeaders = rowHeaders;
+            break;
+          }
         }
+
+        if (headerRowIndex !== -1) break;
       }
 
-      if (headerRowIndex === -1) {
+      if (headerRowIndex === -1 || !targetSheet || !targetRange) {
         throw new Error(
-          'Cabeçalho oficial da CMED não encontrado (colunas "SUBSTÂNCIA" e "EAN 1" obrigatórias). Verifique se o arquivo é a Lista de Preços CMED da ANVISA.'
+          'Cabeçalho oficial da CMED não encontrado em nenhuma aba (colunas "SUBSTÂNCIA" e "EAN 1" obrigatórias). Verifique se o arquivo é a Lista de Preços CMED da ANVISA.'
         );
       }
 
-      const idxSubstancia = findColumnIndex(normalizedHeaders, ['substancia', 'principio ativo']);
-      const idxLab = findColumnIndex(normalizedHeaders, ['laboratorio']);
-      const idxRegistro = findColumnIndex(normalizedHeaders, ['registro']);
-      const idxEan1 = findColumnIndex(normalizedHeaders, ['ean 1', 'ean1', 'ean']);
-      const idxEan2 = findColumnIndex(normalizedHeaders, ['ean 2', 'ean2']);
-      const idxEan3 = findColumnIndex(normalizedHeaders, ['ean 3', 'ean3']);
-      const idxProduto = findColumnIndex(normalizedHeaders, ['produto', 'nome comercial']);
-      const idxApresentacao = findColumnIndex(normalizedHeaders, ['apresentacao']);
-      const idxClasse = findColumnIndex(normalizedHeaders, ['classe terapeutica']);
-      const idxTipo = findColumnIndex(normalizedHeaders, [
-        'tipo de produto (status do produto)',
-        'tipo de produto',
-      ]);
-      const idxTarja = findColumnIndex(normalizedHeaders, ['tarja']);
+      const colOffset = targetRange.s.c;
+      const toSheetCol = (idx: number) => (idx >= 0 ? colOffset + idx : -1);
 
+      const idxSubstancia = toSheetCol(findColumnIndex(normalizedHeaders, ['substancia', 'principio ativo']));
+      const idxLab = toSheetCol(findColumnIndex(normalizedHeaders, ['laboratorio']));
+      const idxRegistro = toSheetCol(findColumnIndex(normalizedHeaders, ['registro']));
+      const idxEan1 = toSheetCol(findColumnIndex(normalizedHeaders, ['ean 1', 'ean1', 'ean']));
+      const idxEan2 = toSheetCol(findColumnIndex(normalizedHeaders, ['ean 2', 'ean2']));
+      const idxEan3 = toSheetCol(findColumnIndex(normalizedHeaders, ['ean 3', 'ean3']));
+      const idxProduto = toSheetCol(findColumnIndex(normalizedHeaders, ['produto', 'nome comercial']));
+      const idxApresentacao = toSheetCol(findColumnIndex(normalizedHeaders, ['apresentacao']));
+      const idxClasse = toSheetCol(findColumnIndex(normalizedHeaders, ['classe terapeutica']));
+      const idxTipo = toSheetCol(
+        findColumnIndex(normalizedHeaders, [
+          'tipo de produto (status do produto)',
+          'tipo de produto',
+        ])
+      );
+      const idxTarja = toSheetCol(findColumnIndex(normalizedHeaders, ['tarja']));
+
+      // Lê apenas os índices mapeados (descartando todas as dezenas de colunas de preços PF/PMVG/PMC)
       const validList: ParsedCmedRow[] = [];
       let totalDataRows = 0;
       let skippedNoEan = 0;
 
-      for (let r = headerRowIndex + 1; r < matrix.length; r++) {
-        const row = matrix[r];
-        if (!Array.isArray(row)) continue;
-
-        const substancia = idxSubstancia >= 0 ? cleanCmedCellText(row[idxSubstancia]) : '';
-        const produto = idxProduto >= 0 ? cleanCmedCellText(row[idxProduto]) : '';
+      for (let r = headerRowIndex + 1; r <= targetRange.e.r; r++) {
+        const substancia = cleanCmedCellText(readSheetCellRaw(targetSheet, r, idxSubstancia));
+        const produto = cleanCmedCellText(readSheetCellRaw(targetSheet, r, idxProduto));
         if (!substancia && !produto) continue;
 
         totalDataRows++;
 
-        let ean1 = idxEan1 >= 0 ? cleanCmedEanClient(row[idxEan1]) : '';
-        let ean2 = idxEan2 >= 0 ? cleanCmedEanClient(row[idxEan2]) : '';
-        let ean3 = idxEan3 >= 0 ? cleanCmedEanClient(row[idxEan3]) : '';
+        let ean1 = cleanCmedEanClient(readSheetCellRaw(targetSheet, r, idxEan1));
+        let ean2 = cleanCmedEanClient(readSheetCellRaw(targetSheet, r, idxEan2));
+        let ean3 = cleanCmedEanClient(readSheetCellRaw(targetSheet, r, idxEan3));
 
         if (!ean1 && ean2) {
           ean1 = ean2;
@@ -290,25 +359,26 @@ export const SuperAdminCmedModal: React.FC<SuperAdminCmedModalProps> = ({
 
         validList.push({
           principio_ativo: substancia,
-          laboratorio: idxLab >= 0 ? cleanCmedCellText(row[idxLab]) : '',
-          registro_anvisa: idxRegistro >= 0 ? cleanCmedCellText(row[idxRegistro]) : '',
+          laboratorio: cleanCmedCellText(readSheetCellRaw(targetSheet, r, idxLab)),
+          registro_anvisa: cleanCmedCellText(readSheetCellRaw(targetSheet, r, idxRegistro)),
           ean: ean1,
           ean2: ean2 !== ean1 ? ean2 : '',
           ean3: ean3 !== ean1 && ean3 !== ean2 ? ean3 : '',
           nome_comercial: produto,
-          apresentacao: idxApresentacao >= 0 ? cleanCmedCellText(row[idxApresentacao]) : '',
-          classe_terapeutica: idxClasse >= 0 ? cleanCmedCellText(row[idxClasse]) : '',
-          tipo_produto: idxTipo >= 0 ? cleanCmedCellText(row[idxTipo]) : '',
-          tarja: idxTarja >= 0 ? cleanCmedCellText(row[idxTarja]) : '',
+          apresentacao: cleanCmedCellText(readSheetCellRaw(targetSheet, r, idxApresentacao)),
+          classe_terapeutica: cleanCmedCellText(readSheetCellRaw(targetSheet, r, idxClasse)),
+          tipo_produto: cleanCmedCellText(readSheetCellRaw(targetSheet, r, idxTipo)),
+          tarja: cleanCmedTarjaClient(readSheetCellRaw(targetSheet, r, idxTarja)),
         });
       }
 
       if (validList.length === 0) {
         throw new Error(
-          `Foram lidas ${totalDataRows} linhas, mas nenhuma possui código EAN válido (8 a 14 dígitos).`
+          `Aba detectada: "${targetSheetName}" (${totalDataRows} linhas lidas), mas nenhuma possui código EAN válido (8 a 14 dígitos).`
         );
       }
 
+      setDetectedSheetName(targetSheetName);
       setTotalReadRows(totalDataRows);
       setIgnoredNoEanCount(skippedNoEan);
       setParsedRows(validList);
@@ -340,7 +410,11 @@ export const SuperAdminCmedModal: React.FC<SuperAdminCmedModalProps> = ({
     let accIgnored = 0;
 
     try {
-      const headers = await getAuthHeaders();
+      const authHeaders = await getAuthHeaders();
+      const headers: Record<string, string> = {
+        ...authHeaders,
+        'Content-Type': 'application/json',
+      };
 
       for (let i = 0; i < parsedRows.length; i += BATCH_SIZE) {
         if (cancelFlagRef.current) {
@@ -488,7 +562,7 @@ export const SuperAdminCmedModal: React.FC<SuperAdminCmedModalProps> = ({
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept=".xlsx,.xls,.csv"
+                  accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv"
                   onChange={handleFileChange}
                   className="hidden"
                 />
@@ -496,7 +570,7 @@ export const SuperAdminCmedModal: React.FC<SuperAdminCmedModalProps> = ({
                   <>
                     <Loader2 size={36} className="animate-spin text-emerald-600" />
                     <span className="text-sm font-black text-emerald-900">
-                      Lendo planilha CMED e localizando cabeçalho oficial...
+                      Varrendo abas da planilha CMED e extraindo colunas oficiais...
                     </span>
                   </>
                 ) : (
@@ -509,7 +583,7 @@ export const SuperAdminCmedModal: React.FC<SuperAdminCmedModalProps> = ({
                         Clique para selecionar a Planilha Oficial CMED (.xlsx, .xls ou .csv)
                       </p>
                       <p className="text-xs font-medium text-gray-500 mt-1">
-                        O leitor localiza automaticamente o cabeçalho (&quot;SUBSTÂNCIA&quot; + &quot;EAN 1&quot;), limpa EANs inválidos e atualiza sem duplicar registros.
+                        Envie o arquivo oficial da ANVISA direto como foi baixado — não é necessário apagar abas nem colunas de preços.
                       </p>
                     </div>
                   </>
@@ -541,8 +615,9 @@ export const SuperAdminCmedModal: React.FC<SuperAdminCmedModalProps> = ({
                 <FileSpreadsheet size={28} className="text-emerald-700 shrink-0" />
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-black text-emerald-950 truncate">{fileName}</p>
-                  <p className="text-xs font-medium text-emerald-800">
-                    Cabeçalho CMED detectado com sucesso. Pronto para envio em lotes de {BATCH_SIZE}.
+                  <p className="text-xs font-bold text-emerald-800 mt-0.5">
+                    Aba detectada: <span className="underline">{detectedSheetName}</span> —{' '}
+                    {totalReadRows.toLocaleString('pt-BR')} registros lidos (pronto para envio em lotes de {BATCH_SIZE}).
                   </p>
                 </div>
               </div>
@@ -683,7 +758,7 @@ export const SuperAdminCmedModal: React.FC<SuperAdminCmedModalProps> = ({
                   </h4>
                   <p className="text-xs font-medium mt-0.5">
                     {uploadError ||
-                      'Todos os lotes enviados já estão disponíveis na Camada 1 do Enriquecimento com IA.'}
+                      `${detectedSheetName ? `Aba detectada: ${detectedSheetName} — ` : ''}Todos os lotes enviados já estão disponíveis na Camada 1 do Enriquecimento com IA.`}
                   </p>
                 </div>
               </div>
