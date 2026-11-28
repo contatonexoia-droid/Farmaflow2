@@ -689,13 +689,21 @@ export const CatalogAiEnrichmentModal: React.FC<CatalogAiEnrichmentModalProps> =
                 )}
               </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
                 <div className="bg-emerald-50 p-4 rounded-2xl border border-emerald-200">
                   <span className="block text-[10px] font-black uppercase text-emerald-700">
                     Enriquecidos IA
                   </span>
                   <span className="text-2xl font-black text-emerald-900">
                     {summary.updated}
+                  </span>
+                </div>
+                <div className="bg-teal-50 p-4 rounded-2xl border border-teal-200 flex flex-col justify-between">
+                  <span className="text-[10px] font-black uppercase text-teal-700 flex items-center gap-1">
+                    <ShieldCheck size={11} /> Validados ANVISA/CMED
+                  </span>
+                  <span className="text-2xl font-black text-teal-900">
+                    {summary.anvisaHits}
                   </span>
                 </div>
                 <div className="bg-blue-50 p-4 rounded-2xl border border-blue-200">
@@ -757,13 +765,21 @@ export const CatalogAiEnrichmentModal: React.FC<CatalogAiEnrichmentModalProps> =
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
                 <div className="bg-emerald-50 p-4 rounded-2xl border border-emerald-200">
                   <span className="block text-[10px] font-black uppercase text-emerald-700">
                     Atualizados via IA
                   </span>
                   <span className="text-2xl font-black text-emerald-900">
                     {summary.updated}
+                  </span>
+                </div>
+                <div className="bg-teal-50 p-4 rounded-2xl border border-teal-200 flex flex-col justify-between">
+                  <span className="text-[10px] font-black uppercase text-teal-700 flex items-center gap-1">
+                    <ShieldCheck size={11} /> Validados ANVISA/CMED
+                  </span>
+                  <span className="text-2xl font-black text-teal-900">
+                    {summary.anvisaHits}
                   </span>
                 </div>
                 <div className="bg-blue-50 p-4 rounded-2xl border border-blue-200 flex flex-col justify-between">

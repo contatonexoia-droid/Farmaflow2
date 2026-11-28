@@ -3,10 +3,12 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { PharmacyConfig, Product, AuthSession, AppReview, BackupLog } from '../types';
 import { getTenants, saveTenant, getAllProducts, getProductsByTenant, getAppReviews, getBackupLogs, runManualBackup, saveBackupConfig, getBackupConfig, getPharmacyStats, exportBackupData, downloadLatestBackupFile, getIntegrationLogs } from '../services/storage';
 import { getDepartmentForCategory } from '../lib/departments';
-import { Plus, Trash2, Edit3, ExternalLink, X, Loader2, Key, Calendar, RefreshCw, Check, Store, AlertCircle, ShieldAlert, Lock, Unlock, MapPin, Palette, Phone, FileDown, Download, Filter, Star, MessageSquare, ShieldCheck, Search, Database, History, HardDriveDownload, FileText, FileCode, Link, Bot, Sparkles } from 'lucide-react';
+import { Plus, Trash2, Edit3, ExternalLink, X, Loader2, Key, Calendar, RefreshCw, Check, Store, AlertCircle, ShieldAlert, Lock, Unlock, MapPin, Palette, Phone, FileDown, Download, Filter, Star, MessageSquare, ShieldCheck, Search, Database, History, HardDriveDownload, FileText, FileCode, Link, Bot, Sparkles, FileSpreadsheet, CheckCircle2 } from 'lucide-react';
 import * as XLSX from 'xlsx';
+import { supabase } from '../services/supabase';
 import { ActivationTokenManager } from './ActivationTokenManager';
 import { StatusMonitor } from './StatusMonitor';
+import { SuperAdminCmedModal, AnvisaCmedStats } from './SuperAdminCmedModal';
 import {
   triggerInovafarmaSync,
   parseInovafarmaUrlAndRoute,
@@ -69,6 +71,9 @@ export const SuperAdminManager: React.FC<SuperAdminManagerProps> = ({ session, o
   const [copiedWebhookField, setCopiedWebhookField] = useState<string | null>(null);
   const [isQueueDashboardOpen, setIsQueueDashboardOpen] = useState(false);
   const [queueStats, setQueueStats] = useState<any>(null);
+  const [isCmedModalOpen, setIsCmedModalOpen] = useState(false);
+  const [cmedStats, setCmedStats] = useState<AnvisaCmedStats | null>(null);
+  const [loadingCmedStats, setLoadingCmedStats] = useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   const handleSyncTenantInovafarma = async () => {
@@ -330,8 +335,64 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
       return () => clearInterval(interval);
   }, [isQueueDashboardOpen]);
 
+  const getSuperAdminAuthHeaders = async (): Promise<Record<string, string>> => {
+    const headers: Record<string, string> = {};
+    try {
+      const { data } = await supabase.auth.getSession();
+      if (data?.session?.access_token) {
+        headers['Authorization'] = `Bearer ${data.session.access_token}`;
+        return headers;
+      }
+    } catch {
+      // Fallback para token salvo na sessao local
+    }
+
+    if (session?.access_token) {
+      headers['Authorization'] = `Bearer ${session.access_token}`;
+      return headers;
+    }
+
+    try {
+      const raw = localStorage.getItem('ff_session');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed?.access_token) {
+          headers['Authorization'] = `Bearer ${parsed.access_token}`;
+        }
+      }
+    } catch {
+      // ignore storage errors
+    }
+
+    return headers;
+  };
+
+  const loadCmedStats = async () => {
+    setLoadingCmedStats(true);
+    try {
+      const authHeaders = await getSuperAdminAuthHeaders();
+      const response = await fetch('/api/super-admin/anvisa-cmed/stats', {
+        headers: authHeaders,
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setCmedStats({
+          totalCount: Number(data.totalCount || 0),
+          lastUpdatedAt: data.lastUpdatedAt || null,
+          schemaReady: data.schemaReady !== false,
+          schemaMessage: data.schemaMessage || '',
+        });
+      }
+    } catch (e) {
+      console.error('Erro ao carregar estatisticas ANVISA CMED:', e);
+    } finally {
+      setLoadingCmedStats(false);
+    }
+  };
+
   useEffect(() => {
     loadTenants();
+    loadCmedStats();
   }, []);
 
   const getDaysRemaining = (expiration?: string) => {
@@ -1094,6 +1155,74 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
         <ActivationTokenManager />
         <StatusMonitor />
+      </div>
+
+      <div className="bg-white rounded-[2.5rem] border border-gray-100 shadow-sm p-6 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
+        <div className="flex items-start sm:items-center gap-4">
+          <div className="w-14 h-14 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-700 flex items-center justify-center shrink-0">
+            <ShieldCheck size={28} />
+          </div>
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="text-lg font-black text-gray-900">Base Oficial ANVISA / CMED</h3>
+              {cmedStats && !cmedStats.schemaReady ? (
+                <span className="bg-amber-100 text-amber-800 px-2.5 py-0.5 rounded-lg text-[10px] font-black uppercase">
+                  Migração SQL Pendente
+                </span>
+              ) : cmedStats && cmedStats.totalCount > 0 ? (
+                <span className="bg-emerald-100 text-emerald-800 px-2.5 py-0.5 rounded-lg text-[10px] font-black uppercase flex items-center gap-1">
+                  <CheckCircle2 size={11} /> Camada 1 Ativa
+                </span>
+              ) : (
+                <span className="bg-gray-100 text-gray-600 px-2.5 py-0.5 rounded-lg text-[10px] font-black uppercase">
+                  Base Vazia
+                </span>
+              )}
+            </div>
+            <p className="text-xs font-medium text-gray-500 mt-1">
+              Tabela global <code className="bg-gray-100 px-1.5 py-0.5 rounded text-gray-700 font-mono">anvisa_medicamentos</code> usada para validar EAN, DCB, tipo legal e tarja no Enriquecimento IA.
+            </p>
+            <div className="flex flex-wrap items-center gap-4 mt-2 text-xs font-bold text-gray-600">
+              <span>
+                Registros:{' '}
+                <strong className="text-gray-900 font-black">
+                  {loadingCmedStats && !cmedStats
+                    ? '...'
+                    : (cmedStats?.totalCount ?? 0).toLocaleString('pt-BR')}
+                </strong>
+              </span>
+              <span>
+                Última atualização:{' '}
+                <strong className="text-gray-900 font-black">
+                  {cmedStats?.lastUpdatedAt
+                    ? new Date(cmedStats.lastUpdatedAt).toLocaleString('pt-BR')
+                    : 'Nunca importado'}
+                </strong>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3 w-full lg:w-auto justify-end shrink-0">
+          <button
+            type="button"
+            onClick={loadCmedStats}
+            disabled={loadingCmedStats}
+            className="px-4 py-3 rounded-2xl bg-gray-100 hover:bg-gray-200 text-gray-700 font-black text-xs transition-all flex items-center gap-2 disabled:opacity-50"
+            title="Atualizar contagem da base CMED"
+          >
+            <RefreshCw size={15} className={loadingCmedStats ? 'animate-spin' : ''} />
+            Atualizar
+          </button>
+          <button
+            type="button"
+            onClick={() => setIsCmedModalOpen(true)}
+            className="px-6 py-3.5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs shadow-lg transition-all flex items-center gap-2"
+          >
+            <FileSpreadsheet size={16} />
+            Importar Planilha CMED (ANVISA)
+          </button>
+        </div>
       </div>
 
       <div className="flex flex-col xl:flex-row justify-between items-start xl:items-center gap-6">
@@ -2297,6 +2426,14 @@ const [editData, setEditData] = useState<Partial<PharmacyConfig>>({
           </div>
           );
       })()}
+
+      <SuperAdminCmedModal
+        isOpen={isCmedModalOpen}
+        onClose={() => setIsCmedModalOpen(false)}
+        stats={cmedStats}
+        onStatsRefresh={loadCmedStats}
+        getAuthHeaders={getSuperAdminAuthHeaders}
+      />
 
     </div>
   );

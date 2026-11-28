@@ -111,6 +111,8 @@ export interface AnvisaMatchInfo {
   therapeuticClass?: string;
   manufacturer?: string;
   drugType?: string;
+  tarja?: string;
+  registroAnvisa?: string;
   productName?: string;
 }
 
@@ -485,8 +487,82 @@ function detectControlledKeywords(text: string): boolean {
   );
 }
 
+export function formatAnvisaSubstanceToDcb(rawSubstance?: string | null): string {
+  const cleaned = String(rawSubstance || "").trim();
+  if (!cleaned) return "";
+
+  const parts = cleaned
+    .split(/\s*(?:;|\/|\+)\s*/)
+    .map((part) =>
+      part
+        .replace(/\b\d+(?:[.,]\d+)?\s*(?:mg|mcg|ug|g|ml|ui|%|cpr|comp|caps|capsulas)\b/gi, "")
+        .replace(/\s+/g, " ")
+        .trim()
+    )
+    .filter((p) => p.length >= 2)
+    .map(toCleanDcbTitleCase);
+
+  const uniqueParts: string[] = [];
+  const seen = new Set<string>();
+  for (const part of parts) {
+    const key = normalizeCompareText(part);
+    if (key && !seen.has(key)) {
+      seen.add(key);
+      uniqueParts.push(part);
+    }
+  }
+  return uniqueParts.join(" + ");
+}
+
+export function mapAnvisaTipoProdutoToDrugType(rawTipo?: string | null): string {
+  const norm = normalizeCompareText(rawTipo);
+  if (!norm) return "";
+  if (norm.includes("generico")) return "Genérico";
+  if (norm.includes("similar")) return "Similar";
+  if (norm.includes("fitoterapico")) return "Fitoterápico";
+  if (norm.includes("biologico")) return "Biológico";
+  if (norm.includes("especifico")) return "Específico";
+  if (norm.includes("novo") || norm.includes("referencia")) return "Referência";
+  return "";
+}
+
+export function doesAnvisaTarjaRequirePrescription(rawTarja?: string | null): boolean {
+  const norm = normalizeCompareText(rawTarja);
+  if (!norm) return false;
+  if (norm.includes("sem tarja") || norm.includes("venda livre") || norm === "isento") {
+    return false;
+  }
+  return (
+    norm.includes("tarja vermelha") ||
+    norm.includes("tarja preta") ||
+    norm.includes("sob prescricao") ||
+    norm.includes("prescricao medica") ||
+    norm.includes("controle especial") ||
+    norm.includes("sujeito a controle") ||
+    norm.includes("retencao de receita") ||
+    norm.includes("antimicrobiano")
+  );
+}
+
+function buildLockedAnvisaContext(anvisa: AnvisaMatchInfo) {
+  const dcb = formatAnvisaSubstanceToDcb(anvisa.activePrinciple);
+  const mappedType = mapAnvisaTipoProdutoToDrugType(anvisa.drugType);
+  const rx = doesAnvisaTarjaRequirePrescription(anvisa.tarja);
+  return {
+    nome_comercial: anvisa.productName || "",
+    principio_ativo_dcb: dcb || anvisa.activePrinciple || "",
+    apresentacao: anvisa.presentation || "",
+    laboratorio: anvisa.manufacturer || "",
+    classe_terapeutica: anvisa.therapeuticClass || "",
+    tipo_produto_anvisa: anvisa.drugType || "",
+    tipo_legal_mapeado: mappedType || "",
+    tarja: anvisa.tarja || "",
+    exige_receita: rx,
+  };
+}
+
 /**
- * Camada 1: Cruzamento prévio por EAN em `anvisa_medicamentos` (se existir) e em `products` já validados.
+ * Camada 1: Cruzamento prévio por EAN em `anvisa_medicamentos` (`ean`, `ean2`, `ean3`) e em `products` já validados.
  */
 export async function lookupEanReferenceBatch(
   barcodes: string[],
@@ -509,14 +585,14 @@ export async function lookupEanReferenceBatch(
   const supabaseAdmin = getSupabaseAdmin();
   if (!supabaseAdmin) return resultMap;
 
-  // 1a. Lookup em `anvisa_medicamentos` (resiliente caso a tabela não exista ou tenha nomes de coluna variados)
+  // 1a. Lookup em `anvisa_medicamentos` (busca oficial por `ean`, `ean2` ou `ean3`, com fallbacks seguros)
   try {
     const { data: anvisaRows, error } = await supabaseAdmin
       .from("anvisa_medicamentos")
       .select("*")
       .or(
         cleanEans
-          .flatMap((ean) => [`ean_1.eq.${ean}`, `ean_2.eq.${ean}`, `ean_3.eq.${ean}`])
+          .flatMap((ean) => [`ean.eq.${ean}`, `ean2.eq.${ean}`, `ean3.eq.${ean}`])
           .join(",")
       )
       .limit(50);
@@ -525,7 +601,7 @@ export async function lookupEanReferenceBatch(
     if (!error && Array.isArray(anvisaRows)) {
       matchedRows = anvisaRows;
     } else if (error) {
-      // Fallback para schema alternativo (`ean` ou `barcode`)
+      // Fallback caso ean2/ean3 ainda não existam na tabela
       const { data: altRows } = await supabaseAdmin
         .from("anvisa_medicamentos")
         .select("*")
@@ -536,10 +612,12 @@ export async function lookupEanReferenceBatch(
 
     for (const row of matchedRows) {
       const candidateEans = [
+        row.ean,
+        row.ean2,
+        row.ean3,
         row.ean_1,
         row.ean_2,
         row.ean_3,
-        row.ean,
         row.barcode,
       ]
         .map((v) => normalizeEanDigits(v))
@@ -552,19 +630,21 @@ export async function lookupEanReferenceBatch(
             found: true,
             activePrinciple: sanitizeTextHint(
               row.principio_ativo || row.substancia || row.active_principle || "",
-              160
+              200
             ),
-            presentation: sanitizeTextHint(row.apresentacao || row.presentation || "", 180),
+            presentation: sanitizeTextHint(row.apresentacao || row.presentation || "", 200),
             therapeuticClass: sanitizeTextHint(
               row.classe_terapeutica || row.therapeutic_class || "",
-              140
+              160
             ),
             manufacturer: sanitizeTextHint(
               row.laboratorio || row.detentor_registro || row.manufacturer || "",
-              120
+              140
             ),
-            drugType: sanitizeTextHint(row.tipo_produto || row.tarja || row.drug_type || "", 60),
-            productName: sanitizeTextHint(row.produto || row.nome_comercial || row.name || "", 180),
+            drugType: sanitizeTextHint(row.tipo_produto || row.drug_type || "", 80),
+            tarja: sanitizeTextHint(row.tarja || "", 80),
+            registroAnvisa: sanitizeTextHint(row.registro_anvisa || row.registro || "", 60),
+            productName: sanitizeTextHint(row.nome_comercial || row.produto || row.name || "", 200),
           };
         }
       }
@@ -662,14 +742,19 @@ export async function enrichProductWithAi(input: ProductAiEnrichInput): Promise<
     };
   }
 
-  const hints: string[] = [`Nome do Produto: "${cleanName}"`];
+  const hints: string[] = [`Nome do Produto na Loja: "${cleanName}"`];
   if (cleanBarcode) hints.push(`Código de Barras (EAN): "${cleanBarcode}"`);
   if (cleanManufacturer) hints.push(`Fabricante informado: "${cleanManufacturer}"`);
   if (cleanCategory) hints.push(`Categoria atual: "${cleanCategory}"`);
   if (cleanPresentation) hints.push(`Apresentação informada: "${cleanPresentation}"`);
   if (cleanActivePrinciple) hints.push(`Princípio ativo informado: "${cleanActivePrinciple}"`);
   if (eanRef?.anvisa?.found) {
-    hints.push(`DADOS OFICIAIS ANVISA (Prioridade Máxima): ${JSON.stringify(eanRef.anvisa)}`);
+    const lockedAnvisa = buildLockedAnvisaContext(eanRef.anvisa);
+    hints.push(
+      `DADOS OFICIAIS ANVISA/CMED TRAVADOS POR EAN (OBRIGATÓRIO SEGUIR SEM ALTERAR O FÁRMACO): ${JSON.stringify(
+        lockedAnvisa
+      )}`
+    );
   }
 
   const ai = getServerGeminiClient();
@@ -683,16 +768,19 @@ Analise o produto abaixo com rigor técnico máximo em PT-BR:
 ${hints.join("\n")}
 
 REGRAS CRÍTICAS ANTI-ERRO E QUALIDADE:
-1. PROIBIDO CHUTAR OU ADIVINHAR: Se o nome estiver excessivamente truncado ou ambíguo e não permitir identificar exatamente o produto, retorne confidence="low", explique em confidence_reason e deixe campos incertos vazios.
-2. confidence: Avalie honestamente como "high" (identificação exata e segura), "medium" (produto identificável nos textos descritivos, porém sem certeza absoluta do ativo) ou "low" (ambíguo/irreconhecível).
-3. Separação Medicamento vs Não-Medicamento:
-   - Se for Medicamento (Referência, Genérico, Similar, Fitoterápico): activePrinciple DEVE ser padronizado em DCB em português (ex: "Dipirona Monoidratada + Orfenadrina + Cafeína"), SEM dosagem e SEM marca comercial.
+1. PROIBIDO CHUTAR OU ADIVINHAR: Se o nome estiver excessivamente truncado ou ambíguo (e não houver DADOS OFICIAIS ANVISA/CMED), retorne confidence="low", explique em confidence_reason e deixe campos incertos vazios.
+2. REGRA DE OURO PARA DADOS OFICIAIS ANVISA/CMED:
+   - Quando DADOS OFICIAIS ANVISA/CMED estiverem presentes no contexto, o produto JÁ ESTÁ IDENTIFICADO oficialmente pelo EAN (use confidence="high").
+   - Mantenha EXATAMENTE o princípio ativo DCB oficial fornecido, sem inventar ou trocar o fármaco, e gere Descrição Comercial, Indicações e Modo de Uso 100% fiéis ao nome_comercial, apresentacao, laboratorio e classe_terapeutica oficiais.
+3. confidence: "high" (identificação exata e segura ou validada por ANVISA/CMED), "medium" (identificável nos textos descritivos, sem certeza absoluta do ativo) ou "low" (ambíguo/irreconhecível).
+4. Separação Medicamento vs Não-Medicamento:
+   - Se for Medicamento (Referência, Genérico, Similar, Fitoterápico, Biológico, Específico): activePrinciple DEVE ser padronizado em DCB em português (ex: "Dipirona Monoidratada + Cafeína"), SEM dosagem e SEM marca comercial.
    - Se NÃO for Medicamento (Cosmético, Higiene, Perfumaria, Correlato, Conveniência): retorne activePrinciple="" (vazio), a menos que um ativo cosmético esteja explícito no nome.
-4. Coerência numérica: presentation DEVE respeitar exatamente dosagens, volumes e quantidades presentes no nome (ex: "200MG", "14 CAP", "250ML").
-5. description: Escreva 2 a 4 frases claras, persuasivas e naturais para ajudar o cliente a comprar na loja online, sem promessas milagrosas proibidas pela ANVISA.
-6. indications e usage (Modo de Uso): Para medicamentos, seja fiel à bula geral (via de administração e orientação básica), incluindo sempre orientação para seguir prescrição médica/farmacêutica; nunca invente posologias específicas arriscadas.
-7. drugType: EXATAMENTE um de ['Referência', 'Genérico', 'Similar', 'Fitoterápico', 'Cosmético', 'Higiene', 'Suplemento', 'Correlato', 'Outros'].
-8. department e category: Enquadre em um dos 7 Departamentos Oficiais e sua Subcategoria Oficial correspondente:
+5. Coerência numérica: presentation DEVE respeitar exatamente dosagens, volumes e quantidades presentes no nome (ex: "200MG", "14 CAP", "250ML").
+6. description: Escreva 2 a 4 frases claras, persuasivas e naturais para ajudar o cliente a comprar na loja online, sem promessas milagrosas proibidas pela ANVISA.
+7. indications e usage (Modo de Uso): Para medicamentos, seja fiel à bula geral (via de administração e orientação básica), incluindo sempre orientação para seguir prescrição médica/farmacêutica; nunca invente posologias específicas arriscadas.
+8. drugType: EXATAMENTE um de ['Referência', 'Genérico', 'Similar', 'Fitoterápico', 'Biológico', 'Específico', 'Cosmético', 'Higiene', 'Suplemento', 'Correlato', 'Outros'].
+9. department e category: Enquadre em um dos 7 Departamentos Oficiais e sua Subcategoria Oficial correspondente:
    - Medicamentos: ['Dor e Febre', 'Gripe e Resfriado', 'Alergias', 'Saúde Digestiva', 'Saúde Respiratória', 'Diabetes', 'Pressão e Coração', 'Saúde da Mulher', 'Saúde do Homem', 'Outros Medicamentos']
    - Saúde e Bem-Estar: ['Vitaminas e Minerais', 'Suplementos', 'Imunidade', 'Saúde Digestiva', 'Energia e Disposição', 'Sono e Relaxamento', 'Controle de Peso', 'Esporte e Performance', 'Saúde da Mulher', 'Saúde do Homem']
    - Dermocosméticos e Beleza: ['Cuidados com o Rosto', 'Cuidados com o Corpo', 'Proteção Solar', 'Cabelos', 'Maquiagem', 'Perfumes', 'Cuidados com as Unhas', 'Beleza Masculina']
@@ -720,6 +808,8 @@ Retorne apenas JSON válido.`,
                   "Genérico",
                   "Similar",
                   "Fitoterápico",
+                  "Biológico",
+                  "Específico",
                   "Cosmético",
                   "Higiene",
                   "Suplemento",
@@ -772,11 +862,16 @@ Retorne apenas JSON válido.`,
       if (!parsed) throw parseError;
     }
 
-    const rawConfidence: AiConfidenceLevel =
+    let rawConfidence: AiConfidenceLevel =
       parsed.confidence === "low" || parsed.confidence === "medium" || parsed.confidence === "high"
         ? parsed.confidence
         : "medium";
-    const confidenceReason = String(parsed.confidence_reason || "").trim() || "Identificação validada pela IA.";
+    if (anvisaMatched && rawConfidence === "low") {
+      rawConfidence = "high";
+    }
+    const confidenceReason = anvisaMatched
+      ? `Validado oficialmente na Base ANVISA/CMED (${eanRef?.anvisa?.productName || cleanName}).`
+      : String(parsed.confidence_reason || "").trim() || "Identificação validada pela IA.";
 
     if (rawConfidence === "low") {
       throw createProductAiError(
@@ -785,48 +880,70 @@ Retorne apenas JSON válido.`,
       );
     }
 
+    const lockedAnvisaActive = anvisaMatched
+      ? formatAnvisaSubstanceToDcb(eanRef?.anvisa?.activePrinciple)
+      : "";
+    const lockedAnvisaDrugType = anvisaMatched
+      ? mapAnvisaTipoProdutoToDrugType(eanRef?.anvisa?.drugType)
+      : "";
+    const anvisaTarjaRx = anvisaMatched
+      ? doesAnvisaTarjaRequirePrescription(eanRef?.anvisa?.tarja)
+      : false;
+
+    const resolvedDrugType =
+      lockedAnvisaDrugType ||
+      (typeof parsed.drugType === "string" && parsed.drugType.trim() ? parsed.drugType.trim() : "Outros");
+
     const classified = classifyProductTaxonomy({
-      name: cleanName,
-      activePrinciple: parsed.activePrinciple || cleanActivePrinciple,
+      name: eanRef?.anvisa?.productName ? `${cleanName} ${eanRef.anvisa.productName}` : cleanName,
+      activePrinciple: lockedAnvisaActive || parsed.activePrinciple || cleanActivePrinciple,
       description: parsed.description,
       rawCategory: parsed.category || cleanCategory,
-      drugType: parsed.drugType,
+      drugType: resolvedDrugType,
       indications: parsed.indications,
-      manufacturer: parsed.manufacturer || cleanManufacturer,
+      manufacturer: eanRef?.anvisa?.manufacturer || parsed.manufacturer || cleanManufacturer,
     });
 
     const isMed =
+      anvisaMatched ||
       Boolean(parsed.is_medication) ||
       isMedicationProduct({
         name: cleanName,
         department: classified.department,
-        drugType: parsed.drugType,
-        requires_prescription: Boolean(input.requires_prescription || parsed.requiresPrescription),
+        drugType: resolvedDrugType,
+        requires_prescription: Boolean(
+          input.requires_prescription || anvisaTarjaRx || parsed.requiresPrescription
+        ),
       });
 
-    // Camada 4: Coerência de apresentação e princípio ativo
+    // Camada 4: Coerência de apresentação e princípio ativo travado quando ANVISA encontrou
     let validatedPresentation =
       typeof parsed.presentation === "string" && parsed.presentation.trim()
         ? parsed.presentation.trim()
-        : cleanPresentation;
+        : eanRef?.anvisa?.presentation || cleanPresentation;
     const presCheck = validatePresentationCoherence(cleanName, validatedPresentation);
     if (!presCheck.valid) {
-      validatedPresentation = cleanPresentation;
+      validatedPresentation = eanRef?.anvisa?.presentation || cleanPresentation;
     }
 
-    const rawActiveSource =
-      rawConfidence === "high"
-        ? parsed.activePrinciple || eanRef?.anvisa?.activePrinciple || cleanActivePrinciple
-        : eanRef?.anvisa?.activePrinciple || cleanActivePrinciple;
-    const standardizedActive = standardizeActivePrinciple(rawActiveSource, isMed, cleanName);
+    const standardizedActive = lockedAnvisaActive
+      ? lockedAnvisaActive
+      : standardizeActivePrinciple(
+          rawConfidence === "high"
+            ? parsed.activePrinciple || cleanActivePrinciple
+            : cleanActivePrinciple,
+          isMed,
+          cleanName
+        );
 
     const requiresPrescription =
       Boolean(input.requires_prescription) ||
+      anvisaTarjaRx ||
       (isMed &&
         rawConfidence === "high" &&
         (Boolean(parsed.requiresPrescription) ||
           detectControlledKeywords(
-            `${cleanName} ${eanRef?.anvisa?.drugType || ""} ${parsed.drugType || ""} ${parsed.contraindications || ""}`
+            `${cleanName} ${eanRef?.anvisa?.tarja || ""} ${eanRef?.anvisa?.drugType || ""} ${resolvedDrugType} ${parsed.contraindications || ""}`
           )));
 
     const safeUsage = ensureMedicationSafetyGuidance(
@@ -835,17 +952,20 @@ Retorne apenas JSON válido.`,
       requiresPrescription
     );
 
+    const resolvedManufacturer =
+      (anvisaMatched && eanRef?.anvisa?.manufacturer) ||
+      (typeof parsed.manufacturer === "string" && parsed.manufacturer.trim()
+        ? parsed.manufacturer.trim()
+        : cleanManufacturer);
+
     return {
       description: typeof parsed.description === "string" ? parsed.description.trim() : "",
       suggestedCode: typeof parsed.suggestedCode === "string" ? parsed.suggestedCode.trim() : "",
       activePrinciple: standardizedActive || cleanActivePrinciple,
-      drugType: typeof parsed.drugType === "string" && parsed.drugType.trim() ? parsed.drugType.trim() : "Outros",
+      drugType: resolvedDrugType,
       department: classified.department,
       category: classified.subcategory,
-      manufacturer:
-        typeof parsed.manufacturer === "string" && parsed.manufacturer.trim()
-          ? parsed.manufacturer.trim()
-          : cleanManufacturer,
+      manufacturer: resolvedManufacturer,
       presentation: validatedPresentation,
       indications: typeof parsed.indications === "string" ? parsed.indications.trim() : "",
       usage: safeUsage,
@@ -897,11 +1017,16 @@ function buildValidatedPatch(
   const allowActivePrinciple = confidence === "high" || anvisaMatched || Boolean(candidateFields.cacheReused);
   if (
     allowActivePrinciple &&
-    canFill(
+    (canFill(
       "activePrinciple",
       origProduct.active_principle ?? origProduct.activePrinciple,
       candidateFields.activePrinciple
-    )
+    ) ||
+      (anvisaMatched &&
+        targetFields.includes("activePrinciple") &&
+        Boolean(candidateFields.activePrinciple) &&
+        normalizeCompareText(origProduct.active_principle ?? origProduct.activePrinciple) !==
+          normalizeCompareText(candidateFields.activePrinciple)))
   ) {
     const v = String(candidateFields.activePrinciple).trim();
     patch.activePrinciple = v;
@@ -930,13 +1055,22 @@ function buildValidatedPatch(
     updatedFieldNames.push("usage");
   }
 
-  // Tipo legal (preenche se vazio ou se overwriteExisting=true e veio válido)
+  // Tipo legal (preenche se vazio, genérico, overwriteExisting=true ou travado por base ANVISA oficial)
   const origDrugType = String(origProduct.drug_type ?? origProduct.drugType ?? "").trim();
   const candDrugType = String(candidateFields.drugType || "").trim();
-  if (candDrugType && (overwriteExisting || !origDrugType || origDrugType.toLowerCase() === "outros")) {
-    patch.drugType = candDrugType;
-    dbUpdate.drug_type = candDrugType;
-    updatedFieldNames.push("drugType");
+  if (
+    candDrugType &&
+    (overwriteExisting ||
+      anvisaMatched ||
+      !origDrugType ||
+      origDrugType.toLowerCase() === "outros" ||
+      origDrugType.toLowerCase() === "livre")
+  ) {
+    if (origDrugType !== candDrugType) {
+      patch.drugType = candDrugType;
+      dbUpdate.drug_type = candDrugType;
+      updatedFieldNames.push("drugType");
+    }
   }
 
   // Categoria & Fabricante (apenas quando vazios ou genéricos, preservando dados manuais)
@@ -961,7 +1095,11 @@ function buildValidatedPatch(
 
   // requires_prescription: NUNCA sobrescreve `true` já definido manualmente para `false`
   const alreadyRequiresPrescription = Boolean(origProduct.requires_prescription);
-  if (!alreadyRequiresPrescription && candidateFields.requiresPrescription === true && confidence === "high") {
+  if (
+    !alreadyRequiresPrescription &&
+    candidateFields.requiresPrescription === true &&
+    (confidence === "high" || anvisaMatched)
+  ) {
     patch.requires_prescription = true;
     dbUpdate.requires_prescription = true;
     updatedFieldNames.push("requires_prescription");
@@ -1049,29 +1187,46 @@ async function processMiniBatchInternal(
     // Verifica Reuso 0 tokens por EAN já validado no banco
     if (eanInfo?.cachedPeer) {
       const peer = eanInfo.cachedPeer;
-      const isMed = isMedicationProduct({
-        name: inp.name,
-        department: inp.department,
-        category: authRow.category,
-        drugType: peer.drug_type || authRow.drug_type,
-        requires_prescription: Boolean(authRow.requires_prescription || peer.requires_prescription),
-      });
+      const lockedAnvisaActive = anvisaMatched
+        ? formatAnvisaSubstanceToDcb(eanInfo?.anvisa?.activePrinciple)
+        : "";
+      const lockedAnvisaDrugType = anvisaMatched
+        ? mapAnvisaTipoProdutoToDrugType(eanInfo?.anvisa?.drugType)
+        : "";
+      const anvisaTarjaRx = anvisaMatched
+        ? doesAnvisaTarjaRequirePrescription(eanInfo?.anvisa?.tarja)
+        : false;
+
+      const resolvedPeerDrugType = lockedAnvisaDrugType || String(peer.drug_type || "").trim();
+      const isMed =
+        anvisaMatched ||
+        isMedicationProduct({
+          name: inp.name,
+          department: inp.department,
+          category: authRow.category,
+          drugType: resolvedPeerDrugType || authRow.drug_type,
+          requires_prescription: Boolean(
+            authRow.requires_prescription || anvisaTarjaRx || peer.requires_prescription
+          ),
+        });
 
       const presCoherence = validatePresentationCoherence(inp.name, peer.presentation || "");
       const candidateFields = {
         description: String(peer.description || "").trim(),
-        activePrinciple: standardizeActivePrinciple(peer.active_principle, isMed, inp.name),
+        activePrinciple:
+          lockedAnvisaActive || standardizeActivePrinciple(peer.active_principle, isMed, inp.name),
         presentation: presCoherence.valid ? String(peer.presentation || "").trim() : "",
         indications: String(peer.indications || "").trim(),
         usage: ensureMedicationSafetyGuidance(
           String(peer.usage || "").trim(),
           isMed,
-          Boolean(authRow.requires_prescription || peer.requires_prescription)
+          Boolean(authRow.requires_prescription || anvisaTarjaRx || peer.requires_prescription)
         ),
-        drugType: String(peer.drug_type || "").trim(),
+        drugType: resolvedPeerDrugType,
         category: String(peer.category || "").trim(),
-        manufacturer: String(peer.manufacturer || "").trim(),
-        requiresPrescription: Boolean(peer.requires_prescription),
+        manufacturer:
+          (anvisaMatched && eanInfo?.anvisa?.manufacturer) || String(peer.manufacturer || "").trim(),
+        requiresPrescription: Boolean(anvisaTarjaRx || peer.requires_prescription),
         cacheReused: true,
       };
 
@@ -1182,7 +1337,9 @@ async function processMiniBatchInternal(
       drugType: input.drugType || authRow.drug_type || "",
       presentation: input.presentation || authRow.presentation || "",
       activePrinciple: input.activePrinciple || authRow.active_principle || "",
-      ...(eanInfo?.anvisa?.found ? { anvisa_official_data: eanInfo.anvisa } : {}),
+      ...(eanInfo?.anvisa?.found
+        ? { anvisa_official_data: buildLockedAnvisaContext(eanInfo.anvisa) }
+        : {}),
     }));
 
     const ai = getServerGeminiClient();
@@ -1199,11 +1356,12 @@ REGRAS OBRIGATÓRIAS DAS 5 CAMADAS DE SEGURANÇA:
    - Cada objeto retornado DEVE conter exatamente o campo "id" recebido e "matched_product_name" ecoando exatamente o campo "name" original correspondente. Nunca troque ou misture itens.
 2. REGRA "MELHOR VAZIO DO QUE ERRADO" (PROIBIDO CHUTAR):
    - Avalie a certeza da identificação como "high", "medium" ou "low" em "confidence" e justifique em "confidence_reason".
-   - Se o nome for genérico/truncado (ex: "ITEM DIVERSOS", código interno sem marca/ativo) ou houver ambiguidade real entre SKUs diferentes, retorne confidence="low" e deixe os campos descritivos vazios.
-3. USO DE FONTE ANVISA:
-   - Quando "anvisa_official_data" estiver presente, utilize-o como referência oficial obrigatória para princípio ativo, apresentação e tipo.
+   - Se o nome for genérico/truncado (ex: "ITEM DIVERSOS", código interno sem marca/ativo) e não houver "anvisa_official_data", retorne confidence="low" e deixe os campos descritivos vazios.
+3. FONTE OFICIAL ANVISA/CMED TRAVADA POR EAN:
+   - Quando "anvisa_official_data" estiver presente, a identificação oficial já está confirmada (use confidence="high").
+   - Utilize exatamente o "principio_ativo_dcb", "nome_comercial", "apresentacao", "laboratorio" e "classe_terapeutica" oficiais para gerar Descrição Comercial, Indicações e Modo de Uso 100% fiéis àquele medicamento, sem alterar ou inventar o fármaco.
 4. SEPARAÇÃO MEDICAMENTO vs NÃO-MEDICAMENTO:
-   - is_medication=true para medicamentos (Referência, Genérico, Similar, Fitoterápico): activePrinciple DEVE seguir DCB oficial em PT-BR sem marca e sem dosagem (ex: "Progesterona", "Dipirona Monoidratada + Orfenadrina + Cafeína").
+   - is_medication=true para medicamentos (Referência, Genérico, Similar, Fitoterápico, Biológico, Específico): activePrinciple DEVE seguir DCB oficial em PT-BR sem marca e sem dosagem (ex: "Progesterona", "Dipirona Monoidratada + Cafeína").
    - is_medication=false para Cosméticos, Higiene, Perfumaria, Mamãe e Bebê, Correlatos e Conveniência: retorne activePrinciple="" (vazio) se não houver ativo cosmético explícito no nome, focando em apresentação, descrição comercial vendedora, indicações e modo de uso.
 5. COERÊNCIA DE DOSAGEM/VOLUME NA APRESENTAÇÃO:
    - Se o nome traz dosagem, peso, volume ou quantidade (ex: "200MG", "14 CAP", "250 ML"), "presentation" NÃO pode contradizer esses valores.
@@ -1213,7 +1371,7 @@ REGRAS OBRIGATÓRIAS DAS 5 CAMADAS DE SEGURANÇA:
    - usage: Modo de Uso claro e responsável. Em medicamentos, mantenha orientação geral fiel à bula e inclua sempre recomendação de seguir prescrição médica ou orientação do farmacêutico (nunca invente posologias arriscadas).
    - requiresPrescription: true apenas para tarjados/controlados/antimicrobianos sob receita.
 7. TAXONOMIA OFICIAL:
-   - drugType: EXATAMENTE um de ['Referência', 'Genérico', 'Similar', 'Fitoterápico', 'Cosmético', 'Higiene', 'Suplemento', 'Correlato', 'Outros'].
+   - drugType: EXATAMENTE um de ['Referência', 'Genérico', 'Similar', 'Fitoterápico', 'Biológico', 'Específico', 'Cosmético', 'Higiene', 'Suplemento', 'Correlato', 'Outros'].
    - department e category: use EXCLUSIVAMENTE os 7 Departamentos Oficiais e suas Subcategorias Oficiais:
      * Medicamentos: ['Dor e Febre', 'Gripe e Resfriado', 'Alergias', 'Saúde Digestiva', 'Saúde Respiratória', 'Diabetes', 'Pressão e Coração', 'Saúde da Mulher', 'Saúde do Homem', 'Outros Medicamentos']
      * Saúde e Bem-Estar: ['Vitaminas e Minerais', 'Suplementos', 'Imunidade', 'Saúde Digestiva', 'Energia e Disposição', 'Sono e Relaxamento', 'Controle de Peso', 'Esporte e Performance', 'Saúde da Mulher', 'Saúde do Homem']
@@ -1244,6 +1402,8 @@ REGRAS OBRIGATÓRIAS DAS 5 CAMADAS DE SEGURANÇA:
                     "Genérico",
                     "Similar",
                     "Fitoterápico",
+                    "Biológico",
+                    "Específico",
                     "Cosmético",
                     "Higiene",
                     "Suplemento",
@@ -1332,7 +1492,13 @@ REGRAS OBRIGATÓRIAS DAS 5 CAMADAS DE SEGURANÇA:
         continue;
       }
 
-      if (!isMatchedProductNameValid(input.name, aiItem.matched_product_name)) {
+      const nameMatchesOriginal =
+        isMatchedProductNameValid(input.name, aiItem.matched_product_name) ||
+        (anvisaMatched &&
+          Boolean(eanInfo?.anvisa?.productName) &&
+          isMatchedProductNameValid(eanInfo!.anvisa!.productName!, aiItem.matched_product_name));
+
+      if (!nameMatchesOriginal) {
         outcomeById.set(input.id, {
           id: input.id,
           name: input.name,
@@ -1352,8 +1518,12 @@ REGRAS OBRIGATÓRIAS DAS 5 CAMADAS DE SEGURANÇA:
         aiItem.confidence === "high" || aiItem.confidence === "medium" || aiItem.confidence === "low"
           ? aiItem.confidence
           : "low";
-      let confidenceReason =
-        String(aiItem.confidence_reason || "").trim() || "Avaliação de confiança não informada.";
+      if (anvisaMatched && confidence === "low") {
+        confidence = "high";
+      }
+      let confidenceReason = anvisaMatched
+        ? `Validado oficialmente na Base ANVISA/CMED (${eanInfo?.anvisa?.productName || input.name}).`
+        : String(aiItem.confidence_reason || "").trim() || "Avaliação de confiança não informada.";
 
       // Camada 3: Itens "low" são estritamente bloqueados de gravação
       if (confidence === "low") {
@@ -1372,47 +1542,73 @@ REGRAS OBRIGATÓRIAS DAS 5 CAMADAS DE SEGURANÇA:
         continue;
       }
 
+      const lockedAnvisaActive = anvisaMatched
+        ? formatAnvisaSubstanceToDcb(eanInfo?.anvisa?.activePrinciple)
+        : "";
+      const lockedAnvisaDrugType = anvisaMatched
+        ? mapAnvisaTipoProdutoToDrugType(eanInfo?.anvisa?.drugType)
+        : "";
+      const anvisaTarjaRx = anvisaMatched
+        ? doesAnvisaTarjaRequirePrescription(eanInfo?.anvisa?.tarja)
+        : false;
+
+      const resolvedDrugType =
+        lockedAnvisaDrugType || String(aiItem.drugType || "").trim();
+
       const classified = classifyProductTaxonomy({
-        name: input.name || "",
-        activePrinciple: aiItem.activePrinciple || eanInfo?.anvisa?.activePrinciple,
+        name: eanInfo?.anvisa?.productName
+          ? `${input.name || ""} ${eanInfo.anvisa.productName}`
+          : input.name || "",
+        activePrinciple: lockedAnvisaActive || aiItem.activePrinciple,
         description: aiItem.description,
         rawCategory: aiItem.category || authRow.category,
-        drugType: aiItem.drugType,
+        drugType: resolvedDrugType,
         indications: aiItem.indications,
-        manufacturer: aiItem.manufacturer || authRow.manufacturer,
+        manufacturer: eanInfo?.anvisa?.manufacturer || aiItem.manufacturer || authRow.manufacturer,
       });
 
       const isMed =
+        anvisaMatched ||
         Boolean(aiItem.is_medication) ||
         isMedicationProduct({
           name: input.name,
           department: classified.department,
-          drugType: aiItem.drugType,
-          requires_prescription: Boolean(authRow.requires_prescription || aiItem.requiresPrescription),
+          drugType: resolvedDrugType,
+          requires_prescription: Boolean(
+            authRow.requires_prescription || anvisaTarjaRx || aiItem.requiresPrescription
+          ),
         });
 
       // Camada 4a: Coerência numérica da apresentação
-      let validatedPresentation = String(aiItem.presentation || "").trim();
+      let validatedPresentation =
+        String(aiItem.presentation || "").trim() || String(eanInfo?.anvisa?.presentation || "").trim();
       const presCheck = validatePresentationCoherence(input.name, validatedPresentation);
       if (!presCheck.valid) {
-        // Contradição numérica grave (ex: 200MG -> 100mg): limpa apresentação e marca aviso
-        validatedPresentation = "";
+        validatedPresentation = String(eanInfo?.anvisa?.presentation || "").trim();
+        if (validatedPresentation && !validatePresentationCoherence(input.name, validatedPresentation).valid) {
+          validatedPresentation = "";
+        }
         confidenceReason = `${confidenceReason} | ${presCheck.reason}`;
       }
 
-      // Camada 4b: Princípio Ativo padronizado apenas em high / ANVISA, e nunca inventado para cosméticos
-      const rawActiveSource =
-        confidence === "high"
-          ? aiItem.activePrinciple || eanInfo?.anvisa?.activePrinciple
-          : eanInfo?.anvisa?.activePrinciple || "";
-      const standardizedActive = standardizeActivePrinciple(rawActiveSource, isMed, input.name);
+      // Camada 4b: Princípio Ativo travado pela ANVISA quando encontrado; caso contrário padronizado em high
+      const standardizedActive = lockedAnvisaActive
+        ? lockedAnvisaActive
+        : standardizeActivePrinciple(
+            confidence === "high" ? aiItem.activePrinciple : "",
+            isMed,
+            input.name
+          );
 
       const requiresPrescription =
         Boolean(authRow.requires_prescription) ||
+        anvisaTarjaRx ||
         (isMed &&
           confidence === "high" &&
           (Boolean(aiItem.requiresPrescription) ||
-            detectControlledKeywords(`${input.name} ${eanInfo?.anvisa?.drugType || ""} ${aiItem.drugType || ""}`)));
+            detectControlledKeywords(
+              `${input.name} ${eanInfo?.anvisa?.tarja || ""} ${eanInfo?.anvisa?.drugType || ""} ${resolvedDrugType}`
+            )));
 
       const safeUsage = ensureMedicationSafetyGuidance(
         String(aiItem.usage || "").trim(),
@@ -1426,9 +1622,9 @@ REGRAS OBRIGATÓRIAS DAS 5 CAMADAS DE SEGURANÇA:
         presentation: validatedPresentation,
         indications: String(aiItem.indications || "").trim(),
         usage: safeUsage,
-        drugType: String(aiItem.drugType || "").trim(),
+        drugType: resolvedDrugType,
         category: classified.subcategory,
-        manufacturer: String(aiItem.manufacturer || eanInfo?.anvisa?.manufacturer || "").trim(),
+        manufacturer: String(eanInfo?.anvisa?.manufacturer || aiItem.manufacturer || "").trim(),
         requiresPrescription,
         cacheReused: false,
       };

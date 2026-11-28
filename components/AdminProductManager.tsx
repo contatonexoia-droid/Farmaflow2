@@ -994,7 +994,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
   const labLogoFileRef = useRef<HTMLInputElement>(null);
 
   const defaultCategories = ['Geral', 'Medicamento', 'Antibiótico', 'Anti-inflamotório', 'Analgésico', 'Antigripal', 'Vitamina', 'Higiene', 'Infantil', 'Dermocosmético', 'Perfumaria', 'Suplemento', 'Ortopedia', 'Curativos', 'Diabetes', 'Hipertensão', 'Saúde Sexual', 'Maquiagem', 'Cabelos', 'Unhas', 'Conveniência'];
-  const defaultDrugTypes = ['Livre', 'Outros', 'Referência', 'Genérico', 'Similar', 'Fitoterápico', 'Cosmético', 'Higiene', 'Suplemento', 'Correlato', 'Homeopático', 'Biológico', 'Manipulado', 'Alimento'];
+  const defaultDrugTypes = ['Livre', 'Outros', 'Referência', 'Genérico', 'Similar', 'Fitoterápico', 'Cosmético', 'Higiene', 'Suplemento', 'Correlato', 'Homeopático', 'Biológico', 'Específico', 'Manipulado', 'Alimento'];
 
   const categoryOptions = useMemo(() => {
       const allOfficialSubcats = Object.values(OFFICIAL_TAXONOMY).flat();

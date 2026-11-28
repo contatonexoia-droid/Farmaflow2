@@ -20253,6 +20253,285 @@ app.post(["/api/ai/generate-product-image", "/api/v1/ai/generate-product-image"]
   }
 });
 
+// Middleware de autenticação estrita para rotas exclusivas do Portal Super Admin
+const requireSuperAdminAuth = async (req: any, res: any, next: any) => {
+  try {
+    const authHeader = req.headers.authorization as string | undefined;
+    const token = authHeader && authHeader.startsWith("Bearer ")
+      ? authHeader.slice(7).trim()
+      : "";
+
+    if (!token || token === "undefined" || token === "null") {
+      return res.status(401).json({
+        error: "Sessão Super Admin ausente ou expirada. Faça login novamente.",
+      });
+    }
+
+    const { data: { user }, error } = await supabaseAdmin.auth.getUser(token);
+    if (error || !user) {
+      return res.status(401).json({
+        error: "Token Super Admin inválido ou expirado. Faça login novamente.",
+      });
+    }
+
+    const superAdmins = ["contato.nexoia@gmail.com", "admin@drogaria.com"];
+    const userEmail = String(user.email || "").toLowerCase().trim();
+    const userRole = String(user.user_metadata?.role || "").toLowerCase().trim();
+
+    if (!superAdmins.includes(userEmail) && userRole !== "super_admin") {
+      return res.status(403).json({
+        error: "Acesso restrito ao Portal Super Admin.",
+      });
+    }
+
+    req.user = user;
+    return next();
+  } catch (err: any) {
+    console.warn("[requireSuperAdminAuth] Erro de validação:", err?.message || err);
+    return res.status(401).json({
+      error: "Não foi possível validar a sessão de Super Admin.",
+    });
+  }
+};
+
+function cleanAnvisaCmedEan(raw: unknown): string | null {
+  if (raw === null || raw === undefined) return null;
+  let str = String(raw).trim();
+  if (!str || str === "-" || str === "--" || str.toLowerCase() === "null") return null;
+
+  if (/^\d+(?:[.,]\d+)?e\+?\d+$/i.test(str)) {
+    const num = Number(str.replace(",", "."));
+    if (Number.isFinite(num) && num > 0) {
+      str = num.toFixed(0);
+    }
+  }
+
+  const digits = str.replace(/\D/g, "");
+  if (digits.length < 8 || digits.length > 14 || /^0+$/.test(digits)) {
+    return null;
+  }
+  return digits;
+}
+
+function cleanCmedText(raw: unknown, maxLen = 250): string | null {
+  if (raw === null || raw === undefined) return null;
+  const str = String(raw).replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!str || str === "-") return null;
+  return str.slice(0, maxLen);
+}
+
+// Estatísticas da Base Oficial ANVISA / CMED (`anvisa_medicamentos`)
+app.get("/api/super-admin/anvisa-cmed/stats", requireSuperAdminAuth, async (_req, res) => {
+  try {
+    const { count, error: countErr } = await supabaseAdmin
+      .from("anvisa_medicamentos")
+      .select("id", { count: "exact", head: true });
+
+    if (countErr) {
+      return res.json({
+        success: true,
+        totalCount: 0,
+        lastUpdatedAt: null,
+        schemaReady: false,
+        schemaMessage: countErr.message,
+      });
+    }
+
+    const { data: latestRow, error: colErr } = await supabaseAdmin
+      .from("anvisa_medicamentos")
+      .select("ean, ean2, ean3, laboratorio, classe_terapeutica, tipo_produto, tarja, updated_at")
+      .order("updated_at", { ascending: false, nullsFirst: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (colErr) {
+      return res.json({
+        success: true,
+        totalCount: Number(count) || 0,
+        lastUpdatedAt: null,
+        schemaReady: false,
+        schemaMessage:
+          "Execute o script SQL de atualização da tabela anvisa_medicamentos (colunas ean, ean2, ean3, laboratorio, classe_terapeutica, tipo_produto, tarja, updated_at).",
+      });
+    }
+
+    return res.json({
+      success: true,
+      totalCount: Number(count) || 0,
+      lastUpdatedAt: latestRow?.updated_at || null,
+      schemaReady: true,
+    });
+  } catch (err: any) {
+    console.error("[API /api/super-admin/anvisa-cmed/stats Error]:", err?.message || err);
+    return res.status(500).json({
+      error: err?.message || "Erro ao consultar estatísticas da base ANVISA/CMED.",
+    });
+  }
+});
+
+// Importação em lote da Planilha Oficial CMED (ANVISA) para `anvisa_medicamentos`
+app.post("/api/super-admin/anvisa-cmed/import", requireSuperAdminAuth, async (req, res) => {
+  try {
+    const rawRows = req.body?.rows;
+    if (!Array.isArray(rawRows) || rawRows.length === 0) {
+      return res.status(400).json({ error: "Envie um lote válido em 'rows'." });
+    }
+    if (rawRows.length > 1000) {
+      return res.status(400).json({ error: "Tamanho máximo por lote excedido (máx. 1000 registros)." });
+    }
+
+    const nowIso = new Date().toISOString();
+    let ignoredNoEan = 0;
+    let duplicatesInBatch = 0;
+    const dedupMap = new Map<string, Record<string, any>>();
+
+    for (const r of rawRows) {
+      if (!r || typeof r !== "object") {
+        ignoredNoEan++;
+        continue;
+      }
+
+      let ean = cleanAnvisaCmedEan(r.ean);
+      let ean2 = cleanAnvisaCmedEan(r.ean2);
+      let ean3 = cleanAnvisaCmedEan(r.ean3);
+
+      // Se EAN 1 não existe mas EAN 2/3 existe, promove para garantir chave válida
+      if (!ean && ean2) {
+        ean = ean2;
+        ean2 = null;
+      } else if (!ean && ean3) {
+        ean = ean3;
+        ean3 = null;
+      }
+
+      if (!ean) {
+        ignoredNoEan++;
+        continue;
+      }
+
+      if (ean2 === ean) ean2 = null;
+      if (ean3 === ean || ean3 === ean2) ean3 = null;
+
+      const normalizedRow = {
+        ean,
+        ean2,
+        ean3,
+        principio_ativo: cleanCmedText(r.principio_ativo, 320),
+        laboratorio: cleanCmedText(r.laboratorio, 200),
+        registro_anvisa: cleanCmedText(r.registro_anvisa, 80),
+        nome_comercial: cleanCmedText(r.nome_comercial, 240),
+        apresentacao: cleanCmedText(r.apresentacao, 260),
+        classe_terapeutica: cleanCmedText(r.classe_terapeutica, 220),
+        tipo_produto: cleanCmedText(r.tipo_produto, 120),
+        tarja: cleanCmedText(r.tarja, 120),
+        updated_at: nowIso,
+      };
+
+      const existing = dedupMap.get(ean);
+      if (existing) {
+        duplicatesInBatch++;
+        dedupMap.set(ean, {
+          ...existing,
+          ...Object.fromEntries(
+            Object.entries(normalizedRow).filter(([, v]) => v !== null && v !== "")
+          ),
+        });
+      } else {
+        dedupMap.set(ean, normalizedRow);
+      }
+    }
+
+    const dedupedRows = Array.from(dedupMap.values());
+    if (dedupedRows.length === 0) {
+      return res.json({
+        success: true,
+        savedCount: 0,
+        duplicatesInBatch,
+        ignoredNoEan,
+      });
+    }
+
+    const { error: upsertErr } = await supabaseAdmin
+      .from("anvisa_medicamentos")
+      .upsert(dedupedRows, { onConflict: "ean" });
+
+    if (upsertErr) {
+      const errCode = String((upsertErr as any)?.code || "");
+      const errMsg = String(upsertErr.message || "");
+
+      if (errCode === "42703" || errCode === "PGRST204" || errMsg.includes("column")) {
+        return res.status(400).json({
+          error:
+            "A tabela anvisa_medicamentos ainda não possui todas as colunas da CMED. Execute o script SQL de alteração antes de importar.",
+          details: errMsg,
+        });
+      }
+
+      // Fallback caso o índice único uq_anvisa_medicamentos_ean ainda não tenha sido criado
+      if (errCode === "42P10" || errMsg.toLowerCase().includes("no unique or exclusion constraint")) {
+        const batchEans = dedupedRows.map((d) => d.ean);
+        const { data: existingRows, error: fetchErr } = await supabaseAdmin
+          .from("anvisa_medicamentos")
+          .select("id, ean")
+          .in("ean", batchEans);
+
+        if (fetchErr) throw fetchErr;
+
+        const existingIdByEan = new Map<string, any>();
+        (existingRows || []).forEach((er: any) => {
+          if (er.ean) existingIdByEan.set(String(er.ean), er.id);
+        });
+
+        const toInsert: any[] = [];
+        const toUpdate: Array<{ id: any; row: any }> = [];
+        for (const row of dedupedRows) {
+          const foundId = existingIdByEan.get(row.ean);
+          if (foundId !== undefined && foundId !== null) {
+            toUpdate.push({ id: foundId, row });
+          } else {
+            toInsert.push(row);
+          }
+        }
+
+        if (toInsert.length > 0) {
+          const { error: insErr } = await supabaseAdmin
+            .from("anvisa_medicamentos")
+            .insert(toInsert);
+          if (insErr) throw insErr;
+        }
+
+        const UPDATE_CHUNK = 25;
+        for (let i = 0; i < toUpdate.length; i += UPDATE_CHUNK) {
+          const chunk = toUpdate.slice(i, i + UPDATE_CHUNK);
+          await Promise.all(
+            chunk.map(async ({ id, row }) => {
+              const { error: upErr } = await supabaseAdmin
+                .from("anvisa_medicamentos")
+                .update(row)
+                .eq("id", id);
+              if (upErr) throw upErr;
+            })
+          );
+        }
+      } else {
+        throw upsertErr;
+      }
+    }
+
+    return res.json({
+      success: true,
+      savedCount: dedupedRows.length,
+      duplicatesInBatch,
+      ignoredNoEan,
+    });
+  } catch (err: any) {
+    console.error("[API /api/super-admin/anvisa-cmed/import Error]:", err?.message || err);
+    return res.status(500).json({
+      error: err?.message || "Erro ao salvar lote da tabela CMED no banco de dados.",
+    });
+  }
+});
+
 // Endpoint para alternar estado do Bot de IA em uma conversa (Silenciar / Reativar)
 app.post("/api/v1/chat/conversations/:id/toggle-bot", async (req, res) => {
   try {
