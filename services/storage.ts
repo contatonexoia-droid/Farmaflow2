@@ -1421,6 +1421,33 @@ export const clearProductsCache = async (tenantId: string) => {
   }
 };
 
+export const patchCachedProductsForTenant = async (
+  tenantId: string,
+  updatedProducts: Product[],
+) => {
+  if (!tenantId || !Array.isArray(updatedProducts) || updatedProducts.length === 0) return;
+  const byId = new Map<string, Product>();
+  updatedProducts.forEach((p) => {
+    if (p && p.id) byId.set(p.id, p);
+  });
+
+  const cacheKeys = [`products_${tenantId}`, `products_${tenantId}_admin`];
+  for (const cacheKey of cacheKeys) {
+    try {
+      const cached = await localforage.getItem<Product[]>(cacheKey);
+      if (cached && Array.isArray(cached)) {
+        const nextList = cached.map((item) => {
+          const updated = byId.get(item.id);
+          return updated ? { ...item, ...updated } : item;
+        });
+        await localforage.setItem(cacheKey, nextList);
+      }
+    } catch (err) {
+      console.warn("Aviso ao sincronizar cache local de produtos:", err);
+    }
+  }
+};
+
 export const updateProductAiFields = async (products: Product[]) => {
   if (!isSupabaseConfigured()) return;
   try {
@@ -1430,22 +1457,58 @@ export const updateProductAiFields = async (products: Product[]) => {
       await Promise.all(
         batch.map((p) =>
           retryRequest(async () => {
-            const { error } = await supabase
-              .from("products")
-              .update({
-                active_principle: p.activePrinciple,
-                drug_type: p.drugType,
-                presentation: p.presentation,
-                description: p.description,
-                indications: p.indications,
-                category: p.category,
-                manufacturer: p.manufacturer,
-              })
-              .eq("id", p.id);
+            const payload: Record<string, any> = {
+              is_ai_enriched: true,
+            };
+            if (typeof p.activePrinciple === "string" && p.activePrinciple.trim()) {
+              payload.active_principle = p.activePrinciple.trim();
+            }
+            if (typeof p.drugType === "string" && p.drugType.trim()) {
+              payload.drug_type = p.drugType.trim();
+            }
+            if (typeof p.presentation === "string" && p.presentation.trim()) {
+              payload.presentation = p.presentation.trim();
+            }
+            if (typeof p.description === "string" && p.description.trim()) {
+              payload.description = p.description.trim();
+            }
+            if (typeof p.indications === "string" && p.indications.trim()) {
+              payload.indications = p.indications.trim();
+            }
+            if (typeof p.usage === "string" && p.usage.trim()) {
+              payload.usage = p.usage.trim();
+            }
+            if (typeof p.category === "string" && p.category.trim()) {
+              payload.category = p.category.trim();
+            }
+            if (typeof p.manufacturer === "string" && p.manufacturer.trim()) {
+              payload.manufacturer = p.manufacturer.trim();
+            }
+            if (p.requires_prescription === true) {
+              payload.requires_prescription = true;
+            }
+
+            let query = supabase.from("products").update(payload).eq("id", p.id);
+            if (p.tenantId) {
+              query = query.eq("tenant_id", p.tenantId);
+            }
+            const { error } = await query;
             if (error) throw error;
           }),
         ),
       );
+    }
+
+    const byTenant = new Map<string, Product[]>();
+    products.forEach((p) => {
+      if (p.tenantId) {
+        const list = byTenant.get(p.tenantId) || [];
+        list.push(p);
+        byTenant.set(p.tenantId, list);
+      }
+    });
+    for (const [tid, list] of byTenant.entries()) {
+      await patchCachedProductsForTenant(tid, list);
     }
   } catch (error) {
     console.error("Erro ao atualizar campos de IA:", error);

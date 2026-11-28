@@ -22,8 +22,10 @@ import { getStoreUrl } from '../lib/store';
 import { AdminDepartmentManager } from './AdminDepartmentManager';
 import { DynamicFlyerGenerator, resolveFlyerProductPricing } from './DynamicFlyerGenerator';
 import { PushNotificationModal } from './PushNotificationModal';
+import { CatalogAiEnrichmentModal } from './CatalogAiEnrichmentModal';
 import { getTenants, getProductsByTenant, saveProductsByTenant } from '../services/storage';
 import { supabase } from '../services/supabase';
+import { isProductIncomplete } from '../utils/productCompleteness';
 
 const GENERIC_PLACEHOLDER = 'https://i.imgur.com/fLz8F3X.png';
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -743,7 +745,9 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
   const [filterZeroStock, setFilterZeroStock] = useState(false);
   const [filterFeatured, setFilterFeatured] = useState(false);
   const [filterNoImage, setFilterNoImage] = useState(false);
+  const [filterIncomplete, setFilterIncomplete] = useState(false);
   const [filterPrescription, setFilterPrescription] = useState('Todos');
+  const [isCatalogAiModalOpen, setIsCatalogAiModalOpen] = useState(false);
   
   const [editingProduct, setEditingProduct] = useState<Partial<Product> | null>(null);
   const [isSavingProduct, setIsSavingProduct] = useState(false);
@@ -990,7 +994,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
   const labLogoFileRef = useRef<HTMLInputElement>(null);
 
   const defaultCategories = ['Geral', 'Medicamento', 'Antibiótico', 'Anti-inflamotório', 'Analgésico', 'Antigripal', 'Vitamina', 'Higiene', 'Infantil', 'Dermocosmético', 'Perfumaria', 'Suplemento', 'Ortopedia', 'Curativos', 'Diabetes', 'Hipertensão', 'Saúde Sexual', 'Maquiagem', 'Cabelos', 'Unhas', 'Conveniência'];
-  const defaultDrugTypes = ['Livre', 'Outros', 'Referência', 'Genérico', 'Similar', 'Fitoterápico', 'Cosmético', 'Suplemento', 'Homeopático', 'Biológico', 'Manipulado', 'Alimento'];
+  const defaultDrugTypes = ['Livre', 'Outros', 'Referência', 'Genérico', 'Similar', 'Fitoterápico', 'Cosmético', 'Higiene', 'Suplemento', 'Correlato', 'Homeopático', 'Biológico', 'Manipulado', 'Alimento'];
 
   const categoryOptions = useMemo(() => {
       const allOfficialSubcats = Object.values(OFFICIAL_TAXONOMY).flat();
@@ -1167,8 +1171,9 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
       const matchesZeroStock = filterZeroStock ? p.stock <= 0 : true;
       const matchesFeatured = filterFeatured ? !!p.isFeatured : true;
       const matchesNoImage = filterNoImage ? !p.image : true;
+      const matchesIncomplete = filterIncomplete ? isProductIncomplete(p) : true;
       
-      return matchesDepartment && matchesCategory && matchesManufacturer && matchesPromotion && matchesZeroStock && matchesFeatured && matchesNoImage && matchesPrescription;
+      return matchesDepartment && matchesCategory && matchesManufacturer && matchesPromotion && matchesZeroStock && matchesFeatured && matchesNoImage && matchesIncomplete && matchesPrescription;
     });
 
     const sorted = filtered.sort((a, b) => {
@@ -1188,7 +1193,12 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
       }
     }
     return Array.from(uniqueMap.values());
-  }, [products, debouncedSearchTerm, filterDepartment, filterCategory, filterManufacturer, filterPromotion, filterPrescription, filterZeroStock, filterFeatured, filterNoImage, fuse, tenant.departments]);
+  }, [products, debouncedSearchTerm, filterDepartment, filterCategory, filterManufacturer, filterPromotion, filterPrescription, filterZeroStock, filterFeatured, filterNoImage, filterIncomplete, fuse, tenant.departments]);
+
+  const incompleteProductsCount = useMemo(
+    () => products.filter((p) => isProductIncomplete(p)).length,
+    [products]
+  );
 
   // Reset category filter when department changes
   useEffect(() => {
@@ -1206,7 +1216,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
   // Reset to page 1 when filters change
   useEffect(() => {
     setCurrentPage(1);
-  }, [debouncedSearchTerm, filterDepartment, filterCategory, filterManufacturer, filterPromotion, filterPrescription, filterZeroStock, filterFeatured, filterNoImage, itemsPerPage]);
+  }, [debouncedSearchTerm, filterDepartment, filterCategory, filterManufacturer, filterPromotion, filterPrescription, filterZeroStock, filterFeatured, filterNoImage, filterIncomplete, itemsPerPage]);
 
   const physicalSaleResults = useMemo(() => {
     if (!physicalSaleSearch) return [];
@@ -1494,12 +1504,16 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
     setAiFeedback({ type: 'info', message: 'Consultando IA para gerar descrição, categoria e dados técnicos...' });
     try {
         const details = await fetchProductDetails({
+          id: editingProduct.id,
           name: editingProduct.name,
           barcode: editingProduct.barcode,
           manufacturer: editingProduct.manufacturer,
           category: editingProduct.category,
+          department: selectedDeptForEdit,
           presentation: editingProduct.presentation,
           activePrinciple: editingProduct.activePrinciple,
+          drugType: editingProduct.drugType,
+          requires_prescription: editingProduct.requires_prescription,
           tenantId: tenant.id,
         });
         if (details.department) {
@@ -1509,7 +1523,8 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
           if (!prev) return prev;
           return {
             ...prev,
-            ...details,
+            drugType: details.drugType || prev.drugType,
+            category: details.category || prev.category,
             manufacturer: details.manufacturer || prev.manufacturer,
             presentation: details.presentation || prev.presentation,
             activePrinciple: details.activePrinciple || prev.activePrinciple,
@@ -1518,10 +1533,16 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
             usage: details.usage || prev.usage,
             sideEffects: details.sideEffects || prev.sideEffects,
             contraindications: details.contraindications || prev.contraindications,
+            requires_prescription: Boolean(prev.requires_prescription || details.requiresPrescription),
             isAiEnriched: true,
           };
         });
-        setAiFeedback({ type: 'success', message: 'Dados e descrição comercial gerados com sucesso pela IA!' });
+        setAiFeedback({
+          type: 'success',
+          message: details.confidence === 'medium'
+            ? 'Descrição e dados gerados pela IA (confiança moderada — revise o Princípio Ativo antes de salvar).'
+            : 'Dados e descrição comercial gerados com sucesso pela IA!',
+        });
     } catch (e: any) {
         setAiFeedback({ type: 'error', message: e?.message || 'Não foi possível gerar os dados com IA no momento.' });
     } finally {
@@ -3876,16 +3897,14 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
         // Start background AI enrichment queue if selected
         if (importType === 'ai') {
             const productsToEnrich = finalProducts.filter(p => {
-                const isComplete = p.description && p.description.length > 10 && 
-                                   p.activePrinciple && p.activePrinciple.length > 3 && 
-                                   p.category && p.category !== 'Geral';
+                const isComplete = !isProductIncomplete(p);
                 
                 if (!overwriteExistingData && isComplete) {
                     ignoredItems++;
                     return false;
                 }
                 
-                if (!p.isAiEnriched || overwriteExistingData) {
+                if (overwriteExistingData || !isComplete) {
                     enrichedItems++;
                     return true;
                 }
@@ -3904,16 +3923,17 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                         const mergedBatch = updatedProductsBatch.map(updated => {
                             const latest = latestProducts.find(p => p.id === updated.id);
                             if (!latest) return updated;
-                            // Only merge the fields that AI enrichment actually updates
                             return {
                                 ...latest,
-                                activePrinciple: updated.activePrinciple,
-                                drugType: updated.drugType,
-                                presentation: updated.presentation,
-                                description: updated.description,
-                                indications: updated.indications,
-                                category: updated.category,
-                                manufacturer: updated.manufacturer,
+                                activePrinciple: updated.activePrinciple || latest.activePrinciple,
+                                drugType: updated.drugType || latest.drugType,
+                                presentation: updated.presentation || latest.presentation,
+                                description: updated.description || latest.description,
+                                indications: updated.indications || latest.indications,
+                                usage: updated.usage || latest.usage,
+                                category: updated.category || latest.category,
+                                manufacturer: updated.manufacturer || latest.manufacturer,
+                                requires_prescription: Boolean(latest.requires_prescription || updated.requires_prescription),
                                 isAiEnriched: updated.isAiEnriched
                             };
                         });
@@ -4035,7 +4055,15 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                             <ImageOff size={16} className={filterNoImage ? 'text-purple-500' : ''} />
                             Sem Foto
                         </button>
-                        {(filterZeroStock || filterFeatured || filterNoImage) && (
+                        <button 
+                            onClick={() => setFilterIncomplete(!filterIncomplete)}
+                            title="Produtos sem descrição comercial, apresentação, indicações, modo de uso ou princípio ativo (em medicamentos)"
+                            className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-black text-xs uppercase tracking-wide transition-all border-2 ${filterIncomplete ? 'bg-amber-50 text-amber-700 border-amber-300 shadow-sm' : 'bg-white text-gray-500 border-gray-200 hover:border-amber-200 hover:text-amber-600'}`}
+                        >
+                            <Sparkles size={16} className={filterIncomplete ? 'text-amber-600' : ''} />
+                            Incompletos ({incompleteProductsCount})
+                        </button>
+                        {(filterZeroStock || filterFeatured || filterNoImage || filterIncomplete) && (
                             <span className="text-xs font-bold text-gray-600 bg-gray-100 px-3 py-1 rounded-lg">
                                 Exibindo {filteredProducts.length} itens
                             </span>
@@ -4236,6 +4264,13 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                     )}
                     <button onClick={() => setIsDepartmentManagerOpen(true)} title="Aqui você pode criar, renomear ou excluir seus departamentos e subcategorias." className="flex-1 md:flex-none px-5 py-4 rounded-xl font-bold text-xs uppercase tracking-wide flex items-center justify-center gap-2 bg-blue-50 text-blue-600 border border-blue-100 text-center leading-tight whitespace-nowrap">
                         <Layers size={18} /> Gerenciar Departamentos
+                    </button>
+                    <button
+                        onClick={() => setIsCatalogAiModalOpen(true)}
+                        title="Enriquecer descrição comercial, princípio ativo, apresentação, indicações e modo de uso com IA direto no catálogo"
+                        className="flex-1 md:flex-none px-5 py-4 rounded-xl font-bold text-xs uppercase tracking-wide flex items-center justify-center gap-2 bg-purple-50 text-purple-700 border border-purple-200 hover:bg-purple-100 transition-all whitespace-nowrap"
+                    >
+                        <Sparkles size={18} /> Enriquecer com IA
                     </button>
                     <button
                         onClick={handleAutoCategorizeProducts}
@@ -5425,6 +5460,37 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                     </div>
                 </div>
             </div>
+        )}
+
+        {isCatalogAiModalOpen && (
+            <CatalogAiEnrichmentModal
+                isOpen={isCatalogAiModalOpen}
+                onClose={() => setIsCatalogAiModalOpen(false)}
+                tenantId={tenant.id}
+                products={products}
+                selectedProductIds={selectedProducts}
+                onProductsMerged={(updatedBatch) => {
+                    const latestProducts = productsRef.current;
+                    const mergedBatch = updatedBatch.map((updated) => {
+                        const latest = latestProducts.find((p) => p.id === updated.id);
+                        if (!latest) return updated;
+                        return {
+                            ...latest,
+                            description: updated.description || latest.description,
+                            activePrinciple: updated.activePrinciple || latest.activePrinciple,
+                            presentation: updated.presentation || latest.presentation,
+                            indications: updated.indications || latest.indications,
+                            usage: updated.usage || latest.usage,
+                            drugType: updated.drugType || latest.drugType,
+                            category: updated.category || latest.category,
+                            manufacturer: updated.manufacturer || latest.manufacturer,
+                            requires_prescription: Boolean(latest.requires_prescription || updated.requires_prescription),
+                            isAiEnriched: true,
+                        };
+                    });
+                    onProductsStateUpdate(mergedBatch);
+                }}
+            />
         )}
 
         {scannerTarget && (

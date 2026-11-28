@@ -1,23 +1,57 @@
 import { supabase } from "./supabase.js";
 import { classifyProductTaxonomy } from "../lib/departments.js";
+import type { EnrichableFieldKey } from "../utils/productCompleteness.js";
+
+export type AiConfidenceLevel = "high" | "medium" | "low";
 
 export interface ProductDetailsAiRequest {
+  id?: string;
   name: string;
   barcode?: string;
   manufacturer?: string;
   category?: string;
+  department?: string;
   presentation?: string;
   activePrinciple?: string;
+  drugType?: string;
+  requires_prescription?: boolean;
   tenantId?: string;
 }
 
 export interface ProductDetailsAiBatchItem {
+  id?: string;
   name: string;
   missingFields: string[];
   barcode?: string;
   manufacturer?: string;
   category?: string;
+  department?: string;
   presentation?: string;
+  activePrinciple?: string;
+  drugType?: string;
+  description?: string;
+  indications?: string;
+  usage?: string;
+  requires_prescription?: boolean;
+  isAiEnriched?: boolean;
+}
+
+export interface CatalogMiniBatchOutcome {
+  id: string;
+  name: string;
+  barcode?: string;
+  status: "updated" | "reused_cache" | "skipped_low_confidence" | "error";
+  confidence: AiConfidenceLevel;
+  confidenceReason: string;
+  anvisaMatched: boolean;
+  updatedFields: string[];
+  patch: Record<string, any>;
+  error?: string;
+}
+
+export interface CatalogMiniBatchResponse {
+  items: Record<string, any>[];
+  outcomes: CatalogMiniBatchOutcome[];
 }
 
 async function getAiRequestHeaders(tenantId?: string): Promise<Record<string, string>> {
@@ -55,6 +89,80 @@ async function parseJsonSafe(response: Response): Promise<any> {
   }
 }
 
+export const enrichCatalogMiniBatch = async (params: {
+  tenantId: string;
+  products: ProductDetailsAiBatchItem[];
+  targetFields?: EnrichableFieldKey[];
+  overwriteExisting?: boolean;
+  persist?: boolean;
+  signal?: AbortSignal;
+}): Promise<CatalogMiniBatchResponse> => {
+  const {
+    tenantId,
+    products,
+    targetFields,
+    overwriteExisting = false,
+    persist = true,
+    signal,
+  } = params;
+
+  if (!Array.isArray(products) || products.length === 0) {
+    return { items: [], outcomes: [] };
+  }
+
+  const headers = await getAiRequestHeaders(tenantId);
+  const response = await fetch("/api/ai/enrich-batch", {
+    method: "POST",
+    headers,
+    signal,
+    body: JSON.stringify({
+      tenantId,
+      products,
+      targetFields,
+      overwriteExisting,
+      persist,
+    }),
+  });
+
+  const data = await parseJsonSafe(response);
+
+  if (!response.ok) {
+    if (response.status === 429) {
+      throw new Error("LIMITE_IA_ATINGIDO");
+    }
+    throw new Error(data?.error || "Falha ao enriquecer mini-lote de produtos com IA.");
+  }
+
+  const rawItems = Array.isArray(data?.items) ? data.items : [];
+  const rawOutcomes = Array.isArray(data?.outcomes) ? data.outcomes : [];
+
+  const normalizedItems = products.map((origProd, idx) => {
+    const item = rawItems[idx] || {};
+    if (!item || Object.keys(item).length === 0) return {};
+
+    const classified = classifyProductTaxonomy({
+      name: origProd?.name || "",
+      activePrinciple: item.activePrinciple || origProd.activePrinciple,
+      description: item.description,
+      rawCategory: item.category || origProd.category,
+      drugType: item.drugType,
+      indications: item.indications,
+      manufacturer: item.manufacturer || origProd.manufacturer,
+    });
+
+    return {
+      ...item,
+      department: classified.department,
+      category: item.category || classified.subcategory,
+    };
+  });
+
+  return {
+    items: normalizedItems,
+    outcomes: rawOutcomes,
+  };
+};
+
 export const fetchProductDetailsBatch = async (
   productsToEnrich: ProductDetailsAiBatchItem[],
   tenantId?: string
@@ -63,12 +171,13 @@ export const fetchProductDetailsBatch = async (
 
   try {
     const headers = await getAiRequestHeaders(tenantId);
-    const response = await fetch("/api/ai/enrich-products-batch", {
+    const response = await fetch("/api/ai/enrich-batch", {
       method: "POST",
       headers,
       body: JSON.stringify({
         products: productsToEnrich,
         ...(tenantId ? { tenantId } : {}),
+        persist: false,
       }),
     });
 
@@ -89,7 +198,7 @@ export const fetchProductDetailsBatch = async (
 
       const classified = classifyProductTaxonomy({
         name: origProd?.name || "",
-        activePrinciple: item.activePrinciple,
+        activePrinciple: item.activePrinciple || origProd.activePrinciple,
         description: item.description,
         rawCategory: item.category || origProd.category,
         drugType: item.drugType,
@@ -100,7 +209,7 @@ export const fetchProductDetailsBatch = async (
       return {
         ...item,
         department: classified.department,
-        category: classified.subcategory,
+        category: item.category || classified.subcategory,
       };
     });
   } catch (e: any) {
@@ -156,7 +265,7 @@ export const fetchProductDetails = async (input: string | ProductDetailsAiReques
     return {
       ...result,
       department: classified.department,
-      category: classified.subcategory,
+      category: result.category || classified.subcategory,
     };
   } catch (e: any) {
     console.error("Erro ao enriquecer produto com IA:", e);

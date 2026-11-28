@@ -34,7 +34,12 @@ import {
   getInboxActiveConversationCounts,
   processNextQueuedConversationIfFreed,
 } from "./services/manipulacaoRouter.js";
-import { enrichProductWithAi, enrichProductsBatchWithAi, generateProductImageWithAi } from "./services/productAiService.js";
+import {
+  enrichProductWithAi,
+  enrichProductsBatchWithAi,
+  enrichProductsBatchDetailedWithAi,
+  generateProductImageWithAi,
+} from "./services/productAiService.js";
 import {
   evolutionApiService,
   safeUpdateWhatsappInstance,
@@ -20037,20 +20042,34 @@ const requireProductAiAuth = async (req: any, res: any, next: any) => {
       });
     }
 
+    const requestedTenantId = String(
+      req.body?.tenantId || req.headers["x-tenant-id"] || ""
+    ).trim();
+
     let resolvedRole = String(user.user_metadata?.role || "").toLowerCase().trim();
-    if (!resolvedRole) {
-      try {
-        const { data: tuRow } = await supabaseAdmin
-          .from("tenant_users")
-          .select("role")
-          .or(`id.eq.${user.id},supabase_user_id.eq.${user.id}`)
-          .limit(1)
-          .maybeSingle();
-        if (tuRow?.role) {
-          resolvedRole = String(tuRow.role).toLowerCase().trim();
+    let userTenantIdFromTable = "";
+
+    try {
+      const { data: tuRows } = await supabaseAdmin
+        .from("tenant_users")
+        .select("role, tenant_id, is_active")
+        .or(`id.eq.${user.id},supabase_user_id.eq.${user.id}`);
+
+      if (Array.isArray(tuRows) && tuRows.length > 0) {
+        const matchedTenantRow = requestedTenantId
+          ? tuRows.find((r: any) => r.tenant_id === requestedTenantId && r.is_active !== false)
+          : tuRows.find((r: any) => r.is_active !== false) || tuRows[0];
+
+        if (matchedTenantRow) {
+          if (!resolvedRole && matchedTenantRow.role) {
+            resolvedRole = String(matchedTenantRow.role).toLowerCase().trim();
+          }
+          if (matchedTenantRow.tenant_id) {
+            userTenantIdFromTable = String(matchedTenantRow.tenant_id).trim();
+          }
         }
-      } catch (_) {}
-    }
+      }
+    } catch (_) {}
 
     const restrictedCatalogRoles = ["chat_only", "chat_agent", "atendente_chat"];
     if (resolvedRole && restrictedCatalogRoles.includes(resolvedRole)) {
@@ -20059,7 +20078,73 @@ const requireProductAiAuth = async (req: any, res: any, next: any) => {
       });
     }
 
+    if (requestedTenantId) {
+      const superAdmins = ["contato.nexoia@gmail.com", "admin@drogaria.com"];
+      const userEmail = String(user.email || "").toLowerCase().trim();
+      const metaTenantId = String(user.user_metadata?.tenant_id || user.user_metadata?.store_id || "").trim();
+
+      let isTenantAuthorized =
+        (userEmail && superAdmins.includes(userEmail)) ||
+        (metaTenantId && metaTenantId === requestedTenantId) ||
+        (userTenantIdFromTable && userTenantIdFromTable === requestedTenantId) ||
+        user.id === requestedTenantId;
+
+      if (!isTenantAuthorized) {
+        try {
+          const { data: targetStore } = await supabaseAdmin
+            .from("tenants")
+            .select("id, admin_email, network_id")
+            .eq("id", requestedTenantId)
+            .maybeSingle();
+
+          if (targetStore) {
+            if (targetStore.admin_email && targetStore.admin_email.toLowerCase() === userEmail) {
+              isTenantAuthorized = true;
+            } else {
+              let userStore: any = null;
+              const lookupId = metaTenantId || userTenantIdFromTable;
+              if (lookupId) {
+                const { data } = await supabaseAdmin
+                  .from("tenants")
+                  .select("id, is_network_master, network_id")
+                  .eq("id", lookupId)
+                  .maybeSingle();
+                userStore = data;
+              } else if (userEmail) {
+                const { data } = await supabaseAdmin
+                  .from("tenants")
+                  .select("id, is_network_master, network_id")
+                  .eq("admin_email", userEmail)
+                  .maybeSingle();
+                userStore = data;
+              }
+
+              const isMatrixRole = ["matriz", "admin_matriz", "network_admin", "owner", "super_admin"].includes(resolvedRole);
+              if (
+                (userStore?.is_network_master || isMatrixRole) &&
+                userStore &&
+                (targetStore.network_id === userStore.id ||
+                  targetStore.id === userStore.id ||
+                  (userStore.network_id && targetStore.network_id === userStore.network_id))
+              ) {
+                isTenantAuthorized = true;
+              }
+            }
+          }
+        } catch (tenantCheckErr: any) {
+          console.warn("[requireProductAiAuth] Erro ao validar vínculo com a loja:", tenantCheckErr?.message || tenantCheckErr);
+        }
+      }
+
+      if (!isTenantAuthorized) {
+        return res.status(403).json({
+          error: "Você não tem permissão para enriquecer produtos desta loja.",
+        });
+      }
+    }
+
     req.user = user;
+    req.resolvedTenantId = requestedTenantId || undefined;
     return next();
   } catch (err: any) {
     console.warn("[requireProductAiAuth] Falha na verificação:", err?.message || err);
@@ -20073,12 +20158,16 @@ const requireProductAiAuth = async (req: any, res: any, next: any) => {
 app.post(["/api/ai/enrich-product", "/api/v1/ai/enrich-product"], requireProductAiAuth, async (req: any, res) => {
   try {
     const {
+      id,
       name,
       barcode,
       manufacturer,
       category,
+      department,
       presentation,
       activePrinciple,
+      drugType,
+      requires_prescription,
     } = req.body || {};
 
     if (!name || typeof name !== "string" || !name.trim()) {
@@ -20086,12 +20175,16 @@ app.post(["/api/ai/enrich-product", "/api/v1/ai/enrich-product"], requireProduct
     }
 
     const data = await enrichProductWithAi({
+      id,
       name,
       barcode,
       manufacturer,
       category,
+      department,
       presentation,
       activePrinciple,
+      drugType,
+      requires_prescription,
     });
 
     return res.json({ success: true, data });
@@ -20104,24 +20197,42 @@ app.post(["/api/ai/enrich-product", "/api/v1/ai/enrich-product"], requireProduct
   }
 });
 
-// Enriquecimento em lote de produtos com IA (Server-Side)
-app.post(["/api/ai/enrich-products-batch", "/api/v1/ai/enrich-products-batch"], requireProductAiAuth, async (req: any, res) => {
-  try {
-    const { products } = req.body || {};
-    if (!Array.isArray(products) || products.length === 0) {
-      return res.status(400).json({ error: "Envie uma lista válida em 'products'." });
-    }
+// Enriquecimento em lote / mini-lotes de produtos com IA (Server-Side)
+app.post(
+  [
+    "/api/ai/enrich-batch",
+    "/api/ai/enrich-products-batch",
+    "/api/v1/ai/enrich-batch",
+    "/api/v1/ai/enrich-products-batch",
+  ],
+  requireProductAiAuth,
+  async (req: any, res) => {
+    try {
+      const { products, tenantId, targetFields, overwriteExisting, persist } = req.body || {};
+      if (!Array.isArray(products) || products.length === 0) {
+        return res.status(400).json({ error: "Envie uma lista válida em 'products'." });
+      }
 
-    const items = await enrichProductsBatchWithAi(products);
-    return res.json({ success: true, items });
-  } catch (err: any) {
-    console.error("[API /api/ai/enrich-products-batch Error]:", err?.message || err);
-    const status = Number(err?.statusCode) || 500;
-    return res.status(status).json({
-      error: err?.message || "Erro ao enriquecer lote de produtos com IA no servidor.",
-    });
+      const resolvedTenantId = String(tenantId || req.resolvedTenantId || "").trim() || undefined;
+      const shouldPersist = Boolean(persist && resolvedTenantId);
+
+      const { items, outcomes } = await enrichProductsBatchDetailedWithAi(products, {
+        tenantId: resolvedTenantId,
+        targetFields: Array.isArray(targetFields) ? targetFields : undefined,
+        overwriteExisting: Boolean(overwriteExisting),
+        persist: shouldPersist,
+      });
+
+      return res.json({ success: true, items, outcomes });
+    } catch (err: any) {
+      console.error("[API /api/ai/enrich-batch Error]:", err?.message || err);
+      const status = Number(err?.statusCode) || 500;
+      return res.status(status).json({
+        error: err?.message || "Erro ao enriquecer lote de produtos com IA no servidor.",
+      });
+    }
   }
-});
+);
 
 // Geração de imagem de produto com IA (Server-Side)
 app.post(["/api/ai/generate-product-image", "/api/v1/ai/generate-product-image"], requireProductAiAuth, async (req: any, res) => {
