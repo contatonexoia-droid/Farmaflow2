@@ -1,6 +1,7 @@
 import { supabase } from "./supabase.js";
 import { classifyProductTaxonomy } from "../lib/departments.js";
 import type { EnrichableFieldKey } from "../utils/productCompleteness.js";
+import type { DepartmentConfig } from "../types.js";
 
 export type AiConfidenceLevel = "high" | "medium" | "low";
 
@@ -160,6 +161,76 @@ export const enrichCatalogMiniBatch = async (params: {
   return {
     items: normalizedItems,
     outcomes: rawOutcomes,
+  };
+};
+
+export interface ProductCategorizeBatchItem {
+  id: string;
+  name: string;
+  barcode?: string;
+  manufacturer?: string;
+  category?: string;
+  department?: string;
+  activePrinciple?: string;
+  drugType?: string;
+  description?: string;
+  requires_prescription?: boolean;
+}
+
+export interface CatalogCategorizeOutcome {
+  id: string;
+  name: string;
+  barcode?: string;
+  status: "updated" | "unchanged" | "skipped_low_confidence" | "error";
+  oldDepartment: string;
+  oldCategory: string;
+  newDepartment: string;
+  newCategory: string;
+  confidence: AiConfidenceLevel;
+  reason: string;
+  anvisaMatched: boolean;
+  updatedFields: string[];
+  patch: Record<string, any>;
+  error?: string;
+}
+
+export const categorizeCatalogMiniBatch = async (params: {
+  tenantId: string;
+  products: ProductCategorizeBatchItem[];
+  departments?: DepartmentConfig[];
+  persist?: boolean;
+  signal?: AbortSignal;
+}): Promise<{ outcomes: CatalogCategorizeOutcome[] }> => {
+  const { tenantId, products, departments, persist = true, signal } = params;
+
+  if (!Array.isArray(products) || products.length === 0) {
+    return { outcomes: [] };
+  }
+
+  const headers = await getAiRequestHeaders(tenantId);
+  const response = await fetch("/api/ai/categorize-batch", {
+    method: "POST",
+    headers,
+    signal,
+    body: JSON.stringify({
+      tenantId,
+      products,
+      departments,
+      persist,
+    }),
+  });
+
+  const data = await parseJsonSafe(response);
+
+  if (!response.ok) {
+    if (response.status === 429) {
+      throw new Error("LIMITE_IA_ATINGIDO");
+    }
+    throw new Error(data?.error || "Falha ao organizar categorias do mini-lote com IA.");
+  }
+
+  return {
+    outcomes: Array.isArray(data?.outcomes) ? data.outcomes : [],
   };
 };
 

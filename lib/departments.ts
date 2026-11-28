@@ -127,19 +127,37 @@ export const getOfficialSubcategories = (deptName?: string): string[] => {
 // Obter departamento para uma subcategoria ou texto de categoria
 export const getDepartmentForCategory = (
   category: string,
-  _customDepartments?: DepartmentConfig[]
+  customDepartments?: DepartmentConfig[]
 ): OfficialDepartment => {
   if (!category) return FALLBACK_DEPARTMENT;
   const norm = normalizeTaxonomyText(category);
 
-  // Se já for o nome de um departamento oficial
+  // 1. Respeita departamentos e subcategorias customizados da loja se informados
+  if (Array.isArray(customDepartments) && customDepartments.length > 0) {
+    for (const dept of customDepartments) {
+      if (dept?.name && normalizeTaxonomyText(dept.name) === norm) {
+        return dept.name as OfficialDepartment;
+      }
+    }
+    for (const dept of customDepartments) {
+      if (Array.isArray(dept?.categories)) {
+        for (const subcat of dept.categories) {
+          if (normalizeTaxonomyText(subcat) === norm) {
+            return dept.name as OfficialDepartment;
+          }
+        }
+      }
+    }
+  }
+
+  // 2. Se já for o nome de um departamento oficial
   for (const dept of OFFICIAL_DEPARTMENTS) {
     if (normalizeTaxonomyText(dept) === norm) {
       return dept;
     }
   }
 
-  // Se corresponder exatamente a uma subcategoria oficial de um departamento
+  // 3. Se corresponder exatamente a uma subcategoria oficial de um departamento
   for (const [dept, subcats] of Object.entries(OFFICIAL_TAXONOMY)) {
     for (const subcat of subcats) {
       if (normalizeTaxonomyText(subcat) === norm) {
@@ -148,7 +166,7 @@ export const getDepartmentForCategory = (
     }
   }
 
-  // Caso seja categoria herdada ou bruta, roda o classificador estrito
+  // 4. Caso seja categoria herdada ou bruta, roda o classificador estrito
   const classified = classifyProductCategory(category, "", "");
   return classified.department;
 };

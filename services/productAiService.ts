@@ -15,7 +15,7 @@ const MAX_BATCH_SIZE = 5;
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 let cachedSupabaseAdmin: SupabaseClient | null = null;
-function getSupabaseAdmin(): SupabaseClient | null {
+export function getSupabaseAdmin(): SupabaseClient | null {
   if (cachedSupabaseAdmin) return cachedSupabaseAdmin;
   const url = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || "").trim();
   const key = (
@@ -122,13 +122,13 @@ interface EanLookupResult {
   cachedPeer: Record<string, any> | null;
 }
 
-function createProductAiError(message: string, statusCode: number): Error & { statusCode: number } {
+export function createProductAiError(message: string, statusCode: number): Error & { statusCode: number } {
   const err = new Error(message) as Error & { statusCode: number };
   err.statusCode = statusCode;
   return err;
 }
 
-function getServerGeminiClient(): GoogleGenAI {
+export function getServerGeminiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY?.trim();
   if (!apiKey) {
     throw createProductAiError(
@@ -147,7 +147,7 @@ function getServerGeminiClient(): GoogleGenAI {
   });
 }
 
-async function retryWithBackoff<T>(
+export async function retryWithBackoff<T>(
   fn: () => Promise<T>,
   retries = 2,
   delay = 1000,
@@ -198,7 +198,7 @@ async function retryWithBackoff<T>(
   }
 }
 
-function cleanJsonResponse(text: string): string {
+export function cleanJsonResponse(text: string): string {
   let cleaned = text.trim();
   if (cleaned.startsWith("```")) {
     cleaned = cleaned.replace(/^```(?:json)?\s*/i, "").replace(/```$/, "").trim();
@@ -206,12 +206,12 @@ function cleanJsonResponse(text: string): string {
   return cleaned;
 }
 
-function sanitizeTextHint(val: unknown, maxLen = 240): string {
+export function sanitizeTextHint(val: unknown, maxLen = 240): string {
   if (typeof val !== "string") return "";
   return val.replace(/[\r\n\t]+/g, " ").trim().slice(0, maxLen);
 }
 
-function mapGeminiException(err: any, fallbackMessage: string): Error & { statusCode: number } {
+export function mapGeminiException(err: any, fallbackMessage: string): Error & { statusCode: number } {
   if (err?.statusCode) return err;
   const msg = String(err?.message || "");
   if (msg.includes("429") || msg.includes("RESOURCE_EXHAUSTED") || msg.toLowerCase().includes("quota")) {
@@ -235,13 +235,13 @@ function mapGeminiException(err: any, fallbackMessage: string): Error & { status
   return createProductAiError(fallbackMessage, 500);
 }
 
-function normalizeEanDigits(barcode?: string | null): string {
+export function normalizeEanDigits(barcode?: string | null): string {
   const digits = String(barcode || "").replace(/\D/g, "");
   if (digits.length >= 8 && digits.length <= 14) return digits;
   return "";
 }
 
-function normalizeCompareText(str?: string | null): string {
+export function normalizeCompareText(str?: string | null): string {
   return String(str || "")
     .toLowerCase()
     .normalize("NFD")
@@ -254,7 +254,7 @@ function normalizeCompareText(str?: string | null): string {
 /**
  * Camada 2: Verifica se `matched_product_name` retornado pela IA corresponde realmente ao nome original enviado.
  */
-function isMatchedProductNameValid(originalName: string, matchedName?: string | null): boolean {
+export function isMatchedProductNameValid(originalName: string, matchedName?: string | null): boolean {
   const origNorm = normalizeCompareText(originalName);
   const matchNorm = normalizeCompareText(matchedName);
   if (!origNorm || !matchNorm) return false;

@@ -23,6 +23,7 @@ import { AdminDepartmentManager } from './AdminDepartmentManager';
 import { DynamicFlyerGenerator, resolveFlyerProductPricing } from './DynamicFlyerGenerator';
 import { PushNotificationModal } from './PushNotificationModal';
 import { CatalogAiEnrichmentModal } from './CatalogAiEnrichmentModal';
+import { CatalogAiCategorizeModal } from './CatalogAiCategorizeModal';
 import { getTenants, getProductsByTenant, saveProductsByTenant } from '../services/storage';
 import { supabase } from '../services/supabase';
 import { isProductIncomplete } from '../utils/productCompleteness';
@@ -748,6 +749,7 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
   const [filterIncomplete, setFilterIncomplete] = useState(false);
   const [filterPrescription, setFilterPrescription] = useState('Todos');
   const [isCatalogAiModalOpen, setIsCatalogAiModalOpen] = useState(false);
+  const [isCatalogCategorizeModalOpen, setIsCatalogCategorizeModalOpen] = useState(false);
   
   const [editingProduct, setEditingProduct] = useState<Partial<Product> | null>(null);
   const [isSavingProduct, setIsSavingProduct] = useState(false);
@@ -4273,21 +4275,11 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                         <Sparkles size={18} /> Enriquecer com IA
                     </button>
                     <button
-                        onClick={handleAutoCategorizeProducts}
-                        disabled={isAutoCategorizing}
-                        title="Reorganizar automaticamente as categorias de todos os produtos da loja (Fraldas Infantis vs Adulto, Shampoos, Conveniência, Vitaminas e Medicamentos)"
-                        className="flex-1 md:flex-none px-5 py-4 rounded-xl font-bold text-xs uppercase tracking-wide flex items-center justify-center gap-2 bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 disabled:opacity-60 transition-all whitespace-nowrap"
+                        onClick={() => setIsCatalogCategorizeModalOpen(true)}
+                        title="Auditar e organizar categorias em 3 camadas (ANVISA/CMED por EAN + Trava Anti-Mistura + IA)"
+                        className="flex-1 md:flex-none px-5 py-4 rounded-xl font-bold text-xs uppercase tracking-wide flex items-center justify-center gap-2 bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 transition-all whitespace-nowrap"
                     >
-                        {isAutoCategorizing ? (
-                            <>
-                                <Loader2 size={18} className="animate-spin text-indigo-600" />
-                                Organizando Categorias...
-                            </>
-                        ) : (
-                            <>
-                                <Wand2 size={18} /> Organizar Categorias (IA/Auto)
-                            </>
-                        )}
+                        <Wand2 size={18} /> Organizar Categorias (IA/Auto)
                     </button>
                     {onNavigateToPriceTags && (
                         <button onClick={onNavigateToPriceTags} title="Gerar e imprimir etiquetas de gôndola, faixas e cartazes de preços" className="flex-1 md:flex-none px-5 py-4 rounded-xl font-bold text-xs uppercase tracking-wide flex items-center justify-center gap-2 bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 whitespace-nowrap">
@@ -5486,6 +5478,32 @@ export const AdminProductManager: React.FC<AdminProductManagerProps> = ({
                             manufacturer: updated.manufacturer || latest.manufacturer,
                             requires_prescription: Boolean(latest.requires_prescription || updated.requires_prescription),
                             isAiEnriched: true,
+                        };
+                    });
+                    onProductsStateUpdate(mergedBatch);
+                }}
+            />
+        )}
+
+        {isCatalogCategorizeModalOpen && (
+            <CatalogAiCategorizeModal
+                isOpen={isCatalogCategorizeModalOpen}
+                onClose={() => setIsCatalogCategorizeModalOpen(false)}
+                tenantId={tenant.id}
+                departments={tenant.departments}
+                products={products}
+                selectedProductIds={selectedProducts}
+                onProductsMerged={(updatedBatch) => {
+                    const latestProducts = productsRef.current;
+                    const mergedBatch = updatedBatch.map((updated) => {
+                        const latest = latestProducts.find((p) => p.id === updated.id);
+                        if (!latest) return updated;
+                        return {
+                            ...latest,
+                            category: updated.category || latest.category,
+                            drugType: updated.drugType || latest.drugType,
+                            activePrinciple: updated.activePrinciple || latest.activePrinciple,
+                            requires_prescription: Boolean(latest.requires_prescription || updated.requires_prescription),
                         };
                     });
                     onProductsStateUpdate(mergedBatch);

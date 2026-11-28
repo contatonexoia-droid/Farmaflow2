@@ -47,6 +47,9 @@ import {
   cleanCmedTarja,
 } from "./services/cmedParserService.js";
 import {
+  categorizeProductsBatchWithAi,
+} from "./services/productCategorizerService.js";
+import {
   evolutionApiService,
   safeUpdateWhatsappInstance,
   syncStoreInboxesToConnectedInstance,
@@ -20235,6 +20238,48 @@ app.post(
       const status = Number(err?.statusCode) || 500;
       return res.status(status).json({
         error: err?.message || "Erro ao enriquecer lote de produtos com IA no servidor.",
+      });
+    }
+  }
+);
+
+// Categorização / Auditoria inteligente de catálogo em mini-lotes (Camada 1 ANVISA/CMED + Camada 2 Anti-Mistura + Camada 3 Gemini)
+app.post(
+  ["/api/ai/categorize-batch", "/api/v1/ai/categorize-batch"],
+  requireProductAiAuth,
+  async (req: any, res) => {
+    try {
+      const { products, tenantId, departments, persist } = req.body || {};
+      const resolvedTenantId = String(tenantId || req.resolvedTenantId || "").trim();
+
+      if (!resolvedTenantId) {
+        return res.status(400).json({
+          error: "O 'tenantId' da loja é obrigatório para organizar as categorias.",
+        });
+      }
+
+      if (!Array.isArray(products) || products.length === 0) {
+        return res.status(400).json({ error: "Envie uma lista válida em 'products'." });
+      }
+
+      if (products.length > 10) {
+        return res.status(400).json({
+          error: "Envie no máximo 10 produtos por mini-lote de categorização.",
+        });
+      }
+
+      const { outcomes } = await categorizeProductsBatchWithAi(products, {
+        tenantId: resolvedTenantId,
+        departments: Array.isArray(departments) ? departments : undefined,
+        persist: persist !== false,
+      });
+
+      return res.json({ success: true, outcomes });
+    } catch (err: any) {
+      console.error("[API /api/ai/categorize-batch Error]:", err?.message || err);
+      const status = Number(err?.statusCode) || 500;
+      return res.status(status).json({
+        error: err?.message || "Erro ao organizar categorias com IA no servidor.",
       });
     }
   }
