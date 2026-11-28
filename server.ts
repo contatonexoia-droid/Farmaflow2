@@ -11051,29 +11051,46 @@ app.post("/api/checkout/address-save", async (req, res) => {
       return res.json({ success: true, message: "Non-delivery address ignored" });
     }
 
-    const cleanWhatsapp = whatsapp.replace(/\D/g, "");
     const cleanCep = (cep || "").replace(/\D/g, "");
-    
+
+    const baseAddressPayload: Record<string, any> = {
+      tenant_id,
+      whatsapp: cleanWhatsapp,
+      customer_name,
+      cep: cleanCep.length === 8 ? cep : (cleanCep.length > 0 ? cep : ""),
+      street: street.trim(),
+      number: (number || "").toString().trim(),
+      neighborhood: (neighborhood || "").trim(),
+      city: (city || "").trim(),
+      complement: (complement || "").trim(),
+      updated_at: new Date().toISOString(),
+    };
+    if (hasMarketingOptIn) {
+      baseAddressPayload.marketing_opt_in = marketing_opt_in;
+    }
+
     // Upsert into delivery_addresses (using unique constraint on tenant_id, whatsapp)
-    const { error } = await supabase
+    let { error } = await supabaseAdmin
       .from("delivery_addresses")
-      .upsert({
-        tenant_id,
-        whatsapp: cleanWhatsapp,
-        customer_name,
-        cep: cleanCep.length === 8 ? cep : (cleanCep.length > 0 ? cep : ""),
-        street: street.trim(),
-        number: (number || "").toString().trim(),
-        neighborhood: (neighborhood || "").trim(),
-        city: (city || "").trim(),
-        complement: (complement || "").trim(),
-        updated_at: new Date().toISOString()
-      }, {
+      .upsert(baseAddressPayload, {
         onConflict: 'tenant_id,whatsapp'
       });
 
-    if (error && error.code !== "42P01") {
-        return res.status(500).json({ error: error.message });
+    if (error) {
+      const code = String((error as any)?.code || "");
+      const msg = `${(error as any)?.message || ""} ${(error as any)?.details || ""}`.toLowerCase();
+      if (
+        hasMarketingOptIn &&
+        (code === "42703" || code === "PGRST204" || msg.includes("marketing_opt_in"))
+      ) {
+        const { marketing_opt_in: _strip, ...legacyAddressPayload } = baseAddressPayload;
+        const retryRes = await supabaseAdmin
+          .from("delivery_addresses")
+          .upsert(legacyAddressPayload, {
+            onConflict: 'tenant_id,whatsapp'
+          });
+        error = retryRes.error;
+      }
     }
 
     res.json({ success: true });
