@@ -41,6 +41,12 @@ import {
   generateProductImageWithAi,
 } from "./services/productAiService.js";
 import {
+  parseCmedSpreadsheetBuffer,
+  cleanAnvisaCmedEan,
+  cleanCmedText,
+  cleanCmedTarja,
+} from "./services/cmedParserService.js";
+import {
   evolutionApiService,
   safeUpdateWhatsappInstance,
   syncStoreInboxesToConnectedInstance,
@@ -20294,62 +20300,52 @@ const requireSuperAdminAuth = async (req: any, res: any, next: any) => {
   }
 };
 
-function cleanAnvisaCmedEan(raw: unknown): string | null {
-  if (raw === null || raw === undefined) return null;
-  if (typeof raw === "number") {
-    if (!Number.isFinite(raw) || raw <= 0) return null;
-    const digits = Math.trunc(raw).toString();
-    if (digits.length < 8 || digits.length > 14 || /^0+$/.test(digits)) return null;
-    return digits;
-  }
-  let str = String(raw).trim();
-  if (!str || !/[0-9]/.test(str)) return null;
+const cmedUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 },
+});
 
-  if (/^\d+(?:[.,]\d+)?e\+?\d+$/i.test(str)) {
-    const num = Number(str.replace(",", "."));
-    if (Number.isFinite(num) && num > 0) {
-      str = num.toFixed(0);
+// Parsing resiliente da Planilha Oficial CMED (suporta tags XML com espaço '<si >', multi-aba e CSV Latin-1/;)
+app.post(
+  "/api/super-admin/anvisa-cmed/parse",
+  requireSuperAdminAuth,
+  (req, res, next) => {
+    cmedUpload.single("file")(req, res, (err: any) => {
+      if (err) {
+        const msg =
+          err?.code === "LIMIT_FILE_SIZE"
+            ? "Arquivo CMED excede o limite de 50 MB."
+            : err?.message || "Erro ao receber o arquivo CMED.";
+        return res.status(400).json({ error: msg });
+      }
+      return next();
+    });
+  },
+  (req, res) => {
+    try {
+      if (!req.file || !req.file.buffer) {
+        return res.status(400).json({ error: "Nenhum arquivo CMED foi enviado." });
+      }
+      const result = parseCmedSpreadsheetBuffer(
+        req.file.buffer,
+        req.file.originalname || "cmed.xlsx"
+      );
+      return res.json({
+        success: true,
+        sheetName: result.sheetName,
+        sheetsScanned: result.sheetsScanned,
+        totalReadRows: result.totalReadRows,
+        ignoredNoEanCount: result.ignoredNoEanCount,
+        rows: result.rows,
+      });
+    } catch (err: any) {
+      console.warn("[API /api/super-admin/anvisa-cmed/parse Error]:", err?.message || err);
+      return res.status(400).json({
+        error: err?.message || "Não foi possível ler a planilha oficial da CMED.",
+      });
     }
   }
-
-  const digits = str.replace(/\D/g, "");
-  if (digits.length < 8 || digits.length > 14 || /^0+$/.test(digits)) {
-    return null;
-  }
-  return digits;
-}
-
-function cleanCmedText(raw: unknown, maxLen = 250): string | null {
-  if (raw === null || raw === undefined) return null;
-  const str = String(raw).replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
-  if (!str || !/[a-zA-Z0-9\u00C0-\u024F]/.test(str)) return null;
-  const lower = str.toLowerCase();
-  if (lower === "n/a" || lower === "na" || lower === "null" || lower === "undefined") {
-    return null;
-  }
-  return str.slice(0, maxLen);
-}
-
-function cleanCmedTarja(raw: unknown): string | null {
-  const cleaned = cleanCmedText(raw, 120);
-  if (!cleaned) return null;
-  const norm = cleaned
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (
-    !norm ||
-    norm === "nao informada" ||
-    norm === "nao informado" ||
-    norm === "indefinida" ||
-    norm === "indefinido"
-  ) {
-    return null;
-  }
-  return cleaned;
-}
+);
 
 // Estatísticas da Base Oficial ANVISA / CMED (`anvisa_medicamentos`)
 app.get("/api/super-admin/anvisa-cmed/stats", requireSuperAdminAuth, async (_req, res) => {

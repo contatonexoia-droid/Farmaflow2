@@ -1,5 +1,4 @@
 import React, { useMemo, useRef, useState } from 'react';
-import * as XLSX from 'xlsx';
 import {
   X,
   Upload,
@@ -71,89 +70,6 @@ CREATE INDEX IF NOT EXISTS idx_anvisa_medicamentos_ean3
 
 CREATE INDEX IF NOT EXISTS idx_anvisa_medicamentos_reg_apres
   ON public.anvisa_medicamentos (registro_anvisa, apresentacao);`;
-
-function normalizeHeaderCell(val: unknown): string {
-  return String(val ?? '')
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function cleanCmedCellText(val: unknown): string {
-  const s = String(val ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
-  if (!s) return '';
-  if (!/[a-zA-Z0-9\u00C0-\u024F]/.test(s)) return '';
-  const lower = s.toLowerCase();
-  if (lower === 'n/a' || lower === 'na' || lower === 'null' || lower === 'undefined') return '';
-  return s;
-}
-
-function cleanCmedTarjaClient(val: unknown): string | null {
-  const cleaned = cleanCmedCellText(val);
-  if (!cleaned) return null;
-  const norm = normalizeHeaderCell(cleaned);
-  if (
-    !norm ||
-    norm === 'nao informada' ||
-    norm === 'nao informado' ||
-    norm === 'indefinida' ||
-    norm === 'indefinido' ||
-    norm === '*'
-  ) {
-    return null;
-  }
-  return cleaned;
-}
-
-function cleanCmedEanClient(val: unknown): string {
-  if (val === null || val === undefined) return '';
-  if (typeof val === 'number') {
-    if (!Number.isFinite(val) || val <= 0) return '';
-    const digits = Math.trunc(val).toString();
-    if (digits.length < 8 || digits.length > 14 || /^0+$/.test(digits)) return '';
-    return digits;
-  }
-  let str = String(val).trim();
-  if (!str || !/[0-9]/.test(str)) return '';
-
-  if (/^\d+(?:[.,]\d+)?e\+?\d+$/i.test(str)) {
-    const num = Number(str.replace(',', '.'));
-    if (Number.isFinite(num) && num > 0) {
-      str = num.toFixed(0);
-    }
-  }
-
-  const digits = str.replace(/\D/g, '');
-  if (digits.length < 8 || digits.length > 14 || /^0+$/.test(digits)) {
-    return '';
-  }
-  return digits;
-}
-
-function readSheetCellRaw(sheet: XLSX.WorkSheet, row: number, col: number): unknown {
-  if (col < 0) return '';
-  const addr = XLSX.utils.encode_cell({ r: row, c: col });
-  const cell = sheet[addr];
-  if (!cell) return '';
-  if (cell.v !== undefined && cell.v !== null && cell.v !== '') {
-    return cell.v;
-  }
-  return cell.w ?? '';
-}
-
-function findColumnIndex(headers: string[], candidates: string[]): number {
-  for (const cand of candidates) {
-    const exact = headers.findIndex((h) => h === cand);
-    if (exact !== -1) return exact;
-  }
-  for (const cand of candidates) {
-    const partial = headers.findIndex((h) => h.includes(cand));
-    if (partial !== -1) return partial;
-  }
-  return -1;
-}
 
 export const SuperAdminCmedModal: React.FC<SuperAdminCmedModalProps> = ({
   isOpen,
@@ -236,152 +152,34 @@ export const SuperAdminCmedModal: React.FC<SuperAdminCmedModalProps> = ({
         );
       }
 
-      const buffer = await file.arrayBuffer();
-      const isCsv = /\.csv(\.csv)*$/i.test(lowerName);
-      let workbook: XLSX.WorkBook;
+      const authHeaders = await getAuthHeaders();
+      const formData = new FormData();
+      formData.append('file', file);
 
-      if (isCsv) {
-        const bytes = new Uint8Array(buffer);
-        let decoded = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-        if (decoded.includes('\uFFFD')) {
-          decoded = new TextDecoder('windows-1252').decode(bytes);
-        }
-        workbook = XLSX.read(decoded, { type: 'string', raw: true });
-      } else {
-        // Ignora estilos/fórmulas/HTML para ler arquivos CMED grandes (13+ MB) rapidamente e sem estourar memória
-        workbook = XLSX.read(buffer, {
-          type: 'array',
-          cellFormula: false,
-          cellHTML: false,
-          cellStyles: false,
-          cellNF: false,
-        });
-      }
+      const res = await fetch('/api/super-admin/anvisa-cmed/parse', {
+        method: 'POST',
+        headers: authHeaders,
+        body: formData,
+      });
 
-      if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
-        throw new Error('Nenhuma aba encontrada no arquivo enviado.');
-      }
-
-      // Varre TODAS as abas do workbook procurando nas primeiras 50 linhas o cabeçalho oficial ("SUBSTÂNCIA" + "EAN 1")
-      let targetSheetName = '';
-      let targetSheet: XLSX.WorkSheet | null = null;
-      let targetRange: XLSX.Range | null = null;
-      let headerRowIndex = -1;
-      let normalizedHeaders: string[] = [];
-
-      for (const sheetName of workbook.SheetNames) {
-        const candidateSheet = workbook.Sheets[sheetName];
-        if (!candidateSheet || !candidateSheet['!ref']) continue;
-
-        const range = XLSX.utils.decode_range(candidateSheet['!ref']);
-        const firstRow = Math.max(0, range.s.r);
-        const scanEndRow = Math.min(range.e.r, firstRow + 49);
-
-        for (let r = firstRow; r <= scanEndRow; r++) {
-          const rowHeaders: string[] = [];
-          for (let c = range.s.c; c <= range.e.c; c++) {
-            rowHeaders.push(normalizeHeaderCell(readSheetCellRaw(candidateSheet, r, c)));
-          }
-          const hasSubstancia = rowHeaders.some(
-            (h) => h === 'substancia' || h.startsWith('substancia')
-          );
-          const hasEan1 = rowHeaders.some(
-            (h) => h === 'ean 1' || h === 'ean1' || h === 'ean'
-          );
-
-          if (hasSubstancia && hasEan1) {
-            targetSheetName = sheetName;
-            targetSheet = candidateSheet;
-            targetRange = range;
-            headerRowIndex = r;
-            normalizedHeaders = rowHeaders;
-            break;
-          }
-        }
-
-        if (headerRowIndex !== -1) break;
-      }
-
-      if (headerRowIndex === -1 || !targetSheet || !targetRange) {
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
         throw new Error(
-          'Cabeçalho oficial da CMED não encontrado em nenhuma aba (colunas "SUBSTÂNCIA" e "EAN 1" obrigatórias). Verifique se o arquivo é a Lista de Preços CMED da ANVISA.'
+          data?.error || `Falha HTTP ${res.status} ao processar a planilha da CMED.`
         );
       }
 
-      const colOffset = targetRange.s.c;
-      const toSheetCol = (idx: number) => (idx >= 0 ? colOffset + idx : -1);
-
-      const idxSubstancia = toSheetCol(findColumnIndex(normalizedHeaders, ['substancia', 'principio ativo']));
-      const idxLab = toSheetCol(findColumnIndex(normalizedHeaders, ['laboratorio']));
-      const idxRegistro = toSheetCol(findColumnIndex(normalizedHeaders, ['registro']));
-      const idxEan1 = toSheetCol(findColumnIndex(normalizedHeaders, ['ean 1', 'ean1', 'ean']));
-      const idxEan2 = toSheetCol(findColumnIndex(normalizedHeaders, ['ean 2', 'ean2']));
-      const idxEan3 = toSheetCol(findColumnIndex(normalizedHeaders, ['ean 3', 'ean3']));
-      const idxProduto = toSheetCol(findColumnIndex(normalizedHeaders, ['produto', 'nome comercial']));
-      const idxApresentacao = toSheetCol(findColumnIndex(normalizedHeaders, ['apresentacao']));
-      const idxClasse = toSheetCol(findColumnIndex(normalizedHeaders, ['classe terapeutica']));
-      const idxTipo = toSheetCol(
-        findColumnIndex(normalizedHeaders, [
-          'tipo de produto (status do produto)',
-          'tipo de produto',
-        ])
-      );
-      const idxTarja = toSheetCol(findColumnIndex(normalizedHeaders, ['tarja']));
-
-      // Lê apenas os índices mapeados (descartando todas as dezenas de colunas de preços PF/PMVG/PMC)
-      const validList: ParsedCmedRow[] = [];
-      let totalDataRows = 0;
-      let skippedNoEan = 0;
-
-      for (let r = headerRowIndex + 1; r <= targetRange.e.r; r++) {
-        const substancia = cleanCmedCellText(readSheetCellRaw(targetSheet, r, idxSubstancia));
-        const produto = cleanCmedCellText(readSheetCellRaw(targetSheet, r, idxProduto));
-        if (!substancia && !produto) continue;
-
-        totalDataRows++;
-
-        let ean1 = cleanCmedEanClient(readSheetCellRaw(targetSheet, r, idxEan1));
-        let ean2 = cleanCmedEanClient(readSheetCellRaw(targetSheet, r, idxEan2));
-        let ean3 = cleanCmedEanClient(readSheetCellRaw(targetSheet, r, idxEan3));
-
-        if (!ean1 && ean2) {
-          ean1 = ean2;
-          ean2 = '';
-        } else if (!ean1 && ean3) {
-          ean1 = ean3;
-          ean3 = '';
-        }
-
-        if (!ean1) {
-          skippedNoEan++;
-          continue;
-        }
-
-        validList.push({
-          principio_ativo: substancia,
-          laboratorio: cleanCmedCellText(readSheetCellRaw(targetSheet, r, idxLab)),
-          registro_anvisa: cleanCmedCellText(readSheetCellRaw(targetSheet, r, idxRegistro)),
-          ean: ean1,
-          ean2: ean2 !== ean1 ? ean2 : '',
-          ean3: ean3 !== ean1 && ean3 !== ean2 ? ean3 : '',
-          nome_comercial: produto,
-          apresentacao: cleanCmedCellText(readSheetCellRaw(targetSheet, r, idxApresentacao)),
-          classe_terapeutica: cleanCmedCellText(readSheetCellRaw(targetSheet, r, idxClasse)),
-          tipo_produto: cleanCmedCellText(readSheetCellRaw(targetSheet, r, idxTipo)),
-          tarja: cleanCmedTarjaClient(readSheetCellRaw(targetSheet, r, idxTarja)),
-        });
-      }
-
-      if (validList.length === 0) {
+      const rows = Array.isArray(data?.rows) ? (data.rows as ParsedCmedRow[]) : [];
+      if (rows.length === 0) {
         throw new Error(
-          `Aba detectada: "${targetSheetName}" (${totalDataRows} linhas lidas), mas nenhuma possui código EAN válido (8 a 14 dígitos).`
+          'Nenhum medicamento com EAN válido foi encontrado na planilha enviada.'
         );
       }
 
-      setDetectedSheetName(targetSheetName);
-      setTotalReadRows(totalDataRows);
-      setIgnoredNoEanCount(skippedNoEan);
-      setParsedRows(validList);
+      setDetectedSheetName(String(data?.sheetName || 'Lista CMED'));
+      setTotalReadRows(Number(data?.totalReadRows || rows.length));
+      setIgnoredNoEanCount(Number(data?.ignoredNoEanCount || 0));
+      setParsedRows(rows);
       setStage('ready');
     } catch (err: any) {
       setParseError(err?.message || 'Não foi possível ler o arquivo da CMED.');
